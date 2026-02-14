@@ -1,0 +1,22 @@
+// For format details, see https://aka.ms/devcontainer.json. For config options, see the
+// README at: https://github.com/devcontainers/templates/tree/main/src/python
+{
+    "name": "Python 3",
+    // Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
+    "image": "mcr.microsoft.com/devcontainers/python:2-3.11-bookworm",
+    "features": {
+        "ghcr.io/devcontainer-community/devcontainer-features/astral.sh-uv:1": {},
+        "ghcr.io/devcontainers/features/node:1": {}
+    },
+    // Snyk CLI auth:
+    // map host port 8080 to the local port 8080
+    "ports": [
+        {
+            "host": 8080,
+            "container": 8080
+        }
+    ],
+    // -------------
+    // Install OpenCode CLI
+    "postCreateCommand": "bash .devcontainer/post-create.sh"
+}
