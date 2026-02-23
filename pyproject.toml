@@ -60,6 +60,10 @@ testpaths = ["tests"]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
+# -vv: extra verbose (show test names and more detail)
+# -rs: show skip reasons in the short test summary (see why tests were skipped)
+# Add -s when debugging to show stdout/stderr (e.g. uv run pytest -s)
+addopts = "-vv -rs"
 
 
 [tool.ruff]

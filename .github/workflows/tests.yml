@@ -36,6 +36,9 @@ jobs:
       run: uv venv
     - name: Run tests
       run: make ci
+      env:
+        # Show stdout/stderr on Windows to debug skipped tests
+        PYTEST_ADDOPTS: ${{ matrix.os == 'windows-latest' && '-s' || '' }}
     # build and store whl as artifact
     - name: Build and store whl
       if: matrix.os == 'ubuntu-latest'
