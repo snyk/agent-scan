@@ -20,6 +20,7 @@ jobs:
           name: Update uv
           command: curl -LsSf https://astral.sh/uv/install.sh | sh
       - prodsec/security_scans:
+          cli-version: "1.1302.1"
           mode: auto
           open-source-additional-arguments: --exclude=mocked_data,mcp-builder,slack-gif-creator
           iac-scan: disabled
