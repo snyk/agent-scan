@@ -24,7 +24,7 @@ from mcp_scan.pipelines import AnalyzeArgs, InspectArgs, PushArgs, inspect_analy
 from mcp_scan.printer import print_scan_result
 from mcp_scan.Storage import Storage
 from mcp_scan.upload import get_hostname, upload
-from mcp_scan.utils import parse_headers, suppress_stdout
+from mcp_scan.utils import ensure_unicode_console, parse_headers, suppress_stdout
 from mcp_scan.verify_api import setup_aiohttp_debug_logging, setup_tcp_connector
 from mcp_scan.version import version_info
 from mcp_scan.well_known_clients import WELL_KNOWN_MCP_PATHS, client_shorthands_to_paths
@@ -410,6 +410,7 @@ def setup_scan_parser(scan_parser, add_files=True):
 
 
 def main():
+    ensure_unicode_console()
     # Create main parser with description
     program_name = get_invoking_name()
     parser = argparse.ArgumentParser(
