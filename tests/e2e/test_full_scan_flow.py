@@ -12,6 +12,7 @@ from mcp_scan.utils import TempFile
 class TestFullScanFlow:
     """Test cases for end-to-end scanning workflows."""
 
+    @pytest.mark.parametrize("mcp_scan_cmd", ["uv", "binary"], indirect=True)
     @pytest.mark.parametrize(
         "sample_config_file",
         [
@@ -22,11 +23,11 @@ class TestFullScanFlow:
             lf("sse_transport_config_file"),
         ],
     )
-    def test_basic(self, sample_config_file):
+    def test_basic(self, mcp_scan_cmd, sample_config_file):
         """Test a basic complete scan workflow from CLI to results. This does not mean that the results are correct or the servers can be run."""
         # Run mcp-scan with JSON output mode
         result = subprocess.run(
-            ["uv", "run", "-m", "src.mcp_scan.run", "scan", "--json", sample_config_file],
+            [*mcp_scan_cmd, "scan", "--json", sample_config_file],
             capture_output=True,
             text=True,
         )
@@ -45,6 +46,7 @@ class TestFullScanFlow:
             print(result.stdout)
             pytest.fail("Failed to parse JSON output")
 
+    @pytest.mark.parametrize("mcp_scan_cmd", ["uv", "binary"], indirect=True)
     @pytest.mark.parametrize(
         "sample_config_file",
         [
@@ -52,10 +54,10 @@ class TestFullScanFlow:
             lf("sse_transport_config_file"),
         ],
     )
-    def test_scan_sse_http(self, sample_config_file):
+    def test_scan_sse_http(self, mcp_scan_cmd, sample_config_file):
         """Test scanning with SSE and HTTP transport configurations."""
         result = subprocess.run(
-            ["uv", "run", "-m", "src.mcp_scan.run", "scan", "--json", sample_config_file],
+            [*mcp_scan_cmd, "scan", "--json", sample_config_file],
             capture_output=True,
             text=True,
         )
@@ -69,6 +71,7 @@ class TestFullScanFlow:
         }, "Tools in signature do not match expected values"
         print(output)
 
+    @pytest.mark.parametrize("mcp_scan_cmd", ["uv", "binary"], indirect=True)
     @pytest.mark.parametrize(
         "sample_config_file, transport, port",
         [
@@ -76,7 +79,7 @@ class TestFullScanFlow:
             (lf("sse_transport_config_file"), "sse", 8123),
         ],
     )
-    def test_infer_transport(self, sample_config_file, transport, port):
+    def test_infer_transport(self, mcp_scan_cmd, sample_config_file, transport, port):
         """Test inferring the transport from the config file."""
         config = {"mcp": {"servers": {"http_server": {"url": f"http://localhost:{port}"}}}}
         file_name: str
@@ -85,7 +88,7 @@ class TestFullScanFlow:
             temp_file.write(json.dumps(config))
             temp_file.flush()
             result = subprocess.run(
-                ["uv", "run", "-m", "src.mcp_scan.run", "scan", "--json", file_name],
+                [*mcp_scan_cmd, "scan", "--json", file_name],
                 capture_output=True,
                 text=True,
             )
@@ -96,6 +99,7 @@ class TestFullScanFlow:
         assert output[file_name]["servers"][0]["server"]["type"] == transport, json.dumps(output, indent=4)
         assert output[file_name]["servers"][0]["server"]["url"] == url, json.dumps(output, indent=4)
 
+    @pytest.mark.parametrize("mcp_scan_cmd", ["uv", "binary"], indirect=True)
     @pytest.mark.parametrize(
         "config, transport",
         [
@@ -117,7 +121,7 @@ class TestFullScanFlow:
             ),  # default to http
         ],
     )
-    def test_infer_transport_server_not_working(self, config: str, transport: str | None):
+    def test_infer_transport_server_not_working(self, mcp_scan_cmd, config: str, transport: str | None):
         """Test that the server not working is detected."""
         file_name: str
         with TempFile(mode="w") as temp_file:
@@ -125,7 +129,7 @@ class TestFullScanFlow:
             temp_file.write(config)
             temp_file.flush()
             result = subprocess.run(
-                ["uv", "run", "-m", "src.mcp_scan.run", "scan", "--json", file_name],
+                [*mcp_scan_cmd, "scan", "--json", file_name],
                 capture_output=True,
                 text=True,
             )
@@ -134,6 +138,7 @@ class TestFullScanFlow:
         assert len(output) == 1, "Output should contain exactly one entry for the config file"
         assert output[file_name]["servers"][0]["server"]["type"] == transport, json.dumps(output, indent=4)
 
+    @pytest.mark.parametrize("mcp_scan_cmd", ["uv", "binary"], indirect=True)
     @pytest.mark.parametrize(
         "path, server_names",
         [
@@ -142,13 +147,10 @@ class TestFullScanFlow:
             ("tests/mcp_servers/configs_files/all_config.json", ["Weather", "Math"]),
         ],
     )
-    def test_scan(self, path, server_names):
+    def test_scan(self, mcp_scan_cmd, path, server_names):
         result = subprocess.run(
             [
-                "uv",
-                "run",
-                "-m",
-                "src.mcp_scan.run",
+                *mcp_scan_cmd,
                 "scan",
                 "--json",
                 path,
@@ -189,10 +191,11 @@ class TestFullScanFlow:
             f"Issues codes {issue_set} do not match expected values {allowed_issue_sets}"
         )
 
-    def test_inspect(self):
+    @pytest.mark.parametrize("mcp_scan_cmd", ["uv", "binary"], indirect=True)
+    def test_inspect(self, mcp_scan_cmd):
         path = "tests/mcp_servers/configs_files/all_config.json"
         result = subprocess.run(
-            ["uv", "run", "-m", "src.mcp_scan.run", "inspect", "--json", path],
+            [*mcp_scan_cmd, "inspect", "--json", path],
             capture_output=True,
             text=True,
         )
@@ -228,10 +231,11 @@ class TestFullScanFlow:
             temp_file.flush()
             yield temp_file.name
 
-    def test_vscode_settings_no_mcp(self, vscode_settings_no_mcp_file):
+    @pytest.mark.parametrize("mcp_scan_cmd", ["uv", "binary"], indirect=True)
+    def test_vscode_settings_no_mcp(self, mcp_scan_cmd, vscode_settings_no_mcp_file):
         """Test scanning VSCode settings with no MCP configurations."""
         result = subprocess.run(
-            ["uv", "run", "-m", "src.mcp_scan.run", "scan", "--json", vscode_settings_no_mcp_file],
+            [*mcp_scan_cmd, "scan", "--json", vscode_settings_no_mcp_file],
             capture_output=True,
             text=True,
         )

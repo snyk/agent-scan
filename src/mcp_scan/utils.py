@@ -3,6 +3,7 @@ import glob
 import logging
 import os
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -10,6 +11,19 @@ from typing import Any
 from rapidfuzz.distance import Levenshtein
 
 from mcp_scan.models import ControlServer, StdioServer
+
+
+def ensure_unicode_console() -> None:
+    """On Windows, reconfigure stdout/stderr to UTF-8 so Unicode (e.g. emoji) prints without UnicodeEncodeError.
+    Uses errors='replace' so unsupported chars are replaced instead of raising. Safe to call on all platforms.
+    See https://github.com/pallets/click/issues/2121#issuecomment-1691716436"""
+    if sys.platform != "win32":
+        return
+    for stream in (sys.stdout, sys.stderr):
+        if stream is not None and hasattr(stream, "reconfigure"):
+            with contextlib.suppress(AttributeError, OSError):
+                stream.reconfigure(encoding="utf-8", errors="replace")
+
 
 logger = logging.getLogger(__name__)
 
