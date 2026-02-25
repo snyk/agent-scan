@@ -10,12 +10,6 @@ from pydantic import ValidationError
 
 from mcp_scan.models import Entity, ScannedEntities, ScannedEntity, entity_type_to_str, hash_entity
 
-try:
-    from mcp_scan_server.models import DEFAULT_GUARDRAIL_CONFIG, GuardrailConfigFile  # type: ignore
-except ImportError:
-    DEFAULT_GUARDRAIL_CONFIG = ""
-    GuardrailConfigFile = None  # type: ignore
-
 # Set up logger for this module
 logger = logging.getLogger(__name__)
 
@@ -28,11 +22,6 @@ class Storage:
         logger.debug("Expanded path: %s", self.path)
         self.scanned_entities: ScannedEntities = ScannedEntities({})
         self.whitelist: dict[str, str] = {}
-
-        if GuardrailConfigFile is not None:
-            self.guardrails_config: GuardrailConfigFile = GuardrailConfigFile()
-        else:
-            self.guardrails_config = None
 
         self.detect_and_convert_legacy_storage()
         self.init_from_path()
@@ -91,23 +80,6 @@ class Storage:
                 with open(whitelist_path) as f:
                     self.whitelist = json.load(f)
                     logger.info("Successfully loaded whitelist with %d entries", len(self.whitelist))
-
-            if GuardrailConfigFile is not None:
-                guardrails_config_path = os.path.join(self.path, "guardrails_config.yml")
-                if os.path.exists(guardrails_config_path):
-                    with open(guardrails_config_path) as f:
-                        try:
-                            guardrails_config_data = yaml.safe_load(f.read()) or {}
-                            self.guardrails_config = GuardrailConfigFile.model_validate(guardrails_config_data)
-                        except yaml.YAMLError as e:
-                            rich.print(
-                                f"[bold red]Could not parse guardrails config file {guardrails_config_path}: {e}[/bold red]"
-                            )
-                        except ValidationError as e:
-                            rich.print(
-                                f"[bold red]Could not validate guardrails config file "
-                                f"{guardrails_config_path}: {e}[/bold red]"
-                            )
 
     def reset_whitelist(self) -> None:
         logger.info("Resetting whitelist")
@@ -182,27 +154,6 @@ class Storage:
         result = hash in self.whitelist.values()
         logger.debug("Checking if entity %s is whitelisted: %s", entity.name, result)
         return result
-
-    def create_guardrails_config(self) -> str:
-        """
-        If the guardrails config file does not exist, create it with default values.
-
-        Returns the path to the guardrails config file.
-        """
-        if GuardrailConfigFile is None:
-            return None
-        guardrails_config_path = os.path.join(self.path, "guardrails_config.yml")
-        with self._lock:
-            if not os.path.exists(guardrails_config_path):
-                # make sure the directory exists (otherwise the write below will fail)
-                if not os.path.exists(self.path):
-                    os.makedirs(self.path, exist_ok=True)
-                logger.debug("Creating guardrails config file at: %s", guardrails_config_path)
-
-                with open(guardrails_config_path, "w") as f:
-                    if self.guardrails_config is not None:
-                        f.write(DEFAULT_GUARDRAIL_CONFIG)
-        return guardrails_config_path
 
     def save(self) -> None:
         logger.info("Saving storage data to %s", self.path)

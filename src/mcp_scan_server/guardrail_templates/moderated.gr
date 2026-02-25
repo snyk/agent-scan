@@ -1,8 +1,0 @@
-# {{ REQUIRES: [openai_extra, transformers_extra]}}
-
-from invariant.detectors import moderated
-
-raise PolicyViolation("Harmful content detected.") if:
-    (tooloutput: ToolOutput)
-    {{ BLACKLIST_WHITELIST }}
-    moderated(tooloutput.content)

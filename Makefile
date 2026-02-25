@@ -17,14 +17,14 @@ test-all:
 test-static:
 	uv sync
 	uv pip install -e ".[test]"
-	MCP_SCAN_ENVIRONMENT=test uv run python -m pytest --ignore=tests/e2e/test_full_proxy_flow.py --ignore=tests/unit/test_mcp_scan_server.py
+	MCP_SCAN_ENVIRONMENT=test uv run python -m pytest
 
 test: test-all
 
 ci-static:
 	uv sync
 	uv pip install -e ".[test]"
-	MCP_SCAN_ENVIRONMENT=ci uv run python -m pytest --ignore=tests/e2e/test_full_proxy_flow.py --ignore=tests/unit/test_mcp_scan_server.py
+	MCP_SCAN_ENVIRONMENT=ci uv run python -m pytest
 
 ci-proxy:
 	uv sync

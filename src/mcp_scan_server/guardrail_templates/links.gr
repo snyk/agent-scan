@@ -1,6 +1,0 @@
-# {{ REQUIRES: []}}
-
-raise PolicyViolation("Detected link in tool output.") if:
-    (tooloutput: ToolOutput)
-    {{ BLACKLIST_WHITELIST }}
-    any([match("https?://[^\s]+", t) for t in  text(tooloutput.content)])

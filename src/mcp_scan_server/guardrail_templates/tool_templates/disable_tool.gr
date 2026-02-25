@@ -1,4 +1,0 @@
-raise PolicyViolation("Tried to call disabled tool '{{ tool_name }}'.") if:
-    (msg: Message)
-    msg.role == "assistant"
-    any([tc.function.name == "{{ tool_name }}" for tc in  msg.tool_calls])
