@@ -1,6 +1,6 @@
 <p align="center">
   <h1 align="center">
-  mcp-scan
+  Snyk Agent Scan
   </h1>
 </p>
 
@@ -9,30 +9,32 @@
   and vulnerabilities (including agents, MCP servers, skills).
 </p>
 
-> **NEW** Read our [technical report on the emerging threats of the agent skill eco-system](.github/reports/skills-report.pdf) published together with mcp-scan 0.4, which adds support for scanning agent skills.
+> **NEW** Read our [technical report on the emerging threats of the agent skill eco-system](.github/reports/skills-report.pdf) published together with Agent Scan 0.4, which adds support for scanning agent skills.
 
 <p align="center">
-  <a href="https://pypi.python.org/pypi/mcp-scan"><img src="https://img.shields.io/pypi/v/mcp-scan.svg" alt="mcp-scan"/></a>
-  <a href="https://pypi.python.org/pypi/mcp-scan"><img src="https://img.shields.io/pypi/l/mcp-scan.svg" alt="mcp-scan license"/></a>
-  <a href="https://pypi.python.org/pypi/mcp-scan"><img src="https://img.shields.io/pypi/pyversions/mcp-scan.svg" alt="mcp-scan python version requirements"/></a>
+  <a href="https://pypi.python.org/pypi/snyk-agent-scan"><img src="https://img.shields.io/pypi/v/snyk-agent-scan.svg" alt="snyk-agent-scan"/></a>
+  <a href="https://pypi.python.org/pypi/snyk-agent-scan"><img src="https://img.shields.io/pypi/l/snyk-agent-scan.svg" alt="snyk-agent-scan license"/></a>
+  <a href="https://pypi.python.org/pypi/snyk-agent-scan"><img src="https://img.shields.io/pypi/pyversions/snyk-agent-scan.svg" alt="snyk-agent-scan python version requirements"/></a>
 </p>
 
 <div align="center">
-  <img src=".github/mcp-scan-cmd-banner.png?raw=true" alt="MCP-Scan logo"/>
+  <img src=".github/mcp-scan-cmd-banner.png?raw=true" alt="Agent Scan logo"/>
 </div>
 
 <br>
 
-MCP-scan helps you keep an inventory of all your installed agent components (harnesses, MCP servers, skills) and scans them for common threats like prompt injections, sensitive data handling or malware payloads hidden natural language.
+Agent Scan helps you keep an inventory of all your installed agent components (harnesses, MCP servers, skills) and scans them for common threats like prompt injections, sensitive data handling or malware payloads hidden in natural language.
 
 ## Highlights
 
 - Auto-discover MCP configurations, agent tools, skills
+- Scanning of Claude, Cursor, Windsurf, Gemini CLI and other agents.
 - Detects MCP Security Vulnerabilities:
   - Prompt Injection Attacks
   - Tool Poisoning Attacks
+  - Cross-origin escalation attacks (e.g. tool shadowing)
   - Toxic Flows
-- Scan local STDIO MCP servers and remote HTTP/SSE MCP servers
+  - MCP rug pull attacks (detects changes to MCP tools via hashing)
 - Detects Agent Skill Vulnerabilities:
   - Prompt Injection Attacks, Malware Payloads
   - Exposure to untrusted third parties (e.g. moltbook)
@@ -48,7 +50,7 @@ To get started, make sure you have uv [installed](https://docs.astral.sh/uv/gett
 To run a full scan of your machine (auto-discovers agents, MCP servers, skills), run:
 
 ```bash
-uvx mcp-scan@latest --skills
+uvx snyk-agent-scan@latest --skills
 ```
 
 This will scan for security vulnerabilities in servers, skills, tools, prompts, and resources. It will automatically discover a variety of agent configurations, including Claude Code/Desktop, Cursor, Gemini CLI and Windsurf. Omit `--skills` to skip skill analysis.
@@ -56,110 +58,46 @@ This will scan for security vulnerabilities in servers, skills, tools, prompts, 
 You can also scan particular configuration files:
 
 ```bash
- # scan mcp configurations
-uvx mcp-scan@latest ~/.vscode/mcp.json
- # scan a single agent skill
-uvx mcp-scan@latest --skills ~/path/to/my/SKILL.md
+# scan mcp configurations
+uvx snyk-agent-scan@latest ~/.vscode/mcp.json
+# scan a single agent skill
+uvx snyk-agent-scan@latest --skills ~/path/to/my/SKILL.md
 # scan all claude skills
-uvx mcp-scan@latest --skills ~/.claude/skills
+uvx snyk-agent-scan@latest --skills ~/.claude/skills
 ```
 
 #### Example Run
 
-[![MCP Scan for security vulnerabilities demo](demo.svg)](https://asciinema.org/a/716858)
+[![Agent Scan security vulnerabilities demo](demo.svg)](https://asciinema.org/a/716858)
 
-## MCP Security Scanner Capabilities
+## Scanner Capabilities
 
-MCP-Scan is a security scanning tool to both statically and dynamically scan and monitor your MCP connections. It checks them for common security vulnerabilities like [prompt injections](https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks), [tool poisoning](https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks) and [toxic flows](https://invariantlabs.ai/blog/mcp-github-vulnerability). Consult our detailed [Documentation](https://invariantlabs-ai.github.io/docs/mcp-scan) for more information.
+Agent Scan is a security scanning tool to both scan and inspect the supply chain of agent components on your machine. It checks them for common security vulnerabilities like prompt injections, tool poisoning and toxic flows.
 
-MCp-Scan operates in two main modes which can be used jointly or separately:
+Agent Scan operates in two main modes which can be used jointly or separately:
 
-1. `mcp-scan scan` statically scans all your installed servers for malicious tool descriptions and tools (e.g. [tool poisoning attacks](https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks), cross-origin escalation, rug pull attacks, toxic flows).
+1. `snyk-agent-scan scan` scans the current machine for agents and agent components such as skills and MCP servers. Upon completion, it will output a comprehensive report for the user to review.
 
-   [Quickstart →](#server-scanning).
-
-2. `mcp-scan proxy` continuously monitors your MCP connections in real-time, and can restrict what agent systems can do over MCP (tool call checking, data flow constraints, PII detection, indirect prompt injection etc.).
-
-   [Quickstart →](#server-proxying).
-
-<br/>
-<br/>
-
-<div align="center">
-<img src="https://invariantlabs-ai.github.io/docs/mcp-scan/assets/proxy.svg" width="420pt" align="center"/>
-<br/>
-<br/>
-
-_mcp-scan in proxy mode._
-
-</div>
-
-## Features
-
-- Scanning of Claude, Cursor, Windsurf, and other file-based MCP client configurations
-- Scanning for prompt injection attacks in tools and [tool poisoning attacks](https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks) using [Guardrails](https://github.com/invariantlabs-ai/invariant?tab=readme-ov-file#analyzer)
-- [Enforce guardrailing policies](https://invariantlabs-ai.github.io/docs/mcp-scan/guardrails-reference/) on MCP tool calls and responses, including PII detection, secrets detection, tool restrictions and entirely custom guardrailing policies.
-- Audit and log MCP traffic in real-time via [`mcp-scan proxy`](#proxy)
-- Detect cross-origin escalation attacks (e.g. [tool shadowing](https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks)), and detect and prevent [MCP rug pull attacks](https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks), i.e. mcp-scan detects changes to MCP tools via hashing
-
-### Server Proxying
-
-Using `mcp-scan proxy`, you can monitor, log, and safeguard all MCP traffic on your machine. This allows you to inspect the runtime behavior of agents and tools, and prevent attacks from e.g., untrusted sources (like websites or emails) that may try to exploit your agents. mcp-scan proxy is a dynamic security layer that runs in the background, and continuously monitors your MCP traffic.
-
-#### Example Run
-
-<img width="903" alt="image" src="https://github.com/user-attachments/assets/63ac9632-8663-40c3-a765-0bfdfbdf9a16" />
-
-#### Enforcing Guardrails
-
-You can also add guardrailing rules, to restrict and validate the sequence of tool uses passing through proxy.
-
-For this, create a `~/.mcp-scan/guardrails_config.yml` with the following contents:
-
-```yml
-<client-name>: # your client's shorthand (e.g., cursor, claude, windsurf)
-  <server-name>: # your server's name according to the mcp config (e.g., whatsapp-mcp)
-    guardrails:
-      secrets: block # block calls/results with secrets
-
-      custom_guardrails:
-        - name: "Filter tool results with 'error'"
-          id: "error_filter_guardrail"
-          action: block # or just 'log'
-          content: |
-            raise "An error was found." if:
-              (msg: ToolOutput)
-              "error" in msg.content
-```
-
-From then on, all calls proxied via `mcp-scan proxy` will be checked against your configured guardrailing rules for the current client/server.
-
-Custom guardrails are implemented using Invariant Guardrails. To learn more about these rules, see the [official documentation](https://invariantlabs-ai.github.io/docs/mcp-scan/guardrails-reference/).
+2. **Background Mode** (MDM, Crowdstrike). Scans the current machine in regular intervals, and reports the results to a [Snyk Evo](https://evo.ai.snyk.io) instance. This can be used by security teams to monitor the company-wide agent supply chain in a central location. To set this up, please [contact us](https://evo.ai.snyk.io/#contact-us).
 
 ## How It Works
 
 ### Scanning
 
-MCP-Scan `scan` searches through your configuration files to find MCP server configurations. It connects to these servers and retrieves tool descriptions.
+Agent Scan searches through your local agent's configuration files to find agents, skills and MCP servers. For MCP, it connects to servers and retrieves tool descriptions.
 
-It then scans tool descriptions, both with local checks and by invoking Invariant Guardrailing via an API. For this, tool names and descriptions are shared with invariantlabs.ai. By using MCP-Scan, you agree to the invariantlabs.ai [terms of use](./TERMS.md) and [privacy policy](https://invariantlabs.ai/privacy-policy).
+It then components, both with local checks and by invoking the Snyk scanning API. For this, tool names and descriptions are shared with Snyk. By using Agent Scan, you agree to the Snyk [terms of use](./TERMS.md) and [privacy policy](https://snyk.io/policies/privacy/).
 
-Invariant Labs is collecting data for security research purposes (only about tool descriptions and how they change over time, not your user data). Don't use MCP-scan if you don't want to share your tools. Additionally, a unique, persistent, and anonymous ID is assigned to your scans for analysis. You can opt out of sending this information using the `--opt-out` flag.
+A unique, persistent, and anonymous ID is assigned to your scans for analysis. You can opt out of sending this information using the `--opt-out` flag.
 
-MCP-scan does not store or log any usage data, i.e. the contents and results of your MCP tool calls.
+Agent Scan does not store or log any usage data, i.e. the contents and results of your MCP tool calls.
 
-### Proxying
+## CLI Parameters
 
-For runtime monitoring using `mcp-scan proxy`, MCP-Scan can be used as a proxy server. This allows you to monitor and guardrail system-wide MCP traffic in real-time. To do this, mcp-scan temporarily injects a local [Invariant Gateway](https://github.com/invariantlabs-ai/invariant-gateway) into MCP server configurations, which intercepts and analyzes traffic. After the `proxy` command exits, Gateway is removed from the configurations.
-
-You can also configure guardrailing rules for the proxy to enforce security policies on the fly. This includes PII detection, secrets detection, tool restrictions, and custom guardrailing policies. Guardrails and proxying operate entirely locally using [Guardrails](https://github.com/invariantlabs-ai/invariant) and do not require any external API calls.
-
-## CLI parameters
-
-MCP-scan provides the following commands:
+Agent Scan provides the following commands:
 
 ```
-mcp-scan - Security scanner for Model Context Protocol servers and tools
+snyk-agent-scan - Security scanner for agents, MCP servers, and skills
 ```
 
 ### Common Options
@@ -182,7 +120,7 @@ These options are available for all commands:
 Scan MCP configurations for security vulnerabilities in tools, prompts, and resources.
 
 ```
-mcp-scan [CONFIG_FILE...]
+snyk-agent-scan [CONFIG_FILE...]
 ```
 
 Options:
@@ -196,31 +134,12 @@ Options:
 --skills PATHS_TO_DIRECTORY       Recursively detects and analyzes all skills in the directory
 ```
 
-#### proxy
-
-Run a proxy server to monitor and guardrail system-wide MCP traffic in real-time. Temporarily injects [Gateway](https://github.com/invariantlabs-ai/invariant-gateway) into MCP server configurations, to intercept and analyze traffic. Removes Gateway again after the `proxy` command exits.
-
-This command requires the `proxy` optional dependency (extra).
-
-- Run via uvx:
-  ```bash
-  uvx --with "mcp-scan[proxy]" mcp-scan@latest proxy
-  ```
-  This installs the `proxy` extra into an uvx-managed virtual environment, not your current shell venv.
-
-Options:
-
-```
-CONFIG_FILE...                  Path to MCP configuration files to setup for proxying.
---pretty oneline|compact|full   Pretty print the output in different formats (default: compact)
-```
-
 #### inspect
 
 Print descriptions of tools, prompts, and resources without verification.
 
 ```
-mcp-scan inspect [CONFIG_FILE...]
+snyk-agent-scan inspect [CONFIG_FILE...]
 ```
 
 Options:
@@ -235,25 +154,25 @@ Options:
 Display detailed help information and examples.
 
 ```bash
-mcp-scan help
+snyk-agent-scan help
 ```
 
 ### Examples
 
 ```bash
 # Scan all known MCP configs
-mcp-scan
+snyk-agent-scan
 
 # Scan a specific config file
-mcp-scan ~/custom/config.json
+snyk-agent-scan ~/custom/config.json
 
 # Just inspect tools without verification
-mcp-scan inspect
+snyk-agent-scan inspect
 ```
 
 ## Demo
 
-This repository includes a vulnerable MCP server that can demonstrate Model Context Protocol security issues that MCP-Scan finds.
+This repository includes a vulnerable MCP server that can demonstrate Model Context Protocol security issues that Agent Scan finds.
 
 How to demo MCP security issues?
 
@@ -272,34 +191,28 @@ How to demo MCP security issues?
 }
 ```
 
-3. Run MCP-Scan: `uvx --python 3.13 mcp-scan@latest scan --full-toxic-flows mcp.json`
+3. Run Agent Scan: `uvx --python 3.13 snyk-agent-scan@latest scan --full-toxic-flows mcp.json`
 
-Note: if you place the `mcp.json` configuration filepath elsewhere then adjust the `args` path inside the MCP server configuration to reflect the path to the MCP Server (`demoserver/server.py`) as well as the `uvx` command that runs MCP-Scan CLI with the correct filepath to `mcp.json`.
+Note: if you place the `mcp.json` configuration filepath elsewhere then adjust the `args` path inside the MCP server configuration to reflect the path to the MCP Server (`demoserver/server.py`) as well as the `uvx` command that runs Agent Scan with the correct filepath to `mcp.json`.
 
-## MCP-Scan is closed to contributions
+## Agent Scan is closed to contributions
 
-MCP-Scan can currently no longer accept external contributions. We are focused on stabilizing releases.
+Agent Scan does not accept external contributions at this time.
+
 We welcome suggestions, bug reports, or feature requests as GitHub issues.
 
 ## Development Setup
 
-To run this package from source, follow these steps:
+To run Agent Scan from source, follow these steps:
 
 ```bash
 uv run pip install -e .
 uv run -m src.agent_scan.cli
 ```
 
-For proxy functionality (e.g., `mcp-scan proxy`, `mcp-scan server`), install with the proxy extra:
+## Including Agent Scan results in your own project / registry
 
-```bash
-uv run pip install -e .[proxy]
-```
-
-## Including MCP-scan results in your own project / registry
-
-If you want to include MCP-scan results in your own project or registry, please reach out to the team via `mcpscan@invariantlabs.ai`, and we can help you with that.
-For automated scanning we recommend using the `--json` flag and parsing the output.
+If you want to include Agent Scan results in your own project or registry, please [reach out](https://evo.ai.snyk.io/#contact-us), and we can help you with that.
 
 ## Further Reading
 
@@ -308,6 +221,7 @@ For automated scanning we recommend using the `--json` flag and parsing the outp
 - [WhatsApp MCP Exploited](https://invariantlabs.ai/blog/whatsapp-mcp-exploited)
 - [MCP Prompt Injection](https://simonwillison.net/2025/Apr/9/mcp-prompt-injection/)
 - [Toxic Flow Analysis](https://invariantlabs.ai/blog/toxic-flow-analysis)
+- [Skills Report](.github/reports/skills-report.pdf)
 
 ## Changelog
 
