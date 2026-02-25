@@ -1,4 +1,5 @@
 import builtins
+from typing import Literal, cast
 
 import rich
 from mcp.types import Prompt, Resource, ResourceTemplate, Tool
@@ -26,6 +27,23 @@ ISSUE_COLOR_MAP = {
     "inspect_mode": "[white]",
 }
 
+SEVERITY_COLOR_MAP = {
+    None: "[green]",
+    "info": "[blue]",
+    "low": "[white]",
+    "medium": "[yellow]",
+    "high": "[orange_red1]",
+    "critical": "[bold][red]",
+}
+ICON_MAP = {
+    "ok": ":white_heavy_check_mark:",
+    "error": ":cross_mark:",
+    "analysis_error": "",
+    "warning": "⚠️ ",
+    "whitelisted": ":white_heavy_check_mark:",
+    "inspect_mode": "  ",
+}
+
 
 def format_exception(e: Exception | str | None) -> tuple[str, rTraceback | None]:
     if e is None:
@@ -46,26 +64,57 @@ def format_exception(e: Exception | str | None) -> tuple[str, rTraceback | None]
     return text, tb
 
 
-def format_error(e: ScanError) -> tuple[str, rTraceback | None]:
+def format_error(
+    e: ScanError, server_idx: int | None = None, entity_idx: int | None = None, code: str = "X001"
+) -> tuple[Issue, rTraceback | None]:
     status, traceback = format_exception(e.exception)
     if e.message:
         status = e.message
     if e.traceback:
         traceback = e.traceback
-    return status, traceback
+    return Issue(
+        code=code,
+        message=status,
+        extra_data={
+            "severity": "info",
+        },
+        reference=(server_idx, entity_idx) if server_idx is not None else None,
+    ), traceback
 
 
-def format_path_line(path: str, status: str | None, operation: str = "Scanning") -> Text:
-    text = f"● {operation} [bold]{path}[/bold] [gray62]{status or ''}[/gray62]"
+def format_path_line(
+    path: str, message: str | None = None, issues: list[Issue] | None = None, operation: str = "Scanning"
+) -> Text:
+    text = f"● {operation} [bold]{path}[/bold]"
+    if issues:
+        text += " " + format_issues(issues, new_line=False)
+    if message is not None:
+        text += f" [gray62]{message}[/gray62]"
     return Text.from_markup(text)
 
 
-def format_servers_line(server: str, status: str | None = None, issues: list[Issue] | None = None) -> Text:
-    text = f"[bold]{server}[/bold]"
+def format_servers_line(
+    server: str,
+    severities: list[Literal["info", "low", "medium", "high", "critical"]] | None = None,
+    issues: list[Issue] | None = None,
+) -> Text:
+    max_severity = get_max_severity(severities) if severities is not None else None
+    color = SEVERITY_COLOR_MAP[max_severity]
+    text = f"{color}[bold]{server}[/bold]{color.replace('[', '[/')}"
     gap = 27
     text += " " * (max(0, gap - len(text)))
-    if status:
-        text += f" [gray62]{status}[/gray62]"
+
+    # criticalities summary
+    severity_levels: list[Literal["critical", "high", "medium", "low"]] = ["critical", "high", "medium", "low"]
+    if severities is not None and len([s for s in severities if s != "info"]) > 0:
+        severity_summary: list[str] = []
+        for k in severity_levels:
+            count = severities.count(k)
+            if count == 0:
+                continue
+            severity_summary.append(f"{SEVERITY_COLOR_MAP[k]}{count} {k}{SEVERITY_COLOR_MAP[k].replace('[', '[/')}")
+        text += f" ({', '.join(severity_summary)})"
+
     if issues:
         text += format_issues(issues, new_line=True)
     return Text.from_markup(text)
@@ -77,29 +126,56 @@ def append_status(status: str, new_status: str) -> str:
     return f"{new_status}, {status}"
 
 
+def get_severity(issue: Issue) -> Literal["info", "low", "medium", "high", "critical"]:
+    if issue.code.startswith("X"):
+        return "info"
+    issue_severity = issue.extra_data.get("severity", None) if issue.extra_data is not None else None
+    if issue_severity is None:
+        print(f"No severity found for issue {issue.code} ({issue.message}) ({issue.extra_data})")
+        issue_severity = "medium"
+    if not isinstance(issue_severity, str):
+        raise ValueError(f"Invalid severity type: {type(issue_severity)}")
+    if issue_severity not in ["info", "low", "medium", "high", "critical"]:
+        raise ValueError(
+            f"Invalid severity: {issue_severity}. Expected one of: {['info', 'low', 'medium', 'high', 'critical']}"
+        )
+    return cast("Literal['info', 'low', 'medium', 'high', 'critical']", issue_severity)
+
+
+def get_serverity_score(severity: Literal["info", "low", "medium", "high", "critical"]) -> int:
+    return {
+        "info": 0,
+        "low": 1,
+        "medium": 2,
+        "high": 3,
+        "critical": 4,
+    }[severity]
+
+
+def get_max_severity(
+    severities: list[Literal["info", "low", "medium", "high", "critical"]],
+) -> Literal["info", "low", "medium", "high", "critical"] | None:
+    max_severity = max([get_serverity_score(severity) for severity in severities], default=None)
+    severity_levels: list[Literal["info", "low", "medium", "high", "critical"]] = [
+        "info",
+        "low",
+        "medium",
+        "high",
+        "critical",
+    ]
+    return severity_levels[max_severity] if max_severity is not None else None
+
+
 def format_issues(issues: list[Issue], new_line: bool = False) -> str:
+    # sort issues by severity
+    issues.sort(key=lambda x: get_serverity_score(get_severity(x)), reverse=True)
     separator = "\n" if new_line else " "
     status_text = separator.join(
         [
-            ISSUE_COLOR_MAP["analysis_error"]
-            + rf"● \[{issue.code}]: {issue.message}"
-            + ISSUE_COLOR_MAP["analysis_error"].replace("[", "[/")
+            SEVERITY_COLOR_MAP[get_severity(issue)]
+            + rf"● \[{issue.code} {get_severity(issue)}]: {issue.message}"
+            + SEVERITY_COLOR_MAP[get_severity(issue)].replace("[", "[/")
             for issue in issues
-            if issue.code.startswith("X")
-        ]
-        + [
-            ISSUE_COLOR_MAP["issue"]
-            + rf"● \[{issue.code}]: {issue.message}"
-            + ISSUE_COLOR_MAP["issue"].replace("[", "[/")
-            for issue in issues
-            if issue.code.startswith("E")
-        ]
-        + [
-            ISSUE_COLOR_MAP["warning"]
-            + rf"● \[{issue.code}]: {issue.message}"
-            + ISSUE_COLOR_MAP["warning"].replace("[", "[/")
-            for issue in issues
-            if issue.code.startswith("W")
         ]
     )
     if new_line:
@@ -126,33 +202,11 @@ def format_entity_line(
     inspect_mode: bool = False,
     is_skill: bool = False,
     full_description: bool = False,
-    are_there_server_issues: bool = False,
 ) -> Text:
     # is_verified = verified.value
     # if is_verified is not None and changed.value is not None:
     #     is_verified = is_verified and not changed.value
-    if any(issue.code.startswith("X") for issue in issues):
-        status = "analysis_error"
-    elif any(issue.code.startswith("E") for issue in issues):
-        status = "issue"
-    elif any(issue.code.startswith("W") for issue in issues):
-        status = "warning"
-    else:
-        status = "successful"
-
-    icon_map = {
-        "successful": ":white_heavy_check_mark:",
-        "issue": ":cross_mark:",
-        "analysis_error": "",
-        "warning": "⚠️ ",
-        "inspect_mode": "  ",
-    }
-    color = ISSUE_COLOR_MAP[status]
-    icon = icon_map[status]
-    if inspect_mode or are_there_server_issues:
-        color = ISSUE_COLOR_MAP["inspect_mode"]
-        icon = icon_map["inspect_mode"]
-    include_description = status not in ["analysis_error", "successful"] or are_there_server_issues
+    include_description = len(issues) > 0
 
     # right-pad & truncate name
     name = entity.name
@@ -171,27 +225,21 @@ def format_entity_line(
     # res. temp. / asset
 
     status_text = format_issues(issues)
-    text = f"{type_str} {color}[bold]{name}[/bold] {icon} {status_text}"
+    text = f"{type_str}[bold]{name}[/bold]  {status_text}"
 
     if include_description:
         if hasattr(entity, "description") and entity.description is not None:
             description = entity.description
         else:
             description = "<no description available>"
-        if not full_description:
-            if len(description) > 200:
-                description = (
-                    description[:200]
-                    + f"... {len(description) - 200} characters truncated. Use --print-full-descriptions to see the full description."
-                )
-            else:
-                description = (
-                    description
-                    + f"... {200 - len(description)} characters truncated. Use --print-full-descriptions to see the full description."
-                )
+        if not full_description and len(description) > 200:
+            description = (
+                description[:200]
+                + f"... {len(description) - 200} characters truncated. Use --print-full-descriptions to see the full description."
+            )
         # escape markdown in the description
         description = description.replace("[", r"\[").replace("]", r"\]")
-        text += f"\n[gray62][bold]Current description:[/bold]\n{description}[/gray62]"
+        text += f"\n[gray62][bold]Description:[/bold]\n{description}[/gray62]"
 
     formatted_text = Text.from_markup(text)
     return formatted_text
@@ -271,8 +319,8 @@ def print_scan_path_result(
     full_description: bool = False,
 ) -> None:
     if result.error is not None:
-        err_status, traceback = format_error(result.error)
-        rich.print(format_path_line(result.path, err_status))
+        error_issue, traceback = format_error(result.error, None, None)
+        rich.print(format_path_line(result.path, issues=[error_issue]))
         if print_errors and traceback is not None:
             console = rich.console.Console()
             console.print(traceback)
@@ -298,15 +346,18 @@ def print_scan_path_result(
     server_tracebacks = []
     for server_idx, server in enumerate(result.servers or []):
         server_issues = [issue for issue in result.issues if issue.reference == (server_idx, None)]
+        severities = [
+            get_severity(issue)
+            for issue in result.issues
+            if issue.reference is not None and issue.reference[0] == server_idx
+        ]
         if server.error is not None:
-            err_status, traceback = format_error(server.error)
-            server_print = path_print_tree.add(
-                format_servers_line(server.name or "", issues=server_issues, status=err_status)
-            )
+            error_issue, traceback = format_error(server.error, server_idx, code="X003")
+            server_issues.append(error_issue)
             if traceback is not None:
                 server_tracebacks.append((server, traceback))
-        else:
-            server_print = path_print_tree.add(format_servers_line(server.name or "", None, server_issues))
+            severities.append("info")
+        server_print = path_print_tree.add(format_servers_line(server.name or "", severities, server_issues))
         for entity_idx, entity in enumerate(server.entities):
             issues = [issue for issue in result.issues if issue.reference == (server_idx, entity_idx)]
             server_print.add(
@@ -316,7 +367,6 @@ def print_scan_path_result(
                     inspect_mode,
                     is_skill=server.server.type == "skill",
                     full_description=full_description,
-                    are_there_server_issues=bool(server_issues),
                 )
             )
 
