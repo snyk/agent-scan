@@ -72,13 +72,13 @@ uvx snyk-agent-scan@latest --skills ~/.claude/skills
 
 ## Scanner Capabilities
 
-Agent Scan is a security scanning tool to both scan and inspect the supply chain of agent components on your machine. It checks them for common security vulnerabilities like prompt injections, tool poisoning and toxic flows.
+Agent Scan is a security scanning tool to both scan and inspect the supply chain of agent components on your machine. It scans for common security vulnerabilities like prompt injections, tool poisoning, toxic flows or vulnerabilities in agent skills.
 
 Agent Scan operates in two main modes which can be used jointly or separately:
 
-1. `snyk-agent-scan scan` scans the current machine for agents and agent components such as skills and MCP servers. Upon completion, it will output a comprehensive report for the user to review.
+1. **Scan Mode**: `snyk-agent-scan scan` scans the current machine for agents and agent components such as skills and MCP servers. Upon completion, it will output a comprehensive report for the user to review.
 
-2. **Background Mode** (MDM, Crowdstrike). Scans the current machine in regular intervals, and reports the results to a [Snyk Evo](https://evo.ai.snyk.io) instance. This can be used by security teams to monitor the company-wide agent supply chain in a central location. To set this up, please [contact us](https://evo.ai.snyk.io/#contact-us).
+2. **Background Mode** (MDM, Crowdstrike). Agent Scan scans the machine in regular intervals in the background, and reports the results to a [Snyk Evo](https://evo.ai.snyk.io) instance. This can be used by security teams to monitor the company-wide agent supply chain in a central location. To set this up, please [contact us](https://evo.ai.snyk.io/#contact-us).
 
 ## How It Works
 
@@ -86,7 +86,7 @@ Agent Scan operates in two main modes which can be used jointly or separately:
 
 Agent Scan searches through your local agent's configuration files to find agents, skills and MCP servers. For MCP, it connects to servers and retrieves tool descriptions.
 
-It then components, both with local checks and by invoking the Snyk scanning API. For this, tool names and descriptions are shared with Snyk. By using Agent Scan, you agree to the Snyk [terms of use](./TERMS.md) and [privacy policy](https://snyk.io/policies/privacy/).
+It then components, both with local checks and by invoking the Snyk scanning API. For this, tool names and descriptions are shared with Snyk. By using Agent Scan, you agree to the Snyk [terms of use for Agent Scan](./TERMS.md).
 
 A unique, persistent, and anonymous ID is assigned to your scans for analysis. You can opt out of sending this information using the `--opt-out` flag.
 
@@ -120,7 +120,7 @@ These options are available for all commands:
 Scan MCP configurations for security vulnerabilities in tools, prompts, and resources.
 
 ```
-snyk-agent-scan [CONFIG_FILE...]
+snyk-agent-scan scan [CONFIG_FILE...]
 ```
 
 Options:
@@ -212,7 +212,7 @@ uv run -m src.agent_scan.cli
 
 ## Including Agent Scan results in your own project / registry
 
-If you want to include Agent Scan results in your own project or registry, please [reach out](https://evo.ai.snyk.io/#contact-us), and we can help you with that.
+If you want to include Agent Scan results in your own project or registry, please [reach out](https://evo.ai.snyk.io/#contact-us). There are designated APIs for this purpose. Using the standard Agent Scan API for large scale scanning is considered abuse and will result in your account being blocked.
 
 ## Further Reading
 
