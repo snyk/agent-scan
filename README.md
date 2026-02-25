@@ -86,7 +86,7 @@ Agent Scan operates in two main modes which can be used jointly or separately:
 
 Agent Scan searches through your local agent's configuration files to find agents, skills and MCP servers. For MCP, it connects to servers and retrieves tool descriptions.
 
-It then components, both with local checks and by invoking the Snyk scanning API. For this, tool names and descriptions are shared with Snyk. By using Agent Scan, you agree to the Snyk [terms of use for Agent Scan](./TERMS.md).
+It then validates the components, both with local checks and by invoking the Agent Scan API. For this, skills, agent applications, tool names and descriptions are shared with Snyk. By using Agent Scan, you agree to the Snyk [terms of use for Agent Scan](./TERMS.md).
 
 A unique, persistent, and anonymous ID is assigned to your scans for analysis. You can opt out of sending this information using the `--opt-out` flag.
 
