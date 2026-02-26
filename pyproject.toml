@@ -23,6 +23,7 @@ dependencies = [
     "truststore>=0.10.4",
     "pydantic-core>=2.41.4",
     "mcp[cli]==1.25.0",
+    "regex>=2026.2.19",
 ]
 
 [project.scripts]
