@@ -59,7 +59,7 @@ shiv: build
 	uv run shiv -c agent-scan -o dist/agent-scan.pyz --python "/usr/bin/env python3" dist/*.whl
 
 publish-pypi: build
-	uv publish --token ${PYPI_TOKEN}
+	uv publish --token ${AGENT_SCAN_PYPI_TOKEN}
 
 publish: publish-pypi
 
