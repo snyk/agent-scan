@@ -29,17 +29,9 @@ Agent Scan helps you keep an inventory of all your installed agent components (h
 
 - Auto-discover MCP configurations, agent tools, skills
 - Scanning of Claude, Cursor, Windsurf, Gemini CLI, and other agents.
-- Detects MCP Security Vulnerabilities:
-  - Prompt Injection Attacks
-  - Tool Poisoning Attacks
-  - Cross-origin escalation attacks (e.g. tool shadowing)
-  - Toxic Flows
-  - MCP rug pull attacks (detects changes to MCP tools via hashing)
-- Detects Agent Skill Vulnerabilities:
-  - Prompt Injection Attacks, Malware Payloads
-  - Exposure to untrusted third parties (e.g. moltbook)
-  - Sensitive Data Handling
-  - Hard-coded secrets
+- Detects [15+ distinct security risks](docs/issue-codes.md) across MCP servers and agent skills:
+  - MCP: [Prompt Injection](docs/issue-codes.md#E001), [Tool Poisoning](docs/issue-codes.md#E003), [Tool Shadowing](docs/issue-codes.md#E002), [Toxic Flows](docs/issue-codes.md#TF001), [Rug Pull](docs/issue-codes.md#W005)
+  - Skills: [Prompt Injection](docs/issue-codes.md#E004), [Malware Payloads](docs/issue-codes.md#E006), [Untrusted Content](docs/issue-codes.md#W011), [Credential Handling](docs/issue-codes.md#W007), [Hardcoded Secrets](docs/issue-codes.md#W008)
 
 ## Quick Start
 
@@ -213,6 +205,11 @@ uv run -m src.agent_scan.cli
 ## Including Agent Scan results in your own project / registry
 
 If you want to include Agent Scan results in your own project or registry, please [reach out](https://evo.ai.snyk.io/#contact-us). There are designated APIs for this purpose. Using the standard Agent Scan API for large scale scanning is considered abuse and will result in your account being blocked.
+
+## Documentation
+
+- [Scanning](docs/scanning.md) — How scanning works, CLI parameters, and usage examples.
+- [Issue Codes](docs/issue-codes.md) — Reference for all security issues detected by Agent Scan.
 
 ## Further Reading
 
