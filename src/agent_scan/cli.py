@@ -478,7 +478,7 @@ async def evo(args):
             connector=setup_tcp_connector(skip_ssl_verify=skip_ssl_verify),
             trust_env=True,
         ) as session:
-            async with session.post(push_key_url, data="", headers={"Authorization": f"token {token}"}) as resp:
+            async with session.post(push_key_url, data="", headers={"Content-Type": "application/json", "Authorization": f"token {token}"}) as resp:
                 if resp.status not in (200, 201):
                     text = await resp.text()
                     rich.print(f"[bold red]Request failed[/bold red]: HTTP {resp.status} - {text}")
