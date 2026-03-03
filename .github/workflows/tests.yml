@@ -21,6 +21,7 @@ jobs:
     env:
       AGENT_SCAN_ENVIRONMENT: ci
       AGENT_SCAN_CI_HOSTNAME: ${{ secrets.AGENT_SCAN_CI_HOSTNAME }}
+      SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
