@@ -1,6 +1,7 @@
 """End-to-end tests for complete MCP scanning workflow."""
 
 import json
+import os
 import subprocess
 
 import pytest
@@ -148,6 +149,7 @@ class TestFullScanFlow:
         ],
     )
     def test_scan(self, agent_scan_cmd, path, server_names):
+        # Pass env explicitly so SNYK_TOKEN reaches the CLI (e.g. when invoked via uv run)
         result = subprocess.run(
             [
                 *agent_scan_cmd,
@@ -159,6 +161,7 @@ class TestFullScanFlow:
             ],
             capture_output=True,
             text=True,
+            env=os.environ.copy(),
         )
         assert result.returncode == 0, f"Command failed with error: {result.stderr}"
         output = json.loads(result.stdout)
