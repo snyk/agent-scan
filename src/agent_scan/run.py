@@ -1,10 +1,16 @@
+import sys
+
 import asyncio
 
 from agent_scan.cli import main
+from agent_scan.verify_api import SnykTokenError
 
 
 def run():
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except SnykTokenError:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -23,6 +23,10 @@ logger = logging.getLogger(__name__)
 identity_manager = IdentityManager()
 
 
+class SnykTokenError(Exception):
+    """Raised when SNYK_TOKEN is required but not set. Handled at top level to exit without traceback."""
+
+
 def get_hostname() -> str:
     ci_hostname = os.getenv("AGENT_SCAN_CI_HOSTNAME")
     if get_environment() == "ci" and ci_hostname:
@@ -216,7 +220,7 @@ async def analyze_machine(
             "[bold red]To use Agent Scan, set the SNYK_TOKEN environment variable. "
             "To get a token, go to https://app.snyk.io/account (API Token -> KEY -> click to show).[/bold red]"
         )
-        raise ValueError("SNYK_TOKEN environment variable not set")
+        raise SnykTokenError("SNYK_TOKEN environment variable not set")
 
     for attempt in range(max_retries):
         try:
