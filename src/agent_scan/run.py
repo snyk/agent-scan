@@ -1,6 +1,5 @@
-import sys
-
 import asyncio
+import sys
 
 from agent_scan.cli import main
 from agent_scan.verify_api import SnykTokenError
