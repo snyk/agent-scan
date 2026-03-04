@@ -173,7 +173,7 @@ def get_max_severity(
 def format_issue(issue: Issue) -> str:
     issue_str = rf"● \[{issue.code} {get_severity(issue)}]: "
 
-    if issue.code == "W015" and issue.extra_data is not None and "reason" in issue.extra_data:
+    if issue.code in ["W015", "W016", "W017", "W018"] and issue.extra_data is not None and "reason" in issue.extra_data:
         issue_str += f"{issue.message} Reason: {issue.extra_data['reason']}"
     elif issue.code == "W001" and issue.extra_data is not None and "word" in issue.extra_data:
         issue_str += f'Found the word "{issue.extra_data["word"]}" in the tool description. It is a common word used in prompt injection attacks.'
