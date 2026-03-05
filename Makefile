@@ -9,29 +9,15 @@ endif
 run:
 	uv run -m src.agent_scan.run ${RUN_ARGS}
 
-test-all:
-	uv sync
-	uv pip install -e ".[test,proxy]"
-	AGENT_SCAN_ENVIRONMENT=test uv run python -m pytest
-
-test-static:
+tests:
 	uv sync
 	uv pip install -e ".[test]"
 	AGENT_SCAN_ENVIRONMENT=test uv run python -m pytest
 
-test: test-all
-
-ci-static:
+ci:
 	uv sync
 	uv pip install -e ".[test]"
 	AGENT_SCAN_ENVIRONMENT=ci uv run python -m pytest
-
-ci-proxy:
-	uv sync
-	uv pip install -e ".[test,proxy]"
-	AGENT_SCAN_ENVIRONMENT=ci uv run python -m pytest
-
-ci: ci-static ci-proxy
 
 pre-commit:
 	uv sync
