@@ -423,10 +423,10 @@ def main():
         parser.print_help()
         sys.exit(0)
     elif args.command == "inspect":
-        asyncio.run(print_scan_inspect(mode="inspect", args=args))
+        asyncio.run(scan_with_skills(mode="inspect", args=args))
         sys.exit(0)
     elif args.command == "scan" or args.command is None:  # default to scan
-        asyncio.run(print_scan_inspect(args=args))
+        asyncio.run(scan_with_skills(mode="scan", args=args))
         sys.exit(0)
     elif args.command == "mcp-server":
         from agent_scan.mcp_server import mcp_server
@@ -637,32 +637,6 @@ async def run_scan_inspect(mode="scan", args=None):
                 scan_context=scan_context,
             )
     return result
-
-
-async def print_scan_inspect(mode="scan", args=None):
-    # With --json enabled, we suppress all stdout
-    # to ensure we produce a valid JSON output.
-    if args.skills:
-        await scan_with_skills(args, mode=mode)
-        return
-
-    if not args.files:
-        args.files = WELL_KNOWN_MCP_PATHS
-
-    if args.json:
-        with suppress_stdout():
-            result = await run_scan_inspect(mode, args)
-        result = {r.path: r.model_dump(mode="json") for r in result}
-        print(json.dumps(result, indent=2))
-    else:
-        result = await run_scan_inspect(mode, args)
-        print_scan_result(
-            result,
-            args.print_errors,
-            args.full_toxic_flows if hasattr(args, "full_toxic_flows") else False,
-            mode == "inspect",
-            args.verbose,
-        )
 
 
 if __name__ == "__main__":
