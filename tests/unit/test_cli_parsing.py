@@ -468,7 +468,7 @@ class TestJSONOutput:
         import sys
         from argparse import Namespace
 
-        from agent_scan.cli import print_scan_inspect
+        from agent_scan.cli import scan_with_skills
         from agent_scan.models import ScanPathResult
 
         mock_result = ScanPathResult(path="/test/path.json")
@@ -498,7 +498,7 @@ class TestJSONOutput:
 
             try:
                 sys.stdout = captured_output
-                await print_scan_inspect(mode="scan", args=args)
+                await scan_with_skills(mode="scan", args=args)
             finally:
                 sys.stdout = original_stdout
 
@@ -516,7 +516,7 @@ class TestJSONOutput:
         import sys
         from argparse import Namespace
 
-        from agent_scan.cli import print_scan_inspect
+        from agent_scan.cli import scan_with_skills
         from agent_scan.models import ScanPathResult
 
         mock_result = ScanPathResult(path="/test/path.json")
@@ -554,7 +554,7 @@ class TestJSONOutput:
 
             try:
                 sys.stdout = captured_output
-                await print_scan_inspect(mode="scan", args=args)
+                await scan_with_skills(mode="scan", args=args)
             finally:
                 sys.stdout = original_stdout
 
