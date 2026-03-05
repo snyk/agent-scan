@@ -29,7 +29,7 @@ from agent_scan.models import (
 from agent_scan.signed_binary import check_server_signature
 from agent_scan.skill_client import inspect_skill, inspect_skills_dir
 from agent_scan.traffic_capture import TrafficCapture
-from agent_scan.well_known_clients import expand_path, get_all_home_directories
+from agent_scan.well_known_clients import expand_path, get_readable_home_directories
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,7 @@ async def get_mcp_config_per_client(client: CandidateClient) -> list[ClientToIns
     Looks for Client (Cursor, VSCode, etc.) across all home directories in the machine.
     """
     ctis: list[ClientToInspect] = []
-    for home_directory in get_all_home_directories():
+    for home_directory in get_readable_home_directories():
         cti = await get_mcp_config_per_home_directory(client, home_directory)
         if cti is not None:
             ctis.append(cti)
@@ -57,9 +57,13 @@ async def get_mcp_config_per_home_directory(client: CandidateClient, home_direct
     client_path: str | None = None
     for path in client.client_exists_paths:
         path_expanded = expand_path(Path(path), home_directory)
-        if path_expanded.exists():
-            client_path = str(path)
-            break
+        try:
+            if path_expanded.exists():
+                client_path = str(path_expanded)
+                break
+        except PermissionError:
+            logger.warning(f"Permission error for path {path_expanded.as_posix()}")
+            continue
 
     if client_path is None:
         return None

@@ -422,10 +422,11 @@ def get_builtin_tools(path_result: ScanPathResult) -> ScanPathResult:
     return output
 
 
-def get_all_home_directories() -> list[Path]:
+def get_readable_home_directories() -> list[Path]:
     """
-    Retrieve a list of all human user home directories on the current machine.
-    Works natively on Windows, Linux, and macOS.
+    Retrieve a list of all human user home directories on the machine
+    that the current process actually has permission to read and traverse.
+    Logs the access status for each found directory.
     """
     system = platform.system()
     home_dirs: set[Path] = set()
@@ -439,13 +440,17 @@ def get_all_home_directories() -> list[Path]:
         for user in pwd.getpwall():
             if user.pw_uid >= uid_threshold and user.pw_name != "nobody":
                 dir_path = Path(user.pw_dir)
-                # Only add if the directory actually exists on disk
+
                 if dir_path.is_dir():
-                    home_dirs.add(dir_path)
+                    # Check for Read (R_OK) and Traverse/Execute (X_OK) permissions
+                    if os.access(dir_path, os.R_OK | os.X_OK):
+                        logger.info(f"Found user '{user.pw_name}' at {dir_path} -> Access: GRANTED")
+                        home_dirs.add(dir_path)
+                    else:
+                        logger.info(f"Found user '{user.pw_name}' at {dir_path} -> Access: DENIED")
 
     elif system == "Windows":
         try:
-            # Query WMI for actual user profile paths (ignores system service accounts)
             cmd = [
                 "powershell",
                 "-NoProfile",
@@ -459,10 +464,15 @@ def get_all_home_directories() -> list[Path]:
                 if clean_path:
                     dir_path = Path(clean_path)
                     if dir_path.is_dir():
-                        home_dirs.add(dir_path)
+                        # Windows primarily relies on R_OK for basic directory readability
+                        if os.access(dir_path, os.R_OK):
+                            logger.info(f"Found profile at {dir_path} -> Access: GRANTED")
+                            home_dirs.add(dir_path)
+                        else:
+                            logger.info(f"Found profile at {dir_path} -> Access: DENIED")
 
         except (subprocess.CalledProcessError, FileNotFoundError) as e:
-            print(f"Warning: Failed to fetch Windows profiles: {e}")
+            logger.error(f"Failed to fetch Windows profiles: {e}")
 
     else:
         raise NotImplementedError(f"Unsupported OS: {system}")
