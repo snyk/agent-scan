@@ -1,7 +1,10 @@
 import logging
 import os
+import platform
 import re
+import subprocess
 import sys
+from pathlib import Path
 
 from mcp.types import Implementation, InitializeResult, ServerCapabilities, Tool, ToolsCapability
 
@@ -417,3 +420,59 @@ def get_builtin_tools(path_result: ScanPathResult) -> ScanPathResult:
         logger.warning("Unknown client; not adding built-in tools for %s", client)
 
     return output
+
+
+def get_all_home_directories() -> list[Path]:
+    """
+    Retrieve a list of all human user home directories on the current machine.
+    Works natively on Windows, Linux, and macOS.
+    """
+    system = platform.system()
+    home_dirs: set[Path] = set()
+
+    if system in ("Linux", "Darwin"):
+        import pwd
+
+        # macOS usually starts human UIDs at 500, Linux at 1000
+        uid_threshold = 500 if system == "Darwin" else 1000
+
+        for user in pwd.getpwall():
+            if user.pw_uid >= uid_threshold and user.pw_name != "nobody":
+                dir_path = Path(user.pw_dir)
+                # Only add if the directory actually exists on disk
+                if dir_path.is_dir():
+                    home_dirs.add(dir_path)
+
+    elif system == "Windows":
+        try:
+            # Query WMI for actual user profile paths (ignores system service accounts)
+            cmd = [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "Get-CimInstance Win32_UserProfile | Where-Object { $_.Special -eq $false } | Select-Object -ExpandProperty LocalPath",
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+
+            for line in result.stdout.splitlines():
+                clean_path = line.strip()
+                if clean_path:
+                    dir_path = Path(clean_path)
+                    if dir_path.is_dir():
+                        home_dirs.add(dir_path)
+
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            print(f"Warning: Failed to fetch Windows profiles: {e}")
+
+    else:
+        raise NotImplementedError(f"Unsupported OS: {system}")
+
+    return list(home_dirs)
+
+
+def expand_path(path: Path, home_directory: Path) -> Path:
+    if not str(path).startswith("~"):
+        return path
+
+    suffix = path.parts[1:]
+    return home_directory / Path(*suffix)
