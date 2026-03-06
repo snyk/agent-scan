@@ -1,3 +1,5 @@
+.PHONY: run tests ci pre-commit clean binary build shiv publish-pypi publish reset-uv install-dev-server-cursor install-dev-server-windsurf
+
 # If the first argument is "run"...
 ifeq (run,$(firstword $(MAKECMDGOALS)))
   # use the rest as arguments for "run"
@@ -13,6 +15,9 @@ tests:
 	uv sync
 	uv pip install -e ".[test]"
 	AGENT_SCAN_ENVIRONMENT=test uv run python -m pytest
+
+test:
+	make tests
 
 ci:
 	uv sync
@@ -48,9 +53,6 @@ publish-pypi: build
 	uv publish --token ${AGENT_SCAN_PYPI_TOKEN}
 
 publish: publish-pypi
-
-pre-commit:
-	pre-commit run --all-files
 
 reset-uv:
 	rm -rf .venv || true

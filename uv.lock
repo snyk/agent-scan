@@ -1946,7 +1946,7 @@ wheels = [
 
 [[package]]
 name = "snyk-agent-scan"
-version = "0.4.2"
+version = "0.4.5"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
