@@ -12,7 +12,6 @@ import asyncio
 import json
 import logging
 import sys
-from pathlib import Path
 
 import aiohttp
 import psutil
@@ -30,8 +29,7 @@ from agent_scan.version import version_info
 from agent_scan.well_known_clients import (
     WELL_KNOWN_MCP_PATHS,
     client_shorthands_to_paths,
-    expand_path,
-    get_readable_home_directories,
+    expand_paths_all_home_directories,
 )
 
 # Configure logging to suppress all output by default
@@ -471,15 +469,7 @@ async def evo(args):
         args.files = WELL_KNOWN_MCP_PATHS
 
     if args.scan_all_users:
-        home_directories = get_readable_home_directories(all_users=True)
-        new_paths: list[str] = []
-        for path in args.files:
-            if path.startswith("~"):
-                for home_directory in home_directories:
-                    new_paths.append(expand_path(Path(path), home_directory).as_posix())
-            else:
-                new_paths.append(path)
-        args.files = new_paths
+        args.files = expand_paths_all_home_directories(args.files)
 
     rich.print(
         "Go to https://app.snyk.io and select the tenant on the left nav bar. Copy the Tenant ID from the URL and paste it here: "
@@ -675,15 +665,7 @@ async def print_scan_inspect(mode="scan", args=None):
         args.files = WELL_KNOWN_MCP_PATHS
 
     if args.scan_all_users:
-        home_directories = get_readable_home_directories(all_users=True)
-        new_paths: list[str] = []
-        for path in args.files:
-            if path.startswith("~"):
-                for home_directory in home_directories:
-                    new_paths.append(expand_path(Path(path), home_directory).as_posix())
-            else:
-                new_paths.append(path)
-        args.files = new_paths
+        args.files = expand_paths_all_home_directories(args.files)
 
     if args.json:
         with suppress_stdout():

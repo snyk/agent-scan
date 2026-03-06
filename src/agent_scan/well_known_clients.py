@@ -489,3 +489,18 @@ def expand_path(path: Path, home_directory: Path) -> Path:
 
     suffix = path.parts[1:]
     return home_directory / Path(*suffix)
+
+
+def expand_paths_all_home_directories(paths: list[str]) -> list[str]:
+    """
+    Expand the paths to include the home directories.
+    """
+    home_directories = get_readable_home_directories(all_users=True)
+    new_paths: list[str] = []
+    for path in paths:
+        if path.startswith("~"):
+            for home_directory in home_directories:
+                new_paths.append(expand_path(Path(path), home_directory).as_posix())
+        else:
+            new_paths.append(path)
+    return new_paths
