@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import re
@@ -44,7 +45,11 @@ MACOS_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
         name="claude code",
         client_exists_paths=["~/.claude"],
         mcp_config_paths=["~/.claude.json"],
-        skills_dir_paths=["~/.claude/skills"],
+        skills_dir_paths=[
+            "~/.claude/skills",
+            # Glob fallback for plugin skills in case installed_plugins.json is unavailable
+            "~/.claude/plugins/cache/*/*/*",
+        ],
     ),
     CandidateClient(
         name="gemini cli",
@@ -111,7 +116,11 @@ LINUX_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
         name="claude code",
         client_exists_paths=["~/.claude"],
         mcp_config_paths=["~/.claude.json"],
-        skills_dir_paths=["~/.claude/skills"],
+        skills_dir_paths=[
+            "~/.claude/skills",
+            # Installed plugin skills: plugins/cache/{marketplace}/{plugin-name}/{version}/
+            "~/.claude/plugins/cache/*/*/*",
+        ],
     ),
     CandidateClient(
         name="gemini cli",
@@ -185,7 +194,11 @@ WINDOWS_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
         name="claude code",
         client_exists_paths=["~/.claude"],
         mcp_config_paths=["~/.claude.json"],
-        skills_dir_paths=["~/.claude/skills"],
+        skills_dir_paths=[
+            "~/.claude/skills",
+            # Installed plugin skills: plugins/cache/{marketplace}/{plugin-name}/{version}/
+            "~/.claude/plugins/cache/*/*/*",
+        ],
     ),
     CandidateClient(
         name="gemini cli",
@@ -220,11 +233,108 @@ WINDOWS_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
 ]
 
 
+def discover_cowork_skills_dirs() -> list[str]:
+    """
+    Dynamically discover skill directories created by Claude Cowork (DXT plugin sessions).
+
+    Cowork stores skills in two places that the static well-known-clients list cannot
+    enumerate at import time because they depend on runtime-generated UUIDs:
+
+    1. DXT session directories
+       ~/Library/Application Support/Claude/local-agent-mode-sessions/skills-plugin/
+         {dxt-uuid}/
+           {session-uuid}/   <- newest mtime = active session
+             skills/         <- each subdir here is one skill (contains SKILL.md)
+
+    2. Plugin install registry (~/.claude/plugins/installed_plugins.json)
+       Each plugin entry has an installPath that may contain a skills/ subdirectory.
+
+    Returns a list of absolute paths to `skills/` directories that can be fed
+    directly into CandidateClient.skills_dir_paths.
+    """
+    discovered: list[str] = []
+
+    # ── 1. DXT session skills ────────────────────────────────────────────────
+    skills_plugin_base = os.path.expanduser(
+        "~/Library/Application Support/Claude/local-agent-mode-sessions/skills-plugin"
+    )
+    if os.path.isdir(skills_plugin_base):
+        for dxt_uuid in os.listdir(skills_plugin_base):
+            dxt_dir = os.path.join(skills_plugin_base, dxt_uuid)
+            if not os.path.isdir(dxt_dir):
+                continue
+            session_dirs = [
+                os.path.join(dxt_dir, s)
+                for s in os.listdir(dxt_dir)
+                if os.path.isdir(os.path.join(dxt_dir, s))
+            ]
+            if not session_dirs:
+                continue
+
+            def _manifest_mtime(d: str) -> float:
+                m = os.path.join(d, "manifest.json")
+                return os.path.getmtime(m) if os.path.isfile(m) else os.path.getmtime(d)
+
+            active_session = max(session_dirs, key=_manifest_mtime)
+            skills_dir = os.path.join(active_session, "skills")
+            if os.path.isdir(skills_dir):
+                logger.debug("Cowork DXT skills dir discovered: %s", skills_dir)
+                discovered.append(skills_dir)
+
+    # ── 2. Plugin-installed skills (installed_plugins.json) ──────────────────
+    plugins_json = os.path.expanduser("~/.claude/plugins/installed_plugins.json")
+    if os.path.isfile(plugins_json):
+        try:
+            with open(plugins_json) as f:
+                data = json.load(f)
+            home = os.path.expanduser("~")
+            for plugin_key, installs in data.get("plugins", {}).items():
+                for install in installs:
+                    raw_path = install.get("installPath", "")
+                    if not raw_path:
+                        continue
+                    # Normalise the path – it may be stored as an absolute path
+                    # under a *different* user home (e.g. from inside the VM) or
+                    # as a session-relative "mnt/.claude/…" prefix.
+                    parts = raw_path.split(os.sep)
+                    if len(parts) >= 3 and parts[1] == "Users":
+                        install_path = os.path.join(home, *parts[3:])
+                    elif raw_path.startswith("mnt/.claude/"):
+                        install_path = os.path.join(home, ".claude", raw_path[len("mnt/.claude/"):])
+                    elif os.path.isabs(raw_path):
+                        install_path = raw_path
+                    else:
+                        install_path = os.path.join(os.path.dirname(plugins_json), raw_path)
+                    skills_dir = os.path.join(install_path, "skills")
+                    if os.path.isdir(skills_dir):
+                        logger.debug(
+                            "Cowork plugin skills dir discovered for %s: %s", plugin_key, skills_dir
+                        )
+                        discovered.append(skills_dir)
+        except Exception:
+            logger.exception("Failed to read %s while discovering Cowork skills", plugins_json)
+
+    return discovered
+
+
 def get_well_known_clients() -> list[CandidateClient]:
     if sys.platform == "linux" or sys.platform == "linux2":
         return LINUX_WELL_KNOWN_CLIENTS
     elif sys.platform == "darwin":
-        return MACOS_WELL_KNOWN_CLIENTS
+        clients: list[CandidateClient] = list(MACOS_WELL_KNOWN_CLIENTS)
+        cowork_skills_dirs = discover_cowork_skills_dirs()
+        if cowork_skills_dirs:
+            clients.append(
+                CandidateClient(
+                    name="cowork",
+                    client_exists_paths=[
+                        "~/Library/Application Support/Claude/local-agent-mode-sessions"
+                    ],
+                    mcp_config_paths=[],
+                    skills_dir_paths=cowork_skills_dirs,
+                )
+            )
+        return clients
     elif sys.platform == "win32":
         return WINDOWS_WELL_KNOWN_CLIENTS
     else:

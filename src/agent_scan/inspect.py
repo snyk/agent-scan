@@ -1,3 +1,4 @@
+import glob as glob_module
 import logging
 import os
 import traceback
@@ -92,10 +93,12 @@ async def get_mcp_config_per_client(client: CandidateClient) -> ClientToInspect 
     # parse skills dirs
     skills_dirs: dict[str, list[tuple[str, SkillServer]] | FileNotFoundConfig] = {}
     for skills_dir_path in client.skills_dir_paths:
-        if os.path.exists(os.path.expanduser(skills_dir_path)):
-            skills_dirs[skills_dir_path] = inspect_skills_dir(skills_dir_path)
-        else:
+        expanded = glob_module.glob(os.path.expanduser(skills_dir_path))
+        if not expanded:
             skills_dirs[skills_dir_path] = FileNotFoundConfig(message=f"Skills dir {skills_dir_path} does not exist")
+        else:
+            for resolved_path in expanded:
+                skills_dirs[resolved_path] = inspect_skills_dir(resolved_path)
 
     return ClientToInspect(
         name=client.name,
