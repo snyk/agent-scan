@@ -7,7 +7,7 @@ import pytest
 
 from agent_scan.models import CandidateClient, ScanError, ScanPathResult, ServerScanResult, SkillServer
 from agent_scan.pipelines import InspectArgs, inspect_pipeline
-from agent_scan.signed_binary import check_signed_binary
+from agent_scan.signed_binary import check_server_signature
 from agent_scan.skill_client import inspect_skill, inspect_skills_dir
 
 TEST_CANDIDATE_CLIENTS = [
@@ -123,7 +123,9 @@ async def test_inspect_clients(mock_get_well_known_clients):
     result_test_client = ScanPathResult.model_validate(
         result_test_client_dict["tests/mcp_servers/.test-client/mcp.json"], by_alias=False, by_name=True
     )
-    result_test_client = (await check_signed_binary([result_test_client]))[0]
+    for server in result_test_client.servers or []:
+        if server.server.type == "stdio":
+            server.server = check_server_signature(server.server)
     result_test_client_invalid_stdout = subprocess.run(
         [
             "uv",
@@ -141,7 +143,9 @@ async def test_inspect_clients(mock_get_well_known_clients):
     result_test_client_invalid = ScanPathResult.model_validate(
         result_test_client_invalid_dict["tests/mcp_servers/.test-client-invalid/mcp.json"], by_alias=False, by_name=True
     )
-    result_test_client_invalid = (await check_signed_binary([result_test_client_invalid]))[0]
+    for server in result_test_client_invalid.servers or []:
+        if server.server.type == "stdio":
+            server.server = check_server_signature(server.server)
 
     spr_0, spr_1 = await inspect_pipeline(
         inspect_args=InspectArgs(

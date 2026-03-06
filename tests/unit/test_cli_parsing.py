@@ -222,59 +222,35 @@ class TestControlServerParsing:
 class TestCLIArgumentParsing:
     """Test suite for overall CLI argument parsing with control servers."""
 
-    @pytest.mark.asyncio
-    async def test_scan_with_multiple_control_servers_uploads_to_all(self):
-        """Test that scanning with multiple control servers uploads to all of them."""
-        mock_result = ScanPathResult(path="/test/path")
+    def test_scan_with_multiple_control_servers_parses_correctly(self):
+        """Test that multiple control servers are parsed correctly."""
+        test_argv = [
+            "mcp-scan",
+            "scan",
+            "--control-server",
+            "https://server1.com",
+            "--control-server-H",
+            "Auth: token1",
+            "--control-identifier",
+            "user1@example.com",
+            "--opt-out",
+            "--control-server",
+            "https://server2.com",
+            "--control-server-H",
+            "Auth: token2",
+            "--control-identifier",
+            "serial-123",
+        ]
 
-        with (
-            patch("agent_scan.cli.MCPScanner") as MockScanner,
-            patch("agent_scan.cli.upload") as mock_upload,
-            patch("agent_scan.cli.print_scan_result"),
-        ):
-            # Setup scanner mock
-            mock_scanner_instance = AsyncMock()
-            mock_scanner_instance.scan = AsyncMock(return_value=[mock_result])
-            mock_scanner_instance.__aenter__ = AsyncMock(return_value=mock_scanner_instance)
-            mock_scanner_instance.__aexit__ = AsyncMock(return_value=None)
-            MockScanner.return_value = mock_scanner_instance
+        control_servers = parse_control_servers(test_argv)
 
-            # Setup upload mock
-            mock_upload.return_value = None
-
-            # Simulate CLI with multiple control servers
-            test_argv = [
-                "mcp-scan",
-                "scan",
-                "--control-server",
-                "https://server1.com",
-                "--control-server-H",
-                "Auth: token1",
-                "--control-identifier",
-                "user1@example.com",
-                "--opt-out",
-                "--control-server",
-                "https://server2.com",
-                "--control-server-H",
-                "Auth: token2",
-                "--control-identifier",
-                "serial-123",
-            ]
-
-            with patch.object(sys, "argv", test_argv):
-                # Import and run the relevant parts
-                from agent_scan.cli import parse_control_servers
-
-                control_servers = parse_control_servers(test_argv)
-
-                # Verify parsing
-                assert len(control_servers) == 2
-                assert control_servers[0]["url"] == "https://server1.com"
-                assert control_servers[0]["identifier"] == "user1@example.com"
-                assert control_servers[0]["opt_out"] is True
-                assert control_servers[1]["url"] == "https://server2.com"
-                assert control_servers[1]["identifier"] == "serial-123"
-                assert control_servers[1]["opt_out"] is False
+        assert len(control_servers) == 2
+        assert control_servers[0]["url"] == "https://server1.com"
+        assert control_servers[0]["identifier"] == "user1@example.com"
+        assert control_servers[0]["opt_out"] is True
+        assert control_servers[1]["url"] == "https://server2.com"
+        assert control_servers[1]["identifier"] == "serial-123"
+        assert control_servers[1]["opt_out"] is False
 
 
 class TestControlServerHeaderParsing:
@@ -325,31 +301,29 @@ class TestControlServerHeaderParsing:
 
 
 class TestControlServerUploadIntegration:
-    """Integration tests for uploading to multiple control servers."""
+    """Integration tests for control server arguments passed to the pipeline."""
 
     @pytest.mark.asyncio
-    async def test_upload_called_for_each_control_server(self):
-        """Test that upload is called once for each control server."""
+    async def test_control_servers_passed_to_pipeline(self):
+        """Test that run_scan passes control servers to the pipeline correctly."""
         from argparse import Namespace
 
-        from agent_scan.cli import run_scan_inspect
+        from agent_scan.cli import run_scan
 
         mock_result = ScanPathResult(path="/test/path")
 
-        with patch("agent_scan.cli.MCPScanner") as MockScanner, patch("agent_scan.cli.upload") as mock_upload:
-            # Setup scanner mock
-            mock_scanner_instance = AsyncMock()
-            mock_scanner_instance.scan = AsyncMock(return_value=[mock_result])
-            mock_scanner_instance.__aenter__ = AsyncMock(return_value=mock_scanner_instance)
-            mock_scanner_instance.__aexit__ = AsyncMock(return_value=None)
-            MockScanner.return_value = mock_scanner_instance
-
-            # Setup upload mock
-            mock_upload.return_value = None
-
-            # Create args with multiple control servers
+        with patch(
+            "agent_scan.cli.inspect_analyze_push_pipeline", new_callable=AsyncMock, return_value=[mock_result]
+        ) as mock_pipeline:
             args = Namespace(
                 verification_H=None,
+                verbose=False,
+                scan_all_users=False,
+                server_timeout=10,
+                files=[],
+                mcp_oauth_tokens_path=None,
+                analysis_url="https://test.com/analysis",
+                skip_ssl_verify=False,
                 control_servers=[
                     {"url": "https://server1.com", "headers": ["Auth: token1"], "identifier": "user1", "opt_out": True},
                     {
@@ -361,100 +335,97 @@ class TestControlServerUploadIntegration:
                 ],
             )
 
-            # Run the scan
-            await run_scan_inspect(mode="scan", args=args)
+            await run_scan(args, mode="scan")
 
-            # Verify upload was called twice
-            assert mock_upload.call_count == 2
-
-            # Verify first upload call
-            first_call = mock_upload.call_args_list[0]
-            assert first_call[0][1] == "https://server1.com"  # URL
-            assert first_call[0][2] == "user1"  # identifier
-            assert first_call[0][3] is True  # opt_out
-
-            # Verify second upload call
-            second_call = mock_upload.call_args_list[1]
-            assert second_call[0][1] == "https://server2.com"  # URL
-            assert second_call[0][2] == "user2"  # identifier
-            assert second_call[0][3] is False  # opt_out
+            mock_pipeline.assert_called_once()
+            push_args = mock_pipeline.call_args[0][2]
+            assert len(push_args.control_servers) == 2
+            assert push_args.control_servers[0].url == "https://server1.com"
+            assert push_args.control_servers[0].identifier == "user1"
+            assert push_args.control_servers[0].opt_out is True
+            assert push_args.control_servers[1].url == "https://server2.com"
+            assert push_args.control_servers[1].identifier == "user2"
+            assert push_args.control_servers[1].opt_out is False
 
     @pytest.mark.asyncio
-    async def test_no_upload_when_no_control_servers(self):
-        """Test that upload is not called when no control servers are specified."""
+    async def test_no_control_servers_passed_to_pipeline(self):
+        """Test that an empty control servers list is passed when none are specified."""
         from argparse import Namespace
 
-        from agent_scan.cli import run_scan_inspect
+        from agent_scan.cli import run_scan
 
         mock_result = ScanPathResult(path="/test/path")
 
-        with patch("agent_scan.cli.MCPScanner") as MockScanner, patch("agent_scan.cli.upload") as mock_upload:
-            # Setup scanner mock
-            mock_scanner_instance = AsyncMock()
-            mock_scanner_instance.scan = AsyncMock(return_value=[mock_result])
-            mock_scanner_instance.__aenter__ = AsyncMock(return_value=mock_scanner_instance)
-            mock_scanner_instance.__aexit__ = AsyncMock(return_value=None)
-            MockScanner.return_value = mock_scanner_instance
-
-            # Setup upload mock
-            mock_upload.return_value = None
-
-            # Create args with no control servers
-            args = Namespace(verification_H=None, control_servers=[])
-
-            # Run the scan
-            await run_scan_inspect(mode="scan", args=args)
-
-            # Verify upload was not called
-            mock_upload.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_upload_with_skip_ssl_verify(self):
-        """Test that upload is called with skip_ssl_verify option."""
-        from argparse import Namespace
-
-        from agent_scan.cli import run_scan_inspect
-
-        mock_result = ScanPathResult(path="/test/path")
-
-        with patch("agent_scan.cli.MCPScanner") as MockScanner, patch("agent_scan.cli.upload") as mock_upload:
-            # Setup scanner mock
-            mock_scanner_instance = AsyncMock()
-            mock_scanner_instance.scan = AsyncMock(return_value=[mock_result])
-            mock_scanner_instance.__aenter__ = AsyncMock(return_value=mock_scanner_instance)
-            mock_scanner_instance.__aexit__ = AsyncMock(return_value=None)
-            MockScanner.return_value = mock_scanner_instance
-
-            # Setup upload mock
-            mock_upload.return_value = None
-
-            # Create args with a control server and without the skip_ssl_verify option
-            args_without_skip_ssl_verify = Namespace(
+        with patch(
+            "agent_scan.cli.inspect_analyze_push_pipeline", new_callable=AsyncMock, return_value=[mock_result]
+        ) as mock_pipeline:
+            args = Namespace(
                 verification_H=None,
+                verbose=False,
+                scan_all_users=False,
+                server_timeout=10,
+                files=[],
+                mcp_oauth_tokens_path=None,
+                analysis_url="https://test.com/analysis",
+                skip_ssl_verify=False,
+                control_servers=[],
+            )
+
+            await run_scan(args, mode="scan")
+
+            mock_pipeline.assert_called_once()
+            push_args = mock_pipeline.call_args[0][2]
+            assert len(push_args.control_servers) == 0
+
+    @pytest.mark.asyncio
+    async def test_skip_ssl_verify_passed_to_pipeline(self):
+        """Test that skip_ssl_verify is correctly passed to the pipeline."""
+        from argparse import Namespace
+
+        from agent_scan.cli import run_scan
+
+        mock_result = ScanPathResult(path="/test/path")
+
+        with patch(
+            "agent_scan.cli.inspect_analyze_push_pipeline", new_callable=AsyncMock, return_value=[mock_result]
+        ) as mock_pipeline:
+            args_without = Namespace(
+                verification_H=None,
+                verbose=False,
+                scan_all_users=False,
+                server_timeout=10,
+                files=[],
+                mcp_oauth_tokens_path=None,
+                analysis_url="https://test.com/analysis",
                 control_servers=[{"url": "https://server1.com", "headers": [], "identifier": None, "opt_out": False}],
             )
 
-            # Run the scan
-            await run_scan_inspect(mode="scan", args=args_without_skip_ssl_verify)
+            await run_scan(args_without, mode="scan")
+            push_args = mock_pipeline.call_args[0][2]
+            analyze_args = mock_pipeline.call_args[0][1]
+            assert push_args.skip_ssl_verify is False
+            assert analyze_args.skip_ssl_verify is False
 
-            # Verify upload was called and skip_ssl_verify was not propagated
-            _, kwargs = mock_upload.call_args
-            assert kwargs.get("skip_ssl_verify") is False
-
-            # Create args with a control server and skip_ssl_verify option
-            args_with_skip_ssl_verify = Namespace(
+        with patch(
+            "agent_scan.cli.inspect_analyze_push_pipeline", new_callable=AsyncMock, return_value=[mock_result]
+        ) as mock_pipeline:
+            args_with = Namespace(
                 verification_H=None,
-                control_servers=[{"url": "https://server1.com", "headers": [], "identifier": None, "opt_out": False}],
+                verbose=False,
+                scan_all_users=False,
+                server_timeout=10,
+                files=[],
+                mcp_oauth_tokens_path=None,
+                analysis_url="https://test.com/analysis",
                 skip_ssl_verify=True,
+                control_servers=[{"url": "https://server1.com", "headers": [], "identifier": None, "opt_out": False}],
             )
 
-            # Run the scan
-            await run_scan_inspect(mode="scan", args=args_with_skip_ssl_verify)
-
-            # Verify upload was called and skip_ssl_verify was propagated
-            assert mock_upload.call_count == 2
-            _, kwargs = mock_upload.call_args
-            assert kwargs.get("skip_ssl_verify") is True
+            await run_scan(args_with, mode="scan")
+            push_args = mock_pipeline.call_args[0][2]
+            analyze_args = mock_pipeline.call_args[0][1]
+            assert push_args.skip_ssl_verify is True
+            assert analyze_args.skip_ssl_verify is True
 
 
 class TestJSONOutput:
@@ -465,7 +436,6 @@ class TestJSONOutput:
         """Test that when --json is enabled, stdout is suppressed during scan."""
         import io
         import json
-        import sys
         from argparse import Namespace
 
         from agent_scan.cli import print_scan_inspect
@@ -473,25 +443,13 @@ class TestJSONOutput:
 
         mock_result = ScanPathResult(path="/test/path.json")
 
-        with patch("agent_scan.cli.MCPScanner") as MockScanner, patch("agent_scan.cli.upload"):
-            # Setup scanner mock
-            mock_scanner_instance = AsyncMock()
-            mock_scanner_instance.scan = AsyncMock(return_value=[mock_result])
-            mock_scanner_instance.__aenter__ = AsyncMock(return_value=mock_scanner_instance)
-            mock_scanner_instance.__aexit__ = AsyncMock(return_value=None)
-            MockScanner.return_value = mock_scanner_instance
-
-            # Create args with json enabled
+        with patch("agent_scan.cli.run_scan", new_callable=AsyncMock, return_value=[mock_result]):
             args = Namespace(
                 json=True,
-                verification_H=None,
-                control_servers=[],
                 print_errors=False,
                 full_toxic_flows=False,
+                print_full_descriptions=False,
                 verbose=False,
-                skills=False,
-                files=[],
-                scan_all_users=False,
             )
 
             captured_output = io.StringIO()
@@ -514,7 +472,6 @@ class TestJSONOutput:
         """Test that JSON output mode only outputs JSON, no rich.print messages."""
         import io
         import json
-        import sys
         from argparse import Namespace
 
         from agent_scan.cli import print_scan_inspect
@@ -522,35 +479,21 @@ class TestJSONOutput:
 
         mock_result = ScanPathResult(path="/test/path.json")
 
-        with patch("agent_scan.cli.MCPScanner") as MockScanner, patch("agent_scan.cli.upload") as mock_upload:
-            # Setup scanner mock
-            mock_scanner_instance = AsyncMock()
-            mock_scanner_instance.scan = AsyncMock(return_value=[mock_result])
-            mock_scanner_instance.__aenter__ = AsyncMock(return_value=mock_scanner_instance)
-            mock_scanner_instance.__aexit__ = AsyncMock(return_value=None)
-            MockScanner.return_value = mock_scanner_instance
+        async def mock_run_scan_with_print(*args, **kwargs):
+            import rich
 
-            # Setup upload to print (which should be suppressed)
-            def mock_upload_with_print(*args, **kwargs):
-                import rich
+            rich.print("Successfully uploaded scan results")
+            return [mock_result]
 
-                rich.print("Successfully uploaded scan results")
-
-            mock_upload.side_effect = mock_upload_with_print
-
+        with patch("agent_scan.cli.run_scan", side_effect=mock_run_scan_with_print):
             args = Namespace(
                 json=True,
-                verification_H=None,
-                control_servers=[{"url": "https://test.com", "headers": [], "identifier": None, "opt_out": False}],
                 print_errors=False,
                 full_toxic_flows=False,
+                print_full_descriptions=False,
                 verbose=False,
-                skills=False,
-                files=[],
-                scan_all_users=False,
             )
 
-            # Capture stdout
             captured_output = io.StringIO()
             original_stdout = sys.stdout
 
