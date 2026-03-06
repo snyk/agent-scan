@@ -9,10 +9,13 @@ from agent_scan.inspect import (
     inspected_client_to_scan_path_result,
 )
 from agent_scan.models import (
+    AnalyzedMachine,
     CandidateClient,
+    ClientNotFoundError,
     ClientToInspect,
     ControlServer,
-    ScanError,
+    InspectedClient,
+    InspectedMachine,
     ScanPathResult,
     SkillServer,
     TokenAndClientInfo,
@@ -30,6 +33,7 @@ class InspectArgs(BaseModel):
     timeout: int
     tokens: list[TokenAndClientInfo]
     paths: list[str]
+    inspect_skills: bool = False
 
 
 class AnalyzeArgs(BaseModel):
@@ -49,7 +53,7 @@ class PushArgs(BaseModel):
 
 async def inspect_pipeline(
     inspect_args: InspectArgs,
-) -> list[ScanPathResult]:
+) -> InspectedMachine:
     # fetch clients to inspect
     if inspect_args.paths:
         clients_to_inspect = [await client_to_inspect_from_path(path, True) for path in inspect_args.paths]
@@ -57,29 +61,55 @@ async def inspect_pipeline(
         clients_to_inspect = [await get_mcp_config_per_client(client) for client in get_well_known_clients()]
 
     # inspect
-    scan_path_results: list[ScanPathResult] = []
+    inspected_clients: list[InspectedClient | ClientNotFoundError] = []
     for i, client_to_inspect in enumerate(clients_to_inspect):
         if client_to_inspect is None and inspect_args.paths:
-            scan_path_results.append(
-                ScanPathResult(
-                    path=inspect_args.paths[i],
-                    client=inspect_args.paths[i],
-                    servers=[],
-                    issues=[],
-                    labels=[],
-                    error=ScanError(message="File or folder not found", is_failure=False, category="file_not_found"),
+            inspected_clients.append(
+                ClientNotFoundError(
+                    message=f"Client {inspect_args.paths[i]} not found.",
                 )
             )
-            continue
         elif client_to_inspect is None:
             logger.info(
                 f"Client {get_well_known_clients()[i].name} does not exist os this machine. {get_well_known_clients()[i].client_exists_paths}"
             )
             continue
         else:
-            inspected_client = await inspect_client(client_to_inspect, inspect_args.timeout, inspect_args.tokens)
-            scan_path_results.append(inspected_client_to_scan_path_result(inspected_client))
-    return scan_path_results
+            inspected_client = await inspect_client(
+                client_to_inspect, inspect_args.timeout, inspect_args.tokens, inspect_skills=inspect_args.inspect_skills
+            )
+            inspected_clients.append(inspected_client)
+    return InspectedMachine(
+        clients=inspected_clients,
+    )
+
+
+async def analyze_pipeline(
+    inspected_machine: InspectedMachine,
+    analyze_args: AnalyzeArgs,
+    push_args: PushArgs,
+    verbose: bool = False,
+) -> AnalyzedMachine:
+    scan_path_results = [inspected_client_to_scan_path_result(rv) for rv in inspected_machine.clients]
+    redacted_scan_path_results = [redact_scan_result(rv) for rv in scan_path_results]
+
+    scan_context = {"cli_version": push_args.version}
+    verified_scan_path_results = await analyze_machine(
+        redacted_scan_path_results,
+        analysis_url=analyze_args.analysis_url,
+        identifier=analyze_args.identifier,
+        additional_headers=analyze_args.additional_headers,
+        opt_out_of_identity=analyze_args.opt_out_of_identity,
+        verbose=verbose,
+        skip_pushing=bool(push_args.control_servers),
+        push_key=get_push_key(push_args.control_servers),
+        max_retries=analyze_args.max_retries,
+        skip_ssl_verify=analyze_args.skip_ssl_verify,
+        scan_context=scan_context,
+    )
+    AnalyzedMachine(
+        clients=verified_scan_path_results,
+    )
 
 
 async def inspect_analyze_push_pipeline(
@@ -95,7 +125,7 @@ async def inspect_analyze_push_pipeline(
     scan_path_results = await inspect_pipeline(inspect_args)
 
     # redact
-    redacted_scan_path_results = [redact_scan_result(rv) for rv in scan_path_results]
+    redacted_scan_path_results = [inspected_client_to_scan_path_result(rv) for rv in scan_path_results]
 
     scan_context = {"cli_version": push_args.version}
     # analyze

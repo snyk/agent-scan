@@ -2,7 +2,7 @@ import asyncio
 import getpass
 import logging
 import os
-
+import base64
 import aiohttp
 import rich
 
@@ -100,6 +100,7 @@ async def upload(
             logger.info(f"No servers and no error for path {result.path}. Skipping upload.")
             continue
         result.client = get_client_from_path(result.path) or result.client or result.path
+        result.path = base64.b64encode(result.path.encode()).decode()
         # Redact sensitive information (tracebacks, etc.) before upload
         redact_scan_result(result)
         results_with_servers.append(result)
@@ -113,6 +114,8 @@ async def upload(
     last_exception = None
     trace_configs = setup_aiohttp_debug_logging(verbose=verbose)
     additional_headers = additional_headers or {}
+    with open("payload.json", "w") as f:
+        f.write(payload.model_dump_json(indent=4))
     for attempt in range(max_retries):
         try:
             async with aiohttp.ClientSession(

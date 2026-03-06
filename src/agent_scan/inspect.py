@@ -7,6 +7,7 @@ from httpx import HTTPStatusError
 from agent_scan.mcp_client import check_server, scan_mcp_config_file
 from agent_scan.models import (
     CandidateClient,
+    ClientNotFoundError,
     ClientToInspect,
     CouldNotParseMCPConfig,
     FileNotFoundConfig,
@@ -195,6 +196,7 @@ async def inspect_client(
     client: ClientToInspect,
     timeout: int,
     tokens: list[TokenAndClientInfo],
+    inspect_skills: bool,
 ) -> InspectedClient:
     """
     Scan a client (Cursor, VSCode, etc.) and return a InspectedClient object.
@@ -213,22 +215,32 @@ async def inspect_client(
             extensions_for_mcp_config.append(extension)
         extensions[mcp_config_path] = extensions_for_mcp_config
 
-    for skills_dir_path, skills_dirs in client.skills_dirs.items():
-        if isinstance(skills_dirs, FileNotFoundConfig):
-            extensions[skills_dir_path] = skills_dirs
-            continue
-        extensions_for_skills_dir: list[InspectedExtensions] = []
-        for name, skill in skills_dirs:
-            extension = await inspect_extension(name, skill, timeout)
-            extensions_for_skills_dir.append(extension)
-        extensions[skills_dir_path] = extensions_for_skills_dir
+    if inspect_skills:
+        for skills_dir_path, skills_dirs in client.skills_dirs.items():
+            if isinstance(skills_dirs, FileNotFoundConfig):
+                extensions[skills_dir_path] = skills_dirs
+                continue
+            extensions_for_skills_dir: list[InspectedExtensions] = []
+            for name, skill in skills_dirs:
+                extension = await inspect_extension(name, skill, timeout)
+                extensions_for_skills_dir.append(extension)
+            extensions[skills_dir_path] = extensions_for_skills_dir
     return InspectedClient(name=client.name, client_path=client.client_path, extensions=extensions)
 
 
-def inspected_client_to_scan_path_result(inspected_client: InspectedClient) -> ScanPathResult:
+def inspected_client_to_scan_path_result(inspected_client: InspectedClient | ClientNotFoundError) -> ScanPathResult:
     """
     Convert a InspectedClient object to a ScanPathResult object.
     """
+    if isinstance(inspected_client, ClientNotFoundError):
+        return ScanPathResult(
+            client=inspected_client.client_path,
+            path=inspected_client.client_path,
+            servers=[],
+            issues=[],
+            labels=[],
+            error=inspected_client.error,
+        )
     servers: list[ServerScanResult] = []
     candidate_errors: list[ScanError] = []
     for _, extensions_or_error in inspected_client.extensions.items():

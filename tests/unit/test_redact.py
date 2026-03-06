@@ -7,8 +7,8 @@ from urllib.parse import parse_qsl, urlsplit
 
 import pytest
 
-from agent_scan.MCPScanner import MCPScanner
 from agent_scan.models import RemoteServer, ScanPathResult, StdioServer
+from agent_scan.pipelines import InspectArgs, inspect_pipeline
 from agent_scan.redact import redact_absolute_paths, redact_args, redact_scan_result
 from tests.conftest import TempFile
 
@@ -207,25 +207,12 @@ async def test_scan_path_redacts_stdio_args():
     Note: -y is treated as a boolean flag (like in npx -y), so the package name is preserved.
     """
 
-    class DummyCfg:
-        def get_servers(self):
-            return {
-                "stdio": StdioServer(
-                    command="npx",
-                    args=["-y", "some-server", "--api-key", "secret123", "--token=xyz"],
-                    env={},
-                )
-            }
+    args = InspectArgs(timeout=10, tokens=[], paths=["/dummy/path"], inspect_skills=True)
 
-    with (
-        patch.object(sys.modules["agent_scan.MCPScanner"], "scan_mcp_config_file", return_value=DummyCfg()),
-        patch.object(sys.modules["agent_scan.MCPScanner"], "check_server", return_value=None),
-    ):
-        async with MCPScanner(files=["/dummy/path"]) as scanner:
-            result = await scanner.scan_path("/dummy/path", inspect_only=True)
+    scan_path_results = await inspect_pipeline(args)
 
     # Redact the result (as would happen before upload)
-    result = redact_scan_result(result)
+    result = redact_scan_result(inspected_client)
 
     assert result.servers is not None and len(result.servers) == 1
     srv = result.servers[0]

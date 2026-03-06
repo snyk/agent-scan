@@ -18,11 +18,10 @@ import psutil
 import rich
 from rich.logging import RichHandler
 
-from agent_scan.MCPScanner import MCPScanner
 from agent_scan.models import ControlServer, TokenAndClientInfo, TokenAndClientInfoList
 from agent_scan.pipelines import AnalyzeArgs, InspectArgs, PushArgs, inspect_analyze_push_pipeline, inspect_pipeline
 from agent_scan.printer import print_scan_result
-from agent_scan.upload import get_hostname, upload
+from agent_scan.upload import get_hostname
 from agent_scan.utils import ensure_unicode_console, parse_headers, suppress_stdout
 from agent_scan.verify_api import setup_aiohttp_debug_logging, setup_tcp_connector
 from agent_scan.version import version_info
@@ -423,10 +422,10 @@ def main():
         parser.print_help()
         sys.exit(0)
     elif args.command == "inspect":
-        asyncio.run(print_scan_inspect(mode="inspect", args=args))
+        asyncio.run(scan_with_skills(mode="inspect", args=args))
         sys.exit(0)
     elif args.command == "scan" or args.command is None:  # default to scan
-        asyncio.run(print_scan_inspect(args=args))
+        asyncio.run(scan_with_skills(mode="scan", args=args))
         sys.exit(0)
     elif args.command == "mcp-server":
         from agent_scan.mcp_server import mcp_server
@@ -504,7 +503,7 @@ async def evo(args):
             "headers": [f"x-client-id:{client_id}"],
         }
     ]
-    await run_scan_inspect(mode="scan", args=args)
+    await scan_with_skills(mode="scan", args=args)
 
     # revoke the created client_id
     del_headers = {
@@ -529,7 +528,7 @@ async def evo(args):
 
 async def scan_with_skills(args, mode: Literal["scan", "inspect"]):
     """
-    Scan the machine with skills. Eventually this should replace run_scan_inspect
+    Scan the machine with skills.
     """
     # collecting common args
     verbose: bool = hasattr(args, "verbose") and args.verbose
@@ -537,6 +536,7 @@ async def scan_with_skills(args, mode: Literal["scan", "inspect"]):
     print_errors: bool = hasattr(args, "print_errors") and args.print_errors
     full_toxic_flows: bool = hasattr(args, "full_toxic_flows") and args.full_toxic_flows
     full_description: bool = hasattr(args, "print_full_descriptions") and args.print_full_descriptions
+    skills: bool = hasattr(args, "skills") and args.skills
 
     # collect inspect args
     server_timeout: int = args.server_timeout if hasattr(args, "server_timeout") else 10
@@ -550,6 +550,7 @@ async def scan_with_skills(args, mode: Literal["scan", "inspect"]):
         timeout=server_timeout,
         tokens=tokens,
         paths=files,
+        inspect_skills=skills,
     )
 
     if mode == "scan":
@@ -607,61 +608,6 @@ async def scan_with_skills(args, mode: Literal["scan", "inspect"]):
             inspect_mode=mode == "inspect",
             internal_issues=verbose,
             full_description=full_description,
-        )
-
-
-async def run_scan_inspect(mode="scan", args=None):
-    # Initialize scan_context dict that can be populated during scanning
-    scan_context = {"cli_version": version_info}
-
-    async with MCPScanner(
-        additional_headers=parse_headers(args.verification_H), scan_context=scan_context, **vars(args)
-    ) as scanner:
-        if mode == "scan":
-            result = await scanner.scan()
-        elif mode == "inspect":
-            result = await scanner.inspect()
-        else:
-            raise ValueError(f"Unknown mode: {mode}, expected 'scan' or 'inspect'")
-    # upload scan result to control servers if specified
-    if hasattr(args, "control_servers") and args.control_servers:
-        for server_config in args.control_servers:
-            await upload(
-                result,
-                server_config["url"],
-                server_config["identifier"],
-                server_config["opt_out"],
-                verbose=getattr(args, "verbose", False),
-                additional_headers=parse_headers(server_config["headers"]),
-                skip_ssl_verify=getattr(args, "skip_ssl_verify", False),
-                scan_context=scan_context,
-            )
-    return result
-
-
-async def print_scan_inspect(mode="scan", args=None):
-    # With --json enabled, we suppress all stdout
-    # to ensure we produce a valid JSON output.
-    if args.skills:
-        await scan_with_skills(args, mode=mode)
-        return
-
-    if not args.files:
-        args.files = WELL_KNOWN_MCP_PATHS
-
-    if args.json:
-        with suppress_stdout():
-            result = await run_scan_inspect(mode, args)
-        result = {r.path: r.model_dump(mode="json") for r in result}
-        print(json.dumps(result, indent=2))
-    else:
-        result = await run_scan_inspect(mode, args)
-        print_scan_result(
-            result,
-            args.print_errors,
-            args.full_toxic_flows if hasattr(args, "full_toxic_flows") else False,
-            mode == "inspect",
-            args.verbose,
         )
 
 

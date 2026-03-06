@@ -23,6 +23,7 @@ from pydantic.alias_generators import to_camel
 
 # Error categories for structured error classification
 ErrorCategory = Literal[
+    "client_not_found",  # Client does not exist (not a failure)
     "file_not_found",  # Config file does not exist (not a failure)
     "unknown_config",  # Unknown/unsupported MCP config format (not a failure)
     "parse_error",  # Config file exists but couldn't be parsed
@@ -535,6 +536,11 @@ class SerializedException(BaseModel):
     category: ErrorCategory
 
 
+class ClientNotFoundError(SerializedException):
+    category: Literal["client_not_found"] = "client_not_found"
+    is_failure: Literal[False] = False
+    client_path: str
+
 class FileNotFoundConfig(SerializedException):
     category: Literal["file_not_found"] = "file_not_found"
     is_failure: Literal[False] = False
@@ -604,7 +610,7 @@ class InspectedClient(BaseModel):
 
 
 class InspectedMachine(BaseModel):
-    clients: list[InspectedClient]
+    clients: list[InspectedClient | ClientNotFoundError]
 
 
 class NewIssue(BaseModel):
@@ -619,14 +625,24 @@ class NewIssue(BaseModel):
     )
 
 
-class ClientAnalysis(BaseModel):
-    labels: list[list[ScalarToolLabels]]
+class AnalyzedClient(BaseModel):
+    name: str
+    client_path: str
+    extensions: dict[
+        str,
+        list[InspectedExtensions] | FileNotFoundConfig | UnknownConfigFormat | CouldNotParseMCPConfig | SkillScannError,
+    ]
     issues: list[NewIssue]
 
 
 class AnalyzedMachine(BaseModel):
-    machine: InspectedMachine
-    analysis: list[ClientAnalysis] | AnalysisError
+    clients: list[AnalyzedClient | ClientNotFoundError]
+
+
+class ClientAnalysis(BaseModel):
+    labels: list[list[ScalarToolLabels]]
+    issues: list[NewIssue]
+
 
 
 class ControlServer(BaseModel):
