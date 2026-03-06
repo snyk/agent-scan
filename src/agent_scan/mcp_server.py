@@ -18,7 +18,6 @@ from rich.logging import RichHandler
 from agent_scan.cli import run_scan
 from agent_scan.mcp_client import scan_mcp_config_file
 from agent_scan.models import StdioServer
-from agent_scan.Storage import Storage
 
 logger = logging.getLogger(__name__)
 
@@ -45,8 +44,9 @@ class Scanner:
     def __init__(self, args):
         self.thread = None
         self.args = args
-        self.storage = Storage(args.storage_file)
-        self.scan_path = self.storage.get_background_scan_path()
+        self.storage_path = os.path.expanduser(args.storage_file)
+        os.makedirs(self.storage_path, exist_ok=True)
+        self.scan_path = os.path.join(self.storage_path, "background_scan.json")
         self.stop_event = threading.Event()
         logger.info("Scanner initialized")
 
@@ -207,11 +207,22 @@ def install_mcp_server(args):
     return 0
 
 
+def _get_mcp_server_log_path(storage_path: str, pid: int, client_name: str | None = None) -> str:
+    date = datetime.now().strftime("%Y-%m-%d_%H:%M:%S")
+    log_dir = os.path.join(storage_path, "mcp_server")
+    os.makedirs(log_dir, exist_ok=True)
+    file = os.path.join(log_dir, f"{date}_{pid}_{client_name}.log")
+    if not os.path.exists(file):
+        with open(file, "w") as f:
+            f.write("")
+    return file
+
+
 def mcp_server(args):
-    # get args
     lifespan = create_lifespan_context(args)
-    storage = Storage(args.storage_file)
-    setup_mcp_server_logging(storage.get_mcp_server_log_path(os.getpid(), args.client_name))
+    storage_path = os.path.expanduser(args.storage_file)
+    os.makedirs(storage_path, exist_ok=True)
+    setup_mcp_server_logging(_get_mcp_server_log_path(storage_path, os.getpid(), args.client_name))
 
     logger.info(f"Starting MCP server with args: {args}")
     logger.info(f"Storage path: {args.storage_file}")
@@ -240,7 +251,7 @@ def mcp_server(args):
         @mcp.tool()
         async def get_scan_results() -> str:
             """Returns the results of the last scan"""
-            path = storage.get_background_scan_path()
+            path = os.path.join(storage_path, "background_scan.json")
             lock_path = path + ".lock"
             with filelock.FileLock(lock_path, timeout=1):
                 with open(path) as f:

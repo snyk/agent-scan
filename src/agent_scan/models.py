@@ -1,8 +1,6 @@
 import logging
 import os
 import re
-from datetime import datetime
-from hashlib import md5
 from itertools import chain
 from typing import Any, Literal, TypeAlias
 
@@ -82,55 +80,8 @@ def rebalance_command_args(command, args):
     return command, args
 
 
-def hash_entity(entity: Entity) -> str:
-    if not hasattr(entity, "description") or entity.description is None:
-        logger.warning("Entity has no description: %s", entity)
-        entity_description = "no description available"
-    else:
-        entity_description = entity.description
-    return md5((entity_description).encode()).hexdigest()
-
-
-def entity_type_to_str(entity: Entity) -> str:
-    if isinstance(entity, Prompt):
-        return "prompt"
-    elif isinstance(entity, Resource):
-        return "resource"
-    elif isinstance(entity, Tool):
-        return "tool"
-    elif isinstance(entity, ResourceTemplate):
-        return "resource template"
-    else:
-        raise ValueError(f"Unknown entity type: {type(entity)}")
-
-
 class StartMCPServerError(Exception):
     pass
-
-
-class ScannedEntity(BaseModel):
-    model_config = ConfigDict()
-    hash: str
-    type: str
-    timestamp: datetime
-    description: str | None = None
-
-    @field_validator("timestamp", mode="before")
-    def parse_datetime(cls, value: str | datetime) -> datetime:
-        if isinstance(value, datetime):
-            return value
-
-        # Try standard ISO format first
-        try:
-            return datetime.fromisoformat(value)
-        except ValueError:
-            pass
-
-        # Try custom format: "DD/MM/YYYY, HH:MM:SS"
-        try:
-            return datetime.strptime(value, "%d/%m/%Y, %H:%M:%S")
-        except ValueError as e:
-            raise ValueError(f"Unrecognized datetime format: {value}") from e
 
 
 class ScalarToolLabels(BaseModel):
@@ -138,9 +89,6 @@ class ScalarToolLabels(BaseModel):
     destructive: int | float
     untrusted_content: int | float
     private_data: int | float
-
-
-ScannedEntities = RootModel[dict[str, ScannedEntity]]
 
 
 class RemoteServer(BaseModel):
