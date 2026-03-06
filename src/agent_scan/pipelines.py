@@ -107,6 +107,9 @@ async def analyze_pipeline(
         skip_ssl_verify=analyze_args.skip_ssl_verify,
         scan_context=scan_context,
     )
+    AnalyzedMachine(
+        clients=verified_scan_path_results,
+    )
 
 
 async def inspect_analyze_push_pipeline(

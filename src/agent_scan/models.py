@@ -539,7 +539,7 @@ class SerializedException(BaseModel):
 class ClientNotFoundError(SerializedException):
     category: Literal["client_not_found"] = "client_not_found"
     is_failure: Literal[False] = False
-
+    client_path: str
 
 class FileNotFoundConfig(SerializedException):
     category: Literal["file_not_found"] = "file_not_found"
@@ -643,10 +643,6 @@ class ClientAnalysis(BaseModel):
     labels: list[list[ScalarToolLabels]]
     issues: list[NewIssue]
 
-
-class AnalyzedMachine(BaseModel):
-    machine: InspectedMachine
-    analysis: list[ClientAnalysis] | AnalysisError
 
 
 class ControlServer(BaseModel):

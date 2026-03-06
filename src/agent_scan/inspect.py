@@ -7,6 +7,7 @@ from httpx import HTTPStatusError
 from agent_scan.mcp_client import check_server, scan_mcp_config_file
 from agent_scan.models import (
     CandidateClient,
+    ClientNotFoundError,
     ClientToInspect,
     CouldNotParseMCPConfig,
     FileNotFoundConfig,
@@ -227,10 +228,19 @@ async def inspect_client(
     return InspectedClient(name=client.name, client_path=client.client_path, extensions=extensions)
 
 
-def inspected_client_to_scan_path_result(inspected_client: InspectedClient) -> ScanPathResult:
+def inspected_client_to_scan_path_result(inspected_client: InspectedClient | ClientNotFoundError) -> ScanPathResult:
     """
     Convert a InspectedClient object to a ScanPathResult object.
     """
+    if isinstance(inspected_client, ClientNotFoundError):
+        return ScanPathResult(
+            client=inspected_client.client_path,
+            path=inspected_client.client_path,
+            servers=[],
+            issues=[],
+            labels=[],
+            error=inspected_client.error,
+        )
     servers: list[ServerScanResult] = []
     candidate_errors: list[ScanError] = []
     for _, extensions_or_error in inspected_client.extensions.items():
