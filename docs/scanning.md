@@ -13,7 +13,7 @@ Agent Scan operates in two main modes which can be used jointly or separately:
 To run a full scan of your machine (auto-discovers agents, MCP servers, skills), run:
 
 ```bash
-uvx snyk-agent-scan@latest
+uvx snyk-agent-scan@latest --skills
 ```
 
 This will scan for security vulnerabilities in servers, skills, tools, prompts, and resources. It will automatically discover a variety of agent configurations, including Claude Code/Desktop, Cursor, Gemini CLI, and Windsurf.
@@ -24,9 +24,9 @@ You can also scan particular configuration files or skills:
 # scan mcp configurations
 uvx snyk-agent-scan@latest ~/.vscode/mcp.json
 # scan a single agent skill
-uvx snyk-agent-scan@latest ~/path/to/my/SKILL.md
+uvx snyk-agent-scan@latest  --skills ~/path/to/my/SKILL.md
 # scan all claude skills
-uvx snyk-agent-scan@latest ~/.claude/skills
+uvx snyk-agent-scan@latest  --skills ~/.claude/skills
 ```
 
 ## How It Works
@@ -58,6 +58,9 @@ These options are available for all commands:
 --print-errors         Show error details and tracebacks
 --full-toxic-flows     Show all tools that could take part in toxic flow. By default only the top 3 are shown.
 --json                 Output results in JSON format instead of rich text
+--skills                          Autodetects and analyzes skills
+--skills PATH_TO_SKILL_MD_FILE    Analyzes the specific skill
+--skills PATHS_TO_DIRECTORY       Recursively detects and analyzes all skills in the directory
 ```
 
 ### Commands
