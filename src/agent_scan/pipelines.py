@@ -145,7 +145,7 @@ async def client_to_inspect_from_path(
         server_name, server_config = direct_scan_to_server_config(path)
         return [
             ClientToInspect(
-                name="not-available" if use_path_as_client_name else path,
+                name=path if use_path_as_client_name else "not-available",
                 client_path=path,
                 mcp_configs={
                     path: [(server_name, server_config)],
@@ -161,7 +161,7 @@ async def client_to_inspect_from_path(
             path_without_last_dir = os.path.dirname(path)
             return [
                 ClientToInspect(
-                    name="not-available" if use_path_as_client_name else path,
+                    name=path if use_path_as_client_name else "not-available",
                     client_path=path_without_last_dir,
                     mcp_configs={},
                     skills_dirs={
@@ -171,7 +171,7 @@ async def client_to_inspect_from_path(
             ]
         else:
             candidate_client = CandidateClient(
-                name="not-available" if use_path_as_client_name else path,
+                name=path if use_path_as_client_name else "not-available",
                 client_exists_paths=[path],
                 mcp_config_paths=[],
                 skills_dir_paths=[path],
@@ -183,7 +183,7 @@ async def client_to_inspect_from_path(
 
         return [
             ClientToInspect(
-                name="not-available" if use_path_as_client_name else path,
+                name=path if use_path_as_client_name else "not-available",
                 client_path=parent_of_skill_directory,
                 mcp_configs={},
                 skills_dirs={
@@ -193,7 +193,7 @@ async def client_to_inspect_from_path(
         ]
     else:
         candidate_client = CandidateClient(
-            name="not-available" if use_path_as_client_name else path,
+            name=path if use_path_as_client_name else "not-available",
             client_exists_paths=[path],
             mcp_config_paths=[path],
             skills_dir_paths=[],
