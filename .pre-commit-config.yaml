@@ -5,6 +5,7 @@ repos:
   - id: mypy
     args: [--config-file=pyproject.toml]
     additional_dependencies: [types-requests, types-PyYAML]
+    exclude: ^tests/skills/
 
 - repo: https://github.com/astral-sh/ruff-pre-commit
   rev: v0.11.8
@@ -12,8 +13,10 @@ repos:
     # Run the linter
     - id: ruff
       args: [ --fix ]
+      exclude: ^tests/skills/
     # Run the formatter
     - id: ruff-format
+      exclude: ^tests/skills/
 
 - repo: https://github.com/pre-commit/pre-commit-hooks
   rev: v5.0.0
