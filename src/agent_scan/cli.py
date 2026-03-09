@@ -197,6 +197,12 @@ def add_common_arguments(parser):
         help="Disable SSL certificate verification",
     )
     parser.add_argument(
+        "--skills",
+        default=False,
+        action="store_true",
+        help="Scan skills beyond mcp servers.",
+    )
+    parser.add_argument(
         "--scan-all-users",
         default=False,
         action="store_true",
@@ -287,6 +293,7 @@ def main():
             f"  {program_name}                     # Scan all known MCP configs\n"
             f"  {program_name} ~/custom/config.json # Scan a specific config file\n"
             f"  {program_name} inspect             # Just inspect tools without verification\n"
+            f"  {program_name} --skills            # Scan skills beyond mcp servers.\n"
             f"  {program_name} --verbose           # Enable detailed logging output\n"
             f"  {program_name} --print-errors      # Show error details and tracebacks\n"
             f"  {program_name} --json              # Output results in JSON format\n\n"
@@ -520,6 +527,7 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[Scan
 
     server_timeout: int = args.server_timeout if hasattr(args, "server_timeout") else 10
     files: list[str] | None = args.files if hasattr(args, "files") else None
+    scan_skills: bool = hasattr(args, "skills") and args.skills
     tokens: list[TokenAndClientInfo] = []
     if hasattr(args, "mcp_oauth_tokens_path") and args.mcp_oauth_tokens_path:
         with open(args.mcp_oauth_tokens_path) as f:
@@ -530,6 +538,7 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[Scan
         tokens=tokens,
         paths=files,
         all_users=scan_all_users,
+        scan_skills=scan_skills,
     )
 
     if mode == "scan":

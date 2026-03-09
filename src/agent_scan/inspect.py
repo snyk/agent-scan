@@ -225,6 +225,7 @@ async def inspect_client(
     client: ClientToInspect,
     timeout: int,
     tokens: list[TokenAndClientInfo],
+    scan_skills: bool,
 ) -> InspectedClient:
     """
     Scan a client (Cursor, VSCode, etc.) and return a InspectedClient object.
@@ -243,15 +244,16 @@ async def inspect_client(
             extensions_for_mcp_config.append(extension)
         extensions[mcp_config_path] = extensions_for_mcp_config
 
-    for skills_dir_path, skills_dirs in client.skills_dirs.items():
-        if isinstance(skills_dirs, FileNotFoundConfig):
-            extensions[skills_dir_path] = skills_dirs
-            continue
-        extensions_for_skills_dir: list[InspectedExtensions] = []
-        for name, skill in skills_dirs:
-            extension = await inspect_extension(name, skill, timeout)
-            extensions_for_skills_dir.append(extension)
-        extensions[skills_dir_path] = extensions_for_skills_dir
+    if scan_skills:
+        for skills_dir_path, skills_dirs in client.skills_dirs.items():
+            if isinstance(skills_dirs, FileNotFoundConfig):
+                extensions[skills_dir_path] = skills_dirs
+                continue
+            extensions_for_skills_dir: list[InspectedExtensions] = []
+            for name, skill in skills_dirs:
+                extension = await inspect_extension(name, skill, timeout)
+                extensions_for_skills_dir.append(extension)
+            extensions[skills_dir_path] = extensions_for_skills_dir
     return InspectedClient(name=client.name, client_path=client.client_path, extensions=extensions)
 
 

@@ -31,6 +31,7 @@ class InspectArgs(BaseModel):
     tokens: list[TokenAndClientInfo]
     paths: list[str]
     all_users: bool = False
+    scan_skills: bool = False
 
 
 class AnalyzeArgs(BaseModel):
@@ -56,7 +57,7 @@ async def inspect_pipeline(
         clients_to_inspect = [
             cti
             for path in inspect_args.paths
-            for cti in await client_to_inspect_from_path(path, True, inspect_args.all_users)
+            for cti in await client_to_inspect_from_path(path, True, inspect_args.all_users, inspect_args.scan_skills)
         ]
     else:
         clients_to_inspect = [
@@ -86,7 +87,9 @@ async def inspect_pipeline(
             )
             continue
         else:
-            inspected_client = await inspect_client(client_to_inspect, inspect_args.timeout, inspect_args.tokens)
+            inspected_client = await inspect_client(
+                client_to_inspect, inspect_args.timeout, inspect_args.tokens, inspect_args.scan_skills
+            )
             scan_path_results.append(inspected_client_to_scan_path_result(inspected_client))
     return scan_path_results
 
@@ -138,9 +141,9 @@ async def inspect_analyze_push_pipeline(
 
 
 async def client_to_inspect_from_path(
-    path: str, use_path_as_client_name: bool = False, all_users: bool = False
+    path: str, use_path_as_client_name: bool = False, all_users: bool = False, scan_skills: bool = False
 ) -> list[ClientToInspect]:
-    if os.path.isdir(os.path.expanduser(path)):
+    if scan_skills and os.path.isdir(os.path.expanduser(path)):
         if os.path.exists(os.path.join(path, "SKILL.md")):
             # split last segment from all other dirs in the path (account for trailing slash)
             last_dir = os.path.basename(os.path.normpath(path))
@@ -164,7 +167,7 @@ async def client_to_inspect_from_path(
                 skills_dir_paths=[path],
             )
             return await get_mcp_config_per_client(candidate_client, all_users=all_users)
-    elif os.path.basename(os.path.normpath(path)).lower() == "skill.md":
+    elif scan_skills and os.path.basename(os.path.normpath(path)).lower() == "skill.md":
         skill_directory = os.path.basename(os.path.dirname(os.path.normpath(path)))
         parent_of_skill_directory = os.path.dirname(os.path.dirname(os.path.normpath(path)))
 
