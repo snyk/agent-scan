@@ -6,16 +6,13 @@ import os
 import aiohttp
 import rich
 
-from agent_scan.identity import IdentityManager
-from agent_scan.models import ScanPathResult, ScanPathResultsCreate, ScanUserInfo
+from agent_scan.models import ScanPathResult, ScanPathResultsCreate
 from agent_scan.redact import redact_scan_result
 from agent_scan.utils import get_environment
-from agent_scan.verify_api import setup_aiohttp_debug_logging, setup_tcp_connector
+from agent_scan.verify_api import get_user_info, setup_aiohttp_debug_logging, setup_tcp_connector
 from agent_scan.well_known_clients import get_client_from_path
 
 logger = logging.getLogger(__name__)
-
-identity = IdentityManager()
 
 
 def get_hostname() -> str:
@@ -34,29 +31,6 @@ def get_username() -> str:
         return getpass.getuser()
     except Exception:
         return "unknown"
-
-
-def get_user_info(identifier: str | None = None, opt_out: bool = False) -> ScanUserInfo:
-    """
-    Get the user info for the scan.
-
-    identifier: A non-anonymous identifier used to identify the user to the control server, e.g. email or serial number
-    opt_out: If True, a new identity is created and saved.
-    """
-    user_identifier = identity.get_identity(regenerate=opt_out)
-
-    # If opt_out is True, clear the identity, so next scan will have a new identity
-    # even if --opt-out is set to False on that scan.
-    if opt_out:
-        identity.clear()
-
-    return ScanUserInfo(
-        hostname=get_hostname() if not opt_out else None,
-        username=get_username() if not opt_out else None,
-        identifier=identifier if not opt_out else None,
-        ip_address=None,  # don't report local ip address
-        anonymous_identifier=user_identifier,
-    )
 
 
 async def upload(

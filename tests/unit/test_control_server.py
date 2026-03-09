@@ -17,47 +17,6 @@ from agent_scan.upload import (
 )
 
 
-def test_opt_out_does_not_create_identity():
-    """
-    Test that opt_out does not create an identity.
-    """
-    # Get user info with opt_out=True
-    user_info = get_user_info(identifier="test@example.com", opt_out=True)
-
-    # Check that personal information is not included in the identity
-    assert user_info.hostname is None
-    assert user_info.username is None
-    assert user_info.identifier is None
-    assert user_info.ip_address is None
-
-    # But anonymous_identifier should be present
-    assert user_info.anonymous_identifier is not None
-
-
-def test_get_identity_maintains_identity_when_opt_out_is_false():
-    """
-    Test that get_identity maintains the same identity when opt_out is False.
-    """
-    # Get user info with opt_out=False
-    user_info_1 = get_user_info(identifier="test@example.com", opt_out=False)
-    user_info_2 = get_user_info(identifier="test@example.com", opt_out=False)
-
-    # The anonymous_identifier should be the same
-    assert user_info_1.anonymous_identifier == user_info_2.anonymous_identifier
-
-
-def test_get_identity_regenerates_identity_when_opt_out_is_true():
-    """
-    Test that get_identity regenerates identity when opt_out is True.
-    """
-    # Get user info with opt_out=True
-    user_info_1 = get_user_info(identifier="test@example.com", opt_out=True)
-    user_info_2 = get_user_info(identifier="test@example.com", opt_out=True)
-
-    # The anonymous_identifier should be different (new identity generated each time)
-    assert user_info_1.anonymous_identifier != user_info_2.anonymous_identifier
-
-
 def test_opt_out_does_not_return_personal_information():
     """
     Test that opt_out does not return personal information.
@@ -70,9 +29,6 @@ def test_opt_out_does_not_return_personal_information():
     assert user_info.username is None
     assert user_info.identifier is None
     assert user_info.ip_address is None
-
-    # But anonymous_identifier should be present
-    assert user_info.anonymous_identifier is not None
 
 
 @pytest.mark.asyncio
