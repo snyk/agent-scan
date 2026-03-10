@@ -3,7 +3,7 @@ import re
 import subprocess
 import sys
 
-from agent_scan.models import ScanPathResult, StdioServer
+from agent_scan.models import StdioServer
 from agent_scan.utils import resolve_command_and_args
 
 logger = logging.getLogger(__name__)
@@ -15,7 +15,6 @@ def check_server_signature(server: StdioServer) -> StdioServer:
         logger.info(f"Binary signature check not supported on {sys.platform}. Only supported on macOS.")
         return server
     try:
-        # check that the binary exists
         command, _ = resolve_command_and_args(server)
         result = subprocess.run(["codesign", "-dvvv", command], capture_output=True, text=True, check=False)
         if result.returncode != 0:
@@ -35,17 +34,3 @@ def check_server_signature(server: StdioServer) -> StdioServer:
     except Exception as e:
         logger.info(f"Error checking binary signature of server {server.command}: {e}")
         return server
-
-
-async def check_signed_binary(result_verified: list[ScanPathResult]) -> list[ScanPathResult]:
-    """
-    Check if the binary is signed by a trusted authority.
-    """
-
-    for path_result in result_verified:
-        for server in path_result.servers or []:
-            if server.server.type == "stdio":
-                # inplace modification of the server
-                server.server = check_server_signature(server.server)
-
-    return result_verified

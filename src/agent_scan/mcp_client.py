@@ -15,12 +15,6 @@ from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.auth import OAuthClientMetadata
-from mcp.types import (
-    Implementation,
-    InitializeResult,
-    ServerCapabilities,
-    ToolsCapability,
-)
 
 from agent_scan.models import (
     ClaudeCodeConfigFile,
@@ -29,7 +23,6 @@ from agent_scan.models import (
     MCPConfig,
     RemoteServer,
     ServerSignature,
-    StaticToolsServer,
     StdioServer,
     TokenAndClientInfo,
     UnknownMCPConfig,
@@ -142,27 +135,12 @@ async def get_client(
 
 
 async def _check_server_pass(
-    server_config: StdioServer | RemoteServer | StaticToolsServer,
+    server_config: StdioServer | RemoteServer,
     timeout: int,
     traffic_capture: TrafficCapture | None = None,
     token: TokenAndClientInfo | None = None,
 ) -> ServerSignature:
     async def _check_server() -> ServerSignature:
-        if isinstance(server_config, StaticToolsServer):
-            logger.debug("Creating static tools client")
-            return ServerSignature(
-                metadata=InitializeResult(
-                    protocolVersion="built-in",
-                    capabilities=ServerCapabilities(tools=ToolsCapability(listChanged=False)),
-                    serverInfo=Implementation(name="<tools>", version="built-in"),
-                    instructions="",
-                ),
-                prompts=[],
-                resources=[],
-                resource_templates=[],
-                tools=server_config.signature,
-            )
-
         async with get_client(server_config, timeout=timeout, traffic_capture=traffic_capture, token=token) as (
             read,
             write,
@@ -222,11 +200,11 @@ async def _check_server_pass(
 
 
 async def check_server(
-    server_config: StdioServer | RemoteServer | StaticToolsServer,
+    server_config: StdioServer | RemoteServer,
     timeout: int,
     traffic_capture: TrafficCapture | None = None,
     token: TokenAndClientInfo | None = None,
-) -> tuple[ServerSignature, StdioServer | RemoteServer | StaticToolsServer]:
+) -> tuple[ServerSignature, StdioServer | RemoteServer]:
     logger.debug("Checking server with timeout: %s seconds", timeout)
 
     if not isinstance(server_config, RemoteServer):

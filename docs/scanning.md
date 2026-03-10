@@ -16,28 +16,26 @@ To run a full scan of your machine (auto-discovers agents, MCP servers, skills),
 uvx snyk-agent-scan@latest --skills
 ```
 
-This will scan for security vulnerabilities in servers, skills, tools, prompts, and resources. It will automatically discover a variety of agent configurations, including Claude Code/Desktop, Cursor, Gemini CLI, and Windsurf. Omit `--skills` to skip skill analysis.
+This will scan for security vulnerabilities in servers, skills, tools, prompts, and resources. It will automatically discover a variety of agent configurations, including Claude Code/Desktop, Cursor, Gemini CLI, and Windsurf.
 
-You can also scan particular configuration files:
+You can also scan particular configuration files or skills:
 
 ```bash
 # scan mcp configurations
 uvx snyk-agent-scan@latest ~/.vscode/mcp.json
 # scan a single agent skill
-uvx snyk-agent-scan@latest --skills ~/path/to/my/SKILL.md
+uvx snyk-agent-scan@latest  --skills ~/path/to/my/SKILL.md
 # scan all claude skills
-uvx snyk-agent-scan@latest --skills ~/.claude/skills
+uvx snyk-agent-scan@latest  --skills ~/.claude/skills
 ```
 
 ## How It Works
 
 ![Scanning overview](assets/scan.svg)
 
-Agent Scan searches through your local agent's configuration files to find agents, skills, and MCP servers. For MCP, it connects to servers and retrieves tool descriptions.
+Agent Scan searches through your local agent's configuration files to find agents, skills, and MCP servers. For MCP, it connects to servers and retrieves tool descriptions. Omit `--skills` to skip skill analysis.
 
 It then validates the components, both with local checks and by invoking the Agent Scan API. For this, skills, agent applications, tool names, and descriptions are shared with Snyk. By using Agent Scan, you agree to the Snyk [terms of use for Agent Scan](../TERMS.md).
-
-A unique, persistent, and anonymous ID is assigned to your scans for analysis. You can opt out of sending this information using the `--opt-out` flag.
 
 Agent Scan does not store or log any usage data, i.e. the contents and results of your MCP tool calls.
 

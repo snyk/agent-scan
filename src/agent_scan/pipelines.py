@@ -3,6 +3,7 @@ import os
 
 from pydantic import BaseModel
 
+from agent_scan.direct_scanner import direct_scan_to_server_config, is_direct_scan
 from agent_scan.inspect import (
     get_mcp_config_per_client,
     inspect_client,
@@ -31,13 +32,13 @@ class InspectArgs(BaseModel):
     tokens: list[TokenAndClientInfo]
     paths: list[str]
     all_users: bool = False
+    scan_skills: bool = False
 
 
 class AnalyzeArgs(BaseModel):
     analysis_url: str
     identifier: str | None = None
     additional_headers: dict | None = None
-    opt_out_of_identity: bool = False
     max_retries: int = 3
     skip_ssl_verify: bool = False
 
@@ -56,7 +57,7 @@ async def inspect_pipeline(
         clients_to_inspect = [
             cti
             for path in inspect_args.paths
-            for cti in await client_to_inspect_from_path(path, True, inspect_args.all_users)
+            for cti in await client_to_inspect_from_path(path, True, inspect_args.all_users, inspect_args.scan_skills)
         ]
     else:
         clients_to_inspect = [
@@ -64,7 +65,6 @@ async def inspect_pipeline(
             for client in get_well_known_clients()
             for cti in await get_mcp_config_per_client(client, inspect_args.all_users)
         ]
-
     # inspect
     scan_path_results: list[ScanPathResult] = []
     for i, client_to_inspect in enumerate(clients_to_inspect):
@@ -86,7 +86,9 @@ async def inspect_pipeline(
             )
             continue
         else:
-            inspected_client = await inspect_client(client_to_inspect, inspect_args.timeout, inspect_args.tokens)
+            inspected_client = await inspect_client(
+                client_to_inspect, inspect_args.timeout, inspect_args.tokens, inspect_args.scan_skills
+            )
             scan_path_results.append(inspected_client_to_scan_path_result(inspected_client))
     return scan_path_results
 
@@ -113,7 +115,6 @@ async def inspect_analyze_push_pipeline(
         analysis_url=analyze_args.analysis_url,
         identifier=analyze_args.identifier,
         additional_headers=analyze_args.additional_headers,
-        opt_out_of_identity=analyze_args.opt_out_of_identity,
         verbose=verbose,
         skip_pushing=bool(push_args.control_servers),
         push_key=get_push_key(push_args.control_servers),
@@ -127,7 +128,6 @@ async def inspect_analyze_push_pipeline(
             verified_scan_path_results,
             control_server.url,
             control_server.identifier,
-            control_server.opt_out,
             verbose=verbose,
             additional_headers=control_server.headers,
             skip_ssl_verify=push_args.skip_ssl_verify,
@@ -138,9 +138,21 @@ async def inspect_analyze_push_pipeline(
 
 
 async def client_to_inspect_from_path(
-    path: str, use_path_as_client_name: bool = False, all_users: bool = False
+    path: str, use_path_as_client_name: bool = False, all_users: bool = False, scan_skills: bool = False
 ) -> list[ClientToInspect]:
-    if os.path.isdir(os.path.expanduser(path)):
+    if is_direct_scan(path):
+        server_name, server_config = direct_scan_to_server_config(path)
+        return [
+            ClientToInspect(
+                name=path if use_path_as_client_name else "not-available",
+                client_path=path,
+                mcp_configs={
+                    path: [(server_name, server_config)],
+                },
+                skills_dirs={},
+            )
+        ]
+    elif scan_skills and os.path.isdir(os.path.expanduser(path)):
         if os.path.exists(os.path.join(path, "SKILL.md")):
             # split last segment from all other dirs in the path (account for trailing slash)
             last_dir = os.path.basename(os.path.normpath(path))
@@ -148,7 +160,7 @@ async def client_to_inspect_from_path(
             path_without_last_dir = os.path.dirname(path)
             return [
                 ClientToInspect(
-                    name="not-available" if use_path_as_client_name else path,
+                    name=path if use_path_as_client_name else "not-available",
                     client_path=path_without_last_dir,
                     mcp_configs={},
                     skills_dirs={
@@ -158,19 +170,19 @@ async def client_to_inspect_from_path(
             ]
         else:
             candidate_client = CandidateClient(
-                name="not-available" if use_path_as_client_name else path,
+                name=path if use_path_as_client_name else "not-available",
                 client_exists_paths=[path],
                 mcp_config_paths=[],
                 skills_dir_paths=[path],
             )
             return await get_mcp_config_per_client(candidate_client, all_users=all_users)
-    elif os.path.basename(os.path.normpath(path)).lower() == "skill.md":
+    elif scan_skills and os.path.basename(os.path.normpath(path)).lower() == "skill.md":
         skill_directory = os.path.basename(os.path.dirname(os.path.normpath(path)))
         parent_of_skill_directory = os.path.dirname(os.path.dirname(os.path.normpath(path)))
 
         return [
             ClientToInspect(
-                name="not-available" if use_path_as_client_name else path,
+                name=path if use_path_as_client_name else "not-available",
                 client_path=parent_of_skill_directory,
                 mcp_configs={},
                 skills_dirs={
@@ -180,7 +192,7 @@ async def client_to_inspect_from_path(
         ]
     else:
         candidate_client = CandidateClient(
-            name="not-available" if use_path_as_client_name else path,
+            name=path if use_path_as_client_name else "not-available",
             client_exists_paths=[path],
             mcp_config_paths=[path],
             skills_dir_paths=[],

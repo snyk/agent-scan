@@ -45,7 +45,6 @@ class TestProxySupport:
                     scan_paths=scan_paths,
                     analysis_url=analysis_url,
                     identifier=None,
-                    opt_out_of_identity=True,
                 )
 
             # Verify ClientSession was called with trust_env=True
@@ -87,7 +86,6 @@ class TestProxySupport:
                     scan_paths=scan_paths,
                     analysis_url=analysis_url,
                     identifier=None,
-                    opt_out_of_identity=True,
                 )
 
             # Verify ClientSession was called with trust_env=True
@@ -129,7 +127,6 @@ class TestProxySupport:
                     scan_paths=scan_paths,
                     analysis_url=analysis_url,
                     identifier=None,
-                    opt_out_of_identity=True,
                 )
 
             # Verify ClientSession was still called with trust_env=True
@@ -171,7 +168,6 @@ class TestProxySupport:
                     scan_paths=scan_paths,
                     analysis_url=analysis_url,
                     identifier=None,
-                    opt_out_of_identity=True,
                     skip_ssl_verify=True,
                 )
 
@@ -263,7 +259,6 @@ class TestAnalyzeMachineRetries:
                     scan_paths=scan_paths,
                     analysis_url=analysis_url,
                     identifier=None,
-                    opt_out_of_identity=True,
                     max_retries=3,
                 )
 
@@ -306,7 +301,6 @@ class TestAnalyzeMachineHeaders:
                 scan_paths=scan_paths,
                 analysis_url=analysis_url,
                 identifier=None,
-                opt_out_of_identity=True,
                 additional_headers=additional_headers,
             )
 
@@ -357,7 +351,6 @@ class TestAnalyzeMachineScanMetadata:
                 scan_paths=scan_paths,
                 analysis_url=analysis_url,
                 identifier=None,
-                opt_out_of_identity=True,
                 scan_context=scan_context,
             )
 
@@ -395,7 +388,6 @@ class TestAnalyzeMachineScanMetadata:
                 scan_paths=scan_paths,
                 analysis_url=analysis_url,
                 identifier=None,
-                opt_out_of_identity=True,
             )
 
             mock_session.post.assert_called_once()

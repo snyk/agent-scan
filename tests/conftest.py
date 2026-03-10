@@ -21,7 +21,7 @@ def _ensure_unicode_console():
 
 def _get_binary_path() -> Path:
     """Path to the PyInstaller-built mcp-scan binary."""
-    return REPO_ROOT / "dist" / ("mcp-scan.exe" if sys.platform == "win32" else "mcp-scan")
+    return REPO_ROOT / "dist" / ("agent-scan.exe" if sys.platform == "win32" else "agent-scan")
 
 
 def _build_binary() -> None:
