@@ -65,7 +65,6 @@ async def inspect_pipeline(
             for client in get_well_known_clients()
             for cti in await get_mcp_config_per_client(client, inspect_args.all_users)
         ]
-
     # inspect
     scan_path_results: list[ScanPathResult] = []
     for i, client_to_inspect in enumerate(clients_to_inspect):
