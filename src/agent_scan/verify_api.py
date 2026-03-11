@@ -249,6 +249,8 @@ async def analyze_machine(
             if 400 <= e.status < 500:
                 if e.status == 413:  # Request Entity Too Large (large skill payloads or MCP server signatures)
                     error_text = "Analysis scope too large (e.g. too many or very large MCP servers/skills). Please consider scanning individual MCP servers or skill directories."
+                elif e.status == 429:
+                    error_text = "Daily usage limit reached for the public version of Agent-Scan. Unlock higher limits and enterprise features by contacting us at https://evo.ai.snyk.io/."
                 else:  # Other 400 errors (e.g. invalid JSON, missing required fields, etc.)
                     error_text = f"The analysis server returned an error for your request: {e.status} - {e.message}"
                 logger.warning(error_text)
