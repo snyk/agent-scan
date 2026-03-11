@@ -234,13 +234,16 @@ class Issue(BaseModel):
     reference: None | tuple[int, int | None] = Field(
         description="The index of the tool the issue references. (server_index, entity_index) if it is a entity issue, (server_index, None) if it is a server issue, None if it is a global issue",
     )
-    title: str = Field(
+    title: str | None = Field(
+        default=None,
         description="The title of the issue.",
     )
-    description: str = Field(
+    description: str | None = Field(
+        default=None,
         description="The description of the issue.",
     )
-    severity: str = Field(
+    severity: str | None = Field(
+        default=None,
         description="The severity of the issue.",
     )
     extra_data: dict[str, Any] | None = Field(
