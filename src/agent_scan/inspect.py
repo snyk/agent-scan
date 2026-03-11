@@ -305,12 +305,12 @@ def inspected_client_to_scan_path_result(inspected_client: InspectedClient) -> S
                     )
                 )
     joined_error: None | ScanError = None
-    if len(candidate_errors) > 0 and len(servers) == 0:
+    if len(candidate_errors) > 0:
         joined_error = ScanError(
             message="\n".join([error.message or "" for error in candidate_errors]),
             exception="\n".join([str(error.exception) for error in candidate_errors]),
             traceback="\n".join([error.traceback or "missing traceback" for error in candidate_errors]),
-            is_failure=True,
+            is_failure=any(error.is_failure for error in candidate_errors),
         )
     return ScanPathResult(
         client=inspected_client.name,
