@@ -195,7 +195,14 @@ async def analyze_machine(
         headers["Authorization"] = f"token {snyk_token}"
     elif push_key:
         # Enterprise MDM mode with push key
+        # The analysis_url in this case has authentication through push_key (not on api-gateway)
         headers["X-Push-Key"] = push_key
+    elif os.getenv("SNYK_CLI_USE", "false").lower() == "true":
+        # Snyk CLI mode with authentication through the proxy
+        # Update the analysis_url to use the use the api gateway authenticated endpoint
+        analysis_url = analysis_url.replace(
+            "/hidden/mcp-scan/analysis-machine", "/hidden/mcp-scan/cli/analysis-machine"
+        )
     else:
         rich.print(
             "[bold red]To use Agent Scan, set the SNYK_TOKEN environment variable. "
