@@ -36,6 +36,16 @@ from agent_scan.utils import resolve_command_and_args
 logger = logging.getLogger(__name__)
 
 
+def with_default_json_content_type(headers: dict[str, str]) -> dict[str, str]:
+    if any(header_name.lower() == "content-type" for header_name in headers):
+        return dict(headers)
+
+    return {
+        "Content-Type": "application/json",
+        **headers,
+    }
+
+
 @asynccontextmanager
 async def streamablehttp_client_without_session(
     url: str,
@@ -65,7 +75,10 @@ async def streamablehttp_client_without_session(
     else:
         oauth_client_provider = None
     async with httpx.AsyncClient(
-        auth=oauth_client_provider, follow_redirects=True, headers=headers, timeout=timeout
+        auth=oauth_client_provider,
+        follow_redirects=True,
+        headers=with_default_json_content_type(headers),
+        timeout=timeout,
     ) as custom_client:
         async with streamable_http_client(url=url, http_client=custom_client) as (read, write, _):
             yield read, write

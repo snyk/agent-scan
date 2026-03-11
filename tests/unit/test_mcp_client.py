@@ -1,5 +1,6 @@
 """Unit tests for the mcp_client module."""
 
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -16,7 +17,13 @@ from mcp.types import (
 )
 from pytest_lazy_fixtures import lf
 
-from agent_scan.mcp_client import _check_server_pass, check_server, scan_mcp_config_file
+from agent_scan.mcp_client import (
+    _check_server_pass,
+    check_server,
+    scan_mcp_config_file,
+    streamablehttp_client_without_session,
+    with_default_json_content_type,
+)
 from agent_scan.models import StdioServer
 
 
@@ -169,3 +176,71 @@ def remote_mcp_server_just_url():
 @pytest.mark.asyncio
 async def test_parse_server():
     pass
+
+
+def test_with_default_json_content_type_adds_header_when_missing():
+    headers = with_default_json_content_type({"Authorization": "Bearer token"})
+
+    assert headers["Content-Type"] == "application/json"
+    assert headers["Authorization"] == "Bearer token"
+
+
+def test_with_default_json_content_type_preserves_existing_header():
+    headers = with_default_json_content_type({"content-type": "application/custom+json"})
+
+    assert "Content-Type" not in headers
+    assert headers["content-type"] == "application/custom+json"
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_client_sets_default_json_content_type():
+    async_client_cm = AsyncMock()
+    async_client_instance = AsyncMock()
+    async_client_cm.__aenter__.return_value = async_client_instance
+    async_client_cm.__aexit__.return_value = None
+
+    @asynccontextmanager
+    async def mock_streamable_http_client(*args, **kwargs):
+        yield AsyncMock(), AsyncMock(), None
+
+    with (
+        patch("agent_scan.mcp_client.httpx.AsyncClient", return_value=async_client_cm) as mock_async_client,
+        patch("agent_scan.mcp_client.streamable_http_client", new=mock_streamable_http_client),
+    ):
+        async with streamablehttp_client_without_session(
+            url="https://example.com/mcp",
+            headers={"Authorization": "Bearer token"},
+            timeout=30,
+        ):
+            pass
+
+    headers = mock_async_client.call_args.kwargs["headers"]
+    assert headers["Content-Type"] == "application/json"
+    assert headers["Authorization"] == "Bearer token"
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_client_preserves_existing_content_type():
+    async_client_cm = AsyncMock()
+    async_client_instance = AsyncMock()
+    async_client_cm.__aenter__.return_value = async_client_instance
+    async_client_cm.__aexit__.return_value = None
+
+    @asynccontextmanager
+    async def mock_streamable_http_client(*args, **kwargs):
+        yield AsyncMock(), AsyncMock(), None
+
+    with (
+        patch("agent_scan.mcp_client.httpx.AsyncClient", return_value=async_client_cm) as mock_async_client,
+        patch("agent_scan.mcp_client.streamable_http_client", new=mock_streamable_http_client),
+    ):
+        async with streamablehttp_client_without_session(
+            url="https://example.com/mcp",
+            headers={"content-type": "application/custom+json"},
+            timeout=30,
+        ):
+            pass
+
+    headers = mock_async_client.call_args.kwargs["headers"]
+    assert "Content-Type" not in headers
+    assert headers["content-type"] == "application/custom+json"
