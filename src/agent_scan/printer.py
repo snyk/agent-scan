@@ -331,7 +331,6 @@ def format_global_issue(result: ScanPathResult, issue: Issue, show_all: bool = F
 def print_scan_path_result(
     result: ScanPathResult,
     print_errors: bool = False,
-    full_toxic_flows: bool = False,
     inspect_mode: bool = False,
     full_description: bool = False,
 ) -> None:
@@ -393,7 +392,7 @@ def print_scan_path_result(
     # print global issues
     for issue in result.issues:
         if issue.reference is None:
-            rich.print(format_global_issue(result, issue, full_toxic_flows))
+            rich.print(format_global_issue(result, issue, True))
 
     if print_errors and len(server_tracebacks) > 0:
         console = rich.console.Console()
@@ -407,7 +406,6 @@ def print_scan_path_result(
 def print_scan_result(
     result: list[ScanPathResult],
     print_errors: bool = False,
-    full_toxic_flows: bool = False,
     inspect_mode: bool = False,
     internal_issues: bool = False,
     full_description: bool = False,
@@ -416,7 +414,7 @@ def print_scan_result(
         for res in result:
             res.issues = [issue for issue in res.issues if issue.code not in ["W003", "W004", "W005", "W006"]]
     for i, path_result in enumerate(result):
-        print_scan_path_result(path_result, print_errors, full_toxic_flows, inspect_mode, full_description)
+        print_scan_path_result(path_result, print_errors, inspect_mode, full_description)
         if i < len(result) - 1:
             rich.print()
     print(end="", flush=True)

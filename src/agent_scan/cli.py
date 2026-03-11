@@ -18,19 +18,13 @@ import psutil
 import rich
 from rich.logging import RichHandler
 
-from agent_scan.MCPScanner import MCPScanner
-from agent_scan.models import ControlServer, TokenAndClientInfo, TokenAndClientInfoList
+from agent_scan.models import ControlServer, ScanPathResult, TokenAndClientInfo, TokenAndClientInfoList
 from agent_scan.pipelines import AnalyzeArgs, InspectArgs, PushArgs, inspect_analyze_push_pipeline, inspect_pipeline
 from agent_scan.printer import print_scan_result
-from agent_scan.upload import get_hostname, upload
+from agent_scan.upload import get_hostname
 from agent_scan.utils import ensure_unicode_console, parse_headers, suppress_stdout
 from agent_scan.verify_api import setup_aiohttp_debug_logging, setup_tcp_connector
 from agent_scan.version import version_info
-from agent_scan.well_known_clients import (
-    WELL_KNOWN_MCP_PATHS,
-    client_shorthands_to_paths,
-    expand_paths_all_home_directories,
-)
 
 # Configure logging to suppress all output by default
 logging.getLogger().setLevel(logging.CRITICAL + 1)  # Higher than any standard level
@@ -97,7 +91,6 @@ def parse_control_servers(argv):
     - url: the control server URL
     - headers: list of additional headers
     - identifier: the control identifier (or None)
-    - opt_out: boolean indicating if opt-out is enabled
     """
     control_servers = []
     current_server = None
@@ -117,7 +110,6 @@ def parse_control_servers(argv):
                     "url": argv[i + 1],
                     "headers": [],
                     "identifier": None,
-                    "opt_out": False,
                 }
                 i += 1  # Skip the URL value
             else:
@@ -129,13 +121,9 @@ def parse_control_servers(argv):
                     current_server["headers"].append(argv[i + 1])
                     i += 1
 
-            elif arg == "--control-identifier":
-                if i + 1 < len(argv) and not argv[i + 1].startswith("--"):
-                    current_server["identifier"] = argv[i + 1]
-                    i += 1
-
-            elif arg == "--opt-out":
-                current_server["opt_out"] = True
+            elif arg == "--control-identifier" and i + 1 < len(argv) and not argv[i + 1].startswith("--"):
+                current_server["identifier"] = argv[i + 1]
+                i += 1
 
         i += 1
 
@@ -244,12 +232,6 @@ def add_scan_arguments(scan_parser):
         metavar="NUM",
     )
     scan_parser.add_argument(
-        "--full-toxic-flows",
-        default=False,
-        action="store_true",
-        help="Show all tools in the toxic flows, by default only the first 3 are shown.",
-    )
-    scan_parser.add_argument(
         "--control-server",
         action="append",
         help="Upload the scan results to the provided control server URL. Can be specified multiple times for multiple control servers.",
@@ -263,18 +245,6 @@ def add_scan_arguments(scan_parser):
         "--control-identifier",
         action="append",
         help="Non-anonymous identifier used to identify the user to the preceding control server, e.g. email or serial number",
-    )
-    scan_parser.add_argument(
-        "--opt-out",
-        action="append_const",
-        const=True,
-        help="Opts out of sending a unique user identifier with every scan to the preceding control server.",
-    )
-    scan_parser.add_argument(
-        "--include-built-in",
-        default=False,
-        action="store_true",
-        help="Also include built-in IDE tools.",
     )
 
 
@@ -311,7 +281,7 @@ def main():
             f"  {program_name} --json              # Output results in JSON format\n\n"
             f"  # Multiple control servers with individual options:\n"
             f'  {program_name} --control-server https://server1.com --control-server-H "Auth: token1" \\\n'
-            f"    --control-identifier user@example.com --opt-out \\\n"
+            f"    --control-identifier user@example.com \\\n"
             f'    --control-server https://server2.com --control-server-H "Auth: token2" \\\n'
             f"    --control-identifier serial-123\n"
         ),
@@ -413,10 +383,6 @@ def main():
 
     args = parser.parse_args()
 
-    # postprocess the files argument (if shorthands are used)
-    if hasattr(args, "files") and args.files is None:
-        args.files = client_shorthands_to_paths(args.files)
-
     # Attach parsed control servers to args
     args.control_servers = control_servers
 
@@ -465,12 +431,6 @@ async def evo(args):
     2. Pushes scan results to the Evo API
     3. Revokes the client_id
     """
-    if not args.files:
-        args.files = WELL_KNOWN_MCP_PATHS
-
-    if args.scan_all_users:
-        args.files = expand_paths_all_home_directories(args.files)
-
     rich.print(
         "Go to https://app.snyk.io and select the tenant on the left nav bar. Copy the Tenant ID from the URL and paste it here: "
     )
@@ -513,11 +473,10 @@ async def evo(args):
         {
             "url": push_scan_url,
             "identifier": get_hostname() or None,
-            "opt_out": False,
             "headers": [f"x-client-id:{client_id}"],
         }
     ]
-    await run_scan_inspect(mode="scan", args=args)
+    await run_scan(args, mode="scan")
 
     # revoke the created client_id
     del_headers = {
@@ -540,23 +499,18 @@ async def evo(args):
         rich.print(f"[bold red]Error revoking client_id[/bold red]: {e}")
 
 
-async def scan_with_skills(args, mode: Literal["scan", "inspect"]):
+async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[ScanPathResult]:
     """
-    Scan the machine with skills. Eventually this should replace run_scan_inspect
+    Run the scan/inspect pipeline and return results.
     """
-    # collecting common args
     verbose: bool = hasattr(args, "verbose") and args.verbose
-    json_output: bool = hasattr(args, "json") and args.json
-    print_errors: bool = hasattr(args, "print_errors") and args.print_errors
-    full_toxic_flows: bool = hasattr(args, "full_toxic_flows") and args.full_toxic_flows
-    full_description: bool = hasattr(args, "print_full_descriptions") and args.print_full_descriptions
     scan_all_users: bool = hasattr(args, "scan_all_users") and args.scan_all_users
 
-    # collect inspect args
     server_timeout: int = args.server_timeout if hasattr(args, "server_timeout") else 10
-    files: list[str] | None = args.files
+    files: list[str] | None = args.files if hasattr(args, "files") else None
+    scan_skills: bool = hasattr(args, "skills") and args.skills
     tokens: list[TokenAndClientInfo] = []
-    if args.mcp_oauth_tokens_path:
+    if hasattr(args, "mcp_oauth_tokens_path") and args.mcp_oauth_tokens_path:
         with open(args.mcp_oauth_tokens_path) as f:
             tokens = TokenAndClientInfoList.model_validate_json(f.read()).root
 
@@ -565,121 +519,58 @@ async def scan_with_skills(args, mode: Literal["scan", "inspect"]):
         tokens=tokens,
         paths=files,
         all_users=scan_all_users,
+        scan_skills=scan_skills,
     )
 
     if mode == "scan":
-        # collect analyze args
-        analysis_url: str = args.analysis_url
-        opt_out_of_identity: bool = bool(hasattr(args, "opt_out_of_identity") and args.opt_out_of_identity)
         skip_ssl_verify: bool = bool(hasattr(args, "skip_ssl_verify") and args.skip_ssl_verify)
-        additional_headers: dict | None = parse_headers(args.verification_H)
-        identifier: None = None
 
         control_servers: list[ControlServer] = [
             ControlServer(
                 url=server_config["url"],
                 headers=parse_headers(server_config["headers"]),
                 identifier=server_config["identifier"],
-                opt_out=server_config["opt_out"],
             )
             for server_config in args.control_servers
         ]
         analyze_args = AnalyzeArgs(
-            analysis_url=analysis_url,
-            identifier=identifier,
-            additional_headers=additional_headers,
-            opt_out_of_identity=opt_out_of_identity,
-            control_servers=control_servers,
+            analysis_url=args.analysis_url,
+            identifier=None,
+            additional_headers=parse_headers(args.verification_H),
             max_retries=3,
             skip_ssl_verify=skip_ssl_verify,
         )
-
-        # collect push args
         push_args = PushArgs(
             control_servers=control_servers,
             skip_ssl_verify=skip_ssl_verify,
             version=version_info,
         )
-        task = inspect_analyze_push_pipeline(inspect_args, analyze_args, push_args, verbose=verbose)
+        return await inspect_analyze_push_pipeline(inspect_args, analyze_args, push_args, verbose=verbose)
     elif mode == "inspect":
-        task = inspect_pipeline(inspect_args)
+        return await inspect_pipeline(inspect_args)
     else:
         raise ValueError(f"Unknown mode: {mode}, expected 'scan' or 'inspect'")
 
-    # Filter debug issues
+
+async def print_scan_inspect(mode="scan", args=None):
+    json_output: bool = hasattr(args, "json") and args.json
+    print_errors: bool = hasattr(args, "print_errors") and args.print_errors
+    full_description: bool = hasattr(args, "print_full_descriptions") and args.print_full_descriptions
+    verbose: bool = hasattr(args, "verbose") and args.verbose
 
     if json_output:
         with suppress_stdout():
-            result = await task
+            result = await run_scan(args, mode=mode)
             result_dict = {r.path: r.model_dump(mode="json") for r in result}
         print(json.dumps(result_dict, indent=2))
     else:
-        result = await task
+        result = await run_scan(args, mode=mode)
         print_scan_result(
             result,
             print_errors,
-            full_toxic_flows,
             inspect_mode=mode == "inspect",
             internal_issues=verbose,
             full_description=full_description,
-        )
-
-
-async def run_scan_inspect(mode="scan", args=None):
-    # Initialize scan_context dict that can be populated during scanning
-    scan_context = {"cli_version": version_info}
-
-    async with MCPScanner(
-        additional_headers=parse_headers(args.verification_H), scan_context=scan_context, **vars(args)
-    ) as scanner:
-        if mode == "scan":
-            result = await scanner.scan()
-        elif mode == "inspect":
-            result = await scanner.inspect()
-        else:
-            raise ValueError(f"Unknown mode: {mode}, expected 'scan' or 'inspect'")
-    # upload scan result to control servers if specified
-    if hasattr(args, "control_servers") and args.control_servers:
-        for server_config in args.control_servers:
-            await upload(
-                result,
-                server_config["url"],
-                server_config["identifier"],
-                server_config["opt_out"],
-                verbose=getattr(args, "verbose", False),
-                additional_headers=parse_headers(server_config["headers"]),
-                skip_ssl_verify=getattr(args, "skip_ssl_verify", False),
-                scan_context=scan_context,
-            )
-    return result
-
-
-async def print_scan_inspect(mode="scan", args=None):
-    # With --json enabled, we suppress all stdout
-    # to ensure we produce a valid JSON output.
-    if args.skills:
-        await scan_with_skills(args, mode=mode)
-        return
-
-    if not args.files:
-        args.files = WELL_KNOWN_MCP_PATHS
-
-    if args.scan_all_users:
-        args.files = expand_paths_all_home_directories(args.files)
-
-    if args.json:
-        with suppress_stdout():
-            result = await run_scan_inspect(mode, args)
-        result = {r.path: r.model_dump(mode="json") for r in result}
-        print(json.dumps(result, indent=2))
-    else:
-        result = await run_scan_inspect(mode, args)
-        print_scan_result(
-            result,
-            args.print_errors,
-            args.full_toxic_flows if hasattr(args, "full_toxic_flows") else False,
-            mode == "inspect",
-            args.verbose,
         )
 
 

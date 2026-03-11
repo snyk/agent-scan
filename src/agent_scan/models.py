@@ -1,8 +1,6 @@
 import logging
 import os
 import re
-from datetime import datetime
-from hashlib import md5
 from itertools import chain
 from typing import Any, Literal, TypeAlias
 
@@ -82,55 +80,8 @@ def rebalance_command_args(command, args):
     return command, args
 
 
-def hash_entity(entity: Entity) -> str:
-    if not hasattr(entity, "description") or entity.description is None:
-        logger.warning("Entity has no description: %s", entity)
-        entity_description = "no description available"
-    else:
-        entity_description = entity.description
-    return md5((entity_description).encode()).hexdigest()
-
-
-def entity_type_to_str(entity: Entity) -> str:
-    if isinstance(entity, Prompt):
-        return "prompt"
-    elif isinstance(entity, Resource):
-        return "resource"
-    elif isinstance(entity, Tool):
-        return "tool"
-    elif isinstance(entity, ResourceTemplate):
-        return "resource template"
-    else:
-        raise ValueError(f"Unknown entity type: {type(entity)}")
-
-
 class StartMCPServerError(Exception):
     pass
-
-
-class ScannedEntity(BaseModel):
-    model_config = ConfigDict()
-    hash: str
-    type: str
-    timestamp: datetime
-    description: str | None = None
-
-    @field_validator("timestamp", mode="before")
-    def parse_datetime(cls, value: str | datetime) -> datetime:
-        if isinstance(value, datetime):
-            return value
-
-        # Try standard ISO format first
-        try:
-            return datetime.fromisoformat(value)
-        except ValueError:
-            pass
-
-        # Try custom format: "DD/MM/YYYY, HH:MM:SS"
-        try:
-            return datetime.strptime(value, "%d/%m/%Y, %H:%M:%S")
-        except ValueError as e:
-            raise ValueError(f"Unrecognized datetime format: {value}") from e
 
 
 class ScalarToolLabels(BaseModel):
@@ -138,9 +89,6 @@ class ScalarToolLabels(BaseModel):
     destructive: int | float
     untrusted_content: int | float
     private_data: int | float
-
-
-ScannedEntities = RootModel[dict[str, ScannedEntity]]
 
 
 class RemoteServer(BaseModel):
@@ -171,42 +119,22 @@ class SkillServer(BaseModel):
     type: Literal["skill"] | None = "skill"
 
 
-class StaticToolsServer(BaseModel):
-    """A server with a static set of tools (e.g. if not scanning a MCP configuration but the set of tools directly)."""
-
-    model_config = ConfigDict()
-    name: str
-    signature: list[Tool]
-    type: Literal["tools"] | None = "tools"
-
-
 class MCPConfig(BaseModel):
-    def get_servers(self) -> dict[str, StdioServer | RemoteServer | StaticToolsServer]:
+    def get_servers(self) -> dict[str, StdioServer | RemoteServer]:
         raise NotImplementedError("Subclasses must implement this method")
 
-    def set_servers(self, servers: dict[str, StdioServer | RemoteServer | StaticToolsServer]) -> None:
+    def set_servers(self, servers: dict[str, StdioServer | RemoteServer]) -> None:
         raise NotImplementedError("Subclasses must implement this method")
-
-
-class StaticToolsConfig(MCPConfig):
-    model_config = ConfigDict()
-    signature: dict[str, StaticToolsServer]
-
-    def get_servers(self) -> dict[str, StdioServer | RemoteServer | StaticToolsServer]:
-        return {server.name: server for server in self.signature.values()}
-
-    def set_servers(self, servers: dict[str, StdioServer | RemoteServer | StaticToolsServer]) -> None:
-        raise NotImplementedError("StaticToolsConfig does not support setting servers")
 
 
 class ClaudeConfigFile(MCPConfig):
     model_config = ConfigDict()
     mcpServers: dict[str, StdioServer | RemoteServer]
 
-    def get_servers(self) -> dict[str, StdioServer | RemoteServer | StaticToolsServer]:
+    def get_servers(self) -> dict[str, StdioServer | RemoteServer]:
         return self.mcpServers
 
-    def set_servers(self, servers: dict[str, StdioServer | RemoteServer | StaticToolsServer]) -> None:
+    def set_servers(self, servers: dict[str, StdioServer | RemoteServer]) -> None:
         self.mcpServers = servers
 
 
@@ -214,13 +142,13 @@ class ClaudeCodeConfigFile(MCPConfig):
     model_config = ConfigDict()
     projects: dict[str, ClaudeConfigFile]
 
-    def get_servers(self) -> dict[str, StdioServer | RemoteServer | StaticToolsServer]:
-        servers: dict[str, StdioServer | RemoteServer | StaticToolsServer] = {}
+    def get_servers(self) -> dict[str, StdioServer | RemoteServer]:
+        servers: dict[str, StdioServer | RemoteServer] = {}
         for proj in self.projects.values():
             servers.update(proj.get_servers())
         return servers
 
-    def set_servers(self, servers: dict[str, StdioServer | RemoteServer | StaticToolsServer]) -> None:
+    def set_servers(self, servers: dict[str, StdioServer | RemoteServer]) -> None:
         self.projects = {"~": ClaudeConfigFile(mcpServers=servers)}
 
 
@@ -241,10 +169,10 @@ class VSCodeConfigFile(MCPConfig):
     model_config = ConfigDict()
     mcp: VSCodeMCPConfig
 
-    def get_servers(self) -> dict[str, StdioServer | RemoteServer | StaticToolsServer]:
+    def get_servers(self) -> dict[str, StdioServer | RemoteServer]:
         return self.mcp.servers
 
-    def set_servers(self, servers: dict[str, StdioServer | RemoteServer | StaticToolsServer]) -> None:
+    def set_servers(self, servers: dict[str, StdioServer | RemoteServer]) -> None:
         self.mcp.servers = servers
 
 
@@ -261,10 +189,10 @@ class UnknownMCPConfig(MCPConfig):
 
     model_config = ConfigDict()
 
-    def get_servers(self) -> dict[str, StdioServer | RemoteServer | StaticToolsServer]:
+    def get_servers(self) -> dict[str, StdioServer | RemoteServer]:
         return {}
 
-    def set_servers(self, servers: dict[str, StdioServer | RemoteServer | StaticToolsServer]) -> None:
+    def set_servers(self, servers: dict[str, StdioServer | RemoteServer]) -> None:
         pass
 
 
@@ -336,7 +264,7 @@ class ServerSignature(BaseModel):
 class ServerScanResult(BaseModel):
     model_config = ConfigDict()
     name: str | None = None
-    server: StdioServer | RemoteServer | StaticToolsServer | SkillServer
+    server: StdioServer | RemoteServer | SkillServer
     signature: ServerSignature | None = None
     error: ScanError | None = None
 
@@ -642,4 +570,3 @@ class ControlServer(BaseModel):
     url: str
     headers: dict[str, str]
     identifier: str | None = None
-    opt_out: bool = False

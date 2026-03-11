@@ -174,10 +174,11 @@ async def inspect_extension(
 
     if isinstance(config, RemoteServer):
         try:
-            signature, fixed_config = await check_server(config, timeout, traffic_capture, token)
+            signature, fixed_config = await check_server(config.model_copy(deep=True), timeout, traffic_capture, token)
             assert isinstance(fixed_config, RemoteServer), f"Fixed config is not a RemoteServer: {fixed_config}"
-            return InspectedExtensions(name=name, config=config, signature_or_error=signature)
+            return InspectedExtensions(name=name, config=fixed_config, signature_or_error=signature)
         except HTTPStatusError as e:
+            config.type = "http" if config.type is None else config.type
             return InspectedExtensions(
                 name=name,
                 config=config,
@@ -190,6 +191,7 @@ async def inspect_extension(
                 ),
             )
         except Exception as e:
+            config.type = "http" if config.type is None else config.type
             return InspectedExtensions(
                 name=name,
                 config=config,
@@ -225,6 +227,7 @@ async def inspect_client(
     client: ClientToInspect,
     timeout: int,
     tokens: list[TokenAndClientInfo],
+    scan_skills: bool,
 ) -> InspectedClient:
     """
     Scan a client (Cursor, VSCode, etc.) and return a InspectedClient object.
@@ -243,15 +246,16 @@ async def inspect_client(
             extensions_for_mcp_config.append(extension)
         extensions[mcp_config_path] = extensions_for_mcp_config
 
-    for skills_dir_path, skills_dirs in client.skills_dirs.items():
-        if isinstance(skills_dirs, FileNotFoundConfig):
-            extensions[skills_dir_path] = skills_dirs
-            continue
-        extensions_for_skills_dir: list[InspectedExtensions] = []
-        for name, skill in skills_dirs:
-            extension = await inspect_extension(name, skill, timeout)
-            extensions_for_skills_dir.append(extension)
-        extensions[skills_dir_path] = extensions_for_skills_dir
+    if scan_skills:
+        for skills_dir_path, skills_dirs in client.skills_dirs.items():
+            if isinstance(skills_dirs, FileNotFoundConfig):
+                extensions[skills_dir_path] = skills_dirs
+                continue
+            extensions_for_skills_dir: list[InspectedExtensions] = []
+            for name, skill in skills_dirs:
+                extension = await inspect_extension(name, skill, timeout)
+                extensions_for_skills_dir.append(extension)
+            extensions[skills_dir_path] = extensions_for_skills_dir
     return InspectedClient(name=client.name, client_path=client.client_path, extensions=extensions)
 
 

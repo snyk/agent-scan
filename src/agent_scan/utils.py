@@ -153,7 +153,6 @@ def get_push_key(control_servers: list[ControlServer] | list[dict[str, Any]]) ->
                     url=control_server["url"],
                     headers=parse_headers(control_server["headers"]),
                     identifier=control_server["identifier"],
-                    opt_out=control_server["opt_out"],
                 )
             )
         else:

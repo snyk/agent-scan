@@ -9,7 +9,6 @@ import aiohttp
 import certifi
 import rich
 
-from agent_scan.identity import IdentityManager
 from agent_scan.models import (
     ScanError,
     ScanPathResult,
@@ -20,7 +19,6 @@ from agent_scan.utils import get_environment
 from agent_scan.well_known_clients import get_client_from_path
 
 logger = logging.getLogger(__name__)
-identity_manager = IdentityManager()
 
 
 class SnykTokenError(Exception):
@@ -130,35 +128,11 @@ def setup_tcp_connector(skip_ssl_verify: bool = False) -> aiohttp.TCPConnector:
     return connector
 
 
-def get_user_info(identifier: str | None = None, opt_out: bool = False) -> ScanUserInfo:
-    """
-    Get the user info for the scan.
-
-    identifier: A non-anonymous identifier used to identify the user to the control server, e.g. email or serial number
-    opt_out: If True, a new identity is created and saved.
-    """
-    user_identifier = identity_manager.get_identity(regenerate=opt_out)
-
-    # If opt_out is True, clear the identity, so next scan will have a new identity
-    # even if --opt-out is set to False on that scan.
-    if opt_out:
-        identity_manager.clear()
-
-    return ScanUserInfo(
-        hostname=get_hostname() if not opt_out else None,
-        username=get_username() if not opt_out else None,
-        identifier=identifier if not opt_out else None,
-        ip_address=None,  # don't report local ip address
-        anonymous_identifier=user_identifier,
-    )
-
-
 async def analyze_machine(
     scan_paths: list[ScanPathResult],
     analysis_url: str,
     identifier: str | None,
     additional_headers: dict | None = None,
-    opt_out_of_identity: bool = False,
     verbose: bool = False,
     skip_pushing: bool = False,
     push_key: str | None = None,
@@ -175,7 +149,6 @@ async def analyze_machine(
         analysis_url: URL of the analysis server
         identifier: Identifier for the user
         additional_headers: Additional headers to send to the analysis server
-        opt_out_of_identity: Whether to opt out of sending personal identifier
         verbose: Whether to enable verbose logging
         skip_pushing: Whether to skip pushing the scan to the platform
         max_retries: Maximum number of retry attempts
@@ -183,7 +156,15 @@ async def analyze_machine(
         scan_context: Optional dict containing scan metadata to include in the request
     """
     logger.debug(f"Analyzing scan path with URL: {analysis_url}")
-    user_info = get_user_info(identifier=identifier, opt_out=opt_out_of_identity)
+
+    # for analysis server we never push personal information
+    user_info = ScanUserInfo(
+        hostname=None,
+        username=None,
+        identifier=identifier,
+        ip_address=None,
+        anonymous_identifier=None,
+    )
 
     for result in scan_paths:
         result.client = get_client_from_path(result.path) or result.client or result.path

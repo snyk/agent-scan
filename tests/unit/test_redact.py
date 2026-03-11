@@ -1,16 +1,11 @@
 """Unit tests for the redaction module."""
 
-import json
-import sys
-from unittest.mock import patch
 from urllib.parse import parse_qsl, urlsplit
 
 import pytest
 
-from agent_scan.MCPScanner import MCPScanner
-from agent_scan.models import RemoteServer, ScanPathResult, StdioServer
+from agent_scan.models import RemoteServer, ScanPathResult, ServerScanResult, StdioServer
 from agent_scan.redact import redact_absolute_paths, redact_args, redact_scan_result
-from tests.conftest import TempFile
 
 
 class TestRedactAbsolutePaths:
@@ -126,111 +121,88 @@ class TestRedactArgs:
         assert result == ["-y", "@modelcontextprotocol/server-github", "--token", "**REDACTED**"]
 
 
-@pytest.mark.asyncio
-async def test_scan_path_redacts_remote_url_query_and_headers():
+def test_redact_remote_url_query_and_headers():
     """
     Ensure RemoteServer headers are redacted and URL query parameter values are replaced with REDACTED.
-    Uses scanner.scan_path and redact_scan_result to exercise redaction before upload.
     """
-
-    class DummyCfg:
-        def get_servers(self):
-            return {
-                "remote": RemoteServer(
+    result = ScanPathResult(
+        path="/dummy/path",
+        servers=[
+            ServerScanResult(
+                name="remote",
+                server=RemoteServer(
                     url="https://api.example.com/endpoint?token=abc123&api_key=xyz",
                     type="http",
                     headers={"Authorization": "Bearer secret", "X-Custom": "value"},
-                )
-            }
+                ),
+            )
+        ],
+    )
 
-    with (
-        patch.object(sys.modules["agent_scan.MCPScanner"], "scan_mcp_config_file", return_value=DummyCfg()),
-        patch.object(sys.modules["agent_scan.MCPScanner"], "check_server", return_value=None),
-    ):
-        async with MCPScanner(files=["/dummy/path"]) as scanner:
-            result = await scanner.scan_path("/dummy/path", inspect_only=True)
-
-    # Redact the result (as would happen before upload)
     result = redact_scan_result(result)
 
     assert result.servers is not None and len(result.servers) == 1
     srv = result.servers[0]
     assert isinstance(srv.server, RemoteServer)
-    # Headers should be redacted
     assert srv.server.headers["Authorization"] == "**REDACTED**"
     assert srv.server.headers["X-Custom"] == "**REDACTED**"
-    # URL query param values should be redacted (keys preserved)
     parts = urlsplit(srv.server.url)
     qs = dict(parse_qsl(parts.query, keep_blank_values=True))
     assert qs.get("token") == "**REDACTED**"
     assert qs.get("api_key") == "**REDACTED**"
 
 
-@pytest.mark.asyncio
-async def test_scan_path_redacts_stdio_env_vars():
+def test_redact_stdio_env_vars():
     """
     Ensure StdioServer environment variable values are redacted via redact_scan_result.
     """
-
-    class DummyCfg:
-        def get_servers(self):
-            return {
-                "stdio": StdioServer(
+    result = ScanPathResult(
+        path="/dummy/path",
+        servers=[
+            ServerScanResult(
+                name="stdio",
+                server=StdioServer(
                     command="echo",
                     args=["hello"],
                     env={"SECRET": "shh", "API_TOKEN": "tok"},
-                )
-            }
+                ),
+            )
+        ],
+    )
 
-    with (
-        patch.object(sys.modules["agent_scan.MCPScanner"], "scan_mcp_config_file", return_value=DummyCfg()),
-        patch.object(sys.modules["agent_scan.MCPScanner"], "check_server", return_value=None),
-    ):
-        async with MCPScanner(files=["/dummy/path"]) as scanner:
-            result = await scanner.scan_path("/dummy/path", inspect_only=True)
-
-    # Redact the result (as would happen before upload)
     result = redact_scan_result(result)
 
     assert result.servers is not None and len(result.servers) == 1
     srv = result.servers[0]
     assert isinstance(srv.server, StdioServer)
-    # Env values should be redacted; keys preserved
     assert srv.server.env["SECRET"] == "**REDACTED**"
     assert srv.server.env["API_TOKEN"] == "**REDACTED**"
 
 
-@pytest.mark.asyncio
-async def test_scan_path_redacts_stdio_args():
+def test_redact_stdio_args():
     """
     Ensure StdioServer argument values are redacted via redact_scan_result.
     Note: -y is treated as a boolean flag (like in npx -y), so the package name is preserved.
     """
-
-    class DummyCfg:
-        def get_servers(self):
-            return {
-                "stdio": StdioServer(
+    result = ScanPathResult(
+        path="/dummy/path",
+        servers=[
+            ServerScanResult(
+                name="stdio",
+                server=StdioServer(
                     command="npx",
                     args=["-y", "some-server", "--api-key", "secret123", "--token=xyz"],
                     env={},
-                )
-            }
+                ),
+            )
+        ],
+    )
 
-    with (
-        patch.object(sys.modules["agent_scan.MCPScanner"], "scan_mcp_config_file", return_value=DummyCfg()),
-        patch.object(sys.modules["agent_scan.MCPScanner"], "check_server", return_value=None),
-    ):
-        async with MCPScanner(files=["/dummy/path"]) as scanner:
-            result = await scanner.scan_path("/dummy/path", inspect_only=True)
-
-    # Redact the result (as would happen before upload)
     result = redact_scan_result(result)
 
     assert result.servers is not None and len(result.servers) == 1
     srv = result.servers[0]
     assert isinstance(srv.server, StdioServer)
-    # Argument values should be redacted, but -y is a boolean flag so "some-server" is preserved
     assert srv.server.args == ["-y", "some-server", "--api-key", "**REDACTED**", "--token=**REDACTED**"]
 
 
@@ -238,42 +210,32 @@ FAKE_API_KEY = "sk-this-is-a-fake-api-key"
 
 
 @pytest.mark.parametrize(
-    "configs",
+    "server",
     [
-        {
-            "mcpServers": {
-                "Weather": {
-                    "command": "uv run python",
-                    "args": ["tests/mcp_servers/weather_server.py"],
-                    "env": {"API_KEY": FAKE_API_KEY},
-                }
-            }
-        },
-        {
-            "mcpServers": {
-                "Math": {
-                    "command": "uv run python",
-                    "args": ["tests/mcp_servers/math_server.py", f"--api-key={FAKE_API_KEY}"],
-                }
-            }
-        },
+        ServerScanResult(
+            name="Weather",
+            server=StdioServer(
+                command="uv run python",
+                args=["tests/mcp_servers/weather_server.py"],
+                env={"API_KEY": FAKE_API_KEY},
+            ),
+        ),
+        ServerScanResult(
+            name="Math",
+            server=StdioServer(
+                command="uv run python",
+                args=["tests/mcp_servers/math_server.py", f"--api-key={FAKE_API_KEY}"],
+            ),
+        ),
     ],
 )
-@pytest.mark.asyncio
-async def test_analysis_machine_get_redacted_payload(configs):
+def test_redact_scan_result_removes_api_key(server):
     """
-    Ensure the payload sent to the analysis machine is redacted.
+    Ensure redact_scan_result removes API keys from server configs.
     """
+    result = ScanPathResult(path="/dummy/path", servers=[server])
 
-    async def check_redacted_payload(scan_paths: list[ScanPathResult], *args, **kwargs):
-        for path in scan_paths:
-            dump = path.model_dump_json()
-            assert FAKE_API_KEY not in dump
-        return scan_paths
+    redacted = redact_scan_result(result)
 
-    with TempFile(mode="w") as temp_file:
-        temp_file.write(json.dumps(configs))
-        temp_file.flush()
-        with patch("agent_scan.MCPScanner.analyze_machine", side_effect=check_redacted_payload):
-            async with MCPScanner(files=[temp_file.name]) as scanner:
-                _ = await scanner.scan()
+    dump = redacted.model_dump_json()
+    assert FAKE_API_KEY not in dump
