@@ -240,21 +240,38 @@ async def analyze_machine(
 
         except aiohttp.ClientResponseError as e:
             if 400 <= e.status < 500:
-                if e.status == 413:  # Request Entity Too Large (large skill payloads or MCP server signatures)
+                if e.status == 429:
+                    error_text = (
+                        "The analysis server is rate limiting requests (429 Too Many Requests). "
+                        "Retrying with backoff."
+                    )
+                    logger.warning("%s (attempt %s/%s)", error_text, attempt + 1, max_retries)
+                elif e.status == 413:  # Request Entity Too Large (large skill payloads or MCP server signatures)
                     error_text = "Analysis scope too large (e.g. too many or very large MCP servers/skills). Please consider scanning individual MCP servers or skill directories."
+                    logger.warning(error_text)
+                    for scan_path in scan_paths:
+                        if scan_path.servers is not None and scan_path.error is None:
+                            scan_path.error = ScanError(
+                                message=error_text,
+                                exception=e,
+                                traceback=traceback.format_exc(),
+                                is_failure=True,
+                                category="analysis_error",
+                            )
+                            return scan_paths
                 else:  # Other 400 errors (e.g. invalid JSON, missing required fields, etc.)
                     error_text = f"The analysis server returned an error for your request: {e.status} - {e.message}"
-                logger.warning(error_text)
-                for scan_path in scan_paths:
-                    if scan_path.servers is not None and scan_path.error is None:
-                        scan_path.error = ScanError(
-                            message=error_text,
-                            exception=e,
-                            traceback=traceback.format_exc(),
-                            is_failure=True,
-                            category="analysis_error",
-                        )
-                        return scan_paths
+                    logger.warning(error_text)
+                    for scan_path in scan_paths:
+                        if scan_path.servers is not None and scan_path.error is None:
+                            scan_path.error = ScanError(
+                                message=error_text,
+                                exception=e,
+                                traceback=traceback.format_exc(),
+                                is_failure=True,
+                                category="analysis_error",
+                            )
+                            return scan_paths
             else:  # 500 errors (e.g. server error, service unavailable, etc.)
                 error_text = f"Could not reach analysis server: {e.status} - {e.message}"
                 logger.warning(error_text)

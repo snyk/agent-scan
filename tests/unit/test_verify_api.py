@@ -4,6 +4,7 @@ import json
 import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiohttp
 import pytest
 
 from agent_scan.models import ScanPathResult
@@ -266,6 +267,66 @@ class TestAnalyzeMachineRetries:
             assert call_count == 3
             assert len(result) == 1
             assert result[0].path == "/test/path"
+
+    @pytest.mark.asyncio
+    async def test_analyze_machine_retries_on_rate_limit(self):
+        """Test that analyze_machine retries on 429 responses."""
+        scan_paths = [ScanPathResult(path="/test/path")]
+        analysis_url = "https://test.example.com/api"
+
+        with patch("agent_scan.verify_api.aiohttp.ClientSession") as mock_session_class:
+            mock_session = MagicMock()
+
+            mock_response_success = AsyncMock()
+            mock_response_success.status = 200
+            mock_response_success.text = AsyncMock(
+                return_value='{"scan_path_results": [{"path": "/test/path", "issues": [], "labels": []}], "scan_user_info": {}}'
+            )
+            mock_response_success.raise_for_status = MagicMock()
+
+            rate_limit_error = aiohttp.ClientResponseError(
+                request_info=MagicMock(),
+                history=(),
+                status=429,
+                message="Too Many Requests",
+            )
+
+            call_count = 0
+
+            def post_side_effect(*args, **kwargs):
+                nonlocal call_count
+                call_count += 1
+
+                if call_count <= 2:
+                    mock_response_rate_limited = AsyncMock()
+                    mock_response_rate_limited.raise_for_status = MagicMock(side_effect=rate_limit_error)
+                    mock_post_rate_limited = MagicMock()
+                    mock_post_rate_limited.__aenter__ = AsyncMock(return_value=mock_response_rate_limited)
+                    mock_post_rate_limited.__aexit__ = AsyncMock(return_value=None)
+                    return mock_post_rate_limited
+
+                mock_post_success = MagicMock()
+                mock_post_success.__aenter__ = AsyncMock(return_value=mock_response_success)
+                mock_post_success.__aexit__ = AsyncMock(return_value=None)
+                return mock_post_success
+
+            mock_session.post = MagicMock(side_effect=post_side_effect)
+            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session.__aexit__ = AsyncMock(return_value=None)
+            mock_session_class.return_value = mock_session
+
+            with patch("agent_scan.verify_api.asyncio.sleep", new_callable=AsyncMock):
+                result = await analyze_machine(
+                    scan_paths=scan_paths,
+                    analysis_url=analysis_url,
+                    identifier=None,
+                    max_retries=3,
+                )
+
+            assert call_count == 3
+            assert len(result) == 1
+            assert result[0].path == "/test/path"
+            assert result[0].error is None
 
 
 class TestAnalyzeMachineHeaders:
