@@ -90,52 +90,41 @@ def parse_control_servers(argv) -> list[ControlServer]:
     Returns a list of ControlServer instances.
     Raises ValueError if any control server is missing an identifier.
     """
-    control_servers: list[ControlServer] = []
-    current_url: str | None = None
-    current_headers: list[str] = []
-    current_identifier: str | None = None
+    server_starts = [i for i, arg in enumerate(argv) if arg == "--control-server"]
 
-    def _flush():
-        nonlocal current_url, current_headers, current_identifier
-        if current_url is None:
-            return
-        if current_identifier is None:
-            raise ValueError(f"Control server {current_url} is missing a --control-identifier.")
+    control_servers: list[ControlServer] = []
+    for idx, start in enumerate(server_starts):
+        end = server_starts[idx + 1] if idx + 1 < len(server_starts) else len(argv)
+        block = argv[start:end]
+
+        if len(block) < 2 or block[1].startswith("--"):
+            continue
+
+        url = block[1]
+        headers: list[str] = []
+        identifier: str | None = None
+
+        i = 2
+        while i < len(block):
+            if block[i] == "--control-server-H" and i + 1 < len(block) and not block[i + 1].startswith("--"):
+                headers.append(block[i + 1])
+                i += 2
+            elif block[i] == "--control-identifier" and i + 1 < len(block) and not block[i + 1].startswith("--"):
+                identifier = block[i + 1]
+                i += 2
+            else:
+                i += 1
+
+        if identifier is None:
+            raise ValueError(f"Control server {url} is missing a --control-identifier")
+
         control_servers.append(
             ControlServer(
-                url=current_url,
-                headers=parse_headers(current_headers),
-                identifier=current_identifier,
+                url=url,
+                headers=parse_headers(headers),
+                identifier=identifier,
             )
         )
-        current_url = None
-        current_headers = []
-        current_identifier = None
-
-    i = 0
-    while i < len(argv):
-        arg = argv[i]
-
-        if arg == "--control-server":
-            _flush()
-
-            if i + 1 < len(argv) and not argv[i + 1].startswith("--"):
-                current_url = argv[i + 1]
-                i += 1
-
-        elif current_url is not None:
-            if arg == "--control-server-H":
-                if i + 1 < len(argv) and not argv[i + 1].startswith("--"):
-                    current_headers.append(argv[i + 1])
-                    i += 1
-
-            elif arg == "--control-identifier" and i + 1 < len(argv) and not argv[i + 1].startswith("--"):
-                current_identifier = argv[i + 1]
-                i += 1
-
-        i += 1
-
-    _flush()
 
     return control_servers
 
