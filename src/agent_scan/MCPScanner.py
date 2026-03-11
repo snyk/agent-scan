@@ -208,11 +208,15 @@ class MCPScanner:
                 c, messages = self.storage_file.check_and_update(server.name or "", entity)
                 if c:
                     logger.info("Entity %s in server %s has changed", entity.name, server.name)
+                    message = "Entity has changed. " + ", ".join(messages)
                     issues.append(
                         Issue(
                             code="W003",
-                            message="Entity has changed. " + ", ".join(messages),
+                            message=message,
                             reference=(server_idx, entity_idx),
+                            title="Entity has changed",
+                            severity="info",
+                            description=message,
                         )
                     )
         return issues

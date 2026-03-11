@@ -65,7 +65,12 @@ def format_exception(e: Exception | str | None) -> tuple[str, rTraceback | None]
 
 
 def format_error(
-    e: ScanError, server_idx: int | None = None, entity_idx: int | None = None, code: str = "X001"
+    e: ScanError,
+    server_idx: int | None = None,
+    entity_idx: int | None = None,
+    code: str = "X001",
+    title: str | None = None,
+    description: str | None = None,
 ) -> tuple[Issue, rTraceback | None]:
     status, traceback = format_exception(e.exception)
     if e.message:
@@ -75,9 +80,9 @@ def format_error(
     return Issue(
         code=code,
         message=status,
-        extra_data={
-            "severity": "info",
-        },
+        title=title or "",
+        description=description or "",
+        severity="info",
         reference=(server_idx, entity_idx) if server_idx is not None else None,
     ), traceback
 
