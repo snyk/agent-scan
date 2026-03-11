@@ -84,52 +84,58 @@ def str2bool(v: str) -> bool:
     return v.lower() in ("true", "1", "t", "y", "yes")
 
 
-def parse_control_servers(argv):
+def parse_control_servers(argv) -> list[ControlServer]:
     """
     Parse control server arguments from sys.argv.
-    Returns a list of control server configurations, where each config is a dict with:
-    - url: the control server URL
-    - headers: list of additional headers
-    - identifier: the control identifier (or None)
+    Returns a list of ControlServer instances.
+    Raises ValueError if any control server is missing an identifier.
     """
-    control_servers = []
-    current_server = None
+    control_servers: list[ControlServer] = []
+    current_url: str | None = None
+    current_headers: list[str] = []
+    current_identifier: str | None = None
+
+    def _flush():
+        nonlocal current_url, current_headers, current_identifier
+        if current_url is None:
+            return
+        if current_identifier is None:
+            raise ValueError(f"Control server {current_url} is missing a --control-identifier.")
+        control_servers.append(
+            ControlServer(
+                url=current_url,
+                headers=parse_headers(current_headers),
+                identifier=current_identifier,
+            )
+        )
+        current_url = None
+        current_headers = []
+        current_identifier = None
 
     i = 0
     while i < len(argv):
         arg = argv[i]
 
         if arg == "--control-server":
-            # Save previous server if exists
-            if current_server is not None:
-                control_servers.append(current_server)
+            _flush()
 
-            # Start new server config
             if i + 1 < len(argv) and not argv[i + 1].startswith("--"):
-                current_server = {
-                    "url": argv[i + 1],
-                    "headers": [],
-                    "identifier": None,
-                }
-                i += 1  # Skip the URL value
-            else:
-                current_server = None
+                current_url = argv[i + 1]
+                i += 1
 
-        elif current_server is not None:
+        elif current_url is not None:
             if arg == "--control-server-H":
                 if i + 1 < len(argv) and not argv[i + 1].startswith("--"):
-                    current_server["headers"].append(argv[i + 1])
+                    current_headers.append(argv[i + 1])
                     i += 1
 
             elif arg == "--control-identifier" and i + 1 < len(argv) and not argv[i + 1].startswith("--"):
-                current_server["identifier"] = argv[i + 1]
+                current_identifier = argv[i + 1]
                 i += 1
 
         i += 1
 
-    # Don't forget the last server
-    if current_server is not None:
-        control_servers.append(current_server)
+    _flush()
 
     return control_servers
 
@@ -470,11 +476,11 @@ async def evo(args):
 
     # Update the default scan args
     args.control_servers = [
-        {
-            "url": push_scan_url,
-            "identifier": get_hostname() or None,
-            "headers": [f"x-client-id:{client_id}"],
-        }
+        ControlServer(
+            url=push_scan_url,
+            identifier=get_hostname() or None,
+            headers=parse_headers([f"x-client-id:{client_id}"]),
+        )
     ]
     await run_scan(args, mode="scan")
 
@@ -525,14 +531,7 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[Scan
     if mode == "scan":
         skip_ssl_verify: bool = bool(hasattr(args, "skip_ssl_verify") and args.skip_ssl_verify)
 
-        control_servers: list[ControlServer] = [
-            ControlServer(
-                url=server_config["url"],
-                headers=parse_headers(server_config["headers"]),
-                identifier=server_config["identifier"],
-            )
-            for server_config in args.control_servers
-        ]
+        control_servers: list[ControlServer] = args.control_servers if hasattr(args, "control_servers") else []
         analyze_args = AnalyzeArgs(
             analysis_url=args.analysis_url,
             identifier=None,

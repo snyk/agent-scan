@@ -560,4 +560,4 @@ class AnalyzedMachine(BaseModel):
 class ControlServer(BaseModel):
     url: str
     headers: dict[str, str]
-    identifier: str | None = None
+    identifier: str

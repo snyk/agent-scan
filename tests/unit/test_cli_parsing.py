@@ -6,205 +6,179 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from agent_scan.cli import parse_control_servers
-from agent_scan.models import ScanPathResult
+from agent_scan.models import ControlServer, ScanPathResult
 
 
 class TestControlServerParsing:
     """Test suite for parsing multiple control servers with individual options."""
 
-    def test_parse_single_control_server_no_options(self):
-        """Test parsing a single control server without any options."""
-        argv = ["--control-server", "https://server1.com"]
+    @pytest.mark.parametrize(
+        "argv, expected",
+        [
+            pytest.param(
+                [
+                    "--control-server",
+                    "https://server1.com",
+                    "--control-server-H",
+                    "Auth: token1",
+                    "--control-identifier",
+                    "user@example.com",
+                    "--opt-out",
+                ],
+                [ControlServer(url="https://server1.com", headers={"Auth": " token1"}, identifier="user@example.com")],
+                id="single_server_with_all_options",
+            ),
+            pytest.param(
+                [
+                    "--control-server",
+                    "https://server1.com",
+                    "--control-server-H",
+                    "Auth: token1",
+                    "--control-identifier",
+                    "user@example.com",
+                    "--control-server",
+                    "https://server2.com",
+                    "--control-server-H",
+                    "Auth: token2",
+                    "--control-identifier",
+                    "serial-123",
+                ],
+                [
+                    ControlServer(
+                        url="https://server1.com", headers={"Auth": " token1"}, identifier="user@example.com"
+                    ),
+                    ControlServer(url="https://server2.com", headers={"Auth": " token2"}, identifier="serial-123"),
+                ],
+                id="multiple_servers_with_individual_options",
+            ),
+            pytest.param(
+                [
+                    "--control-identifier",
+                    "should-be-ignored",
+                    "--control-server",
+                    "https://server1.com",
+                    "--control-identifier",
+                    "user1",
+                ],
+                [ControlServer(url="https://server1.com", headers={}, identifier="user1")],
+                id="options_before_first_server_ignored",
+            ),
+            pytest.param(
+                ["scan", "--verbose", "--json"],
+                [],
+                id="no_control_servers",
+            ),
+            pytest.param(
+                ["--control-server", "--verbose"],
+                [],
+                id="control_server_without_url",
+            ),
+            pytest.param(
+                ["--control-server", "--some-other-arg", "value"],
+                [],
+                id="url_starts_with_dash",
+            ),
+            pytest.param(
+                [
+                    "scan",
+                    "--verbose",
+                    "--control-server",
+                    "https://server1.com",
+                    "--control-identifier",
+                    "user1",
+                    "--json",
+                    "--control-server",
+                    "https://server2.com",
+                    "--control-identifier",
+                    "id2",
+                    "--storage-file",
+                    "~/.mcp-scan",
+                ],
+                [
+                    ControlServer(url="https://server1.com", headers={}, identifier="user1"),
+                    ControlServer(url="https://server2.com", headers={}, identifier="id2"),
+                ],
+                id="with_other_cli_args",
+            ),
+            pytest.param(
+                [
+                    "--control-server",
+                    "https://server1.com",
+                    "--control-server-H",
+                    "Auth: token1",
+                    "--control-server-H",
+                    "X-Custom: value1",
+                    "--control-identifier",
+                    "id1",
+                ],
+                [
+                    ControlServer(
+                        url="https://server1.com", headers={"Auth": " token1", "X-Custom": " value1"}, identifier="id1"
+                    )
+                ],
+                id="single_server_with_multiple_headers",
+            ),
+        ],
+    )
+    def test_parse_control_servers(self, argv: list[str], expected: list[ControlServer]):
         result = parse_control_servers(argv)
+        assert result == expected
 
-        assert len(result) == 1
-        assert result[0]["url"] == "https://server1.com"
-        assert result[0]["headers"] == []
-        assert result[0]["identifier"] is None
-
-    def test_parse_single_control_server_with_all_options(self):
-        """Test parsing a single control server with all options."""
-        argv = [
-            "--control-server",
-            "https://server1.com",
-            "--control-server-H",
-            "Auth: token1",
-            "--control-identifier",
-            "user@example.com",
-            "--opt-out",
-        ]
-        result = parse_control_servers(argv)
-
-        assert len(result) == 1
-        assert result[0]["url"] == "https://server1.com"
-        assert result[0]["headers"] == ["Auth: token1"]
-        assert result[0]["identifier"] == "user@example.com"
-
-    def test_parse_single_control_server_with_multiple_headers(self):
-        """Test parsing a single control server with multiple headers."""
-        argv = [
-            "--control-server",
-            "https://server1.com",
-            "--control-server-H",
-            "Auth: token1",
-            "--control-server-H",
-            "X-Custom: value1",
-        ]
-        result = parse_control_servers(argv)
-
-        assert len(result) == 1
-        assert result[0]["url"] == "https://server1.com"
-        assert result[0]["headers"] == ["Auth: token1", "X-Custom: value1"]
-
-    def test_parse_multiple_control_servers_with_individual_options(self):
-        """Test parsing multiple control servers with their own options."""
-        argv = [
-            "--control-server",
-            "https://server1.com",
-            "--control-server-H",
-            "Auth: token1",
-            "--control-identifier",
-            "user@example.com",
-            "--control-server",
-            "https://server2.com",
-            "--control-server-H",
-            "Auth: token2",
-            "--control-identifier",
-            "serial-123",
-        ]
-        result = parse_control_servers(argv)
-
-        assert len(result) == 2
-
-        # First server
-        assert result[0]["url"] == "https://server1.com"
-        assert result[0]["headers"] == ["Auth: token1"]
-        assert result[0]["identifier"] == "user@example.com"
-
-        # Second server
-        assert result[1]["url"] == "https://server2.com"
-        assert result[1]["headers"] == ["Auth: token2"]
-        assert result[1]["identifier"] == "serial-123"
-
-    def test_parse_multiple_control_servers_mixed_options(self):
-        """Test parsing multiple servers where some have certain options and others don't."""
-        argv = [
-            "--control-server",
-            "https://server1.com",
-            "--control-identifier",
-            "user1",
-            "--control-server",
-            "https://server2.com",
-            "--control-server",
-            "https://server3.com",
-            "--control-server-H",
-            "Auth: token3",
-            "--control-server-H",
-            "X-Custom: value3",
-        ]
-        result = parse_control_servers(argv)
-
-        assert len(result) == 3
-
-        # First server: only identifier
-        assert result[0]["url"] == "https://server1.com"
-        assert result[0]["identifier"] == "user1"
-        assert result[0]["headers"] == []
-
-        # Second server: only opt-out
-        assert result[1]["url"] == "https://server2.com"
-        assert result[1]["identifier"] is None
-        assert result[1]["headers"] == []
-
-        # Third server: only headers
-        assert result[2]["url"] == "https://server3.com"
-        assert result[2]["headers"] == ["Auth: token3", "X-Custom: value3"]
-        assert result[2]["identifier"] is None
-
-    def test_parse_control_servers_with_other_cli_args(self):
-        """Test that control server parsing doesn't interfere with other CLI arguments."""
-        argv = [
-            "scan",
-            "--verbose",
-            "--control-server",
-            "https://server1.com",
-            "--control-identifier",
-            "user1",
-            "--json",
-            "--control-server",
-            "https://server2.com",
-            "--storage-file",
-            "~/.mcp-scan",
-        ]
-        result = parse_control_servers(argv)
-
-        assert len(result) == 2
-        assert result[0]["url"] == "https://server1.com"
-        assert result[0]["identifier"] == "user1"
-        assert result[1]["url"] == "https://server2.com"
-
-    def test_parse_no_control_servers(self):
-        """Test parsing when no control servers are specified."""
-        argv = ["scan", "--verbose", "--json"]
-        result = parse_control_servers(argv)
-
-        assert len(result) == 0
-
-    def test_parse_control_servers_options_before_first_server_ignored(self):
-        """Test that control server options before the first --control-server are ignored."""
-        argv = [
-            "--control-identifier",
-            "should-be-ignored",
-            "--control-server",
-            "https://server1.com",
-            "--control-identifier",
-            "user1",
-        ]
-        result = parse_control_servers(argv)
-
-        assert len(result) == 1
-        assert result[0]["url"] == "https://server1.com"
-        assert result[0]["identifier"] == "user1"  # Should use the one after --control-server
-
-    def test_parse_control_server_options_only_apply_to_preceding_server(self):
-        """Test that options only apply to their immediately preceding server."""
-        argv = [
-            "--control-server",
-            "https://server1.com",
-            "--control-identifier",
-            "user1",
-            "--control-server",
-            "https://server2.com",
-            "--control-server",
-            "https://server3.com",
-            "--control-identifier",
-            "user3",
-        ]
-        result = parse_control_servers(argv)
-
-        assert len(result) == 3
-        assert result[0]["identifier"] == "user1"
-        assert result[1]["identifier"] is None  # No identifier for server2
-        assert result[2]["identifier"] == "user3"
-
-    def test_parse_control_server_without_url(self):
-        """Test parsing when --control-server is provided without a URL."""
-        argv = [
-            "--control-server",  # No URL follows
-            "--verbose",
-        ]
-        result = parse_control_servers(argv)
-
-        # Should not create a server entry when URL is missing
-        assert len(result) == 0
-
-    def test_parse_control_server_url_starts_with_dash(self):
-        """Test parsing when what looks like a URL actually starts with --."""
-        argv = ["--control-server", "--some-other-arg", "value"]
-        result = parse_control_servers(argv)
-
-        # Should not create a server when the next arg is another flag
-        assert len(result) == 0
+    @pytest.mark.parametrize(
+        "argv",
+        [
+            pytest.param(
+                ["--control-server", "https://server1.com"],
+                id="single_server_no_identifier",
+            ),
+            pytest.param(
+                [
+                    "--control-server",
+                    "https://server1.com",
+                    "--control-server-H",
+                    "Auth: token1",
+                    "--control-server-H",
+                    "X-Custom: value1",
+                ],
+                id="single_server_headers_only_no_identifier",
+            ),
+            pytest.param(
+                [
+                    "--control-server",
+                    "https://server1.com",
+                    "--control-identifier",
+                    "user1",
+                    "--control-server",
+                    "https://server2.com",
+                    "--control-server",
+                    "https://server3.com",
+                    "--control-server-H",
+                    "Auth: token3",
+                    "--control-identifier",
+                    "user3",
+                ],
+                id="multiple_servers_one_missing_identifier",
+            ),
+            pytest.param(
+                [
+                    "--control-server",
+                    "https://server1.com",
+                    "--control-identifier",
+                    "user1",
+                    "--control-server",
+                    "https://server2.com",
+                    "--control-server",
+                    "https://server3.com",
+                    "--control-identifier",
+                    "user3",
+                ],
+                id="options_only_apply_to_preceding_server",
+            ),
+        ],
+    )
+    def test_parse_control_servers_missing_identifier(self, argv: list[str]):
+        with pytest.raises(ValueError, match="missing a --control-identifier"):
+            parse_control_servers(argv)
 
 
 class TestCLIArgumentParsing:
@@ -233,10 +207,10 @@ class TestCLIArgumentParsing:
         control_servers = parse_control_servers(test_argv)
 
         assert len(control_servers) == 2
-        assert control_servers[0]["url"] == "https://server1.com"
-        assert control_servers[0]["identifier"] == "user1@example.com"
-        assert control_servers[1]["url"] == "https://server2.com"
-        assert control_servers[1]["identifier"] == "serial-123"
+        assert control_servers[0].url == "https://server1.com"
+        assert control_servers[0].identifier == "user1@example.com"
+        assert control_servers[1].url == "https://server2.com"
+        assert control_servers[1].identifier == "serial-123"
 
 
 class TestControlServerHeaderParsing:
@@ -311,12 +285,10 @@ class TestControlServerUploadIntegration:
                 analysis_url="https://test.com/analysis",
                 skip_ssl_verify=False,
                 control_servers=[
-                    {"url": "https://server1.com", "headers": ["Auth: token1"], "identifier": "user1"},
-                    {
-                        "url": "https://server2.com",
-                        "headers": ["Auth: token2", "X-Custom: value"],
-                        "identifier": "user2",
-                    },
+                    ControlServer(url="https://server1.com", headers={"Auth": " token1"}, identifier="user1"),
+                    ControlServer(
+                        url="https://server2.com", headers={"Auth": " token2", "X-Custom": " value"}, identifier="user2"
+                    ),
                 ],
             )
 
@@ -380,7 +352,7 @@ class TestControlServerUploadIntegration:
                 files=[],
                 mcp_oauth_tokens_path=None,
                 analysis_url="https://test.com/analysis",
-                control_servers=[{"url": "https://server1.com", "headers": [], "identifier": None}],
+                control_servers=[ControlServer(url="https://server1.com", headers={}, identifier="host1")],
             )
 
             await run_scan(args_without, mode="scan")
@@ -401,7 +373,7 @@ class TestControlServerUploadIntegration:
                 mcp_oauth_tokens_path=None,
                 analysis_url="https://test.com/analysis",
                 skip_ssl_verify=True,
-                control_servers=[{"url": "https://server1.com", "headers": [], "identifier": None}],
+                control_servers=[ControlServer(url="https://server1.com", headers={}, identifier="host1")],
             )
 
             await run_scan(args_with, mode="scan")
