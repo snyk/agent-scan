@@ -13,6 +13,37 @@ from agent_scan.utils import TempFile, ensure_unicode_console
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
+def pytest_addoption(parser):
+    parser.addoption(
+        "--runner",
+        action="store",
+        default="both",
+        choices=["uv", "binary", "both"],
+        help="Which runner to use for e2e tests: uv, binary, or both (default: both)",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    runner = config.getoption("--runner")
+    if runner == "both":
+        return
+    deselected = []
+    remaining = []
+    for item in items:
+        params = getattr(item, "callspec", {})
+        if (
+            hasattr(params, "params")
+            and params.params.get("agent_scan_cmd") != runner
+            and "agent_scan_cmd" in params.params
+        ):
+            deselected.append(item)
+            continue
+        remaining.append(item)
+    if deselected:
+        config.hook.pytest_deselected(items=deselected)
+        items[:] = remaining
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _ensure_unicode_console():
     """Reconfigure stdout/stderr to UTF-8 on Windows so tests can print Unicode (e.g. emoji) without UnicodeEncodeError."""
@@ -40,44 +71,13 @@ def _build_binary() -> None:
             raise RuntimeError(f"{name} failed: {result.stderr or result.stdout}")
 
 
-def _skip_binary(reason: str) -> None:
-    """Skip binary tests and log reason (visible with pytest -s on Windows)."""
-    print(f"[agent_scan_binary] {reason}", flush=True)
-    pytest.skip(reason)
-
-
-@pytest.fixture(scope="session")
-def agent_scan_binary():
-    """Build the CLI binary and return its path. Uses `make binary` on Unix; builds directly on Windows. Skips if build fails."""
-    binary_path = _get_binary_path()
-    if binary_path.is_file():
-        return str(binary_path)
-    if sys.platform == "win32":
-        try:
-            _build_binary()
-        except RuntimeError as e:
-            _skip_binary(f"Could not build binary: {e}")
-    else:
-        result = subprocess.run(
-            ["make", "binary"],
-            cwd=REPO_ROOT,
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            _skip_binary(f"Could not build binary (make binary failed): {result.stderr or result.stdout}")
-    if not binary_path.is_file():
-        _skip_binary(f"Binary was not produced at {binary_path}")
-    return str(binary_path)
-
-
 @pytest.fixture
 def agent_scan_cmd(request):
     """CLI invocation: either 'uv run -m src.agent_scan.run' or the built binary. Use with @pytest.mark.parametrize('agent_scan_cmd', ['uv', 'binary'], indirect=True). Build runs only when 'binary' is requested."""
     if request.param == "uv":
         return ["uv", "run", "-m", "src.agent_scan.run"]
     if request.param == "binary":
-        binary = request.getfixturevalue("agent_scan_binary")
+        binary = _get_binary_path()
         return [binary]
     raise ValueError(f"Unknown agent_scan_cmd param: {request.param}")
 
