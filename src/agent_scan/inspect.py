@@ -34,7 +34,9 @@ from agent_scan.well_known_clients import expand_path, get_readable_home_directo
 logger = logging.getLogger(__name__)
 
 
-async def get_mcp_config_per_client(client: CandidateClient, all_users: bool = False) -> list[ClientToInspect]:
+async def get_mcp_config_per_client(
+    client: CandidateClient, all_users: bool = False, create_file_not_found_error: bool = False
+) -> list[ClientToInspect]:
     """
     Looks for Client (Cursor, VSCode, etc.) across all home directories in the machine.
     """
@@ -42,18 +44,18 @@ async def get_mcp_config_per_client(client: CandidateClient, all_users: bool = F
 
     if any(path.startswith("~") for path in client.client_exists_paths):
         for home_directory in get_readable_home_directories(all_users):
-            cti = await get_mcp_config_per_home_directory(client, home_directory)
+            cti = await get_mcp_config_per_home_directory(client, home_directory, create_file_not_found_error)
             if cti is not None:
                 ctis.append(cti)
     else:
-        cti = await get_mcp_config_per_home_directory(client, None)
+        cti = await get_mcp_config_per_home_directory(client, None, create_file_not_found_error)
         if cti is not None:
             ctis.append(cti)
     return ctis
 
 
 async def get_mcp_config_per_home_directory(
-    client: CandidateClient, home_directory: Path | None
+    client: CandidateClient, home_directory: Path | None, create_file_not_found_error: bool = False
 ) -> ClientToInspect | None:
     """
     Looks for Client (Cursor, VSCode, etc.) config files.
@@ -87,10 +89,11 @@ async def get_mcp_config_per_home_directory(
     for mcp_config_path in client.mcp_config_paths:
         mcp_config_path_expanded = expand_path(Path(mcp_config_path), home_directory)
         if not mcp_config_path_expanded.exists():
-            mcp_configs[mcp_config_path_expanded.as_posix()] = FileNotFoundConfig(
-                message=f"file {mcp_config_path_expanded.as_posix()} does not exist",
-                is_failure=False,
-            )
+            if create_file_not_found_error:
+                mcp_configs[mcp_config_path_expanded.as_posix()] = FileNotFoundConfig(
+                    message=f"file {mcp_config_path_expanded.as_posix()} does not exist",
+                    is_failure=False,
+                )
             continue
         try:
             mcp_config = await scan_mcp_config_file(str(mcp_config_path_expanded))

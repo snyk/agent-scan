@@ -175,7 +175,9 @@ async def client_to_inspect_from_path(
                 mcp_config_paths=[],
                 skills_dir_paths=[path],
             )
-            return await get_mcp_config_per_client(candidate_client, all_users=all_users)
+            return await get_mcp_config_per_client(
+                candidate_client, all_users=all_users, create_file_not_found_error=True
+            )
     elif scan_skills and os.path.basename(os.path.normpath(path)).lower() == "skill.md":
         skill_directory = os.path.basename(os.path.dirname(os.path.normpath(path)))
         parent_of_skill_directory = os.path.dirname(os.path.dirname(os.path.normpath(path)))
@@ -197,4 +199,4 @@ async def client_to_inspect_from_path(
             mcp_config_paths=[path],
             skills_dir_paths=[],
         )
-        return await get_mcp_config_per_client(candidate_client, all_users=all_users)
+        return await get_mcp_config_per_client(candidate_client, all_users=all_users, create_file_not_found_error=True)

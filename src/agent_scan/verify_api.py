@@ -10,6 +10,7 @@ import certifi
 import rich
 
 from agent_scan.models import (
+    ScalarToolLabels,
     ScanError,
     ScanPathResult,
     ScanPathResultsCreate,
@@ -269,6 +270,13 @@ async def analyze_machine(
                                 is_failure=True,
                                 category="analysis_error",
                             )
+                    scan_path.labels = [
+                        [
+                            ScalarToolLabels(is_public_sink=0, destructive=0, untrusted_content=0, private_data=0)
+                            for _ in s.entities
+                        ]
+                        for s in scan_path.servers
+                    ]
                 elif scan_path.error is None:
                     scan_path.error = ScanError(
                         message=error_text,

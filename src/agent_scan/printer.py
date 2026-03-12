@@ -65,15 +65,25 @@ def format_exception(e: Exception | str | None) -> tuple[str, rTraceback | None]
 
 
 def format_error(
-    e: ScanError, server_idx: int | None = None, entity_idx: int | None = None, code: str = "X001"
+    e: ScanError, server_idx: int | None = None, entity_idx: int | None = None
 ) -> tuple[Issue, rTraceback | None]:
     status, traceback = format_exception(e.exception)
+    code_from_category = {
+        "server_startup": "X001",
+        "skill_scan_error": "X002",
+        "file_not_found": "X003",
+        "unknown_config": "X004",
+        "parse_error": "X005",
+        "server_http_error": "X006",
+        "analysis_error": "X007",
+        None: "X008",
+    }[e.category]
     if e.message:
         status = e.message
     if e.traceback:
         traceback = e.traceback
     return Issue(
-        code=code,
+        code=code_from_category,
         message=status,
         extra_data={
             "severity": "info",
@@ -330,7 +340,7 @@ def print_scan_path_result(
     full_description: bool = False,
 ) -> None:
     if result.error is not None:
-        error_issue, traceback = format_error(result.error, None, None)
+        error_issue, traceback = format_error(result.error)
         rich.print(format_path_line(result.path, issues=[error_issue]))
         if print_errors and traceback is not None:
             console = rich.console.Console()
@@ -363,7 +373,7 @@ def print_scan_path_result(
             if issue.reference is not None and issue.reference[0] == server_idx
         ]
         if server.error is not None:
-            error_issue, traceback = format_error(server.error, server_idx, code="X003")
+            error_issue, traceback = format_error(server.error, server_idx)
             server_issues.append(error_issue)
             if traceback is not None:
                 server_tracebacks.append((server, traceback))
