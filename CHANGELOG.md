@@ -62,3 +62,4 @@
 - `0.4.4` Use Snyk API Key for analysis.
 - `0.4.5` Add possibility to scan agent on multiple users.
 - `0.4.6` Add Snyk CLI support.
+- `0.4.6` Bug fixes.
