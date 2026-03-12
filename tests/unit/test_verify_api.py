@@ -4,9 +4,18 @@ import json
 import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import aiohttp
 import pytest
+from mcp.types import Implementation, InitializeResult, ServerCapabilities, Tool
 
-from agent_scan.models import ScanPathResult
+from agent_scan.models import (
+    RemoteServer,
+    ScanError,
+    ScanPathResult,
+    ServerScanResult,
+    ServerSignature,
+    StdioServer,
+)
 from agent_scan.verify_api import analyze_machine, setup_tcp_connector
 
 
@@ -395,3 +404,144 @@ class TestAnalyzeMachineScanMetadata:
             payload = json.loads(call_kwargs["data"])
             # scan_metadata may be absent or null when not provided
             assert payload.get("scan_metadata") is None
+
+
+class TestAnalyzeMachineHttpErrors:
+    """Test that analyze_machine handles various HTTP error status codes correctly."""
+
+    @staticmethod
+    def _make_scan_paths() -> list[ScanPathResult]:
+        """Build a realistic ScanPathResult modelled on a real claude code inspect."""
+        return [
+            ScanPathResult(
+                path="/Users/test/.claude",
+                client="claude code",
+                servers=[
+                    ServerScanResult(
+                        name="figma",
+                        server=RemoteServer(url="https://mcp.figma.com/mcp", type="http"),
+                        signature=None,
+                        error=ScanError(
+                            message="could not start server",
+                            category="server_startup",
+                        ),
+                    ),
+                    ServerScanResult(
+                        name="Playwright",
+                        server=StdioServer(command="npx", args=["@playwright/mcp@latest"]),
+                        signature=ServerSignature(
+                            metadata=InitializeResult(
+                                protocolVersion="2025-11-25",
+                                capabilities=ServerCapabilities(),
+                                serverInfo=Implementation(name="Playwright", version="0.0.68"),
+                            ),
+                            tools=[
+                                Tool(
+                                    name="browser_close",
+                                    description="Close the page",
+                                    inputSchema={"type": "object", "properties": {}},
+                                ),
+                            ],
+                        ),
+                    ),
+                ],
+            ),
+            ScanPathResult(
+                path="/Users/test/.vscode",
+                client="vscode",
+                servers=[],
+                error=ScanError(
+                    message="Unknown MCP config: /Users/test/.vscode/settings.json",
+                    exception=None,
+                    traceback=None,
+                    is_failure=True,
+                    category="unknown_config",
+                    server_output=None,
+                ),
+            ),
+            ScanPathResult(
+                path="/Users/test/.cursor",
+                client="cursor",
+                servers=[],
+            ),
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "status_code, status_message, expected_error_substring",
+        [
+            (400, "Bad Request", "The analysis server returned an error for your request: 400 - Bad Request"),
+            (401, "Unauthorized", "Unauthorized. To use Agent Scan, set the SNYK_TOKEN environment variable."),
+            (403, "Forbidden", "The analysis server returned an error for your request: 403 - Forbidden"),
+            (
+                413,
+                "Payload Too Large",
+                "Analysis scope too large (e.g. too many or very large MCP servers/skills)",
+            ),
+            (
+                422,
+                "Unprocessable Entity",
+                "The analysis server returned an error for your request: 422 - Unprocessable Entity",
+            ),
+            (
+                429,
+                "Too Many Requests",
+                "Daily usage limit reached for the public version of Agent-Scan",
+            ),
+            (500, "Internal Server Error", "Could not reach analysis server: 500 - Internal Server Error"),
+            (502, "Bad Gateway", "Could not reach analysis server: 502 - Bad Gateway"),
+            (503, "Service Unavailable", "Could not reach analysis server: 503 - Service Unavailable"),
+            (504, "Gateway Timeout", "Could not reach analysis server: 504 - Gateway Timeout"),
+        ],
+        ids=["400", "401", "403", "413", "422", "429", "500", "502", "503", "504"],
+    )
+    async def test_analyze_machine_http_error_responses(self, status_code, status_message, expected_error_substring):
+        """Test that each HTTP error status code produces the correct error message on scan_paths."""
+        scan_paths = self._make_scan_paths()
+        analysis_url = "https://test.example.com/api"
+
+        with patch("agent_scan.verify_api.aiohttp.ClientSession") as mock_session_class:
+            mock_session = MagicMock()
+
+            mock_request_info = MagicMock()
+            mock_request_info.real_url = analysis_url
+
+            error = aiohttp.ClientResponseError(
+                request_info=mock_request_info,
+                history=(),
+                status=status_code,
+                message=status_message,
+            )
+
+            mock_response = AsyncMock()
+            mock_response.status = status_code
+            mock_response.raise_for_status = MagicMock(side_effect=error)
+
+            mock_post = MagicMock()
+            mock_post.__aenter__ = AsyncMock(return_value=mock_response)
+            mock_post.__aexit__ = AsyncMock(return_value=None)
+
+            mock_session.post = MagicMock(return_value=mock_post)
+            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session.__aexit__ = AsyncMock(return_value=None)
+
+            mock_session_class.return_value = mock_session
+
+            with patch.dict(os.environ, {"SNYK_TOKEN": "test-token"}):
+                result = await analyze_machine(
+                    scan_paths=scan_paths,
+                    analysis_url=analysis_url,
+                    identifier=None,
+                    max_retries=1,
+                )
+
+        assert len(result) == 3
+        claude, vscode, cursor = result
+        # client level errors should have not been changed.
+        assert claude.error is None
+        assert vscode.error is not None and vscode.error.category == "unknown_config"
+        assert cursor.error is None
+        assert len(claude.servers) == 2
+        figma, playwright = claude.servers
+        assert figma.error is not None and figma.error.category == "server_startup"
+        assert playwright.error is not None and playwright.error.category == "analysis_error"

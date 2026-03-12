@@ -277,14 +277,6 @@ async def analyze_machine(
                         ]
                         for s in scan_path.servers
                     ]
-                elif scan_path.error is None:
-                    scan_path.error = ScanError(
-                        message=error_text,
-                        exception=e,
-                        traceback=traceback.format_exc(),
-                        is_failure=True,
-                        category="analysis_error",
-                    )
             return scan_paths
 
         except RuntimeError as e:
