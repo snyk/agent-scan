@@ -250,6 +250,8 @@ async def analyze_machine(
                 error_text = "Unauthorized. To use Agent Scan, set the SNYK_TOKEN environment variable."
             elif e.status == 413:
                 error_text = "Analysis scope too large (e.g. too many or very large MCP servers/skills). Please consider scanning individual MCP servers or skill directories."
+            elif e.status == 429:
+                error_text = "Daily usage limit reached for the public version of Agent-Scan. Unlock higher limits and enterprise features by contacting us at https://evo.ai.snyk.io/."
             elif 400 <= e.status < 500:
                 error_text = f"The analysis server returned an error for your request: {e.status} - {e.message}"
             else:
