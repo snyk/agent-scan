@@ -227,3 +227,20 @@ If you want to include Agent Scan results in your own project or registry, pleas
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md).
+
+## Verification/Publication Failure Handling (Operational Safety)
+
+When integrating scanners into autonomous publishing workflows, treat these as **incident-class failures**:
+
+- Verification challenge not completed within TTL
+- Published artifact cannot be re-fetched/confirmed (existence mismatch)
+- API success response without verifiable state change
+
+Recommended guardrails:
+
+1. Fail closed after one unresolved verification failure.
+2. Require re-fetch confirmation before marking success.
+3. Emit run IDs and evidence links in incident reports.
+4. Do not continue to secondary actions when verification is pending.
+
+These controls reduce false-positive success signals and moderation/suspension risk.
