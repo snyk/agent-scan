@@ -259,7 +259,17 @@ async def analyze_machine(
 
             logger.warning(error_text)
             for scan_path in scan_paths:
-                if scan_path.servers is not None and scan_path.error is None:
+                if scan_path.servers is not None:
+                    for server in scan_path.servers:
+                        if server.error is None:
+                            server.error = ScanError(
+                                message=error_text,
+                                exception=e,
+                                traceback=traceback.format_exc(),
+                                is_failure=True,
+                                category="analysis_error",
+                            )
+                elif scan_path.error is None:
                     scan_path.error = ScanError(
                         message=error_text,
                         exception=e,
