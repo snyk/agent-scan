@@ -248,7 +248,7 @@ async def analyze_machine(
 
         except aiohttp.ClientResponseError as e:
             if e.status == 401:
-                error_text = "Unauthorized. To use Agent Scan, set the SNYK_TOKEN environment variable."
+                error_text = "Unauthorized."
             elif e.status == 413:
                 error_text = "Analysis scope too large (e.g. too many or very large MCP servers/skills). Please consider scanning individual MCP servers or skill directories."
             elif e.status == 429:
