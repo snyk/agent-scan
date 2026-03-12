@@ -77,7 +77,7 @@ def agent_scan_cmd(request):
     if request.param == "uv":
         return ["uv", "run", "-m", "src.agent_scan.run"]
     if request.param == "binary":
-        binary = request.getfixturevalue("agent_scan_binary")
+        binary = _get_binary_path()
         return [binary]
     raise ValueError(f"Unknown agent_scan_cmd param: {request.param}")
 
