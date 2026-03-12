@@ -125,7 +125,7 @@ async def get_mcp_config_per_home_directory(
         skills_dir_path_expanded = expand_path(Path(skills_dir_path), home_directory)
         if skills_dir_path_expanded.exists():
             skills_dirs[skills_dir_path_expanded.as_posix()] = inspect_skills_dir(str(skills_dir_path_expanded))
-        else:
+        elif create_file_not_found_error:
             skills_dirs[skills_dir_path_expanded.as_posix()] = FileNotFoundConfig(
                 message=f"Skills dir {skills_dir_path_expanded.as_posix()} does not exist"
             )
@@ -308,12 +308,14 @@ def inspected_client_to_scan_path_result(inspected_client: InspectedClient) -> S
                     )
                 )
     joined_error: None | ScanError = None
-    if len(candidate_errors) > 0 and len(servers) == 0:
+    if len(candidate_errors) > 0:
+        error_category = next((error.category for error in candidate_errors if error.category is not None), None)
         joined_error = ScanError(
             message="\n".join([error.message or "" for error in candidate_errors]),
             exception="\n".join([str(error.exception) for error in candidate_errors]),
             traceback="\n".join([error.traceback or "missing traceback" for error in candidate_errors]),
-            is_failure=True,
+            is_failure=any(error.is_failure for error in candidate_errors),
+            category=error_category,
         )
     return ScanPathResult(
         client=inspected_client.name,
