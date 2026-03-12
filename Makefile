@@ -1,28 +1,23 @@
-.PHONY: run tests ci pre-commit clean binary build shiv publish-pypi publish reset-uv install-dev-server-cursor install-dev-server-windsurf
+.PHONY: run test tests ci pre-commit clean binary build shiv publish-pypi publish reset-uv install-dev-server-cursor install-dev-server-windsurf
 
-# If the first argument is "run"...
+# Pass extra arguments via ARGS, e.g.: make test ARGS="-v -k test_basic tests/e2e/"
+ARGS ?=
+
+# Capture trailing targets for the run command (e.g. make run scan --json foo.json)
 ifeq (run,$(firstword $(MAKECMDGOALS)))
-  # use the rest as arguments for "run"
   RUN_ARGS := $(wordlist 2,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS))
-  # ...and turn them into do-nothing targets
   $(eval $(RUN_ARGS):;@:)
 endif
 
 run:
-	uv run -m src.agent_scan.run ${RUN_ARGS}
+	uv run -m src.agent_scan.run $(RUN_ARGS)
 
-tests:
-	uv sync
-	uv pip install -e ".[test]"
-	AGENT_SCAN_ENVIRONMENT=test uv run python -m pytest
-
-test:
-	make tests
+test tests:
+	AGENT_SCAN_ENVIRONMENT=test uv run --extra test -m pytest --runner=uv $(ARGS)
 
 ci:
-	uv sync
-	uv pip install -e ".[test]"
-	AGENT_SCAN_ENVIRONMENT=ci uv run python -m pytest
+	$(MAKE) binary
+	AGENT_SCAN_ENVIRONMENT=ci uv run --extra test -m pytest --runner=binary $(ARGS)
 
 pre-commit:
 	uv sync
