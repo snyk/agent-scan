@@ -9,15 +9,23 @@ ifeq (run,$(firstword $(MAKECMDGOALS)))
   $(eval $(RUN_ARGS):;@:)
 endif
 
+# Capture positional pytest args (e.g. make test tests/e2e/test_scan.py)
+# Use ARGS for flag-like pytest args (e.g. ARGS="-k basic -q").
+ifneq (,$(filter test tests ci,$(firstword $(MAKECMDGOALS))))
+  PYTEST_PATH_ARGS := $(wordlist 2,$(words $(MAKECMDGOALS)),$(MAKECMDGOALS))
+  .PHONY: $(PYTEST_PATH_ARGS)
+  $(eval $(PYTEST_PATH_ARGS):;@:)
+endif
+
 run:
 	uv run -m src.agent_scan.run $(RUN_ARGS)
 
 test tests:
-	AGENT_SCAN_ENVIRONMENT=test uv run --extra test -m pytest --runner=uv $(ARGS)
+	AGENT_SCAN_ENVIRONMENT=test uv run --extra test -m pytest --runner=uv $(PYTEST_PATH_ARGS) $(ARGS)
 
 ci:
 	$(MAKE) binary
-	AGENT_SCAN_ENVIRONMENT=ci uv run --extra test -m pytest --runner=binary $(ARGS)
+	AGENT_SCAN_ENVIRONMENT=ci uv run --extra test -m pytest --runner=binary $(PYTEST_PATH_ARGS) $(ARGS)
 
 pre-commit:
 	uv sync

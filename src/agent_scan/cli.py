@@ -32,6 +32,12 @@ logging.getLogger().setLevel(logging.CRITICAL + 1)  # Higher than any standard l
 logging.getLogger().addHandler(logging.NullHandler())
 
 
+class MissingIdentifierError(Exception):
+    """Raised when a control server is missing an identifier."""
+
+    pass
+
+
 def setup_logging(verbose=False, log_to_stderr=False):
     """Configure logging based on the verbose flag."""
     if verbose:
@@ -116,7 +122,8 @@ def parse_control_servers(argv) -> list[ControlServer]:
                 i += 1
 
         if identifier is None:
-            raise ValueError(f"Control server {url} is missing a --control-identifier")
+            rich.print(f"[bold red]Control server {url} is missing a --control-identifier[/bold red]")
+            raise MissingIdentifierError(f"Control server {url} is missing a --control-identifier")
 
         control_servers.append(
             ControlServer(
