@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from agent_scan.cli import parse_control_servers
+from agent_scan.cli import MissingIdentifierError, parse_control_servers
 from agent_scan.models import ControlServer, ScanPathResult
 
 
@@ -177,7 +177,7 @@ class TestControlServerParsing:
         ],
     )
     def test_parse_control_servers_missing_identifier(self, argv: list[str]):
-        with pytest.raises(ValueError, match="missing a --control-identifier"):
+        with pytest.raises(MissingIdentifierError, match="missing a --control-identifier"):
             parse_control_servers(argv)
 
 
