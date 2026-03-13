@@ -236,17 +236,24 @@ def add_scan_arguments(scan_parser):
     scan_parser.add_argument(
         "--control-server",
         action="append",
-        help="Upload the scan results to the provided control server URL. Can be specified multiple times for multiple control servers.",
+        help=(
+            "Upload scan results to this control server URL. "
+            "Must be paired with a --control-identifier for that same server block. "
+            "Can be specified multiple times."
+        ),
     )
     scan_parser.add_argument(
         "--control-server-H",
         action="append",
-        help="Additional headers for the preceding control server",
+        help="Additional header for the current --control-server block (repeatable)",
     )
     scan_parser.add_argument(
         "--control-identifier",
         action="append",
-        help="Non-anonymous identifier used to identify the user to the preceding control server, e.g. email or serial number",
+        help=(
+            "Required per --control-server block. "
+            "Non-anonymous identifier for that control server (for example: email, hostname, serial number)."
+        ),
     )
 
 
