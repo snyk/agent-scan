@@ -60,9 +60,9 @@ You can also scan particular configuration files or skills:
 # scan mcp configurations
 uvx snyk-agent-scan@latest ~/.vscode/mcp.json
 # scan a single agent skill
-uvx snyk-agent-scan@latest ~/path/to/my/SKILL.md
+uvx snyk-agent-scan@latest ~/path/to/my/SKILL.md --skills
 # scan all claude skills
-uvx snyk-agent-scan@latest ~/.claude/skills
+uvx snyk-agent-scan@latest ~/.claude/skills --skills
 ```
 
 #### Example Run
