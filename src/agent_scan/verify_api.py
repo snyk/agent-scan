@@ -238,8 +238,10 @@ async def analyze_machine(
                                 response_scan_path_result.servers or [],
                                 strict=True,
                             ):
-                                if server_given.signature is None:
+                                if server_given.signature is None and server_received.signature is not None:
                                     server_given.signature = server_received.signature
+                                    if server_given.error is not None:
+                                        server_given.error.is_failure = False
                         return scan_paths  # Success - exit the function
 
         except TimeoutError as e:
