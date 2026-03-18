@@ -181,15 +181,7 @@ def get_max_severity(
 
 
 def format_issue(issue: Issue) -> str:
-    issue_str = rf"● \[{issue.code} {get_severity(issue)}]: "
-
-    if issue.code in ["W015", "W016", "W017", "W018"] and issue.extra_data is not None and "reason" in issue.extra_data:
-        issue_str += f"{issue.message} Reason: {issue.extra_data['reason']}"
-    elif issue.code == "W001" and issue.extra_data is not None and "words" in issue.extra_data:
-        words = ",".join([f'"{w}"' for w in issue.extra_data["words"]])
-        issue_str += f"Found the word{'s' if len(issue.extra_data['words']) > 1 else ''} {words} in the tool description. It is a common word used in prompt injection attacks."
-    else:
-        issue_str += f"{issue.message}"
+    issue_str = rf"● \[{issue.code} {get_severity(issue)}]: {issue.message}"
     return (
         SEVERITY_COLOR_MAP[get_severity(issue)] + issue_str + SEVERITY_COLOR_MAP[get_severity(issue)].replace("[", "[/")
     )
@@ -338,6 +330,7 @@ def print_scan_path_result(
     print_errors: bool = False,
     inspect_mode: bool = False,
     full_description: bool = False,
+    args=None,
 ) -> None:
     if result.error is not None:
         error_issue, traceback = format_error(result.error)
@@ -354,14 +347,18 @@ def print_scan_path_result(
             skill_count += 1
         else:
             server_count += 1
+
+    report_skills = hasattr(args, "skills") and args.skills
     if server_count > 0 and skill_count > 0:
         message = f"found {server_count} mcp server{'' if server_count == 1 else 's'} and {skill_count} skill{'' if skill_count == 1 else 's'}"
     elif server_count > 0:
         message = f"found {server_count} mcp server{'' if server_count == 1 else 's'}"
     elif skill_count > 0:
         message = f"found {skill_count} skill{'' if skill_count == 1 else 's'}"
+    elif report_skills:
+        message = "no mcp servers or skills found"
     else:
-        message = "no servers or skills found"
+        message = "no mcp servers found"
     rich.print(format_path_line(result.path, message))
     path_print_tree = Tree("│")
     server_tracebacks = []
@@ -414,12 +411,13 @@ def print_scan_result(
     inspect_mode: bool = False,
     internal_issues: bool = False,
     full_description: bool = False,
+    args=None,
 ) -> None:
     if not internal_issues:
         for res in result:
             res.issues = [issue for issue in res.issues if issue.code not in ["W003", "W004", "W005", "W006"]]
     for i, path_result in enumerate(result):
-        print_scan_path_result(path_result, print_errors, inspect_mode, full_description)
+        print_scan_path_result(path_result, print_errors, inspect_mode, full_description, args)
         if i < len(result) - 1:
             rich.print()
     print(end="", flush=True)

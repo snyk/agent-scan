@@ -573,6 +573,7 @@ async def print_scan_inspect(mode="scan", args=None):
             inspect_mode=mode == "inspect",
             internal_issues=verbose,
             full_description=full_description,
+            args=args,
         )
 
 

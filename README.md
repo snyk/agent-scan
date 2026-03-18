@@ -23,7 +23,7 @@
 
 <br>
 
-Agent Scan helps you keep an inventory of all your installed agent components (harnesses, MCP servers, skills) and scans them for common threats like prompt injections, sensitive data handling, or malware payloads hidden in natural language.
+Agent Scan helps you keep an inventory of all your installed agent components (harnesses, MCP servers, and skills) and scans them for common threats like prompt injections, sensitive data handling, or malware payloads hidden in natural language. **By default** it focuses on MCP servers; add `--skills` to autodiscover and scan agent skills.
 
 ## Highlights
 
@@ -52,17 +52,24 @@ To run a full scan of your machine (auto-discovers agents, MCP servers, skills),
 uvx snyk-agent-scan@latest
 ```
 
-This will scan for security vulnerabilities in servers, skills, tools, prompts, and resources. It will automatically discover a variety of agent configurations, including Claude Code/Desktop, Cursor, Gemini CLI, and Windsurf.
 
-You can also scan particular configuration files or skills:
+This will scan for security vulnerabilities in MCP servers, tools, prompts, and resources. It will automatically discover a variety of agent configurations, including Claude Code/Desktop, Cursor, Gemini CLI, and Windsurf.
+
+To also auto-discover and scan agent skills, pass the `--skills` flag:
 
 ```bash
-# scan mcp configurations
+uvx snyk-agent-scan@latest --skills
+```
+
+You can also scan particular MCP configuration files or skills:
+
+```bash
+# scan a specific mcp configuration
 uvx snyk-agent-scan@latest ~/.vscode/mcp.json
 # scan a single agent skill
-uvx snyk-agent-scan@latest ~/path/to/my/SKILL.md
+uvx snyk-agent-scan@latest --skills ~/path/to/my/SKILL.md
 # scan all claude skills
-uvx snyk-agent-scan@latest ~/.claude/skills
+uvx snyk-agent-scan@latest --skills ~/.claude/skills
 ```
 
 #### Example Run
@@ -124,6 +131,7 @@ snyk-agent-scan scan [CONFIG_FILE...]
 Options:
 
 ```
+--skills                          Also scan agent skills (default: off)
 --checks-per-server NUM           Number of checks to perform on each server (default: 1)
 --server-timeout SECONDS          Seconds to wait before timing out server connections (default: 10)
 --suppress-mcpserver-io BOOL      Suppress stdout/stderr from MCP servers (default: True)
@@ -158,8 +166,17 @@ snyk-agent-scan help
 # Scan all known MCP configs
 snyk-agent-scan
 
+# Scan all known MCP configs and agent skills
+snyk-agent-scan --skills
+
 # Scan a specific config file
 snyk-agent-scan ~/custom/config.json
+
+# Scan a specific skill file
+snyk-agent-scan --skills ~/path/to/my/SKILL.md
+
+# Scan a directory for skills
+snyk-agent-scan --skills ~/.claude/skills
 
 # Just inspect tools without verification
 snyk-agent-scan inspect
