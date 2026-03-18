@@ -33,6 +33,29 @@ Agent Scan helps you keep an inventory of all your installed agent components (h
   - MCP: [Prompt Injection](docs/issue-codes.md#E001), [Tool Poisoning](docs/issue-codes.md#E003), [Tool Shadowing](docs/issue-codes.md#E002), [Toxic Flows](docs/issue-codes.md#TF001)
   - Skills: [Prompt Injection](docs/issue-codes.md#E004), [Malware Payloads](docs/issue-codes.md#E006), [Untrusted Content](docs/issue-codes.md#W011), [Credential Handling](docs/issue-codes.md#W007), [Hardcoded Secrets](docs/issue-codes.md#W008)
 
+## Supported agents by OS
+
+Agent Scan auto-discovers clients and their capabilities (MCP servers or skills) when their install paths exist. The table reflects [well-known client definitions](src/agent_scan/well_known_clients.py).
+
+- **✓**: at least one path is defined for that capability.
+- **✗**: the client is listed for that OS but has no paths for that capability.
+- **—**: that client is not included for that OS.
+- **Skills** columns apply when using `--skills`.
+
+| Agent | macOS MCP | macOS Skills | Linux MCP | Linux Skills | Windows MCP | Windows Skills |
+| --- | :---: | :---: | :---: | :---: | :---: | :---: |
+| Windsurf | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Cursor | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| VS Code | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Claude Desktop | ✓ | ✗ | — | — | ✓ | ✗ |
+| Claude Code | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Gemini CLI | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| OpenClaw | ✗ | ✓ | ✗ | ✓ | ✗ | ✓ |
+| Kiro | ✓ | ✗ | ✓ | ✗ | ✓ | ✗ |
+| OpenCode | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| Antigravity | ✓ | ✗ | ✓ | ✗ | ✓ | ✗ |
+| Codex | ✗ | ✓ | ✗ | ✓ | — | — |
+
 ## Quick Start
 
 To get started:

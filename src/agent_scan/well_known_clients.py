@@ -52,10 +52,10 @@ MACOS_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
         skills_dir_paths=["~/.gemini/skills"],
     ),
     CandidateClient(
-        name="clawdbot",
-        client_exists_paths=["~/.clawdbot"],
+        name="openclaw",
+        client_exists_paths=["~/.clawdbot", "~/.openclaw"],
         mcp_config_paths=[],
-        skills_dir_paths=["~/.clawdbot/skills"],
+        skills_dir_paths=["~/.clawdbot/skills", "~/.openclaw/skills"],
     ),
     CandidateClient(
         name="kiro",
