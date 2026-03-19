@@ -152,3 +152,24 @@ class TestFullScanFlow:
         assert len(skill_servers) == 0, (
             f"Expected no skill servers without --skills flag, got: {[s['name'] for s in skill_servers]}"
         )
+
+    @pytest.mark.parametrize("agent_scan_cmd", ["uv"], indirect=True)
+    def test_scan_server_in_catalog(self, agent_scan_cmd, remote_server_with_oauth_in_catalog_file):
+        """Test that scanning a server in the catalog works."""
+        result = subprocess.run(
+            [*agent_scan_cmd, "scan", "--json", remote_server_with_oauth_in_catalog_file],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, f"Command failed with error: {result.stderr}"
+        output = json.loads(result.stdout)
+        assert len(output) == 1, "Output should contain exactly one entry for the config file"
+        assert output[remote_server_with_oauth_in_catalog_file]["servers"][0]["signature"] is not None, (
+            "Signature should not be None"
+        )
+        assert output[remote_server_with_oauth_in_catalog_file]["servers"][0]["error"] is not None, json.dumps(
+            output, indent=4
+        )
+        assert output[remote_server_with_oauth_in_catalog_file]["servers"][0]["error"]["is_failure"] is False, (
+            "Error should not be a failure"
+        )

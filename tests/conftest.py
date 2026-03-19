@@ -285,6 +285,27 @@ def streamable_http_transport_config_file(streamable_http_transport_config):
 
 
 @pytest.fixture
+def remote_server_with_oauth_in_catalog_file(remote_server_with_oauth_in_catalog_config):
+    with TempFile(mode="w") as temp_file:
+        temp_file.write(remote_server_with_oauth_in_catalog_config)
+        temp_file.flush()
+        yield temp_file.name
+
+
+@pytest.fixture
+def remote_server_with_oauth_in_catalog_config():
+    """Sample VSCode settings.json with MCP config."""
+    return """// settings.json
+{
+    "mcpServers": {
+        "atlassian": {
+            "url": "https://mcp.atlassian.com/v1/mcp"
+        }
+    }
+}"""
+
+
+@pytest.fixture
 def toy_server_add():
     """Example toy server from the mcp docs."""
     return """
