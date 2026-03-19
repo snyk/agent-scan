@@ -64,3 +64,4 @@
 - `0.4.6` Add Snyk CLI support.
 - `0.4.7` Bug fixes.
 - `0.4.8` Bug fixes.
+- `0.4.9` Bug fixes and improvements.
