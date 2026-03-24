@@ -551,7 +551,8 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[Scan
         )
         return await inspect_analyze_push_pipeline(inspect_args, analyze_args, push_args, verbose=verbose)
     elif mode == "inspect":
-        return await inspect_pipeline(inspect_args)
+        scan_path_results, _scanned_usernames = await inspect_pipeline(inspect_args)
+        return scan_path_results
     else:
         raise ValueError(f"Unknown mode: {mode}, expected 'scan' or 'inspect'")
 

@@ -22,7 +22,7 @@ from agent_scan.redact import redact_scan_result
 from agent_scan.upload import upload
 from agent_scan.utils import get_push_key
 from agent_scan.verify_api import analyze_machine
-from agent_scan.well_known_clients import get_well_known_clients
+from agent_scan.well_known_clients import get_readable_home_directories, get_well_known_clients
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +51,11 @@ class PushArgs(BaseModel):
 
 async def inspect_pipeline(
     inspect_args: InspectArgs,
-) -> list[ScanPathResult]:
+) -> tuple[list[ScanPathResult], list[str]]:
+    # collect discovered usernames
+    home_dirs_with_users = get_readable_home_directories(all_users=inspect_args.all_users)
+    scanned_usernames: list[str] = [username for _path, username in home_dirs_with_users]
+
     # fetch clients to inspect
     if inspect_args.paths:
         clients_to_inspect = [
@@ -90,7 +94,7 @@ async def inspect_pipeline(
                 client_to_inspect, inspect_args.timeout, inspect_args.tokens, inspect_args.scan_skills
             )
             scan_path_results.append(inspected_client_to_scan_path_result(inspected_client))
-    return scan_path_results
+    return scan_path_results, scanned_usernames
 
 
 async def inspect_analyze_push_pipeline(
@@ -103,7 +107,7 @@ async def inspect_analyze_push_pipeline(
     Pipeline the scan and analyze the machine.
     """
     # inspect
-    scan_path_results = await inspect_pipeline(inspect_args)
+    scan_path_results, scanned_usernames = await inspect_pipeline(inspect_args)
 
     # redact
     redacted_scan_path_results = [redact_scan_result(rv) for rv in scan_path_results]
@@ -132,6 +136,7 @@ async def inspect_analyze_push_pipeline(
             additional_headers=control_server.headers,
             skip_ssl_verify=push_args.skip_ssl_verify,
             scan_context=scan_context,
+            scanned_usernames=scanned_usernames,
         )
 
     return verified_scan_path_results

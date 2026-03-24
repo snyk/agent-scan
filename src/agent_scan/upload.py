@@ -42,6 +42,7 @@ async def upload(
     max_retries: int = 3,
     skip_ssl_verify: bool = False,
     scan_context: dict | None = None,
+    scanned_usernames: list[str] | None = None,
 ) -> None:
     """
     Upload the scan results to the control server with retry logic.
@@ -55,6 +56,7 @@ async def upload(
         max_retries: Maximum number of retry attempts (default: 3)
         skip_ssl_verify: Whether to disable SSL certificate verification (default: False)
         scan_context: Optional dict containing scan context metadata to include in upload
+        scanned_usernames: List of usernames detected during the scan. When provided, used instead of the current OS username.
     """
     if not results:
         logger.info("No scan results to upload")
@@ -62,10 +64,9 @@ async def upload(
 
     additional_headers = additional_headers or {}
 
-    # Normalize control server URL
     user_info = ScanUserInfo(
         hostname=get_hostname(),
-        username=get_username(),
+        username=scanned_usernames if scanned_usernames is not None else get_username(),
         identifier=identifier,
         ip_address=None,
         anonymous_identifier=None,

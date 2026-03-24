@@ -283,17 +283,21 @@ def get_client_from_path(path: str) -> str | None:
     return None
 
 
-def get_readable_home_directories(all_users: bool = False) -> list[Path]:
+def get_readable_home_directories(all_users: bool = False) -> list[tuple[Path, str]]:
     """
     Retrieve a list of all human user home directories on the machine
     that the current process actually has permission to read and traverse.
     Logs the access status for each found directory.
+
+    Returns a list of (home_directory_path, username) tuples.
     """
     if not all_users:
-        return [Path.home()]
+        import getpass
+
+        return [(Path.home(), getpass.getuser())]
 
     system = platform.system()
-    home_dirs: set[Path] = set()
+    home_dirs: dict[Path, str] = {}
 
     if system in ("Linux", "Darwin"):
         import pwd
@@ -309,7 +313,7 @@ def get_readable_home_directories(all_users: bool = False) -> list[Path]:
                     # Check for Read (R_OK) and Traverse/Execute (X_OK) permissions
                     if os.access(dir_path, os.R_OK | os.X_OK):
                         logger.info(f"Found user '{user.pw_name}' at {dir_path} -> Access: GRANTED")
-                        home_dirs.add(dir_path)
+                        home_dirs[dir_path] = user.pw_name
                     else:
                         logger.info(f"Found user '{user.pw_name}' at {dir_path} -> Access: DENIED")
 
@@ -330,8 +334,9 @@ def get_readable_home_directories(all_users: bool = False) -> list[Path]:
                     if dir_path.is_dir():
                         # Windows primarily relies on R_OK for basic directory readability
                         if os.access(dir_path, os.R_OK):
+                            username = dir_path.name
                             logger.info(f"Found profile at {dir_path} -> Access: GRANTED")
-                            home_dirs.add(dir_path)
+                            home_dirs[dir_path] = username
                         else:
                             logger.info(f"Found profile at {dir_path} -> Access: DENIED")
 
@@ -341,7 +346,7 @@ def get_readable_home_directories(all_users: bool = False) -> list[Path]:
     else:
         raise NotImplementedError(f"Unsupported OS: {system}")
 
-    return list(home_dirs)
+    return list(home_dirs.items())
 
 
 def expand_path(path: Path, home_directory: Path | None) -> Path:
