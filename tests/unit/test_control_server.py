@@ -46,9 +46,9 @@ async def test_upload_payload_excludes_hostname_and_username():
 
 
 @pytest.mark.asyncio
-async def test_upload_sends_single_username_as_string_without_scanned_usernames():
+async def test_upload_sends_username_as_list_without_scanned_usernames():
     """
-    Test that without scanned_usernames, the upload payload falls back to the current OS username as a string.
+    Test that without scanned_usernames, the upload payload falls back to the current OS username wrapped in a list.
     """
     mock_result = ScanPathResult(path="/test/path")
 
@@ -66,7 +66,9 @@ async def test_upload_sends_single_username_as_string_without_scanned_usernames(
 
         payload = json.loads(mock_post_method.call_args.kwargs["data"])
         user_info = payload["scan_user_info"]
-        assert isinstance(user_info["username"], str)
+        assert isinstance(user_info["username"], list)
+        assert len(user_info["username"]) == 1
+        assert isinstance(user_info["username"][0], str)
 
 
 @pytest.mark.asyncio

@@ -317,7 +317,7 @@ class ScanPathResult(BaseModel):
 
 class ScanUserInfo(BaseModel):
     hostname: str | None = None
-    username: str | list[str] | None = None
+    username: list[str] | None = None
     identifier: str | None = None
     ip_address: str | None = None
     anonymous_identifier: str | None = None

@@ -66,7 +66,7 @@ async def upload(
 
     user_info = ScanUserInfo(
         hostname=get_hostname(),
-        username=scanned_usernames if scanned_usernames is not None else get_username(),
+        username=scanned_usernames if scanned_usernames else [get_username()],
         identifier=identifier,
         ip_address=None,
         anonymous_identifier=None,
