@@ -16,7 +16,7 @@ from agent_scan.models import (
     ScanPathResultsCreate,
     ScanUserInfo,
 )
-from agent_scan.utils import get_environment
+from agent_scan.utils import get_environment, get_relative_path
 from agent_scan.well_known_clients import get_client_from_path
 
 logger = logging.getLogger(__name__)
@@ -169,6 +169,7 @@ async def analyze_machine(
 
     for result in scan_paths:
         result.client = get_client_from_path(result.path) or result.client or result.path
+        result.path = get_relative_path(result.path)
 
     payload = ScanPathResultsCreate(
         scan_path_results=scan_paths,
