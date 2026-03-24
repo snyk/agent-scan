@@ -63,9 +63,7 @@ async def inspect_pipeline(
         clients_to_inspect = [
             cti
             for path in inspect_args.paths
-            for cti in await client_to_inspect_from_path(
-                path, True, home_dirs_with_users, inspect_args.scan_skills
-            )
+            for cti in await client_to_inspect_from_path(path, True, home_dirs_with_users, inspect_args.scan_skills)
         ]
     else:
         clients_to_inspect = [
