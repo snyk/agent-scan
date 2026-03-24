@@ -37,7 +37,6 @@ TEST_CANDIDATE_CLIENTS = [
 ]
 
 
-@pytest.mark.parametrize("all_user", [True, False])
 @pytest.mark.parametrize("create_file_not_found_error", [True, False])
 @pytest.mark.parametrize(
     "client, test_type",
@@ -49,12 +48,11 @@ TEST_CANDIDATE_CLIENTS = [
 )
 @pytest.mark.asyncio
 async def test_get_mcp_config_per_client(
-    all_user: bool,
     create_file_not_found_error: bool,
     client: CandidateClient,
     test_type: Literal["valid", "invalid", "does-not-exist"],
 ):
-    ctis = await get_mcp_config_per_client(client, all_user, create_file_not_found_error)
+    ctis = await get_mcp_config_per_client(client, [], create_file_not_found_error)
     assert len(ctis) == 1
 
     assert ctis[0].mcp_configs is not None
@@ -99,7 +97,7 @@ async def test_get_mcp_config_per_client(
 async def test_inspected_client_to_scan_path_result(
     client: CandidateClient, test_type: Literal["valid", "invalid", "does-not-exist"]
 ):
-    ctis = await get_mcp_config_per_client(client, False, False)
+    ctis = await get_mcp_config_per_client(client, [], False)
     inspected_client = await inspect_client(ctis[0], 10, [], True)
     scan_path_result = inspected_client_to_scan_path_result(inspected_client)
     if test_type == "invalid":
