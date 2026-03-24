@@ -1,3 +1,4 @@
+import getpass
 import logging
 import os
 from pathlib import Path
@@ -151,6 +152,8 @@ async def client_to_inspect_from_path(
     home_dirs: list[tuple[Path, str]] | None = None,
     scan_skills: bool = False,
 ) -> list[ClientToInspect]:
+    if home_dirs is None:
+        home_dirs = [(Path.home(), getpass.getuser())]
     if is_direct_scan(path):
         server_name, server_config = direct_scan_to_server_config(path)
         return [
@@ -187,7 +190,7 @@ async def client_to_inspect_from_path(
                 skills_dir_paths=[path],
             )
             return await get_mcp_config_per_client(
-                candidate_client, home_dirs=home_dirs or [], create_file_not_found_error=True
+                candidate_client, home_dirs=home_dirs, create_file_not_found_error=True
             )
     elif scan_skills and os.path.basename(os.path.normpath(path)).lower() == "skill.md":
         skill_directory = os.path.basename(os.path.dirname(os.path.normpath(path)))
@@ -210,4 +213,4 @@ async def client_to_inspect_from_path(
             mcp_config_paths=[path],
             skills_dir_paths=[],
         )
-        return await get_mcp_config_per_client(candidate_client, home_dirs=home_dirs or [], create_file_not_found_error=True)
+        return await get_mcp_config_per_client(candidate_client, home_dirs=home_dirs, create_file_not_found_error=True)
