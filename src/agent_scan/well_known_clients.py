@@ -1,3 +1,4 @@
+import getpass
 import logging
 import os
 import platform
@@ -292,8 +293,6 @@ def get_readable_home_directories(all_users: bool = False) -> list[tuple[Path, s
     Returns a list of (home_directory_path, username) tuples.
     """
     if not all_users:
-        import getpass
-
         return [(Path.home(), getpass.getuser())]
 
     system = platform.system()

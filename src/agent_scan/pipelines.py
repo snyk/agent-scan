@@ -1,5 +1,6 @@
 import logging
 import os
+from pathlib import Path
 
 from pydantic import BaseModel
 
@@ -61,13 +62,15 @@ async def inspect_pipeline(
         clients_to_inspect = [
             cti
             for path in inspect_args.paths
-            for cti in await client_to_inspect_from_path(path, True, inspect_args.all_users, inspect_args.scan_skills)
+            for cti in await client_to_inspect_from_path(
+                path, True, home_dirs_with_users, inspect_args.scan_skills
+            )
         ]
     else:
         clients_to_inspect = [
             cti
             for client in get_well_known_clients()
-            for cti in await get_mcp_config_per_client(client, inspect_args.all_users)
+            for cti in await get_mcp_config_per_client(client, home_dirs_with_users)
         ]
     # inspect
     scan_path_results: list[ScanPathResult] = []
@@ -143,7 +146,10 @@ async def inspect_analyze_push_pipeline(
 
 
 async def client_to_inspect_from_path(
-    path: str, use_path_as_client_name: bool = False, all_users: bool = False, scan_skills: bool = False
+    path: str,
+    use_path_as_client_name: bool = False,
+    home_dirs: list[tuple[Path, str]] | None = None,
+    scan_skills: bool = False,
 ) -> list[ClientToInspect]:
     if is_direct_scan(path):
         server_name, server_config = direct_scan_to_server_config(path)
@@ -181,7 +187,7 @@ async def client_to_inspect_from_path(
                 skills_dir_paths=[path],
             )
             return await get_mcp_config_per_client(
-                candidate_client, all_users=all_users, create_file_not_found_error=True
+                candidate_client, home_dirs=home_dirs or [], create_file_not_found_error=True
             )
     elif scan_skills and os.path.basename(os.path.normpath(path)).lower() == "skill.md":
         skill_directory = os.path.basename(os.path.dirname(os.path.normpath(path)))
@@ -204,4 +210,4 @@ async def client_to_inspect_from_path(
             mcp_config_paths=[path],
             skills_dir_paths=[],
         )
-        return await get_mcp_config_per_client(candidate_client, all_users=all_users, create_file_not_found_error=True)
+        return await get_mcp_config_per_client(candidate_client, home_dirs=home_dirs or [], create_file_not_found_error=True)

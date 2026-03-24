@@ -29,13 +29,15 @@ from agent_scan.models import (
 from agent_scan.signed_binary import check_server_signature
 from agent_scan.skill_client import inspect_skill, inspect_skills_dir
 from agent_scan.traffic_capture import TrafficCapture
-from agent_scan.well_known_clients import expand_path, get_readable_home_directories
+from agent_scan.well_known_clients import expand_path
 
 logger = logging.getLogger(__name__)
 
 
 async def get_mcp_config_per_client(
-    client: CandidateClient, all_users: bool = False, create_file_not_found_error: bool = False
+    client: CandidateClient,
+    home_dirs: list[tuple[Path, str]],
+    create_file_not_found_error: bool = False,
 ) -> list[ClientToInspect]:
     """
     Looks for Client (Cursor, VSCode, etc.) across all home directories in the machine.
@@ -43,7 +45,7 @@ async def get_mcp_config_per_client(
     ctis: list[ClientToInspect] = []
 
     if any(path.startswith("~") for path in client.client_exists_paths):
-        for home_directory, _username in get_readable_home_directories(all_users):
+        for home_directory, _username in home_dirs:
             cti = await get_mcp_config_per_home_directory(client, home_directory, create_file_not_found_error)
             if cti is not None:
                 ctis.append(cti)
