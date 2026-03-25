@@ -56,7 +56,7 @@ async def inspect_pipeline(
 ) -> tuple[list[ScanPathResult], list[str]]:
     # collect discovered usernames
     home_dirs_with_users = get_readable_home_directories(all_users=inspect_args.all_users)
-    scanned_usernames: list[str] = [username for _path, username in home_dirs_with_users]
+    all_usernames: list[str] = [username for _path, username in home_dirs_with_users]
 
     # fetch clients to inspect
     if inspect_args.paths:
@@ -71,6 +71,10 @@ async def inspect_pipeline(
             for client in get_well_known_clients()
             for cti in await get_mcp_config_per_client(client, home_dirs_with_users)
         ]
+
+    # only report usernames where an agent was detected; fall back to all if none detected
+    detected_usernames: list[str] = list({cti.username for cti in clients_to_inspect if cti is not None and cti.username is not None})
+    scanned_usernames: list[str] = detected_usernames if detected_usernames else all_usernames
     # inspect
     scan_path_results: list[ScanPathResult] = []
     for i, client_to_inspect in enumerate(clients_to_inspect):

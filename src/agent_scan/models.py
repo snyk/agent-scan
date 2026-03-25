@@ -506,6 +506,7 @@ class CandidateClient(BaseModel):
 class ClientToInspect(BaseModel):
     name: str
     client_path: str
+    username: str | None = None
     mcp_configs: dict[
         str,
         list[tuple[str, StdioServer | RemoteServer]]

@@ -45,9 +45,10 @@ async def get_mcp_config_per_client(
     ctis: list[ClientToInspect] = []
 
     if any(path.startswith("~") for path in client.client_exists_paths):
-        for home_directory, _username in home_dirs:
+        for home_directory, username in home_dirs:
             cti = await get_mcp_config_per_home_directory(client, home_directory, create_file_not_found_error)
             if cti is not None:
+                cti.username = username
                 ctis.append(cti)
     else:
         cti = await get_mcp_config_per_home_directory(client, None, create_file_not_found_error)
