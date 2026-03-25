@@ -73,11 +73,16 @@ async def inspect_pipeline(
     # but if no users have agents, include all users
     all_usernames: list[str] = [username for _path, username in home_dirs_with_users]
     found_clients = [cti for cti in clients_to_inspect if cti is not None]
-    scanned_usernames: list[str] = list(dict.fromkeys(
-        username
-        for home_dir, username in home_dirs_with_users
-        if any(cti.client_path.startswith(home_dir.as_posix()) for cti in found_clients)
-    )) or all_usernames
+    scanned_usernames: list[str] = (
+        list(
+            dict.fromkeys(
+                username
+                for home_dir, username in home_dirs_with_users
+                if any(cti.client_path.startswith(home_dir.as_posix()) for cti in found_clients)
+            )
+        )
+        or all_usernames
+    )
 
     # inspect
     scan_path_results: list[ScanPathResult] = []
