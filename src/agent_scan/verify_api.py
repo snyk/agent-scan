@@ -167,12 +167,17 @@ async def analyze_machine(
         anonymous_identifier=None,
     )
 
+    # Use relative paths in the analysis payload to strip the username from absolute paths,
+    # anonymizing the user. Clone to preserve the absolute paths for the control backend call.
+    analysis_path_results = []
     for result in scan_paths:
         result.client = get_client_from_path(result.path) or result.client or result.path
-        result.path = get_relative_path(result.path)
+        analysis_path_copy = result.clone()
+        analysis_path_copy.path = get_relative_path(result.path)
+        analysis_path_results.append(analysis_path_copy)
 
     payload = ScanPathResultsCreate(
-        scan_path_results=scan_paths,
+        scan_path_results=analysis_path_results,
         scan_user_info=user_info,
         scan_metadata=scan_context if scan_context else None,
     )
