@@ -54,9 +54,7 @@ class PushArgs(BaseModel):
 async def inspect_pipeline(
     inspect_args: InspectArgs,
 ) -> tuple[list[ScanPathResult], list[str]]:
-    # collect discovered usernames
     home_dirs_with_users = get_readable_home_directories(all_users=inspect_args.all_users)
-    scanned_usernames: list[str] = [username for _path, username in home_dirs_with_users]
 
     # fetch clients to inspect
     if inspect_args.paths:
@@ -71,6 +69,14 @@ async def inspect_pipeline(
             for client in get_well_known_clients()
             for cti in await get_mcp_config_per_client(client, home_dirs_with_users)
         ]
+    # only include usernames where at least one client was found
+    found_clients = [cti for cti in clients_to_inspect if cti is not None]
+    scanned_usernames: list[str] = list(dict.fromkeys(
+        username
+        for home_dir, username in home_dirs_with_users
+        if any(cti.client_path.startswith(home_dir.as_posix()) for cti in found_clients)
+    ))
+
     # inspect
     scan_path_results: list[ScanPathResult] = []
     for i, client_to_inspect in enumerate(clients_to_inspect):
