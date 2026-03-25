@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from agent_scan.cli import MissingIdentifierError, parse_control_servers
-from agent_scan.models import ControlServer, ScanPathResult
+from agent_scan.models import ControlServer, Issue, ScanPathResult
 
 
 class TestControlServerParsing:
@@ -381,6 +381,97 @@ class TestControlServerUploadIntegration:
             analyze_args = mock_pipeline.call_args[0][1]
             assert push_args.skip_ssl_verify is True
             assert analyze_args.skip_ssl_verify is True
+
+
+class TestCIMode:
+    """Tests for --ci exit status (non-zero when analysis findings are present)."""
+
+    @pytest.mark.asyncio
+    async def test_ci_exits_1_when_non_operational_issue_present(self):
+        """With --ci, sys.exit(1) when an issue has a code outside FAILURE_CATEGORY_TO_CODE_MAPPING."""
+        from argparse import Namespace
+
+        from agent_scan.cli import print_scan_inspect
+
+        mock_result = ScanPathResult(
+            path="/test/path",
+            issues=[Issue(code="E001", message="analysis finding", reference=None)],
+        )
+
+        with patch("agent_scan.cli.run_scan", new_callable=AsyncMock, return_value=[mock_result]):
+            args = Namespace(
+                json=True,
+                print_errors=False,
+                print_full_descriptions=False,
+                verbose=False,
+                ci=True,
+            )
+            with pytest.raises(SystemExit) as exc_info:
+                await print_scan_inspect(mode="scan", args=args)
+            assert exc_info.value.code == 1
+
+    @pytest.mark.asyncio
+    async def test_ci_no_exit_when_only_operational_failure_codes(self):
+        """With --ci, operational failure codes (X001 - X008) do not trigger a non-zero exit."""
+        from argparse import Namespace
+
+        from agent_scan.cli import print_scan_inspect
+
+        mock_result = ScanPathResult(
+            path="/test/path",
+            issues=[Issue(code="X001", message="server startup", reference=None)],
+        )
+
+        with patch("agent_scan.cli.run_scan", new_callable=AsyncMock, return_value=[mock_result]):
+            args = Namespace(
+                json=True,
+                print_errors=False,
+                print_full_descriptions=False,
+                verbose=False,
+                ci=True,
+            )
+            await print_scan_inspect(mode="scan", args=args)
+
+    @pytest.mark.asyncio
+    async def test_ci_no_exit_when_no_issues(self):
+        """With --ci and empty issues, the scan completes without SystemExit."""
+        from argparse import Namespace
+
+        from agent_scan.cli import print_scan_inspect
+
+        mock_result = ScanPathResult(path="/test/path", issues=[])
+
+        with patch("agent_scan.cli.run_scan", new_callable=AsyncMock, return_value=[mock_result]):
+            args = Namespace(
+                json=True,
+                print_errors=False,
+                print_full_descriptions=False,
+                verbose=False,
+                ci=True,
+            )
+            await print_scan_inspect(mode="scan", args=args)
+
+    @pytest.mark.asyncio
+    async def test_non_ci_no_exit_with_analysis_issues(self):
+        """Without --ci, analysis findings do not call sys.exit."""
+        from argparse import Namespace
+
+        from agent_scan.cli import print_scan_inspect
+
+        mock_result = ScanPathResult(
+            path="/test/path",
+            issues=[Issue(code="E001", message="analysis finding", reference=None)],
+        )
+
+        with patch("agent_scan.cli.run_scan", new_callable=AsyncMock, return_value=[mock_result]):
+            args = Namespace(
+                json=True,
+                print_errors=False,
+                print_full_descriptions=False,
+                verbose=False,
+                ci=False,
+            )
+            await print_scan_inspect(mode="scan", args=args)
 
 
 class TestJSONOutput:

@@ -20,7 +20,7 @@ from rich.logging import RichHandler
 
 from agent_scan.models import ControlServer, ScanPathResult, TokenAndClientInfo, TokenAndClientInfoList
 from agent_scan.pipelines import AnalyzeArgs, InspectArgs, PushArgs, inspect_analyze_push_pipeline, inspect_pipeline
-from agent_scan.printer import print_scan_result
+from agent_scan.printer import FAILURE_CATEGORY_TO_CODE_MAPPING, print_scan_result
 from agent_scan.upload import get_hostname
 from agent_scan.utils import ensure_unicode_console, parse_headers, suppress_stdout
 from agent_scan.verify_api import setup_aiohttp_debug_logging, setup_tcp_connector
@@ -204,6 +204,12 @@ def add_common_arguments(parser):
         action="store_true",
         help="Scan all users on the machine.",
     )
+    parser.add_argument(
+        "--ci",
+        action="store_true",
+        default=False,
+        help="Exit with a non-zero code when there are analysis findings",
+    )
 
 
 def add_server_arguments(parser):
@@ -277,7 +283,7 @@ def main():
     program_name = get_invoking_name()
     parser = argparse.ArgumentParser(
         prog=program_name,
-        description="Snyk Agent Scan: Security scanner for Model Context Protocol servers and tools",
+        description="Snyk Agent Scan: Security scanner for Model Context Protocol servers, agents, skills and tools",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
@@ -287,7 +293,8 @@ def main():
             f"  {program_name} --skills            # Scan skills beyond mcp servers.\n"
             f"  {program_name} --verbose           # Enable detailed logging output\n"
             f"  {program_name} --print-errors      # Show error details and tracebacks\n"
-            f"  {program_name} --json              # Output results in JSON format\n\n"
+            f"  {program_name} --json              # Output results in JSON format\n"
+            f"  {program_name} --ci                # With --ci, exit with a non-zero code when there are analysis findings\n\n"
             f"  # Multiple control servers with individual options:\n"
             f'  {program_name} --control-server https://server1.com --control-server-H "Auth: token1" \\\n'
             f"    --control-identifier user@example.com \\\n"
@@ -561,6 +568,7 @@ async def print_scan_inspect(mode="scan", args=None):
     print_errors: bool = hasattr(args, "print_errors") and args.print_errors
     full_description: bool = hasattr(args, "print_full_descriptions") and args.print_full_descriptions
     verbose: bool = hasattr(args, "verbose") and args.verbose
+    ci_mode: bool = hasattr(args, "ci") and args.ci
 
     if json_output:
         with suppress_stdout():
@@ -577,6 +585,15 @@ async def print_scan_inspect(mode="scan", args=None):
             full_description=full_description,
             args=args,
         )
+
+    # In CI mode, exit with a non-zero code if there are findings from the analysis result
+    if ci_mode:
+        if any(
+            issue.code and issue.code not in frozenset(FAILURE_CATEGORY_TO_CODE_MAPPING.values())
+            for scan_result in result
+            for issue in scan_result.issues
+        ):
+            sys.exit(1)
 
 
 if __name__ == "__main__":

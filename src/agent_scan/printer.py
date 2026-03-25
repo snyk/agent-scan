@@ -44,6 +44,18 @@ ICON_MAP = {
     "inspect_mode": "  ",
 }
 
+# Mapping from failure categories to codes
+# These codes are different the ones from analysis findings like E001, E002, etc
+FAILURE_CATEGORY_TO_CODE_MAPPING = {
+    "server_startup": "X001",
+    "skill_scan_error": "X002",
+    "file_not_found": "X003",
+    "unknown_config": "X004",
+    "parse_error": "X005",
+    "server_http_error": "X006",
+    "analysis_error": "X007",
+    None: "X008",
+}
 
 def format_exception(e: Exception | str | None) -> tuple[str, rTraceback | None]:
     if e is None:
@@ -68,22 +80,12 @@ def format_error(
     e: ScanError, server_idx: int | None = None, entity_idx: int | None = None
 ) -> tuple[Issue, rTraceback | None]:
     status, traceback = format_exception(e.exception)
-    code_from_category = {
-        "server_startup": "X001",
-        "skill_scan_error": "X002",
-        "file_not_found": "X003",
-        "unknown_config": "X004",
-        "parse_error": "X005",
-        "server_http_error": "X006",
-        "analysis_error": "X007",
-        None: "X008",
-    }[e.category]
     if e.message:
         status = e.message
     if e.traceback:
         traceback = e.traceback
     return Issue(
-        code=code_from_category,
+        code=FAILURE_CATEGORY_TO_CODE_MAPPING[e.category],
         message=status,
         extra_data={
             "severity": "info",

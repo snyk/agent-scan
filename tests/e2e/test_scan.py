@@ -128,6 +128,27 @@ class TestFullScanFlow:
             f"Issues codes {issue_set} do not match expected values {allowed_issue_sets}"
         )
 
+    @pytest.mark.parametrize("agent_scan_cmd", ["binary"], indirect=True)
+    def test_ci_exit_code_with_flag(self, agent_scan_cmd):
+        """Math config + analysis yields W001; --ci exits 1."""
+        math_config = "tests/mcp_servers/configs_files/math_config.json"
+        analysis_url = "https://api.snyk.io/hidden/mcp-scan/analysis-machine?version=2025-09-07"
+        base_cmd = [
+            *agent_scan_cmd,
+            "scan",
+            "--json",
+            math_config,
+            "--analysis-url",
+            analysis_url,
+        ]
+
+        with_ci = subprocess.run(
+            [*base_cmd, "--ci"],
+            capture_output=True,
+            text=True,
+        )
+        assert with_ci.returncode == 1, f"Expected exit 1 with --ci when analysis issues exist: {with_ci.stderr}"
+
     @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
     @pytest.mark.parametrize(
         "skill_path",
