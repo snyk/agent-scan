@@ -81,9 +81,7 @@ async def test_detected_usernames_filtering(home_dirs_with_agent):
     ctis = await get_mcp_config_per_client(candidate, home_dirs)
     all_usernames = [username for _, username in home_dirs]
 
-    detected_usernames = list(
-        {cti.username for cti in ctis if cti is not None and cti.username is not None}
-    )
+    detected_usernames = list({cti.username for cti in ctis if cti is not None and cti.username is not None})
     scanned_usernames = detected_usernames if detected_usernames else all_usernames
 
     assert "charlie" not in scanned_usernames
@@ -112,9 +110,7 @@ async def test_detected_usernames_falls_back_to_all_when_none_detected():
         ctis = await get_mcp_config_per_client(candidate, home_dirs)
         all_usernames = [username for _, username in home_dirs]
 
-        detected_usernames = list(
-            {cti.username for cti in ctis if cti is not None and cti.username is not None}
-        )
+        detected_usernames = list({cti.username for cti in ctis if cti is not None and cti.username is not None})
         scanned_usernames = detected_usernames if detected_usernames else all_usernames
 
         assert len(ctis) == 0
