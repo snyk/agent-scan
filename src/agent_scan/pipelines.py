@@ -69,13 +69,15 @@ async def inspect_pipeline(
             for client in get_well_known_clients()
             for cti in await get_mcp_config_per_client(client, home_dirs_with_users)
         ]
-    # only include usernames where at least one client was found
+    # only include usernames where at least one client was found,
+    # but if no users have agents, include all users
+    all_usernames: list[str] = [username for _path, username in home_dirs_with_users]
     found_clients = [cti for cti in clients_to_inspect if cti is not None]
     scanned_usernames: list[str] = list(dict.fromkeys(
         username
         for home_dir, username in home_dirs_with_users
         if any(cti.client_path.startswith(home_dir.as_posix()) for cti in found_clients)
-    ))
+    )) or all_usernames
 
     # inspect
     scan_path_results: list[ScanPathResult] = []
