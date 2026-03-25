@@ -56,7 +56,9 @@ async def inspect_pipeline(
 ) -> tuple[list[ScanPathResult], list[str]]:
     home_dirs_with_users = get_readable_home_directories(all_users=inspect_args.all_users)
 
-    # fetch clients to inspect
+    # fetch clients to inspect, tracking which users have agents
+    all_usernames: list[str] = [username for _path, username in home_dirs_with_users]
+    usernames_with_agents: set[str] = set()
     if inspect_args.paths:
         clients_to_inspect = [
             cti
@@ -64,25 +66,14 @@ async def inspect_pipeline(
             for cti in await client_to_inspect_from_path(path, True, home_dirs_with_users, inspect_args.scan_skills)
         ]
     else:
-        clients_to_inspect = [
-            cti
-            for client in get_well_known_clients()
-            for cti in await get_mcp_config_per_client(client, home_dirs_with_users)
-        ]
-    # only include usernames where at least one client was found,
-    # but if no users have agents, include all users
-    all_usernames: list[str] = [username for _path, username in home_dirs_with_users]
-    found_clients = [cti for cti in clients_to_inspect if cti is not None]
-    scanned_usernames: list[str] = (
-        list(
-            dict.fromkeys(
-                username
-                for home_dir, username in home_dirs_with_users
-                if any(cti.client_path.startswith(home_dir.as_posix()) for cti in found_clients)
-            )
-        )
-        or all_usernames
-    )
+        clients_to_inspect = []
+        for client in get_well_known_clients():
+            for home_dir, username in home_dirs_with_users:
+                ctis = await get_mcp_config_per_client(client, [(home_dir, username)])
+                clients_to_inspect.extend(ctis)
+                if ctis:
+                    usernames_with_agents.add(username)
+    scanned_usernames: list[str] = [u for u in all_usernames if u in usernames_with_agents] or all_usernames
 
     # inspect
     scan_path_results: list[ScanPathResult] = []
