@@ -73,7 +73,9 @@ async def inspect_pipeline(
         ]
 
     # only report usernames where an agent was detected; fall back to all if none detected
-    detected_usernames: list[str] = list({cti.username for cti in clients_to_inspect if cti is not None and cti.username is not None})
+    detected_usernames: list[str] = list(
+        {cti.username for cti in clients_to_inspect if cti is not None and cti.username is not None}
+    )
     scanned_usernames: list[str] = detected_usernames if detected_usernames else all_usernames
     # inspect
     scan_path_results: list[ScanPathResult] = []
