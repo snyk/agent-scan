@@ -589,12 +589,13 @@ async def print_scan_inspect(mode="scan", args=None):
 
     # In CI mode, exit with a non-zero code if any scan path has issues
     if ci_mode and any(scan_result.issues for scan_result in result):
-        codes = sorted({issue.code for scan_result in result for issue in scan_result.issues if issue.code})
-        codes_part = ", ".join(codes) if codes else "none"
-        rich.print(
-            f"[bold red]CI (--ci): exiting with code 1 (issue codes: {codes_part}).[/bold red]",
-            file=sys.stderr,
-        )
+        if not json_output:
+            codes = sorted({issue.code for scan_result in result for issue in scan_result.issues if issue.code})
+            codes_part = ", ".join(codes) if codes else "none"
+            rich.print(
+                f"[bold red]CI (--ci): exiting with code 1 (issue codes: {codes_part}).[/bold red]",
+                file=sys.stderr,
+            )
         sys.exit(1)
 
 
