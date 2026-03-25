@@ -384,18 +384,19 @@ class TestControlServerUploadIntegration:
 
 
 class TestCIMode:
-    """Tests for --ci exit status (non-zero when analysis findings are present)."""
+    """Tests for --ci exit status (non-zero when any issues are present)."""
 
+    @pytest.mark.parametrize("code", ["E001", "X002", "X007"])
     @pytest.mark.asyncio
-    async def test_ci_exits_1_when_non_operational_issue_present(self):
-        """With --ci, sys.exit(1) when an issue has a code outside FAILURE_CATEGORY_TO_CODE_MAPPING."""
+    async def test_ci_exits_1_when_any_issue(self, code: str):
+        """With --ci, sys.exit(1) for any issue regardless of code (analysis or operational)."""
         from argparse import Namespace
 
         from agent_scan.cli import print_scan_inspect
 
         mock_result = ScanPathResult(
             path="/test/path",
-            issues=[Issue(code="E001", message="analysis finding", reference=None)],
+            issues=[Issue(code=code, message="issue", reference=None)],
         )
 
         with patch("agent_scan.cli.run_scan", new_callable=AsyncMock, return_value=[mock_result]):
@@ -409,28 +410,6 @@ class TestCIMode:
             with pytest.raises(SystemExit) as exc_info:
                 await print_scan_inspect(mode="scan", args=args)
             assert exc_info.value.code == 1
-
-    @pytest.mark.asyncio
-    async def test_ci_no_exit_when_only_operational_failure_codes(self):
-        """With --ci, operational failure codes (X001 - X008) do not trigger a non-zero exit."""
-        from argparse import Namespace
-
-        from agent_scan.cli import print_scan_inspect
-
-        mock_result = ScanPathResult(
-            path="/test/path",
-            issues=[Issue(code="X001", message="server startup", reference=None)],
-        )
-
-        with patch("agent_scan.cli.run_scan", new_callable=AsyncMock, return_value=[mock_result]):
-            args = Namespace(
-                json=True,
-                print_errors=False,
-                print_full_descriptions=False,
-                verbose=False,
-                ci=True,
-            )
-            await print_scan_inspect(mode="scan", args=args)
 
     @pytest.mark.asyncio
     async def test_ci_no_exit_when_no_issues(self):

@@ -20,7 +20,7 @@ from rich.logging import RichHandler
 
 from agent_scan.models import ControlServer, ScanPathResult, TokenAndClientInfo, TokenAndClientInfoList
 from agent_scan.pipelines import AnalyzeArgs, InspectArgs, PushArgs, inspect_analyze_push_pipeline, inspect_pipeline
-from agent_scan.printer import FAILURE_CATEGORY_TO_CODE_MAPPING, print_scan_result
+from agent_scan.printer import print_scan_result
 from agent_scan.upload import get_hostname
 from agent_scan.utils import ensure_unicode_console, parse_headers, suppress_stdout
 from agent_scan.verify_api import setup_aiohttp_debug_logging, setup_tcp_connector
@@ -586,14 +586,15 @@ async def print_scan_inspect(mode="scan", args=None):
             args=args,
         )
 
-    # In CI mode, exit with a non-zero code if there are findings from the analysis result
-    if ci_mode:
-        if any(
-            issue.code and issue.code not in frozenset(FAILURE_CATEGORY_TO_CODE_MAPPING.values())
-            for scan_result in result
-            for issue in scan_result.issues
-        ):
-            sys.exit(1)
+    # In CI mode, exit with a non-zero code if any scan path has issues
+    if ci_mode and any(scan_result.issues for scan_result in result):
+        codes = sorted({issue.code for scan_result in result for issue in scan_result.issues if issue.code})
+        codes_part = ", ".join(codes) if codes else "none"
+        rich.print(
+            f"[bold red]CI (--ci): exiting with code 1 (issue codes: {codes_part}).[/bold red]",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 if __name__ == "__main__":
