@@ -57,6 +57,7 @@ FAILURE_CATEGORY_TO_CODE_MAPPING = {
     None: "X008",
 }
 
+
 def format_exception(e: Exception | str | None) -> tuple[str, rTraceback | None]:
     if e is None:
         return "", None
