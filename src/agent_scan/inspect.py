@@ -305,12 +305,8 @@ def inspected_client_to_scan_path_result(inspected_client: InspectedClient) -> S
                             traceback=extension.signature_or_error.traceback,
                             is_failure=extension.signature_or_error.is_failure,
                             category=extension.signature_or_error.category,
-                            server_output=extension.signature_or_error.server_output
-                            if isinstance(extension.signature_or_error, ServerStartupError | ServerHTTPError)
-                            else None,
-                            status_code=extension.signature_or_error.status_code
-                            if isinstance(extension.signature_or_error, ServerHTTPError)
-                            else None,
+                            server_output=getattr(extension.signature_or_error, "server_output", None),
+                            status_code=getattr(extension.signature_or_error, "status_code", None),
                         ),
                     )
                 )
