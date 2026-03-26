@@ -329,6 +329,45 @@ async def test_upload_server_http_error_in_payload():
         sent_result = payload["scan_path_results"][0]
         assert sent_result["servers"][0]["error"]["message"] == "server returned HTTP status code"
         assert sent_result["servers"][0]["error"]["is_failure"] is True
+        assert sent_result["servers"][0]["error"]["status_code"] is None
+
+
+@pytest.mark.asyncio
+async def test_upload_server_http_error_status_code_in_payload():
+    """
+    Ensure status_code on ScanError is serialized and sent to the control server.
+    """
+    result = ScanPathResult(
+        path="/ok/path",
+        servers=[
+            ServerScanResult(
+                name="srv",
+                server=StdioServer(command="echo"),
+                error=ScanError(
+                    message="server returned HTTP status code",
+                    is_failure=True,
+                    category="server_http_error",
+                    status_code=401,
+                ),
+            )
+        ],
+    )
+
+    mock_http_response = AsyncMock(status=200)
+    mock_http_response.json.return_value = []
+    mock_http_response.text.return_value = ""
+
+    mock_post_context_manager = AsyncMock()
+    mock_post_context_manager.__aenter__.return_value = mock_http_response
+
+    with patch("agent_scan.upload.aiohttp.ClientSession.post") as mock_post_method:
+        mock_post_method.return_value = mock_post_context_manager
+
+        await upload([result], "https://control.mcp.scan", None, False)
+
+        payload = json.loads(mock_post_method.call_args.kwargs["data"])
+        sent_result = payload["scan_path_results"][0]
+        assert sent_result["servers"][0]["error"]["status_code"] == 401
 
 
 @pytest.mark.asyncio

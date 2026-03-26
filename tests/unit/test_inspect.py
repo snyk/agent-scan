@@ -2,12 +2,13 @@ import getpass
 import shutil
 import tempfile
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from httpx import HTTPStatusError
 
-from agent_scan.inspect import get_mcp_config_per_client
-from agent_scan.models import CandidateClient, ClientToInspect
+from agent_scan.inspect import get_mcp_config_per_client, inspect_extension
+from agent_scan.models import CandidateClient, ClientToInspect, RemoteServer
 from agent_scan.pipelines import InspectArgs, inspect_pipeline
 
 TEST_CANDIDATE_CLIENT = CandidateClient(
@@ -399,3 +400,62 @@ async def test_inspect_pipeline_discovery_mode_without_all_users_falls_back_to_c
         assert scanned_usernames == [getpass.getuser()]
     finally:
         shutil.rmtree(tmp)
+
+
+@pytest.mark.asyncio
+async def test_inspect_extension_remote_server_http_error_captures_status_code():
+    """
+    When a remote MCP server raises HTTPStatusError, the resulting ScanError
+    must include the HTTP status code from the response.
+    """
+    mock_response = MagicMock()
+    mock_response.status_code = 401
+
+    http_error = HTTPStatusError("401 Unauthorized", request=MagicMock(), response=mock_response)
+
+    with patch("agent_scan.inspect.check_server", side_effect=http_error):
+        result = await inspect_extension(
+            name="my-server",
+            config=RemoteServer(url="https://example.com/mcp"),
+            timeout=10,
+        )
+
+    from agent_scan.models import ServerHTTPError
+
+    assert isinstance(result.signature_or_error, ServerHTTPError)
+    assert result.signature_or_error.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_inspect_extension_remote_server_http_error_status_code_propagates_to_scan_error():
+    """
+    The status_code captured in ServerHTTPError must be propagated into the
+    ScanError produced by inspected_client_to_scan_path_result.
+    """
+    from agent_scan.inspect import inspected_client_to_scan_path_result
+    from agent_scan.models import InspectedClient, InspectedExtensions, ServerHTTPError
+
+    http_err = ServerHTTPError(
+        message="server returned HTTP status code",
+        traceback=None,
+        is_failure=True,
+        sub_exception_message="401 Unauthorized",
+        server_output=None,
+        status_code=403,
+    )
+    inspected_client = InspectedClient(
+        name="test-client",
+        client_path="/some/path",
+        extensions={"my-server": [InspectedExtensions(
+            name="my-server",
+            config=RemoteServer(url="https://example.com/mcp"),
+            signature_or_error=http_err,
+        )]},
+    )
+
+    scan_path_result = inspected_client_to_scan_path_result(inspected_client)
+
+    assert scan_path_result.servers is not None
+    server_result = scan_path_result.servers[0]
+    assert server_result.error is not None
+    assert server_result.error.status_code == 403
