@@ -24,15 +24,15 @@ def make_http_status_error(status_code: int) -> httpx.HTTPStatusError:
 
 class TestServerHTTPErrorStatusCode:
     def test_status_code_field_exists(self):
-        err = ServerHTTPError(message="server returned HTTP status code", category="server_http_error", status_code=401)
+        err = ServerHTTPError(message="server returned HTTP status code", status_code=401)
         assert err.status_code == 401
 
     def test_status_code_defaults_to_none(self):
-        err = ServerHTTPError(message="server returned HTTP status code", category="server_http_error")
+        err = ServerHTTPError(message="server returned HTTP status code")
         assert err.status_code is None
 
     def test_status_code_serializes(self):
-        err = ServerHTTPError(message="server returned HTTP status code", category="server_http_error", status_code=404)
+        err = ServerHTTPError(message="server returned HTTP status code", status_code=404)
         data = err.model_dump()
         assert data["status_code"] == 404
 
