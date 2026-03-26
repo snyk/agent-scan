@@ -185,12 +185,7 @@ class TestFullScanFlow:
         assert result.returncode == 0, f"Command failed with error: {result.stderr}"
         output = json.loads(result.stdout)
         assert len(output) == 1, "Output should contain exactly one entry for the config file"
-        assert output[remote_server_with_oauth_in_catalog_file]["servers"][0]["signature"] is not None, (
-            "Signature should not be None"
-        )
-        assert output[remote_server_with_oauth_in_catalog_file]["servers"][0]["error"] is not None, json.dumps(
-            output, indent=4
-        )
-        assert output[remote_server_with_oauth_in_catalog_file]["servers"][0]["error"]["is_failure"] is False, (
-            "Error should not be a failure"
-        )
+        key = posix(remote_server_with_oauth_in_catalog_file)
+        assert output[key]["servers"][0]["signature"] is not None, "Signature should not be None"
+        assert output[key]["servers"][0]["error"] is not None, json.dumps(output, indent=4)
+        assert output[key]["servers"][0]["error"]["is_failure"] is False, "Error should not be a failure"
