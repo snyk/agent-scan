@@ -204,6 +204,7 @@ class ScanError(BaseModel):
     is_failure: bool = True
     category: ErrorCategory | None = None
     server_output: str | None = None  # Captured MCP traffic (sent/received messages + stderr)
+    status_code: int | None = None
 
     @field_serializer("exception")
     def serialize_exception(self, exception: Exception | None, _info) -> str | None:
@@ -225,6 +226,7 @@ class ScanError(BaseModel):
             is_failure=self.is_failure,
             category=self.category,
             server_output=self.server_output,
+            status_code=self.status_code,
         )
 
 
@@ -489,6 +491,7 @@ class SkillScannError(SerializedException):
 class ServerHTTPError(SerializedException):
     category: Literal["server_http_error"] = "server_http_error"
     server_output: str | None = None
+    status_code: int | None = None
 
 
 class AnalysisError(SerializedException):
