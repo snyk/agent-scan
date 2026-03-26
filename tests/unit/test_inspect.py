@@ -154,7 +154,7 @@ async def test_inspect_pipeline_reports_only_detected_usernames(home_dirs_with_a
 
 @pytest.mark.asyncio
 async def test_inspect_pipeline_falls_back_to_all_usernames_when_no_agents_detected():
-    """When no agents are detected for any user, inspect_pipeline should report all usernames."""
+    """When no agents are detected and all_users is set, inspect_pipeline should report all usernames."""
     tmp = tempfile.mkdtemp()
     try:
         home_dirs = [
@@ -175,7 +175,7 @@ async def test_inspect_pipeline_falls_back_to_all_usernames_when_no_agents_detec
             patch("agent_scan.pipelines.get_readable_home_directories", return_value=home_dirs),
             patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
         ):
-            args = InspectArgs(timeout=10, tokens=[], paths=[])
+            args = InspectArgs(timeout=10, tokens=[], paths=[], all_users=True)
             _, scanned_usernames = await inspect_pipeline(args)
 
         assert sorted(scanned_usernames) == ["alice", "bob"]
@@ -341,7 +341,7 @@ async def test_inspect_pipeline_paths_mode_does_not_leak_all_usernames():
 
 @pytest.mark.asyncio
 async def test_inspect_pipeline_discovery_mode_falls_back_to_all_usernames_when_no_agents_detected():
-    """Without --paths, when no agents are detected, all readable usernames should be reported (original behavior)."""
+    """Without --paths but with --scan-all-users, when no agents are detected, all readable usernames should be reported."""
     tmp = tempfile.mkdtemp()
     try:
         home_dirs = [
@@ -362,9 +362,40 @@ async def test_inspect_pipeline_discovery_mode_falls_back_to_all_usernames_when_
             patch("agent_scan.pipelines.get_readable_home_directories", return_value=home_dirs),
             patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
         ):
-            args = InspectArgs(timeout=10, tokens=[], paths=[])
+            args = InspectArgs(timeout=10, tokens=[], paths=[], all_users=True)
             _, scanned_usernames = await inspect_pipeline(args)
 
         assert sorted(scanned_usernames) == ["alice", "bob"]
+    finally:
+        shutil.rmtree(tmp)
+
+
+@pytest.mark.asyncio
+async def test_inspect_pipeline_discovery_mode_without_all_users_falls_back_to_current_user():
+    """Without --paths and without --scan-all-users, when no agents are detected, only the current user should be reported."""
+    tmp = tempfile.mkdtemp()
+    try:
+        home_dirs = [
+            (Path(tmp) / "alice", "alice"),
+            (Path(tmp) / "bob", "bob"),
+        ]
+        for home, _ in home_dirs:
+            home.mkdir(parents=True, exist_ok=True)
+
+        candidate = CandidateClient(
+            name="nonexistent-client",
+            client_exists_paths=["~/.nonexistent-client"],
+            mcp_config_paths=[],
+            skills_dir_paths=[],
+        )
+
+        with (
+            patch("agent_scan.pipelines.get_readable_home_directories", return_value=home_dirs),
+            patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
+        ):
+            args = InspectArgs(timeout=10, tokens=[], paths=[], all_users=False)
+            _, scanned_usernames = await inspect_pipeline(args)
+
+        assert scanned_usernames == [getpass.getuser()]
     finally:
         shutil.rmtree(tmp)
