@@ -4,10 +4,18 @@ import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 
-from agent_scan.inspect import get_mcp_config_per_client
-from agent_scan.models import CandidateClient, ClientToInspect
+from agent_scan.inspect import get_mcp_config_per_client, inspect_extension, inspected_client_to_scan_path_result
+from agent_scan.models import (
+    CandidateClient,
+    ClientToInspect,
+    InspectedClient,
+    InspectedExtensions,
+    RemoteServer,
+    ServerHTTPError,
+)
 from agent_scan.pipelines import InspectArgs, inspect_pipeline
 
 TEST_CANDIDATE_CLIENT = CandidateClient(
@@ -399,3 +407,66 @@ async def test_inspect_pipeline_discovery_mode_without_all_users_falls_back_to_c
         assert scanned_usernames == [getpass.getuser()]
     finally:
         shutil.rmtree(tmp)
+
+
+# --- HTTP status code surfacing tests ---
+
+
+def _make_http_status_error(status_code: int) -> httpx.HTTPStatusError:
+    request = httpx.Request("GET", "http://example.com")
+    response = httpx.Response(status_code=status_code, request=request)
+    return httpx.HTTPStatusError(message=f"HTTP {status_code}", request=request, response=response)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [401, 403, 404, 500])
+async def test_inspect_extension_captures_http_status_code(status_code):
+    """When a remote server returns an HTTP error, the status code should be captured in ServerHTTPError."""
+    config = RemoteServer(url="http://example.com")
+
+    with patch("agent_scan.inspect.check_server", side_effect=_make_http_status_error(status_code)):
+        result = await inspect_extension("test-server", config, timeout=5)
+
+    assert isinstance(result.signature_or_error, ServerHTTPError)
+    assert result.signature_or_error.http_status_code == status_code
+
+
+@pytest.mark.asyncio
+async def test_inspect_extension_no_http_status_code_on_generic_error():
+    """When a remote server fails with a non-HTTP exception, http_status_code should not be set."""
+    from agent_scan.models import ServerStartupError
+
+    config = RemoteServer(url="http://example.com")
+
+    with patch("agent_scan.inspect.check_server", side_effect=Exception("connection refused")):
+        result = await inspect_extension("test-server", config, timeout=5)
+
+    assert isinstance(result.signature_or_error, ServerStartupError)
+    assert (
+        not hasattr(result.signature_or_error, "http_status_code") or result.signature_or_error.http_status_code is None
+    )  # type: ignore[union-attr]
+
+
+@pytest.mark.parametrize("status_code", [401, 403, 404, 500])
+def test_inspected_client_to_scan_path_result_propagates_http_status_code(status_code):
+    """HTTP status code from ServerHTTPError should be propagated into ScanError sent to the platform."""
+    config = RemoteServer(url="http://example.com", type="http")
+    http_error = ServerHTTPError(
+        message="server returned HTTP status code",
+        traceback="...",
+        sub_exception_message=f"HTTP {status_code}",
+        http_status_code=status_code,
+    )
+    extension = InspectedExtensions(name="test-server", config=config, signature_or_error=http_error)
+    client = InspectedClient(
+        name="test-client",
+        client_path="/test/path",
+        extensions={"/test/mcp.json": [extension]},
+    )
+
+    result = inspected_client_to_scan_path_result(client)
+
+    assert result.servers is not None
+    assert len(result.servers) == 1
+    assert result.servers[0].error is not None
+    assert result.servers[0].error.http_status_code == status_code

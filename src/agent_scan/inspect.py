@@ -194,6 +194,7 @@ async def inspect_extension(
                     is_failure=True,
                     sub_exception_message=str(e),
                     server_output=traffic_capture.get_traffic_log(),
+                    http_status_code=e.response.status_code,
                 ),
             )
         except Exception as e:
@@ -306,6 +307,9 @@ def inspected_client_to_scan_path_result(inspected_client: InspectedClient) -> S
                             category=extension.signature_or_error.category,
                             server_output=extension.signature_or_error.server_output
                             if isinstance(extension.signature_or_error, ServerStartupError | ServerHTTPError)
+                            else None,
+                            http_status_code=extension.signature_or_error.http_status_code
+                            if isinstance(extension.signature_or_error, ServerHTTPError)
                             else None,
                         ),
                     )
