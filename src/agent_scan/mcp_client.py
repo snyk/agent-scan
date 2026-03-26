@@ -263,6 +263,14 @@ async def check_server(
                 exceptions.append(e)
                 continue
 
+        # If any attempt produced an HTTP status error, surface it so callers can
+        # inspect the status code rather than receiving a generic exception.
+        from httpx import HTTPStatusError
+
+        http_errors = [e for e in exceptions if isinstance(e, HTTPStatusError)]
+        if http_errors:
+            raise http_errors[-1]
+
         # if python 3.11 or higher, use ExceptionGroup
         if sys.version_info >= (3, 11):
             raise ExceptionGroup("Could not connect to remote server", exceptions)  # noqa: F821

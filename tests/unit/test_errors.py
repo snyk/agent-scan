@@ -65,8 +65,10 @@ class TestScanErrorStatusCode:
 class TestInspectExtensionHTTPStatusCode:
     @pytest.mark.asyncio
     async def test_401_is_captured_as_status_code(self):
+        # Mock _check_server_pass so the real check_server() retry loop runs and
+        # collects the HTTPStatusError before re-raising it.
         config = RemoteServer(url="https://example.com/mcp")
-        with patch("agent_scan.inspect.check_server", side_effect=make_http_status_error(401)):
+        with patch("agent_scan.mcp_client._check_server_pass", side_effect=make_http_status_error(401)):
             result = await inspect_extension("my-server", config, timeout=5)
 
         assert isinstance(result.signature_or_error, ServerHTTPError)
@@ -75,7 +77,7 @@ class TestInspectExtensionHTTPStatusCode:
     @pytest.mark.asyncio
     async def test_404_is_captured_as_status_code(self):
         config = RemoteServer(url="https://example.com/mcp")
-        with patch("agent_scan.inspect.check_server", side_effect=make_http_status_error(404)):
+        with patch("agent_scan.mcp_client._check_server_pass", side_effect=make_http_status_error(404)):
             result = await inspect_extension("my-server", config, timeout=5)
 
         assert isinstance(result.signature_or_error, ServerHTTPError)
@@ -84,7 +86,7 @@ class TestInspectExtensionHTTPStatusCode:
     @pytest.mark.asyncio
     async def test_status_code_propagates_to_scan_error(self):
         config = RemoteServer(url="https://example.com/mcp")
-        with patch("agent_scan.inspect.check_server", side_effect=make_http_status_error(401)):
+        with patch("agent_scan.mcp_client._check_server_pass", side_effect=make_http_status_error(401)):
             inspected = await inspect_extension("my-server", config, timeout=5)
 
         client = InspectedClient(
