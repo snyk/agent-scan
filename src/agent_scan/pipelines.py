@@ -72,11 +72,18 @@ async def inspect_pipeline(
             for cti in await get_mcp_config_per_client(client, home_dirs_with_users)
         ]
 
-    # only report usernames where an agent was detected; fall back to all if none detected
+    # only report usernames where an agent was detected;
+    # fall back to all only during home-directory discovery (no --paths),
+    # to avoid disclosing unrelated usernames when scanning explicit paths.
     detected_usernames: list[str] = sorted(
         {cti.username for cti in clients_to_inspect if cti is not None and cti.username is not None}
     )
-    scanned_usernames: list[str] = detected_usernames if detected_usernames else all_usernames
+    if detected_usernames:
+        scanned_usernames = detected_usernames
+    elif not inspect_args.paths:
+        scanned_usernames = all_usernames
+    else:
+        scanned_usernames = [getpass.getuser()]
     # inspect
     scan_path_results: list[ScanPathResult] = []
     for i, client_to_inspect in enumerate(clients_to_inspect):

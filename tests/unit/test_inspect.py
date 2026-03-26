@@ -1,3 +1,4 @@
+import getpass
 import shutil
 import tempfile
 from pathlib import Path
@@ -301,5 +302,69 @@ async def test_inspect_pipeline_deduplicates_usernames_across_clients():
             _, scanned_usernames = await inspect_pipeline(args)
 
         assert scanned_usernames == ["alice"]
+    finally:
+        shutil.rmtree(tmp)
+
+
+@pytest.mark.asyncio
+async def test_inspect_pipeline_paths_mode_does_not_leak_all_usernames():
+    """When using --paths, scanned_usernames should not fall back to all readable usernames."""
+    tmp = tempfile.mkdtemp()
+    try:
+        home_dirs = [
+            (Path(tmp) / "alice", "alice"),
+            (Path(tmp) / "bob", "bob"),
+        ]
+        for home, _ in home_dirs:
+            home.mkdir(parents=True, exist_ok=True)
+
+        with (
+            patch("agent_scan.pipelines.get_readable_home_directories", return_value=home_dirs),
+            patch(
+                "agent_scan.pipelines.client_to_inspect_from_path",
+                new_callable=AsyncMock,
+                return_value=[ClientToInspect(name="test", client_path="/some/path", mcp_configs={}, skills_dirs={})],
+            ),
+            patch("agent_scan.pipelines.inspect_client", new_callable=AsyncMock) as mock_inspect,
+            patch("agent_scan.pipelines.inspected_client_to_scan_path_result") as mock_to_result,
+        ):
+            mock_inspect.return_value = None
+            mock_to_result.return_value = None
+
+            args = InspectArgs(timeout=10, tokens=[], paths=["/some/path/mcp.json"])
+            _, scanned_usernames = await inspect_pipeline(args)
+
+        assert scanned_usernames == [getpass.getuser()]
+    finally:
+        shutil.rmtree(tmp)
+
+
+@pytest.mark.asyncio
+async def test_inspect_pipeline_discovery_mode_falls_back_to_all_usernames_when_no_agents_detected():
+    """Without --paths, when no agents are detected, all readable usernames should be reported (original behavior)."""
+    tmp = tempfile.mkdtemp()
+    try:
+        home_dirs = [
+            (Path(tmp) / "alice", "alice"),
+            (Path(tmp) / "bob", "bob"),
+        ]
+        for home, _ in home_dirs:
+            home.mkdir(parents=True, exist_ok=True)
+
+        candidate = CandidateClient(
+            name="nonexistent-client",
+            client_exists_paths=["~/.nonexistent-client"],
+            mcp_config_paths=[],
+            skills_dir_paths=[],
+        )
+
+        with (
+            patch("agent_scan.pipelines.get_readable_home_directories", return_value=home_dirs),
+            patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
+        ):
+            args = InspectArgs(timeout=10, tokens=[], paths=[])
+            _, scanned_usernames = await inspect_pipeline(args)
+
+        assert sorted(scanned_usernames) == ["alice", "bob"]
     finally:
         shutil.rmtree(tmp)
