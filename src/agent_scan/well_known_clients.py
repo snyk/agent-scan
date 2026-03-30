@@ -75,12 +75,18 @@ MACOS_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
         client_exists_paths=["~/.gemini/antigravity"],
         mcp_config_paths=["~/.gemini/antigravity/mcp_config.json"],
         skills_dir_paths=[],
-    ),
+    ), 
     CandidateClient(
         name="codex",
         client_exists_paths=["~/.codex"],
         mcp_config_paths=[],
         skills_dir_paths=["~/.codex/skills"],
+    ),
+    CandidateClient(
+        name="amazon_q",
+        client_exists_paths=["~/.aws/amazonq"],
+        mcp_config_paths=["~/.aws/amazonq/agents/default.json", "~/.aws/amazonq/agents/mcp.json"],
+        skills_dir_paths=[],
     ),
 ]
 
@@ -149,6 +155,12 @@ LINUX_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
         mcp_config_paths=[],
         skills_dir_paths=["~/.codex/skills"],
     ),
+    CandidateClient(
+        name="amazon_q",
+        client_exists_paths=["~/.aws"],
+        mcp_config_paths=["~/.aws/amazonq/default.json", "~/.aws/amazonq/mcp.json"],
+        skills_dir_paths=["~/.codex/skills"],
+    ),
 ]
 
 
@@ -215,6 +227,12 @@ WINDOWS_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
         name="antigravity",
         client_exists_paths=["~/.gemini/antigravity"],
         mcp_config_paths=["~/.gemini/antigravity/mcp_config.json"],
+        skills_dir_paths=[],
+    ),
+    CandidateClient(
+        name="amazon_q",
+        client_exists_paths=["~/.aws/amazonq"],
+        mcp_config_paths=["~/.aws/amazonq/agents/default.json", "~/.aws/amazonq/agents/mcp.json"],
         skills_dir_paths=[],
     ),
 ]
