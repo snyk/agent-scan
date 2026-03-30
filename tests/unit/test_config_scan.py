@@ -17,7 +17,7 @@ from mcp.types import (
 from pytest_lazy_fixtures import lf
 
 from agent_scan.mcp_client import check_server, scan_mcp_config_file
-from agent_scan.models import StdioServer, UnknownMCPConfig, ConfigWithoutMCP
+from agent_scan.models import ConfigWithoutMCP, StdioServer, UnknownMCPConfig
 
 
 @pytest.mark.parametrize(
