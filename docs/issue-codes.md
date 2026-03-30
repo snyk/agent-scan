@@ -34,11 +34,15 @@ While the presence of these words alone does not confirm malicious intent, it is
 
 ---
 
+<a id="ToxicFlows">
+
+## Toxic Flows
+
+Research from [Invariant Labs](https://invariantlabs.ai/blog/mcp-github-vulnerability) and [Simon Willison](https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/) demonstrates how a critical vulnerability arises when an agent simultaneously has: exposure to untrusted content, access to private data, and the ability to communicate with the internet. This combination is referred to as a toxic flow.
+
+In practice, most agents possess all three of these characteristics and are therefore inherently vulnerable. For this reason, our analysis focuses on each component individually. We flag servers that expose the agent to untrusted data ([W015](#W015), [W016](#W016)); servers that expose particularly sensitive private data that should be excluded from the agent's context ([W017](#W017), [W018](#W018)); and servers with potentially destructive capabilities ([W019](#W019), [W020](#W020)). We currently do not separately flag internet communication capabilities, as most agents include network access tools (such as curl) by default.
+
 <a id="W015"></a>
-
-## Vulnerable MCP Servers
-
-These issues highlight how benign mcp servers can play a role during an attack. Here the attack itself as not occured yet, rather we found a risky setting, for this reason all the issues here are capped at "medium".
 
 ### ![W015 | medium](https://img.shields.io/badge/W015-medium-yellow) ![MCP](https://img.shields.io/badge/MCP-blue) Untrusted content detected
 
