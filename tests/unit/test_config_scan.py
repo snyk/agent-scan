@@ -17,7 +17,7 @@ from mcp.types import (
 from pytest_lazy_fixtures import lf
 
 from agent_scan.mcp_client import check_server, scan_mcp_config_file
-from agent_scan.models import StdioServer, UnknownMCPConfig
+from agent_scan.models import StdioServer, UnknownMCPConfig, ConfigWithoutMCP
 
 
 @pytest.mark.parametrize(
@@ -164,7 +164,7 @@ async def test_weather_server():
 async def test_vscode_settings_file_without_mcp():
     path = "tests/mcp_servers/configs_files/vs_code_settings_file_without_mcp.json"
     mcp_config = await scan_mcp_config_file(path)
-    assert isinstance(mcp_config, UnknownMCPConfig)
+    assert isinstance(mcp_config, ConfigWithoutMCP)
     servers = mcp_config.get_servers()
     assert len(servers) == 0
 

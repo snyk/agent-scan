@@ -175,7 +175,6 @@ class VSCodeConfigFile(MCPConfig):
     def set_servers(self, servers: dict[str, StdioServer | RemoteServer]) -> None:
         self.mcp.servers = servers
 
-
 class UnknownMCPConfig(MCPConfig):
     """
     Represents an MCP configuration the scanner cannot interpret.
@@ -188,12 +187,24 @@ class UnknownMCPConfig(MCPConfig):
     """
 
     model_config = ConfigDict()
+    mcp: list[Any] | dict[str, Any]
 
     def get_servers(self) -> dict[str, StdioServer | RemoteServer]:
         return {}
 
     def set_servers(self, servers: dict[str, StdioServer | RemoteServer]) -> None:
         pass
+
+
+class ConfigWithoutMCP(MCPConfig):
+    model_config = ConfigDict()
+
+    def get_servers(self) -> dict[str, StdioServer | RemoteServer]:
+        return {}
+
+    def set_servers(self, servers: dict[str, StdioServer | RemoteServer]) -> None:
+        pass
+
 
 
 class ScanError(BaseModel):

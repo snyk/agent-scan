@@ -19,6 +19,7 @@ from mcp.shared.auth import OAuthClientMetadata
 from agent_scan.models import (
     ClaudeCodeConfigFile,
     ClaudeConfigFile,
+    ConfigWithoutMCP,
     FileTokenStorage,
     MCPConfig,
     RemoteServer,
@@ -283,6 +284,7 @@ async def scan_mcp_config_file(path: str) -> MCPConfig:
             VSCodeConfigFile,  # used by vscode settings.json
             VSCodeMCPConfig,  # used by vscode mcp.json
             UnknownMCPConfig,  # used by unknown config files
+            ConfigWithoutMCP,  # used by config files without MCP
         ]
         for model in models:
             try:

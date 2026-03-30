@@ -343,13 +343,13 @@ def print_scan_path_result(
     full_description: bool = False,
     args=None,
 ) -> None:
+    issues = []
     if result.error is not None:
         error_issue, traceback = format_error(result.error)
-        rich.print(format_path_line(result.path, issues=[error_issue]))
+        issues.append(error_issue)
         if print_errors and traceback is not None:
             console = rich.console.Console()
             console.print(traceback)
-        return
 
     server_count = 0
     skill_count = 0
@@ -370,7 +370,7 @@ def print_scan_path_result(
         message = "no mcp servers or skills found"
     else:
         message = "no mcp servers found"
-    rich.print(format_path_line(result.path, message))
+    rich.print(format_path_line(result.path, message, issues))
     path_print_tree = Tree("│")
     server_tracebacks = []
     for server_idx, server in enumerate(result.servers or []):
