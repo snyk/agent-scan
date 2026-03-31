@@ -6,7 +6,7 @@ This is the reference for all issues that can be detected via `snyk-agent-scan`.
 
 ## Compromised MCP Servers
 
-These issues hilight that the installed MCP server is acting maliciously. This yields a very important security threat, as it effectivly exposes a successful supply chain attack
+These issues highlight that the installed MCP server is acting maliciously. This yields a very important security threat, as it effectivly exposes a successful supply chain attack
 
 <a id="E001"></a>
 
