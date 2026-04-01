@@ -51,7 +51,7 @@ $userAgent = "snyk/snyk-agent-guard.ps1 Agent Scan v$AGENT_SCAN_VERSION"
 $url = "$($env:REMOTE_HOOKS_BASE_URL)$endpoint`?version=$VERSION"
 
 # Read payload from stdin
-$payload = @($Input) -join "`n"
+$payload = [Console]::In.ReadToEnd()
 if (-not $payload) {
     Write-Error "Expected JSON payload on stdin"
     exit 1
