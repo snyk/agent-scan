@@ -58,8 +58,9 @@ switch ($Client) {
 $userAgent = "snyk/snyk-agent-guard.ps1 Agent Scan v$AGENT_SCAN_VERSION"
 $url = "${RemoteUrl}${endpoint}?version=$VERSION"
 
-# Read payload from stdin
-$payload = [Console]::In.ReadToEnd().Trim()
+# Read payload from stdin as UTF-8 (strips BOM automatically)
+$reader = New-Object System.IO.StreamReader([Console]::OpenStandardInput(), [System.Text.Encoding]::UTF8, $true)
+$payload = $reader.ReadToEnd().Trim()
 if (-not $payload) {
     Write-Error "Expected JSON payload on stdin"
     exit 1
