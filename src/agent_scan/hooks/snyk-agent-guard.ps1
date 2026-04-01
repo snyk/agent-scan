@@ -59,7 +59,7 @@ $userAgent = "snyk/snyk-agent-guard.ps1 Agent Scan v$AGENT_SCAN_VERSION"
 $url = "${RemoteUrl}${endpoint}?version=$VERSION"
 
 # Read payload from stdin
-$payload = [Console]::In.ReadToEnd()
+$payload = [Console]::In.ReadToEnd().Trim()
 if (-not $payload) {
     Write-Error "Expected JSON payload on stdin"
     exit 1
@@ -95,7 +95,8 @@ try {
         "Content-Type" = "text/plain"
         "X-Client-Id"  = $PushKey
     }
-    $response = Invoke-WebRequest -Uri $url -Method POST -Body $body -Headers $headers -UseBasicParsing
+    $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($body)
+    $response = Invoke-WebRequest -Uri $url -Method POST -Body $bodyBytes -Headers $headers -UseBasicParsing
     Write-Output $response.Content
 } catch {
     $statusCode = $null
