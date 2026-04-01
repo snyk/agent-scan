@@ -16,6 +16,8 @@ import rich
 
 from agent_scan.pushkeys import mint_push_key, revoke_push_key
 
+IS_WINDOWS = sys.platform == "win32"
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -433,9 +435,14 @@ def _send_test_event(push_key: str, url: str, hook_client: str, script_path: Pat
         "REMOTE_HOOKS_BASE_URL": url,
     }
 
+    if IS_WINDOWS:
+        cmd = ["powershell", "-File", str(script_path), "-Client", hook_client]
+    else:
+        cmd = ["bash", str(script_path), "--client", hook_client]
+
     try:
         result = subprocess.run(
-            ["bash", str(script_path), "--client", hook_client],
+            cmd,
             input=payload,
             capture_output=True,
             text=True,
@@ -525,6 +532,10 @@ def _parse_command_info(cmd: str, events: list[str]) -> dict:
 
 
 def _extract_env_from_cmd(cmd: str, key: str) -> str:
+    # Try PowerShell $env:KEY='...' form
+    m = re.search(rf"\$env:{re.escape(key)}='([^']*)'", cmd)
+    if m:
+        return m.group(1)
     # Try KEY='...' form
     m = re.search(rf"(?:^| ){re.escape(key)}='([^']*)'", cmd)
     if m:
@@ -553,6 +564,8 @@ def _config_path(client: str, override: str | None = None) -> Path:
 
 
 def _build_hook_command(push_key: str, url: str, script_path: Path, hook_client: str, *, tenant_id: str = "") -> str:
+    if IS_WINDOWS:
+        return _build_hook_command_powershell(push_key, url, script_path, hook_client, tenant_id=tenant_id)
     parts = [
         f"PUSH_KEY={_shell_quote(push_key)}",
         f"REMOTE_HOOKS_BASE_URL={_shell_quote(url)}",
@@ -562,6 +575,19 @@ def _build_hook_command(push_key: str, url: str, script_path: Path, hook_client:
     parts.append(f"bash {_shell_quote(script_path.as_posix())}")
     parts.append(f"--client {hook_client}")
     return " ".join(parts)
+
+
+def _build_hook_command_powershell(
+    push_key: str, url: str, script_path: Path, hook_client: str, *, tenant_id: str = ""
+) -> str:
+    env_parts = [
+        f"$env:PUSH_KEY='{push_key}';",
+        f"$env:REMOTE_HOOKS_BASE_URL='{url}';",
+    ]
+    if tenant_id:
+        env_parts.append(f"$env:TENANT_ID='{tenant_id}';")
+    env_parts.append(f"powershell -File '{script_path}' -Client {hook_client}")
+    return " ".join(env_parts)
 
 
 def _shell_quote(s: str) -> str:
@@ -591,13 +617,14 @@ def _copy_hook_script(client: str) -> tuple[Path, bool, bool]:
     dest_dir = Path.home() / ".claude" / "hooks" if client == "claude" else Path.home() / ".cursor" / "hooks"
 
     dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / "snyk-agent-guard.sh"
+    script_name = "snyk-agent-guard.ps1" if IS_WINDOWS else "snyk-agent-guard.sh"
+    dest = dest_dir / script_name
     existed = dest.exists()
 
     from agent_scan.version import version_info
 
     hook_pkg = importlib_resources.files("agent_scan.hooks")
-    source = hook_pkg.joinpath("snyk-agent-guard.sh")
+    source = hook_pkg.joinpath(script_name)
     new_content = source.read_bytes().replace(b"__AGENT_SCAN_VERSION__", version_info.encode())
 
     if existed and dest.read_bytes() == new_content:
@@ -611,7 +638,8 @@ def _copy_hook_script(client: str) -> tuple[Path, bool, bool]:
 
 def _remove_hook_script(client: str) -> None:
     dest_dir = Path.home() / ".claude" / "hooks" if client == "claude" else Path.home() / ".cursor" / "hooks"
-    dest = dest_dir / "snyk-agent-guard.sh"
+    script_name = "snyk-agent-guard.ps1" if IS_WINDOWS else "snyk-agent-guard.sh"
+    dest = dest_dir / script_name
     if dest.exists():
         dest.unlink()
         rich.print(f"[green]\u2713[/green]  Removed hook script [dim]{dest}[/dim]")
