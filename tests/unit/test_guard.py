@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+import base64
 import json
+import shutil
+import subprocess
+import sys
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 import pytest
@@ -1006,3 +1012,213 @@ class TestFilterCursorHooks:
         result = _filter_cursor_hooks(hooks)
         assert len(result["stop"]) == 1
         assert result["stop"][0]["command"] == CURSOR_OTHER_CMD
+
+
+# ===================================================================
+# Hook script integration tests
+# ===================================================================
+
+
+class _HookHandler(BaseHTTPRequestHandler):
+    """Captures the last POST request for assertions."""
+
+    last_request: dict | None = None
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length).decode()
+        _HookHandler.last_request = {
+            "path": self.path,
+            "body": body,
+            "headers": dict(self.headers),
+        }
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"ok":true}')
+
+    def log_message(self, format, *args):
+        pass  # silence logs
+
+
+@pytest.fixture()
+def hook_server():
+    """Start a throwaway HTTP server and yield its base URL."""
+    server = HTTPServer(("127.0.0.1", 0), _HookHandler)
+    port = server.server_address[1]
+    t = threading.Thread(target=server.serve_forever, daemon=True)
+    t.start()
+    _HookHandler.last_request = None
+    yield f"http://127.0.0.1:{port}"
+    server.shutdown()
+
+
+def _get_script_path(name: str) -> Path:
+    from importlib import resources as importlib_resources
+
+    return Path(str(importlib_resources.files("agent_scan.hooks").joinpath(name)))
+
+
+IS_WINDOWS = sys.platform == "win32"
+
+
+@pytest.mark.skipif(IS_WINDOWS, reason="bash script; skipped on Windows")
+class TestBashHookScript:
+    """Integration: invoke the real .sh script against a local HTTP server."""
+
+    @pytest.fixture(autouse=True)
+    def _skip_no_bash(self):
+        if not shutil.which("bash"):
+            pytest.skip("bash not available")
+
+    def test_posts_base64_payload(self, hook_server):
+        script = _get_script_path("snyk-agent-guard.sh")
+        payload = '{"hook_event_name":"test","session_id":"s1"}'
+        result = subprocess.run(
+            ["bash", str(script), "--client", "claude-code"],
+            input=payload,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={
+                "PATH": "/usr/bin:/bin:/usr/local/bin",
+                "PUSH_KEY": "test-pk-123",
+                "REMOTE_HOOKS_BASE_URL": hook_server,
+            },
+        )
+        assert result.returncode == 0, result.stderr
+
+        req = _HookHandler.last_request
+        assert req is not None
+        assert "/hidden/agent-monitor/hooks/claude-code" in req["path"]
+        assert req["headers"]["X-Client-Id"] == "test-pk-123"
+        assert req["body"].startswith("base64:")
+        decoded = base64.b64decode(req["body"].removeprefix("base64:"))
+        assert json.loads(decoded) == json.loads(payload)
+
+    def test_cursor_endpoint(self, hook_server):
+        script = _get_script_path("snyk-agent-guard.sh")
+        payload = '{"hook_event_name":"test","conversation_id":"c1"}'
+        result = subprocess.run(
+            ["bash", str(script), "--client", "cursor"],
+            input=payload,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={
+                "PATH": "/usr/bin:/bin:/usr/local/bin",
+                "PUSH_KEY": "test-pk-456",
+                "REMOTE_HOOKS_BASE_URL": hook_server,
+            },
+        )
+        assert result.returncode == 0, result.stderr
+        assert "/hidden/agent-monitor/hooks/cursor" in _HookHandler.last_request["path"]
+
+    def test_missing_push_key_fails(self, hook_server):
+        script = _get_script_path("snyk-agent-guard.sh")
+        result = subprocess.run(
+            ["bash", str(script), "--client", "claude-code"],
+            input="{}",
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={
+                "PATH": "/usr/bin:/bin:/usr/local/bin",
+                "REMOTE_HOOKS_BASE_URL": hook_server,
+            },
+        )
+        assert result.returncode != 0
+        assert "PUSH_KEY" in result.stderr
+
+    def test_missing_url_fails(self):
+        script = _get_script_path("snyk-agent-guard.sh")
+        result = subprocess.run(
+            ["bash", str(script), "--client", "claude-code"],
+            input="{}",
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={
+                "PATH": "/usr/bin:/bin:/usr/local/bin",
+                "PUSH_KEY": "pk",
+            },
+        )
+        assert result.returncode != 0
+        assert "REMOTE_HOOKS_BASE_URL" in result.stderr
+
+
+@pytest.mark.skipif(not IS_WINDOWS, reason="PowerShell script; Windows only")
+class TestPowerShellHookScript:
+    """Integration: invoke the real .ps1 script against a local HTTP server."""
+
+    @pytest.fixture(autouse=True)
+    def _skip_no_powershell(self):
+        if not shutil.which("powershell") and not shutil.which("pwsh"):
+            pytest.skip("powershell not available")
+
+    @staticmethod
+    def _ps_cmd():
+        return "powershell" if shutil.which("powershell") else "pwsh"
+
+    def test_posts_base64_payload(self, hook_server):
+        script = _get_script_path("snyk-agent-guard.ps1")
+        payload = '{"hook_event_name":"test","session_id":"s1"}'
+        env = {
+            **dict(__import__("os").environ),
+            "PUSH_KEY": "test-pk-123",
+            "REMOTE_HOOKS_BASE_URL": hook_server,
+        }
+        result = subprocess.run(
+            [self._ps_cmd(), "-File", str(script), "-Client", "claude-code"],
+            input=payload,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            env=env,
+        )
+        assert result.returncode == 0, result.stderr
+
+        req = _HookHandler.last_request
+        assert req is not None
+        assert "/hidden/agent-monitor/hooks/claude-code" in req["path"]
+        assert req["headers"]["X-Client-Id"] == "test-pk-123"
+        assert req["body"].startswith("base64:")
+        decoded = base64.b64decode(req["body"].removeprefix("base64:"))
+        assert json.loads(decoded) == json.loads(payload)
+
+    def test_cursor_endpoint(self, hook_server):
+        script = _get_script_path("snyk-agent-guard.ps1")
+        payload = '{"hook_event_name":"test","conversation_id":"c1"}'
+        env = {
+            **dict(__import__("os").environ),
+            "PUSH_KEY": "test-pk-456",
+            "REMOTE_HOOKS_BASE_URL": hook_server,
+        }
+        result = subprocess.run(
+            [self._ps_cmd(), "-File", str(script), "-Client", "cursor"],
+            input=payload,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            env=env,
+        )
+        assert result.returncode == 0, result.stderr
+        assert "/hidden/agent-monitor/hooks/cursor" in _HookHandler.last_request["path"]
+
+    def test_missing_push_key_fails(self, hook_server):
+        script = _get_script_path("snyk-agent-guard.ps1")
+        env = {
+            **dict(__import__("os").environ),
+            "REMOTE_HOOKS_BASE_URL": hook_server,
+        }
+        env.pop("PUSH_KEY", None)
+        env.pop("PUSHKEY", None)
+        result = subprocess.run(
+            [self._ps_cmd(), "-File", str(script), "-Client", "claude-code"],
+            input="{}",
+            capture_output=True,
+            text=True,
+            timeout=15,
+            env=env,
+        )
+        assert result.returncode != 0

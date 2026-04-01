@@ -142,7 +142,7 @@ def _run_install(args) -> None:
     minted = not headless  # True if we minted the key in this run
     config_path = _config_path(client, getattr(args, "file", None))
     # Copy hook script first so we can use it for the test event
-    dest_path, script_existed, script_updated = _copy_hook_script(client)
+    dest_path, script_existed, script_updated = _copy_hook_script(client, config_path)
 
     first_install = not config_path.exists() or not script_existed
     run_test = first_install or minted or getattr(args, "test", False)
@@ -257,7 +257,7 @@ def _run_uninstall(args) -> None:
         _uninstall_cursor(config_path)
 
     # Remove hook script
-    _remove_hook_script(client)
+    _remove_hook_script(client, config_path)
 
     # Try to revoke the push key
     if info and info.get("auth_value"):
@@ -611,12 +611,12 @@ def _compact_events(events: list[str]) -> str:
     return f"({', '.join(events[:show])} + {len(events) - show} more)"
 
 
-def _copy_hook_script(client: str) -> tuple[Path, bool, bool]:
-    """Copy bundled hook script to the client's hooks dir.
+def _copy_hook_script(client: str, config_path: Path) -> tuple[Path, bool, bool]:
+    """Copy bundled hook script to a hooks/ dir next to the config file.
 
     Returns (path, already_existed, was_updated).
     """
-    dest_dir = Path.home() / ".claude" / "hooks" if client == "claude" else Path.home() / ".cursor" / "hooks"
+    dest_dir = config_path.parent / "hooks"
 
     dest_dir.mkdir(parents=True, exist_ok=True)
     script_name = "snyk-agent-guard.ps1" if IS_WINDOWS else "snyk-agent-guard.sh"
@@ -638,8 +638,8 @@ def _copy_hook_script(client: str) -> tuple[Path, bool, bool]:
     return dest, existed, True
 
 
-def _remove_hook_script(client: str) -> None:
-    dest_dir = Path.home() / ".claude" / "hooks" if client == "claude" else Path.home() / ".cursor" / "hooks"
+def _remove_hook_script(client: str, config_path: Path) -> None:
+    dest_dir = config_path.parent / "hooks"
     script_name = "snyk-agent-guard.ps1" if IS_WINDOWS else "snyk-agent-guard.sh"
     dest = dest_dir / script_name
     if dest.exists():
