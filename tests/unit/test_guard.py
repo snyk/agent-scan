@@ -1163,18 +1163,22 @@ class TestPowerShellHookScript:
     def test_posts_base64_payload(self, hook_server):
         script = _get_script_path("snyk-agent-guard.ps1")
         payload = '{"hook_event_name":"test","session_id":"s1"}'
-        env = {
-            **dict(__import__("os").environ),
-            "PUSH_KEY": "test-pk-123",
-            "REMOTE_HOOKS_BASE_URL": hook_server,
-        }
         result = subprocess.run(
-            [self._ps_cmd(), "-File", str(script), "-Client", "claude-code"],
+            [
+                self._ps_cmd(),
+                "-File",
+                str(script),
+                "-Client",
+                "claude-code",
+                "-PushKey",
+                "test-pk-123",
+                "-RemoteUrl",
+                hook_server,
+            ],
             input=payload,
             capture_output=True,
             text=True,
             timeout=15,
-            env=env,
         )
         assert result.returncode == 0, result.stderr
 
@@ -1189,32 +1193,33 @@ class TestPowerShellHookScript:
     def test_cursor_endpoint(self, hook_server):
         script = _get_script_path("snyk-agent-guard.ps1")
         payload = '{"hook_event_name":"test","conversation_id":"c1"}'
-        env = {
-            **dict(__import__("os").environ),
-            "PUSH_KEY": "test-pk-456",
-            "REMOTE_HOOKS_BASE_URL": hook_server,
-        }
         result = subprocess.run(
-            [self._ps_cmd(), "-File", str(script), "-Client", "cursor"],
+            [
+                self._ps_cmd(),
+                "-File",
+                str(script),
+                "-Client",
+                "cursor",
+                "-PushKey",
+                "test-pk-456",
+                "-RemoteUrl",
+                hook_server,
+            ],
             input=payload,
             capture_output=True,
             text=True,
             timeout=15,
-            env=env,
         )
         assert result.returncode == 0, result.stderr
         assert "/hidden/agent-monitor/hooks/cursor" in _HookHandler.last_request["path"]
 
     def test_missing_push_key_fails(self, hook_server):
         script = _get_script_path("snyk-agent-guard.ps1")
-        env = {
-            **dict(__import__("os").environ),
-            "REMOTE_HOOKS_BASE_URL": hook_server,
-        }
+        env = dict(__import__("os").environ)
         env.pop("PUSH_KEY", None)
         env.pop("PUSHKEY", None)
         result = subprocess.run(
-            [self._ps_cmd(), "-File", str(script), "-Client", "claude-code"],
+            [self._ps_cmd(), "-File", str(script), "-Client", "claude-code", "-RemoteUrl", hook_server],
             input="{}",
             capture_output=True,
             text=True,

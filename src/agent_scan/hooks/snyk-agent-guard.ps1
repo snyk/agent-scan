@@ -3,7 +3,7 @@
 # Supports both Claude Code and Cursor via the -Client argument.
 #
 # Usage:
-#   $env:PUSH_KEY='...'; $env:REMOTE_HOOKS_BASE_URL='...'; powershell -File snyk-agent-guard.ps1 -Client claude-code
+#   powershell -File snyk-agent-guard.ps1 -Client claude-code -PushKey '...' -RemoteUrl 'https://...'
 #
 # Reads a JSON payload from stdin and POSTs it (base64-encoded) to the Agent Guard endpoint.
 #
@@ -12,7 +12,13 @@
 param(
     [Parameter(Mandatory=$true)]
     [ValidateSet("claude-code","cursor")]
-    [string]$Client
+    [string]$Client,
+
+    [Parameter(Mandatory=$false)]
+    [string]$PushKey,
+
+    [Parameter(Mandatory=$false)]
+    [string]$RemoteUrl
 )
 
 $ErrorActionPreference = "Stop"
@@ -27,14 +33,16 @@ $AGENT_SCAN_VERSION = "__AGENT_SCAN_VERSION__"
 # Main
 # ---------------------------------------------------------------------------
 
-$pushkey = if ($env:PUSH_KEY) { $env:PUSH_KEY } elseif ($env:PUSHKEY) { $env:PUSHKEY } else { $null }
-if (-not $pushkey) {
-    Write-Error "PUSH_KEY environment variable is not set"
+# Parameters take precedence over env vars.
+if (-not $PushKey) { $PushKey = if ($env:PUSH_KEY) { $env:PUSH_KEY } elseif ($env:PUSHKEY) { $env:PUSHKEY } else { $null } }
+if (-not $PushKey) {
+    Write-Error "PUSH_KEY is required (pass -PushKey or set env var)"
     exit 1
 }
 
-if (-not $env:REMOTE_HOOKS_BASE_URL) {
-    Write-Error "REMOTE_HOOKS_BASE_URL environment variable is not set"
+if (-not $RemoteUrl) { $RemoteUrl = $env:REMOTE_HOOKS_BASE_URL }
+if (-not $RemoteUrl) {
+    Write-Error "REMOTE_HOOKS_BASE_URL is required (pass -RemoteUrl or set env var)"
     exit 1
 }
 
@@ -48,7 +56,7 @@ switch ($Client) {
 }
 
 $userAgent = "snyk/snyk-agent-guard.ps1 Agent Scan v$AGENT_SCAN_VERSION"
-$url = "$($env:REMOTE_HOOKS_BASE_URL)$endpoint`?version=$VERSION"
+$url = "${RemoteUrl}${endpoint}?version=$VERSION"
 
 # Read payload from stdin
 $payload = [Console]::In.ReadToEnd()
@@ -85,7 +93,7 @@ try {
         "User-Agent"   = $userAgent
         "X-User"       = $xUser
         "Content-Type" = "text/plain"
-        "X-Client-Id"  = $pushkey
+        "X-Client-Id"  = $PushKey
     }
     $response = Invoke-WebRequest -Uri $url -Method POST -Body $body -Headers $headers -UseBasicParsing
     Write-Output $response.Content

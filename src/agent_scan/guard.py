@@ -431,16 +431,26 @@ def _send_test_event(push_key: str, url: str, hook_client: str, script_path: Pat
     else:
         payload = '{"hook_event_name":"hooksConfigured","conversation_id":"hooks-setup"}'
 
-    env = {
-        **os.environ,
-        "PUSH_KEY": push_key,
-        "REMOTE_HOOKS_BASE_URL": url,
-    }
-
     if IS_WINDOWS:
-        cmd = ["powershell", "-File", str(script_path), "-Client", hook_client]
+        cmd = [
+            "powershell",
+            "-File",
+            str(script_path),
+            "-Client",
+            hook_client,
+            "-PushKey",
+            push_key,
+            "-RemoteUrl",
+            url,
+        ]
+        env = None  # inherit current env
     else:
         cmd = ["bash", str(script_path), "--client", hook_client]
+        env = {
+            **os.environ,
+            "PUSH_KEY": push_key,
+            "REMOTE_HOOKS_BASE_URL": url,
+        }
 
     try:
         result = subprocess.run(
@@ -533,11 +543,19 @@ def _parse_command_info(cmd: str, events: list[str]) -> dict:
     }
 
 
+_PS_PARAM_MAP = {
+    "PUSH_KEY": "PushKey",
+    "REMOTE_HOOKS_BASE_URL": "RemoteUrl",
+}
+
+
 def _extract_env_from_cmd(cmd: str, key: str) -> str:
-    # Try PowerShell $env:KEY='...' form
-    m = re.search(rf"\$env:{re.escape(key)}='([^']*)'", cmd)
-    if m:
-        return m.group(1)
+    # Try PowerShell -ParamName 'value' form
+    ps_name = _PS_PARAM_MAP.get(key)
+    if ps_name:
+        m = re.search(rf"-{re.escape(ps_name)}\s+'([^']*)'", cmd)
+        if m:
+            return m.group(1)
     # Try KEY='...' form
     m = re.search(rf"(?:^| ){re.escape(key)}='([^']*)'", cmd)
     if m:
@@ -582,14 +600,7 @@ def _build_hook_command(push_key: str, url: str, script_path: Path, hook_client:
 def _build_hook_command_powershell(
     push_key: str, url: str, script_path: Path, hook_client: str, *, tenant_id: str = ""
 ) -> str:
-    env_parts = [
-        f"$env:PUSH_KEY='{push_key}';",
-        f"$env:REMOTE_HOOKS_BASE_URL='{url}';",
-    ]
-    if tenant_id:
-        env_parts.append(f"$env:TENANT_ID='{tenant_id}';")
-    env_parts.append(f"powershell -File '{script_path}' -Client {hook_client}")
-    return " ".join(env_parts)
+    return f"powershell -File '{script_path}' -Client {hook_client} -PushKey '{push_key}' -RemoteUrl '{url}'"
 
 
 def _shell_quote(s: str) -> str:
