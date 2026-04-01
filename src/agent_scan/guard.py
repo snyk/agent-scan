@@ -559,7 +559,7 @@ def _build_hook_command(push_key: str, url: str, script_path: Path, hook_client:
     ]
     if tenant_id:
         parts.append(f"TENANT_ID={_shell_quote(tenant_id)}")
-    parts.append(f"bash {_shell_quote(str(script_path))}")
+    parts.append(f"bash {_shell_quote(script_path.as_posix())}")
     parts.append(f"--client {hook_client}")
     return " ".join(parts)
 
