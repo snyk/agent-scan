@@ -68,3 +68,4 @@
 - `0.4.10` Add --ci flag and better support multi-user machines.
 - `0.4.11` Bug fixes, Amazon Q support.
 - `0.4.12` Add Amazon Q path.
+- `0.4.13` Minor fixes.
