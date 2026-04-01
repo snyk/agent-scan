@@ -1,4 +1,4 @@
-.PHONY: run test tests ci pre-commit clean binary build shiv publish-pypi publish reset-uv install-dev-server-cursor install-dev-server-windsurf
+.PHONY: run test tests ci pre-commit clean binary build shiv publish-pypi publish reset-uv install-dev-server-cursor install-dev-server-windsurf generate-mcp-locations
 
 # Pass extra arguments via ARGS, e.g.: make test ARGS="-v -k test_basic tests/e2e/"
 ARGS ?=
@@ -67,3 +67,6 @@ install-dev-server-cursor:
 
 install-dev-server-windsurf:
 	uv run --directory $PWD -m src.agent_scan.run install-mcp-server ~/.codeium/windsurf/mcp_config.json --background --tool --client-name Windsurf
+
+generate-mcp-locations:
+	uv run python scripts/generate_mcp_config_locations.py

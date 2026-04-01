@@ -53,3 +53,6 @@ npm/package.json
 
 # Snyk Security Extension - AI Rules (auto-generated)
 .cursor/rules/snyk_rules.mdc
+
+# Generated documentation files
+mcp-cfg-locations-by-client-and-os.csv
