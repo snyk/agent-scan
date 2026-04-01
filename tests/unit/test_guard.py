@@ -18,6 +18,7 @@ from agent_scan.guard import (
     CLAUDE_HOOK_EVENTS,
     CURSOR_HOOK_EVENTS,
     _build_hook_command,
+    _build_hook_command_powershell,
     _compact_events,
     _detect_claude_install,
     _detect_cursor_install,
@@ -1244,3 +1245,88 @@ class TestPowerShellHookScript:
             env=env,
         )
         assert result.returncode != 0
+
+
+# ===================================================================
+# End-to-end: command string invoked the way the client shell does it
+# ===================================================================
+
+
+@pytest.mark.skipif(not IS_WINDOWS, reason="PowerShell Cursor invocation; Windows only")
+class TestCursorStylePowerShellInvocation:
+    """Verify the built command string works when Cursor passes it to
+    ``powershell -Command "..."``.
+
+    An earlier version that used ``$env:KEY='...'; ...`` broke because
+    PowerShell rejected chained expressions in that context.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _skip_no_powershell(self):
+        if not shutil.which("powershell") and not shutil.which("pwsh"):
+            pytest.skip("powershell not available")
+
+    @staticmethod
+    def _ps_cmd():
+        return "powershell" if shutil.which("powershell") else "pwsh"
+
+    def test_cursor_invokes_command_string(self, hook_server):
+        script = _get_script_path("snyk-agent-guard.ps1")
+        command = _build_hook_command_powershell(
+            "test-pk-cursor",
+            hook_server,
+            script,
+            "claude-code",
+        )
+        payload = '{"hook_event_name":"test","session_id":"cursor-test"}'
+        result = subprocess.run(
+            [self._ps_cmd(), "-Command", command],
+            input=payload,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert result.returncode == 0, f"Command failed:\n{command}\nstderr: {result.stderr}"
+
+        req = _HookHandler.last_request
+        assert req is not None
+        assert "/hidden/agent-monitor/hooks/claude-code" in req["path"]
+        assert req["headers"]["X-Client-Id"] == "test-pk-cursor"
+        decoded = base64.b64decode(req["body"].removeprefix("base64:"))
+        assert json.loads(decoded) == json.loads(payload)
+
+
+@pytest.mark.skipif(IS_WINDOWS, reason="bash invocation; non-Windows only")
+class TestCursorStyleBashInvocation:
+    """Verify the built command string works when passed to ``bash -c``."""
+
+    @pytest.fixture(autouse=True)
+    def _skip_no_bash(self):
+        if not shutil.which("bash"):
+            pytest.skip("bash not available")
+
+    def test_cursor_invokes_command_string(self, hook_server):
+        script = _get_script_path("snyk-agent-guard.sh")
+        command = _build_hook_command(
+            "test-pk-cursor",
+            hook_server,
+            script,
+            "cursor",
+        )
+        payload = '{"hook_event_name":"test","conversation_id":"cursor-test"}'
+        result = subprocess.run(
+            ["bash", "-c", command],
+            input=payload,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={"PATH": "/usr/bin:/bin:/usr/local/bin"},
+        )
+        assert result.returncode == 0, f"Command failed:\n{command}\nstderr: {result.stderr}"
+
+        req = _HookHandler.last_request
+        assert req is not None
+        assert "/hidden/agent-monitor/hooks/cursor" in req["path"]
+        assert req["headers"]["X-Client-Id"] == "test-pk-cursor"
+        decoded = base64.b64decode(req["body"].removeprefix("base64:"))
+        assert json.loads(decoded) == json.loads(payload)
