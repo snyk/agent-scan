@@ -191,6 +191,8 @@ def _install_claude(command: str, path: Path) -> bool:
 
     for event in CLAUDE_HOOK_EVENTS:
         entry = {"type": "command", "command": command}
+        if IS_WINDOWS:
+            entry["shell"] = "powershell"
         group: dict = {"hooks": [entry]}
         if event in CLAUDE_EVENTS_WITH_MATCHER:
             group["matcher"] = "*"
