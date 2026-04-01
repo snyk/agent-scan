@@ -149,7 +149,8 @@ class TestExtractEnvFromCmd:
 
 
 class TestBuildHookCommand:
-    def test_without_tenant(self):
+    @pytest.mark.skipif(sys.platform == "win32", reason="bash command format")
+    def test_without_tenant_bash(self):
         cmd = _build_hook_command("pk", "https://api.snyk.io", Path("/x/hook.sh"), "claude-code")
         assert "PUSH_KEY='pk'" in cmd
         assert "REMOTE_HOOKS_BASE_URL='https://api.snyk.io'" in cmd
@@ -157,9 +158,23 @@ class TestBuildHookCommand:
         assert "bash '/x/hook.sh'" in cmd
         assert "--client claude-code" in cmd
 
-    def test_with_tenant(self):
+    @pytest.mark.skipif(sys.platform == "win32", reason="bash command format")
+    def test_with_tenant_bash(self):
         cmd = _build_hook_command("pk", "https://api.snyk.io", Path("/x/hook.sh"), "cursor", tenant_id="tid")
         assert "TENANT_ID='tid'" in cmd
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="powershell command format")
+    def test_without_tenant_powershell(self):
+        cmd = _build_hook_command("pk", "https://api.snyk.io", Path("/x/hook.ps1"), "claude-code")
+        assert "-PushKey 'pk'" in cmd
+        assert "-RemoteUrl 'https://api.snyk.io'" in cmd
+        assert "powershell -File" in cmd
+        assert "-Client claude-code" in cmd
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="powershell command format")
+    def test_without_tenant_powershell_no_tenant_id(self):
+        cmd = _build_hook_command("pk", "https://api.snyk.io", Path("/x/hook.ps1"), "claude-code")
+        assert "TENANT_ID" not in cmd
 
     def test_roundtrip_extract(self):
         cmd = _build_hook_command(
@@ -167,7 +182,9 @@ class TestBuildHookCommand:
         )
         assert _extract_env_from_cmd(cmd, "PUSH_KEY") == "my-key"
         assert _extract_env_from_cmd(cmd, "REMOTE_HOOKS_BASE_URL") == "https://example.com"
-        assert _extract_env_from_cmd(cmd, "TENANT_ID") == "t-1"
+        # tenant_id is only in bash commands, not powershell
+        if sys.platform != "win32":
+            assert _extract_env_from_cmd(cmd, "TENANT_ID") == "t-1"
 
 
 class TestParseCommandInfo:
