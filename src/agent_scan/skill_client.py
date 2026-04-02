@@ -1,3 +1,4 @@
+import hashlib
 import logging
 import os
 
@@ -122,7 +123,9 @@ def traverse_skill_tree(skill_path: str, relative_path: str | None) -> tuple[lis
                     content = f.read()
             except UnicodeDecodeError:
                 logger.exception(f"Error reading file: {file}. The file is not a bianry")
-                content = "Binary file. No content available."
+                with open(os.path.expanduser(full_path), "rb") as f:
+                    content_hash = hashlib.sha256(f.read()).hexdigest()
+                content = f"Binary file. Hash: {content_hash}"
             resources.append(
                 Resource(
                     name=file,
