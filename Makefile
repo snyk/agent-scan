@@ -42,7 +42,7 @@ clean:
 binary:
 	uv sync
 	uv pip install -e .[dev]
-	if [ -n "${APPLE_SIGNING_IDENTITY}" ]; then uv run pyinstaller --onefile --name agent-scan src/agent_scan/run.py --codesign-identity "${APPLE_SIGNING_IDENTITY}"; else uv run pyinstaller --onefile --name agent-scan src/agent_scan/run.py; fi
+	if [ -n "${APPLE_SIGNING_IDENTITY}" ]; then uv run pyinstaller --onefile --name agent-scan --add-data 'src/agent_scan/hooks:agent_scan/hooks' src/agent_scan/run.py --codesign-identity "${APPLE_SIGNING_IDENTITY}"; else uv run pyinstaller --onefile --name agent-scan --add-data 'src/agent_scan/hooks:agent_scan/hooks' src/agent_scan/run.py; fi
 
 build: clean
 	uv build --no-sources
