@@ -85,7 +85,11 @@ MACOS_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
     CandidateClient(
         name="amazon_q",
         client_exists_paths=["~/.aws/amazonq"],
-        mcp_config_paths=["~/.aws/amazonq/agents/default.json", "~/.aws/amazonq/agents/mcp.json"],
+        mcp_config_paths=[
+            "~/.aws/amazonq/agents/default.json",
+            "~/.aws/amazonq/agents/mcp.json",
+            "~/.aws/amazonq/mcp.json",
+        ],
         skills_dir_paths=[],
     ),
 ]
@@ -158,7 +162,11 @@ LINUX_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
     CandidateClient(
         name="amazon_q",
         client_exists_paths=["~/.aws/amazonq"],
-        mcp_config_paths=["~/.aws/amazonq/agents/default.json", "~/.aws/amazonq/agents/mcp.json"],
+        mcp_config_paths=[
+            "~/.aws/amazonq/agents/default.json",
+            "~/.aws/amazonq/agents/mcp.json",
+            "~/.aws/amazonq/mcp.json",
+        ],
         skills_dir_paths=[],
     ),
 ]
