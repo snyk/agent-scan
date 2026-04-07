@@ -135,6 +135,10 @@ def _run_install(args) -> None:
             push_key = mint_push_key(url, tenant_id, snyk_token, description=description)
         except RuntimeError as e:
             rich.print(f"[bold red]Error:[/bold red] {e}")
+            if "403" in str(e):
+                rich.print(
+                    f"[yellow]Please ensure you have access to tenant [bold]{tenant_id}[/bold] and access to Evo Agent Guard.[/yellow]"
+                )
             sys.exit(1)
         rich.print(f"[green]\u2713[/green]  Push key minted  [yellow]{_mask_key(push_key)}[/yellow]")
 
