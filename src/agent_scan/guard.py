@@ -49,6 +49,8 @@ CURSOR_HOOK_EVENTS = [
     "afterMCPExecution",
     "beforeReadFile",
     "afterFileEdit",
+    "afterAgentResponse",
+    "afterAgentThought",
     "stop",
     "preToolUse",
     "postToolUse",
