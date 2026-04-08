@@ -30,6 +30,7 @@ MACOS_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
         client_exists_paths=["~/.vscode"],
         mcp_config_paths=[
             "~/Library/Application Support/Code/User/settings.json",
+            "~/.vscode/mcp.json",
             "~/Library/Application Support/Code/User/mcp.json",
         ],
         skills_dir_paths=["~/.copilot/skills"],
