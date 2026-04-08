@@ -187,11 +187,11 @@ WINDOWS_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
     ),
     CandidateClient(
         name="vscode",
-        client_exists_paths=["~/.vscode", "~/.config/Code"],
+        client_exists_paths=["~/.vscode", "~/AppData/Roaming/Code"],
         mcp_config_paths=[
-            "~/.config/Code/User/settings.json",
+            "~/AppData/Roaming/Code/User/settings.json",
             "~/.vscode/mcp.json",
-            "~/.config/Code/User/mcp.json",
+            "~/AppData/Roaming/Code/User/mcp.json",
         ],
         skills_dir_paths=["~/.copilot/skills"],
     ),
@@ -251,41 +251,6 @@ def get_well_known_clients() -> list[CandidateClient]:
         return []
 
 
-# Platform-specific client paths
-if sys.platform == "linux" or sys.platform == "linux2":
-    # Linux
-    CLIENT_PATHS = {
-        "windsurf": ["~/.codeium/windsurf/mcp_config.json"],
-        "cursor": ["~/.cursor/mcp.json"],
-        "vscode": ["~/.vscode/mcp.json", "~/.config/Code/User/settings.json", "~/.config/Code/User/mcp.json"],
-    }
-elif sys.platform == "darwin":
-    # OS X
-    CLIENT_PATHS = {
-        "windsurf": ["~/.codeium/windsurf/mcp_config.json"],
-        "cursor": ["~/.cursor/mcp.json"],
-        "claude": ["~/Library/Application Support/Claude/claude_desktop_config.json"],
-        "vscode": [
-            "~/.vscode/mcp.json",
-            "~/Library/Application Support/Code/User/settings.json",
-            "~/Library/Application Support/Code/User/mcp.json",
-        ],
-    }
-elif sys.platform == "win32":
-    CLIENT_PATHS = {
-        "windsurf": ["~/.codeium/windsurf/mcp_config.json"],
-        "cursor": ["~/.cursor/mcp.json"],
-        "claude": ["~/AppData/Roaming/Claude/claude_desktop_config.json"],
-        "vscode": [
-            "~/.vscode/mcp.json",
-            "~/AppData/Roaming/Code/User/settings.json",
-            "~/AppData/Roaming/Code/User/mcp.json",
-        ],
-    }
-else:
-    CLIENT_PATHS = {}
-
-
 def get_client_from_path(path: str) -> str | None:
     """
     Returns the client name from a path.
@@ -297,10 +262,10 @@ def get_client_from_path(path: str) -> str | None:
         str: The client name or None if it cannot be guessed from the path.
     """
     path = os.path.realpath(os.path.expanduser(path))
-    for client, paths in CLIENT_PATHS.items():
-        real_paths = [os.path.realpath(os.path.expanduser(path)) for path in paths]
+    for client in get_well_known_clients():
+        real_paths = [os.path.realpath(os.path.expanduser(p)) for p in client.mcp_config_paths]
         if path in real_paths:
-            return client
+            return client.name
     return None
 
 
