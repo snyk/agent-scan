@@ -9,6 +9,7 @@ from mcp.client.auth import TokenStorage
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from mcp.types import Completion, InitializeResult, Prompt, Resource, ResourceTemplate, Tool
 from pydantic import (
+    AliasChoices,
     BaseModel,
     ConfigDict,
     Field,
@@ -92,8 +93,8 @@ class ScalarToolLabels(BaseModel):
 
 
 class RemoteServer(BaseModel):
-    model_config = ConfigDict()
-    url: str
+    model_config = ConfigDict(populate_by_name=True)
+    url: str = Field(validation_alias=AliasChoices("url", "serverUrl"))
     type: Literal["sse", "http"] | None = None
     headers: dict[str, str] = Field(default_factory=dict)
 
