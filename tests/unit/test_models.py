@@ -1,6 +1,40 @@
 import pytest
 
-from agent_scan.models import CommandParsingError, StdioServer
+from agent_scan.models import CommandParsingError, RemoteServer, StdioServer
+
+
+class TestRemoteServerUrlAlias:
+    """Test that RemoteServer accepts both 'url' and 'serverUrl' field names."""
+
+    def test_url_field_works(self):
+        server = RemoteServer(url="https://mcp.example.com/mcp")
+        assert server.url == "https://mcp.example.com/mcp"
+
+    def test_server_url_alias_works(self):
+        server = RemoteServer.model_validate({"serverUrl": "https://mcp.figma.com/mcp"})
+        assert server.url == "https://mcp.figma.com/mcp"
+
+    def test_server_url_alias_with_type(self):
+        server = RemoteServer.model_validate({"serverUrl": "https://mcp.figma.com/mcp", "type": "http"})
+        assert server.url == "https://mcp.figma.com/mcp"
+        assert server.type == "http"
+
+    def test_server_url_alias_with_headers(self):
+        server = RemoteServer.model_validate(
+            {
+                "serverUrl": "https://mcp.example.com/mcp",
+                "headers": {"Authorization": "Bearer token"},
+            }
+        )
+        assert server.url == "https://mcp.example.com/mcp"
+        assert server.headers == {"Authorization": "Bearer token"}
+
+    def test_url_takes_precedence_when_both_present(self):
+        # If both are somehow present, 'url' should win (it's first in AliasChoices)
+        server = RemoteServer.model_validate(
+            {"url": "https://primary.example.com/mcp", "serverUrl": "https://secondary.example.com/mcp"}
+        )
+        assert server.url == "https://primary.example.com/mcp"
 
 
 class TestStdioServerRebalance:

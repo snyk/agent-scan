@@ -176,3 +176,79 @@ async def test_vscode_settings_file_with_empty_mcp():
     assert isinstance(mcp_config, UnknownMCPConfig)
     servers = mcp_config.get_servers()
     assert len(servers) == 0
+
+
+class TestServerUrlAliasParsing:
+    @pytest.mark.asyncio
+    async def test_server_url_field_parsed_as_remote_server(self, tmp_path):
+        """A server with 'serverUrl' should parse as a RemoteServer, not be silently dropped."""
+        from agent_scan.models import ClaudeConfigFile, RemoteServer
+
+        config = tmp_path / "mcp.json"
+        config.write_text('{"mcpServers": {"figma": {"serverUrl": "https://mcp.figma.com/mcp"}}}')
+
+        mcp_config = await scan_mcp_config_file(str(config))
+        assert isinstance(mcp_config, ClaudeConfigFile)
+        servers = mcp_config.get_servers()
+        assert "figma" in servers
+        assert isinstance(servers["figma"], RemoteServer)
+        assert servers["figma"].url == "https://mcp.figma.com/mcp"
+
+    @pytest.mark.asyncio
+    async def test_server_url_does_not_drop_other_servers(self, tmp_path):
+        """
+        Regression: when a 'serverUrl' server is present alongside normal servers,
+        all servers must be parsed — none should be silently dropped.
+        """
+        config = tmp_path / "mcp.json"
+        config.write_text("""{
+            "mcpServers": {
+                "figma": {"serverUrl": "https://mcp.figma.com/mcp"},
+                "local": {"command": "npx", "args": ["-y", "some-mcp-server"]}
+            }
+        }""")
+
+        mcp_config = await scan_mcp_config_file(str(config))
+        servers = mcp_config.get_servers()
+        assert "figma" in servers, "figma server was silently dropped"
+        assert "local" in servers, "local server was silently dropped"
+        assert len(servers) == 2
+
+    @pytest.mark.asyncio
+    async def test_server_url_not_silently_dropped_as_config_without_mcp(self, tmp_path):
+        """
+        Regression: config with 'serverUrl' must NOT resolve to ConfigWithoutMCP (zero servers).
+        """
+        from agent_scan.models import ConfigWithoutMCP
+
+        config = tmp_path / "mcp.json"
+        config.write_text('{"mcpServers": {"figma": {"serverUrl": "https://mcp.figma.com/mcp"}}}')
+
+        mcp_config = await scan_mcp_config_file(str(config))
+        assert not isinstance(mcp_config, ConfigWithoutMCP), (
+            "Config with serverUrl was silently treated as ConfigWithoutMCP"
+        )
+
+    @pytest.mark.asyncio
+    async def test_url_wins_over_server_url_when_both_present(self, tmp_path):
+        """
+        When a server entry has both 'url' and 'serverUrl', 'url' should win because it is
+        listed first in AliasChoices — Pydantic v2 picks the first alias found in the input.
+        """
+        from agent_scan.models import RemoteServer
+
+        config = tmp_path / "mcp.json"
+        config.write_text("""{
+            "mcpServers": {
+                "ambiguous": {
+                    "url": "https://primary.example.com/mcp",
+                    "serverUrl": "https://secondary.example.com/mcp"
+                }
+            }
+        }""")
+
+        mcp_config = await scan_mcp_config_file(str(config))
+        servers = mcp_config.get_servers()
+        assert "ambiguous" in servers
+        assert isinstance(servers["ambiguous"], RemoteServer)
+        assert servers["ambiguous"].url == "https://primary.example.com/mcp"
