@@ -53,3 +53,4 @@ npm/package.json
 
 # Snyk Security Extension - AI Rules (auto-generated)
 .cursor/rules/snyk_rules.mdc
+.venv-x86_64/
