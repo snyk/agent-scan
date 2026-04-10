@@ -70,3 +70,4 @@
 - `0.4.12` Add Amazon Q path.
 - `0.4.13` Minor fixes.
 - `0.4.14` 'guard' hook installation flow for Claude Code and Cursor.
+- `0.4.15` Support Windows and x86 builds
