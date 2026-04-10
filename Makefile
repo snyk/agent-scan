@@ -43,6 +43,7 @@ ARCH ?=
 
 binary:
 ifeq ($(ARCH),x86_64)
+	@if [ "$$(uname)" != "Darwin" ]; then echo "ERROR: ARCH=x86_64 is only supported on macOS (darwin)"; exit 1; fi
 	curl -LsSf https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-apple-darwin.tar.gz | tar -xz -C /tmp
 	UV_PYTHON_PREFERENCE=managed arch -x86_64 /tmp/uv-x86_64-apple-darwin/uv python install 3.13
 	UV_PROJECT_ENVIRONMENT=.venv-x86_64 UV_PYTHON_PREFERENCE=managed arch -x86_64 /tmp/uv-x86_64-apple-darwin/uv sync --extra dev
