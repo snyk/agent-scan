@@ -137,3 +137,41 @@ class TestBuildOAuthClientProvider:
         # The returned metadata should contain the custom redirect URI
         redirect_uris = [str(u) for u in metadata.redirect_uris]
         assert "http://localhost:4040/callback" in redirect_uris
+
+    def test_build_oauth_client_provider_with_client_id(self, tmp_path):
+        """build_oauth_client_provider should accept a client_id parameter and return a valid provider."""
+        from mcp.client.auth import OAuthClientProvider
+
+        from agent_scan.models import InteractiveTokenStorage
+
+        storage = InteractiveTokenStorage(base_dir=str(tmp_path), server_url="https://mcp.example.com")
+        provider, metadata = build_oauth_client_provider(
+            server_url="https://mcp.example.com",
+            storage=storage,
+            client_id="pre-reg-id",
+        )
+        assert isinstance(provider, OAuthClientProvider)
+
+    def test_build_oauth_client_provider_with_client_id_and_secret_sets_auth_method(self, tmp_path):
+        """When client_id and client_secret are provided, token_endpoint_auth_method should be 'client_secret_post'."""
+        from agent_scan.models import InteractiveTokenStorage
+
+        storage = InteractiveTokenStorage(base_dir=str(tmp_path), server_url="https://mcp.example.com")
+        provider, metadata = build_oauth_client_provider(
+            server_url="https://mcp.example.com",
+            storage=storage,
+            client_id="pre-reg-id",
+            client_secret="pre-reg-secret",
+        )
+        assert metadata.token_endpoint_auth_method == "client_secret_post"
+
+    def test_build_oauth_client_provider_without_secret_no_auth_method(self, tmp_path):
+        """When no client_id or client_secret is provided, token_endpoint_auth_method should not be 'client_secret_post'."""
+        from agent_scan.models import InteractiveTokenStorage
+
+        storage = InteractiveTokenStorage(base_dir=str(tmp_path), server_url="https://mcp.example.com")
+        provider, metadata = build_oauth_client_provider(
+            server_url="https://mcp.example.com",
+            storage=storage,
+        )
+        assert metadata.token_endpoint_auth_method != "client_secret_post"

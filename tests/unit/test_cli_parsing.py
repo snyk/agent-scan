@@ -580,3 +580,141 @@ class TestEnableOAuthFlag:
         parser = _make_inspect_parser()
         args = parser.parse_args(["inspect", "--enable-oauth"])
         assert args.enable_oauth is True
+
+
+class TestOAuthClientIdFlags:
+    """Tests for the --oauth-client-id and --oauth-client-secret CLI flags."""
+
+    def test_oauth_client_id_default_none(self):
+        """Parsing args without --oauth-client-id should default to None."""
+        parser = _make_scan_parser()
+        args = parser.parse_args(["scan", "somefile.json"])
+        assert args.oauth_client_id is None
+
+    def test_oauth_client_id_set(self):
+        """Parsing args with --oauth-client-id should set the value."""
+        parser = _make_scan_parser()
+        args = parser.parse_args(["scan", "--oauth-client-id", "my-client-id", "somefile.json"])
+        assert args.oauth_client_id == "my-client-id"
+
+    def test_oauth_client_secret_default_none(self):
+        """Parsing args without --oauth-client-secret should default to None."""
+        parser = _make_scan_parser()
+        args = parser.parse_args(["scan", "somefile.json"])
+        assert args.oauth_client_secret is None
+
+    def test_oauth_client_secret_set(self):
+        """Parsing args with --oauth-client-secret should set the value."""
+        parser = _make_scan_parser()
+        args = parser.parse_args(["scan", "--oauth-client-secret", "my-secret", "somefile.json"])
+        assert args.oauth_client_secret == "my-secret"
+
+    def test_oauth_client_id_available_on_inspect_command(self):
+        """The --oauth-client-id and --oauth-client-secret flags should be available on the inspect command."""
+        parser = _make_inspect_parser()
+        args = parser.parse_args(
+            ["inspect", "--oauth-client-id", "id123", "--oauth-client-secret", "sec456", "somefile.json"]
+        )
+        assert args.oauth_client_id == "id123"
+        assert args.oauth_client_secret == "sec456"
+
+    @pytest.mark.asyncio
+    async def test_oauth_client_id_auto_implies_enable_oauth(self):
+        """Setting --oauth-client-id should auto-imply enable_oauth=True in InspectArgs."""
+        from argparse import Namespace
+
+        from agent_scan.cli import run_scan
+
+        mock_result = ScanPathResult(path="/test/path")
+
+        with patch(
+            "agent_scan.cli.inspect_analyze_push_pipeline", new_callable=AsyncMock, return_value=[mock_result]
+        ) as mock_pipeline:
+            args = Namespace(
+                verification_H=None,
+                verbose=False,
+                scan_all_users=False,
+                server_timeout=10,
+                files=[],
+                mcp_oauth_tokens_path=None,
+                analysis_url="https://test.com/analysis",
+                skip_ssl_verify=False,
+                control_servers=[],
+                enable_oauth=False,
+                oauth_client_id="my-id",
+                oauth_client_secret=None,
+            )
+
+            await run_scan(args, mode="scan")
+
+            mock_pipeline.assert_called_once()
+            inspect_args = mock_pipeline.call_args[0][0]
+            assert inspect_args.enable_oauth is True
+            assert inspect_args.oauth_client_id == "my-id"
+
+    @pytest.mark.asyncio
+    async def test_oauth_client_id_and_secret_threaded_to_inspect_args(self):
+        """Both --oauth-client-id and --oauth-client-secret should be passed to InspectArgs."""
+        from argparse import Namespace
+
+        from agent_scan.cli import run_scan
+
+        mock_result = ScanPathResult(path="/test/path")
+
+        with patch(
+            "agent_scan.cli.inspect_analyze_push_pipeline", new_callable=AsyncMock, return_value=[mock_result]
+        ) as mock_pipeline:
+            args = Namespace(
+                verification_H=None,
+                verbose=False,
+                scan_all_users=False,
+                server_timeout=10,
+                files=[],
+                mcp_oauth_tokens_path=None,
+                analysis_url="https://test.com/analysis",
+                skip_ssl_verify=False,
+                control_servers=[],
+                enable_oauth=False,
+                oauth_client_id="cid",
+                oauth_client_secret="csec",
+            )
+
+            await run_scan(args, mode="scan")
+
+            mock_pipeline.assert_called_once()
+            inspect_args = mock_pipeline.call_args[0][0]
+            assert inspect_args.oauth_client_id == "cid"
+            assert inspect_args.oauth_client_secret == "csec"
+
+    @pytest.mark.asyncio
+    async def test_oauth_client_id_none_does_not_imply_enable_oauth(self):
+        """When oauth_client_id is None and enable_oauth is False, enable_oauth should stay False."""
+        from argparse import Namespace
+
+        from agent_scan.cli import run_scan
+
+        mock_result = ScanPathResult(path="/test/path")
+
+        with patch(
+            "agent_scan.cli.inspect_analyze_push_pipeline", new_callable=AsyncMock, return_value=[mock_result]
+        ) as mock_pipeline:
+            args = Namespace(
+                verification_H=None,
+                verbose=False,
+                scan_all_users=False,
+                server_timeout=10,
+                files=[],
+                mcp_oauth_tokens_path=None,
+                analysis_url="https://test.com/analysis",
+                skip_ssl_verify=False,
+                control_servers=[],
+                enable_oauth=False,
+                oauth_client_id=None,
+                oauth_client_secret=None,
+            )
+
+            await run_scan(args, mode="scan")
+
+            mock_pipeline.assert_called_once()
+            inspect_args = mock_pipeline.call_args[0][0]
+            assert inspect_args.enable_oauth is False
