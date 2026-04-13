@@ -1,11 +1,18 @@
 """Tests for CLI argument parsing, especially multiple control servers."""
 
+import argparse
 import sys
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from agent_scan.cli import MissingIdentifierError, parse_control_servers
+from agent_scan.cli import (
+    MissingIdentifierError,
+    add_common_arguments,
+    add_server_arguments,
+    parse_control_servers,
+    setup_scan_parser,
+)
 from agent_scan.models import ControlServer, Issue, ScanPathResult
 
 
@@ -531,3 +538,132 @@ class TestJSONOutput:
 
             parsed = json.loads(output)
             assert isinstance(parsed, dict)
+
+
+def _make_scan_parser():
+    """Helper: build a scan subcommand parser identical to the one in main()."""
+    parser = argparse.ArgumentParser(prog="agent-scan")
+    subparsers = parser.add_subparsers(dest="command")
+    scan_parser = subparsers.add_parser("scan")
+    setup_scan_parser(scan_parser)
+    return parser
+
+
+def _make_inspect_parser():
+    """Helper: build an inspect subcommand parser identical to the one in main()."""
+    parser = argparse.ArgumentParser(prog="agent-scan")
+    subparsers = parser.add_subparsers(dest="command")
+    inspect_parser = subparsers.add_parser("inspect")
+    add_common_arguments(inspect_parser)
+    add_server_arguments(inspect_parser)
+    inspect_parser.add_argument("files", type=str, nargs="*", default=[])
+    return parser
+
+
+class TestEnableOAuthFlag:
+    """Tests for the --enable-oauth CLI flag."""
+
+    def test_enable_oauth_flag_default_false(self):
+        """Parsing args for scan without --enable-oauth should default to False."""
+        parser = _make_scan_parser()
+        args = parser.parse_args(["scan"])
+        assert args.enable_oauth is False
+
+    def test_enable_oauth_flag_set_true(self):
+        """Parsing args with --enable-oauth should set enable_oauth to True."""
+        parser = _make_scan_parser()
+        args = parser.parse_args(["scan", "--enable-oauth"])
+        assert args.enable_oauth is True
+
+    def test_enable_oauth_flag_available_on_inspect_command(self):
+        """The --enable-oauth flag should be available on the inspect command."""
+        parser = _make_inspect_parser()
+        args = parser.parse_args(["inspect", "--enable-oauth"])
+        assert args.enable_oauth is True
+
+
+class TestOAuthClientIdFlags:
+    """Tests for the --oauth-client-id and --oauth-client-secret CLI flags."""
+
+    def test_oauth_client_id_default_none(self):
+        """Parsing args without --oauth-client-id should default to None."""
+        parser = _make_scan_parser()
+        args = parser.parse_args(["scan", "somefile.json"])
+        assert args.oauth_client_id is None
+
+    def test_oauth_client_id_set(self):
+        """Parsing args with --oauth-client-id should set the value."""
+        parser = _make_scan_parser()
+        args = parser.parse_args(["scan", "--oauth-client-id", "my-client-id", "somefile.json"])
+        assert args.oauth_client_id == "my-client-id"
+
+    def test_oauth_client_id_available_on_inspect_command(self):
+        """The --oauth-client-id flag should be available on the inspect command."""
+        parser = _make_inspect_parser()
+        args = parser.parse_args(["inspect", "--oauth-client-id", "id123", "somefile.json"])
+        assert args.oauth_client_id == "id123"
+
+    @pytest.mark.asyncio
+    async def test_oauth_client_id_auto_implies_enable_oauth(self):
+        """Setting --oauth-client-id should auto-imply enable_oauth=True in InspectArgs."""
+        from argparse import Namespace
+
+        from agent_scan.cli import run_scan
+
+        mock_result = ScanPathResult(path="/test/path")
+
+        with patch(
+            "agent_scan.cli.inspect_analyze_push_pipeline", new_callable=AsyncMock, return_value=[mock_result]
+        ) as mock_pipeline:
+            args = Namespace(
+                verification_H=None,
+                verbose=False,
+                scan_all_users=False,
+                server_timeout=10,
+                files=[],
+                mcp_oauth_tokens_path=None,
+                analysis_url="https://test.com/analysis",
+                skip_ssl_verify=False,
+                control_servers=[],
+                enable_oauth=False,
+                oauth_client_id="my-id",
+            )
+
+            await run_scan(args, mode="scan")
+
+            mock_pipeline.assert_called_once()
+            inspect_args = mock_pipeline.call_args[0][0]
+            assert inspect_args.enable_oauth is True
+            assert inspect_args.oauth_client_id == "my-id"
+
+    @pytest.mark.asyncio
+    async def test_oauth_client_id_none_does_not_imply_enable_oauth(self):
+        """When oauth_client_id is None and enable_oauth is False, enable_oauth should stay False."""
+        from argparse import Namespace
+
+        from agent_scan.cli import run_scan
+
+        mock_result = ScanPathResult(path="/test/path")
+
+        with patch(
+            "agent_scan.cli.inspect_analyze_push_pipeline", new_callable=AsyncMock, return_value=[mock_result]
+        ) as mock_pipeline:
+            args = Namespace(
+                verification_H=None,
+                verbose=False,
+                scan_all_users=False,
+                server_timeout=10,
+                files=[],
+                mcp_oauth_tokens_path=None,
+                analysis_url="https://test.com/analysis",
+                skip_ssl_verify=False,
+                control_servers=[],
+                enable_oauth=False,
+                oauth_client_id=None,
+            )
+
+            await run_scan(args, mode="scan")
+
+            mock_pipeline.assert_called_once()
+            inspect_args = mock_pipeline.call_args[0][0]
+            assert inspect_args.enable_oauth is False

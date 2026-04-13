@@ -14,13 +14,14 @@ from mcp.client.auth import OAuthClientProvider
 from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
-from mcp.shared.auth import OAuthClientMetadata
+from mcp.shared.auth import OAuthClientInformationFull
 
 from agent_scan.models import (
     ClaudeCodeConfigFile,
     ClaudeConfigFile,
     ConfigWithoutMCP,
     FileTokenStorage,
+    InteractiveTokenStorage,
     MCPConfig,
     RemoteServer,
     ServerSignature,
@@ -30,6 +31,7 @@ from agent_scan.models import (
     VSCodeConfigFile,
     VSCodeMCPConfig,
 )
+from agent_scan.oauth import build_oauth_client_provider
 from agent_scan.traffic_capture import PipeStderrCapture, TrafficCapture, capturing_client
 from agent_scan.utils import resolve_command_and_args
 
@@ -42,29 +44,8 @@ async def streamablehttp_client_without_session(
     url: str,
     headers: dict[str, str],
     timeout: int,
-    token: TokenAndClientInfo | None = None,
+    oauth_client_provider: OAuthClientProvider | None = None,
 ):
-    async def handle_redirect(auth_url: str) -> None:
-        raise NotImplementedError(f"handle_redirect is not implemented {auth_url}")
-
-    async def handle_callback(auth_code: str, state: str | None) -> tuple[str, str | None]:
-        raise NotImplementedError(f"handle_callback is not implemented {auth_code} {state}")
-
-    if token:
-        oauth_client_provider = OAuthClientProvider(
-            server_url=token.mcp_server_url,
-            client_metadata=OAuthClientMetadata(
-                client_name="mcp-scan",
-                grant_types=["authorization_code", "refresh_token"],
-                response_types=["code"],
-                redirect_uris=["http://localhost:3030/callback"],
-            ),
-            storage=FileTokenStorage(data=token),
-            redirect_handler=handle_redirect,
-            callback_handler=handle_callback,
-        )
-    else:
-        oauth_client_provider = None
     async with httpx.AsyncClient(
         auth=oauth_client_provider, follow_redirects=True, headers=headers, timeout=timeout
     ) as custom_client:
@@ -78,6 +59,9 @@ async def get_client(
     timeout: int | None = None,
     traffic_capture: TrafficCapture | None = None,
     token: TokenAndClientInfo | None = None,
+    enable_oauth: bool = False,
+    oauth_client_id: str | None = None,
+    oauth_client_provider: OAuthClientProvider | None = None,
 ) -> AsyncIterator[tuple]:
     """
     Create an MCP client for the given server config.
@@ -85,14 +69,46 @@ async def get_client(
     If traffic_capture is provided, all MCP protocol traffic will be captured
     for debugging purposes.
     """
+    # [REVIEW-COMMENT]
+    # If a pre-built oauth_client_provider was passed in (shared across strategy
+    # attempts in check_server), skip re-constructing it here.  This ensures
+    # the provider is built exactly once against the *original* URL rather than
+    # once per mutated strategy URL.
+    # [/REVIEW-COMMENT]
+    # Construct the OAuthClientProvider centrally
+    if oauth_client_provider is not None:
+        # Use the pre-built provider (shared across strategy attempts)
+        pass
+    elif token and isinstance(server_config, RemoteServer):
+        storage = FileTokenStorage(data=token)
+        oauth_client_provider, _ = build_oauth_client_provider(
+            server_url=token.mcp_server_url,
+            storage=storage,
+        )
+    elif enable_oauth and isinstance(server_config, RemoteServer):
+        storage = InteractiveTokenStorage(server_url=server_config.url)
+        if oauth_client_id:
+            await storage.set_client_info(
+                OAuthClientInformationFull(
+                    client_id=oauth_client_id,
+                    redirect_uris=["http://localhost:3030/callback"],
+                )
+            )
+        oauth_client_provider, _ = build_oauth_client_provider(
+            server_url=server_config.url,
+            storage=storage,
+        )
+
     if isinstance(server_config, RemoteServer) and server_config.type == "sse":
         logger.debug("Creating SSE client with URL: %s", server_config.url)
-        client_cm = sse_client(
-            url=server_config.url,
-            headers=server_config.headers,
-            # env=server_config.env, #Not supported by MCP yet, but present in vscode
-            timeout=timeout,
-        )
+        sse_kwargs: dict = {
+            "url": server_config.url,
+            "headers": server_config.headers,
+            "timeout": timeout,
+        }
+        if oauth_client_provider is not None:
+            sse_kwargs["auth"] = oauth_client_provider
+        client_cm = sse_client(**sse_kwargs)
     elif isinstance(server_config, RemoteServer) and server_config.type == "http":
         logger.debug(
             "Creating Streamable HTTP client with URL: %s with headers %s", server_config.url, server_config.headers
@@ -101,7 +117,7 @@ async def get_client(
             url=server_config.url,
             headers=server_config.headers,
             timeout=timeout or 60,
-            token=token,
+            oauth_client_provider=oauth_client_provider,
         )
     elif isinstance(server_config, StdioServer):
         logger.debug("Creating stdio client")
@@ -140,9 +156,24 @@ async def _check_server_pass(
     timeout: int,
     traffic_capture: TrafficCapture | None = None,
     token: TokenAndClientInfo | None = None,
+    enable_oauth: bool = False,
+    oauth_client_id: str | None = None,
+    oauth_client_provider: OAuthClientProvider | None = None,
 ) -> ServerSignature:
     async def _check_server() -> ServerSignature:
-        async with get_client(server_config, timeout=timeout, traffic_capture=traffic_capture, token=token) as (
+        # [REVIEW-COMMENT]
+        # Forward the pre-built oauth_client_provider so get_client can skip
+        # re-constructing it when one is already supplied.
+        # [/REVIEW-COMMENT]
+        async with get_client(
+            server_config,
+            timeout=timeout,
+            traffic_capture=traffic_capture,
+            token=token,
+            enable_oauth=enable_oauth,
+            oauth_client_id=oauth_client_id,
+            oauth_client_provider=oauth_client_provider,
+        ) as (
             read,
             write,
         ):
@@ -205,15 +236,56 @@ async def check_server(
     timeout: int,
     traffic_capture: TrafficCapture | None = None,
     token: TokenAndClientInfo | None = None,
+    enable_oauth: bool = False,
+    oauth_client_id: str | None = None,
 ) -> tuple[ServerSignature, StdioServer | RemoteServer]:
     logger.debug("Checking server with timeout: %s seconds", timeout)
 
     if not isinstance(server_config, RemoteServer):
-        result = await asyncio.wait_for(_check_server_pass(server_config, timeout, traffic_capture), timeout)
+        result = await asyncio.wait_for(
+            _check_server_pass(
+                server_config,
+                timeout,
+                traffic_capture,
+                enable_oauth=enable_oauth,
+                oauth_client_id=oauth_client_id,
+            ),
+            timeout,
+        )
         logger.debug("Server check completed within timeout")
         return result, server_config
     else:
         logger.debug(f"Remote server with url: {server_config.url}, type: {server_config.type or 'none'}")
+
+        # [REVIEW-COMMENT]
+        # Build the shared OAuthClientProvider once before the strategy loop so
+        # that (a) the provider is keyed on the original/canonical URL rather
+        # than a mutated strategy variant, and (b) build_oauth_client_provider
+        # is called at most once instead of once per retry.
+        # [/REVIEW-COMMENT]
+        # Build shared OAuthClientProvider once, keyed on the canonical (original) URL
+        original_url = server_config.url
+        shared_oauth_provider: OAuthClientProvider | None = None
+        if token and isinstance(server_config, RemoteServer):
+            storage = FileTokenStorage(data=token)
+            shared_oauth_provider, _ = build_oauth_client_provider(
+                server_url=token.mcp_server_url,
+                storage=storage,
+            )
+        elif enable_oauth:
+            storage = InteractiveTokenStorage(server_url=original_url)
+            if oauth_client_id:
+                await storage.set_client_info(
+                    OAuthClientInformationFull(
+                        client_id=oauth_client_id,
+                        redirect_uris=["http://localhost:3030/callback"],
+                    )
+                )
+            shared_oauth_provider, _ = build_oauth_client_provider(
+                server_url=original_url,
+                storage=storage,
+            )
+
         strategy: list[tuple[Literal["sse", "http"], str]] = []
         url_path = urlparse(server_config.url).path
         if url_path.endswith("/sse"):
@@ -250,8 +322,21 @@ async def check_server(
                 server_config.type = protocol
                 server_config.url = url
                 logger.debug(f"Trying {protocol} with url: {url}")
+                # [REVIEW-COMMENT]
+                # Pass the shared provider so each strategy attempt reuses the
+                # same OAuthClientProvider built against the original URL.
+                # [/REVIEW-COMMENT]
                 result = await asyncio.wait_for(
-                    _check_server_pass(server_config, timeout, traffic_capture, token), timeout
+                    _check_server_pass(
+                        server_config,
+                        timeout,
+                        traffic_capture,
+                        token,
+                        enable_oauth=enable_oauth,
+                        oauth_client_id=oauth_client_id,
+                        oauth_client_provider=shared_oauth_provider,
+                    ),
+                    timeout,
                 )
                 logger.debug("Server check completed within timeout")
                 return result, server_config
