@@ -156,6 +156,7 @@ async def inspect_extension(
     config: StdioServer | RemoteServer | SkillServer,
     timeout: int,
     token: TokenAndClientInfo | None = None,
+    enable_oauth: bool = False,
 ) -> InspectedExtensions:
     """
     Scan an extension (MCP server or skill) and return a InspectedExtensions object.
@@ -163,7 +164,7 @@ async def inspect_extension(
     traffic_capture = TrafficCapture()
     if isinstance(config, StdioServer):
         try:
-            signature, _ = await check_server(config, timeout, traffic_capture, token)
+            signature, _ = await check_server(config, timeout, traffic_capture, token, enable_oauth=enable_oauth)
             return InspectedExtensions(name=name, config=config, signature_or_error=signature)
         except Exception as e:
             return InspectedExtensions(
@@ -180,7 +181,9 @@ async def inspect_extension(
 
     if isinstance(config, RemoteServer):
         try:
-            signature, fixed_config = await check_server(config.model_copy(deep=True), timeout, traffic_capture, token)
+            signature, fixed_config = await check_server(
+                config.model_copy(deep=True), timeout, traffic_capture, token, enable_oauth=enable_oauth
+            )
             assert isinstance(fixed_config, RemoteServer), f"Fixed config is not a RemoteServer: {fixed_config}"
             return InspectedExtensions(name=name, config=fixed_config, signature_or_error=signature)
         except HTTPStatusError as e:
@@ -234,6 +237,7 @@ async def inspect_client(
     timeout: int,
     tokens: list[TokenAndClientInfo],
     scan_skills: bool,
+    enable_oauth: bool = False,
 ) -> InspectedClient:
     """
     Scan a client (Cursor, VSCode, etc.) and return a InspectedClient object.
@@ -248,7 +252,9 @@ async def inspect_client(
             continue
         extensions_for_mcp_config: list[InspectedExtensions] = []
         for name, server in mcp_configs:
-            extension = await inspect_extension(name, server, timeout, find_relevant_token(tokens, name))
+            extension = await inspect_extension(
+                name, server, timeout, find_relevant_token(tokens, name), enable_oauth=enable_oauth
+            )
             extensions_for_mcp_config.append(extension)
         extensions[mcp_config_path] = extensions_for_mcp_config
 
