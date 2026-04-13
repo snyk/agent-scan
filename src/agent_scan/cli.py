@@ -208,6 +208,12 @@ def add_common_arguments(parser):
         default=False,
         help="Exit with a non-zero code when there are analysis findings or runtime failures",
     )
+    parser.add_argument(
+        "--enable-oauth",
+        action="store_true",
+        default=False,
+        help="Enable interactive OAuth authentication for remote MCP servers",
+    )
 
 
 def add_server_arguments(parser):
@@ -567,12 +573,15 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[Scan
         with open(args.mcp_oauth_tokens_path) as f:
             tokens = TokenAndClientInfoList.model_validate_json(f.read()).root
 
+    enable_oauth: bool = hasattr(args, "enable_oauth") and args.enable_oauth
+
     inspect_args = InspectArgs(
         timeout=server_timeout,
         tokens=tokens,
         paths=files,
         all_users=scan_all_users,
         scan_skills=scan_skills,
+        enable_oauth=enable_oauth,
     )
 
     if mode == "scan":
