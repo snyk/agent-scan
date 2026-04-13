@@ -424,6 +424,9 @@ def print_scan_result(
     full_description: bool = False,
     args=None,
 ) -> None:
+    if not result:
+        rich.print("No MCP client configurations found on this machine.")
+        return
     if not internal_issues:
         for res in result:
             res.issues = [issue for issue in res.issues if issue.code not in ["W003", "W004", "W005", "W006"]]

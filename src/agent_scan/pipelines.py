@@ -3,7 +3,6 @@ import logging
 import os
 from pathlib import Path
 
-import rich
 from pydantic import BaseModel
 
 from agent_scan.direct_scanner import direct_scan_to_server_config, is_direct_scan
@@ -87,8 +86,6 @@ async def inspect_pipeline(
                 clients_to_inspect.extend(ctis)
             else:
                 logger.info(f"Client {client.name} does not exist on this machine. {client.client_exists_paths}")
-        if not clients_to_inspect:
-            rich.print("No MCP client configurations found on this machine.")
 
     # Only report usernames where an agent was detected in their home directory.
     # When no usernames were associated with detected agents:
