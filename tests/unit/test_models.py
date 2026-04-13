@@ -277,6 +277,7 @@ class TestFileTokenStorageUpdated:
         new_token = OAuthToken(access_token="new_tok", token_type="bearer")
         # This should NOT raise NotImplementedError anymore
         await storage.set_tokens(new_token)
+        assert storage.data.token.access_token == "new_tok"
 
     @pytest.mark.asyncio
     async def test_file_token_storage_set_client_info_no_longer_raises(self):
@@ -296,3 +297,4 @@ class TestFileTokenStorageUpdated:
         )
         # This should NOT raise NotImplementedError anymore
         await storage.set_client_info(client_info)
+        assert storage.data.client_id == "new_cid"

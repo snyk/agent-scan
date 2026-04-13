@@ -187,10 +187,10 @@ class TestOAuthIntegrationInGetClient:
 
         with (
             patch("agent_scan.mcp_client.sse_client") as mock_sse,
-            patch("agent_scan.oauth.build_oauth_client_provider") as mock_build,
+            patch("agent_scan.mcp_client.build_oauth_client_provider") as mock_build,
         ):
             mock_provider = Mock()
-            mock_build.return_value = mock_provider
+            mock_build.return_value = (mock_provider, Mock())
 
             mock_cm = AsyncMock()
             mock_cm.__aenter__.return_value = (AsyncMock(), AsyncMock())
@@ -199,11 +199,12 @@ class TestOAuthIntegrationInGetClient:
             async with get_client(server, timeout=10, enable_oauth=True) as _:
                 pass
 
+            # build_oauth_client_provider must have been called
+            assert mock_build.called, "build_oauth_client_provider should have been called"
             # sse_client should have been called with an auth parameter
             call_kwargs = mock_sse.call_args
             assert call_kwargs is not None
-            # Check that auth was passed (either as keyword arg or that build was called)
-            assert "auth" in (call_kwargs.kwargs or {}) or mock_build.called
+            assert "auth" in (call_kwargs.kwargs or {}), "auth should have been passed to sse_client"
 
     @pytest.mark.asyncio
     async def test_get_client_sse_without_oauth_no_auth(self):
@@ -234,7 +235,7 @@ class TestOAuthIntegrationInGetClient:
             patch("agent_scan.mcp_client.build_oauth_client_provider") as mock_build,
         ):
             mock_provider = Mock()
-            mock_build.return_value = mock_provider
+            mock_build.return_value = (mock_provider, Mock())
 
             mock_cm = AsyncMock()
             mock_cm.__aenter__.return_value = (AsyncMock(), AsyncMock())

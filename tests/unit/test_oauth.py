@@ -118,7 +118,7 @@ class TestBuildOAuthClientProvider:
         from agent_scan.models import InteractiveTokenStorage
 
         storage = InteractiveTokenStorage(base_dir=str(tmp_path), server_url="https://mcp.example.com")
-        provider = build_oauth_client_provider(
+        provider, metadata = build_oauth_client_provider(
             server_url="https://mcp.example.com",
             storage=storage,
         )
@@ -129,10 +129,11 @@ class TestBuildOAuthClientProvider:
         from agent_scan.models import InteractiveTokenStorage
 
         storage = InteractiveTokenStorage(base_dir=str(tmp_path), server_url="https://mcp.example.com")
-        provider = build_oauth_client_provider(
+        provider, metadata = build_oauth_client_provider(
             server_url="https://mcp.example.com",
             storage=storage,
             port=4040,
         )
-        # The provider's client_metadata should contain the custom redirect URI
-        assert "http://localhost:4040/callback" in provider._client_metadata.redirect_uris
+        # The returned metadata should contain the custom redirect URI
+        redirect_uris = [str(u) for u in metadata.redirect_uris]
+        assert "http://localhost:4040/callback" in redirect_uris

@@ -141,7 +141,7 @@ def build_oauth_client_provider(
     server_url: str,
     storage: TokenStorage,
     port: int = 3030,
-) -> OAuthClientProvider:
+) -> tuple[OAuthClientProvider, OAuthClientMetadata]:
     """Construct an OAuthClientProvider with interactive browser-based handlers.
 
     Args:
@@ -150,7 +150,9 @@ def build_oauth_client_provider(
         port: The local port for the OAuth redirect callback server.
 
     Returns:
-        A configured OAuthClientProvider instance.
+        A tuple of (provider, client_metadata) where provider is a configured
+        OAuthClientProvider instance and client_metadata is the OAuthClientMetadata
+        used to construct it.
     """
     client_metadata = OAuthClientMetadata(
         client_name="mcp-scan",
@@ -167,14 +169,4 @@ def build_oauth_client_provider(
         callback_handler=make_callback_handler(port=port),
     )
 
-    # Expose client_metadata for testing/introspection.
-    # Store a copy with plain-string redirect_uris so that
-    # ``"http://..." in provider._client_metadata.redirect_uris`` works
-    # (OAuthClientMetadata converts them to AnyUrl objects).
-    class _ClientMetadataView:
-        def __init__(self, meta: OAuthClientMetadata) -> None:
-            self.redirect_uris = [str(u) for u in meta.redirect_uris]
-
-    provider._client_metadata = _ClientMetadataView(client_metadata)  # type: ignore[attr-defined]
-
-    return provider
+    return provider, client_metadata

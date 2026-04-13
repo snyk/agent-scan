@@ -14,7 +14,6 @@ from mcp.client.auth import OAuthClientProvider
 from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
-from mcp.shared.auth import OAuthClientMetadata
 
 from agent_scan.models import (
     ClaudeCodeConfigFile,
@@ -31,7 +30,7 @@ from agent_scan.models import (
     VSCodeConfigFile,
     VSCodeMCPConfig,
 )
-from agent_scan.oauth import build_oauth_client_provider, make_callback_handler, make_redirect_handler
+from agent_scan.oauth import build_oauth_client_provider
 from agent_scan.traffic_capture import PipeStderrCapture, TrafficCapture, capturing_client
 from agent_scan.utils import resolve_command_and_args
 
@@ -39,10 +38,6 @@ from agent_scan.utils import resolve_command_and_args
 logger = logging.getLogger(__name__)
 
 
-# [REVIEW][BEFORE] streamablehttp_client_without_session accepted a `token` param and
-# built OAuthClientProvider internally, duplicating provider construction logic.
-# [REVIEW][AFTER] Accepts a pre-built `oauth_client_provider` so construction is
-# centralised in get_client, making it easier to swap storage strategies.
 @asynccontextmanager
 async def streamablehttp_client_without_session(
     url: str,
@@ -57,10 +52,6 @@ async def streamablehttp_client_without_session(
             yield read, write
 
 
-# [REVIEW][BEFORE] get_client did not support interactive OAuth — only token-based auth
-# [REVIEW][AFTER] Added enable_oauth param; constructs OAuthClientProvider centrally
-# using either FileTokenStorage (when token provided) or InteractiveTokenStorage
-# (when enable_oauth=True for remote servers)
 @asynccontextmanager
 async def get_client(
     server_config: StdioServer | RemoteServer,
@@ -78,21 +69,14 @@ async def get_client(
     # Construct the OAuthClientProvider centrally
     oauth_client_provider: OAuthClientProvider | None = None
     if token and isinstance(server_config, RemoteServer):
-        oauth_client_provider = OAuthClientProvider(
+        storage = FileTokenStorage(data=token)
+        oauth_client_provider, _ = build_oauth_client_provider(
             server_url=token.mcp_server_url,
-            client_metadata=OAuthClientMetadata(
-                client_name="mcp-scan",
-                grant_types=["authorization_code", "refresh_token"],
-                response_types=["code"],
-                redirect_uris=["http://localhost:3030/callback"],
-            ),
-            storage=FileTokenStorage(data=token),
-            redirect_handler=make_redirect_handler(),
-            callback_handler=make_callback_handler(),
+            storage=storage,
         )
     elif enable_oauth and isinstance(server_config, RemoteServer):
         storage = InteractiveTokenStorage(server_url=server_config.url)
-        oauth_client_provider = build_oauth_client_provider(
+        oauth_client_provider, _ = build_oauth_client_provider(
             server_url=server_config.url,
             storage=storage,
         )

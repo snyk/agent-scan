@@ -457,8 +457,6 @@ class FileTokenStorage(TokenStorage):
         return self.data.token
 
     async def set_tokens(self, tokens: OAuthToken) -> None:
-        # [REVIEW][BEFORE] Raised NotImplementedError, preventing token refresh flows
-        # [REVIEW][AFTER] Update in-memory token so refresh cycles work with FileTokenStorage
         self.data.token = tokens
 
     async def get_client_info(self) -> OAuthClientInformationFull | None:
@@ -469,8 +467,6 @@ class FileTokenStorage(TokenStorage):
 
     async def set_client_info(self, client_info: OAuthClientInformationFull) -> None:
         """Store client information."""
-        # [REVIEW][BEFORE] Raised NotImplementedError, breaking dynamic client registration
-        # [REVIEW][AFTER] Update in-memory client_id so the provider can track registrations
         self.data.client_id = client_info.client_id
 
 
@@ -497,8 +493,10 @@ class InteractiveTokenStorage(TokenStorage):
     async def set_tokens(self, tokens: OAuthToken) -> None:
         """Write tokens to {storage_dir}/tokens.json."""
         token_path = self._get_storage_dir() / "tokens.json"
-        with open(token_path, "w", encoding="utf-8") as f:
-            json.dump(tokens.model_dump(mode="json"), f)
+        data = json.dumps(tokens.model_dump(mode="json"))
+        fd = os.open(str(token_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(data)
 
     async def get_client_info(self) -> OAuthClientInformationFull | None:
         """Read client info from {storage_dir}/client_info.json, returning None if absent."""
@@ -512,14 +510,16 @@ class InteractiveTokenStorage(TokenStorage):
     async def set_client_info(self, client_info: OAuthClientInformationFull) -> None:
         """Write client info to {storage_dir}/client_info.json."""
         info_path = self._get_storage_dir() / "client_info.json"
-        with open(info_path, "w", encoding="utf-8") as f:
-            json.dump(client_info.model_dump(mode="json"), f)
+        data = json.dumps(client_info.model_dump(mode="json"))
+        fd = os.open(str(info_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(data)
 
     def _get_storage_dir(self) -> Path:
         """Return the per-server storage directory, creating it if necessary."""
         safe_name = self._url_safe_filename(self._server_url)
         storage_dir = Path(self._base_dir) / safe_name
-        os.makedirs(storage_dir, exist_ok=True)
+        os.makedirs(storage_dir, mode=0o700, exist_ok=True)
         return storage_dir
 
     @staticmethod
