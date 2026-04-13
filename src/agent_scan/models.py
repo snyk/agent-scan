@@ -145,15 +145,19 @@ class ClaudeConfigFile(MCPConfig):
 class ClaudeCodeConfigFile(MCPConfig):
     model_config = ConfigDict()
     projects: dict[str, ClaudeConfigFile]
+    mcpServers: dict[str, StdioServer | RemoteServer] = Field(default_factory=dict)
 
     def get_servers(self) -> dict[str, StdioServer | RemoteServer]:
         servers: dict[str, StdioServer | RemoteServer] = {}
+        # Include top-level (global) mcpServers
+        servers.update(self.mcpServers)
+        # Include per-project mcpServers
         for proj in self.projects.values():
             servers.update(proj.get_servers())
         return servers
 
     def set_servers(self, servers: dict[str, StdioServer | RemoteServer]) -> None:
-        self.projects = {"~": ClaudeConfigFile(mcpServers=servers)}
+        self.mcpServers = servers
 
 
 class VSCodeMCPConfig(MCPConfig):
