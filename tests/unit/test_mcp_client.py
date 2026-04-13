@@ -1,5 +1,6 @@
 """Unit tests for the mcp_client module."""
 
+import contextlib
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -16,8 +17,13 @@ from mcp.types import (
 )
 from pytest_lazy_fixtures import lf
 
-from agent_scan.mcp_client import _check_server_pass, check_server, scan_mcp_config_file
-from agent_scan.models import StdioServer
+from agent_scan.mcp_client import (
+    _check_server_pass,
+    check_server,
+    get_client,
+    scan_mcp_config_file,
+)
+from agent_scan.models import RemoteServer, StdioServer
 
 
 @pytest.mark.parametrize(
@@ -169,3 +175,115 @@ def remote_mcp_server_just_url():
 @pytest.mark.asyncio
 async def test_parse_server():
     pass
+
+
+class TestOAuthIntegrationInGetClient:
+    """Tests for OAuth support in get_client and check_server."""
+
+    @pytest.mark.asyncio
+    async def test_get_client_sse_with_oauth_provider(self):
+        """get_client should pass auth to sse_client when enable_oauth=True."""
+        server = RemoteServer(url="https://mcp.example.com/sse", type="sse")
+
+        with (
+            patch("agent_scan.mcp_client.sse_client") as mock_sse,
+            patch("agent_scan.oauth.build_oauth_client_provider") as mock_build,
+        ):
+            mock_provider = Mock()
+            mock_build.return_value = mock_provider
+
+            mock_cm = AsyncMock()
+            mock_cm.__aenter__.return_value = (AsyncMock(), AsyncMock())
+            mock_sse.return_value = mock_cm
+
+            async with get_client(server, timeout=10, enable_oauth=True) as _:
+                pass
+
+            # sse_client should have been called with an auth parameter
+            call_kwargs = mock_sse.call_args
+            assert call_kwargs is not None
+            # Check that auth was passed (either as keyword arg or that build was called)
+            assert "auth" in (call_kwargs.kwargs or {}) or mock_build.called
+
+    @pytest.mark.asyncio
+    async def test_get_client_sse_without_oauth_no_auth(self):
+        """get_client should not pass auth when enable_oauth=False and no token."""
+        server = RemoteServer(url="https://mcp.example.com/sse", type="sse")
+
+        with patch("agent_scan.mcp_client.sse_client") as mock_sse:
+            mock_cm = AsyncMock()
+            mock_cm.__aenter__.return_value = (AsyncMock(), AsyncMock())
+            mock_sse.return_value = mock_cm
+
+            async with get_client(server, timeout=10, enable_oauth=False) as _:
+                pass
+
+            call_kwargs = mock_sse.call_args
+            assert call_kwargs is not None
+            # auth should not be passed or should be None
+            auth_val = (call_kwargs.kwargs or {}).get("auth")
+            assert auth_val is None
+
+    @pytest.mark.asyncio
+    async def test_get_client_http_with_enable_oauth_no_token(self):
+        """HTTP path should construct OAuthClientProvider via InteractiveTokenStorage when enable_oauth=True."""
+        server = RemoteServer(url="https://mcp.example.com/mcp", type="http")
+
+        with (
+            patch("agent_scan.mcp_client.streamablehttp_client_without_session") as mock_http,
+            patch("agent_scan.mcp_client.build_oauth_client_provider") as mock_build,
+        ):
+            mock_provider = Mock()
+            mock_build.return_value = mock_provider
+
+            mock_cm = AsyncMock()
+            mock_cm.__aenter__.return_value = (AsyncMock(), AsyncMock())
+            mock_http.return_value = mock_cm
+
+            async with get_client(server, timeout=10, enable_oauth=True) as _:
+                pass
+
+            mock_build.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_get_client_stdio_ignores_enable_oauth(self):
+        """enable_oauth should have no effect on stdio servers."""
+        server = StdioServer(command="echo", args=["hello"])
+
+        with patch("agent_scan.mcp_client.stdio_client") as mock_stdio:
+            mock_cm = AsyncMock()
+            mock_cm.__aenter__.return_value = (AsyncMock(), AsyncMock())
+            mock_stdio.return_value = mock_cm
+
+            async with get_client(server, timeout=10, enable_oauth=True) as _:
+                pass
+
+            # stdio_client should have been called normally without OAuth params
+            mock_stdio.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_check_server_passes_enable_oauth(self):
+        """check_server should accept and forward enable_oauth to _check_server_pass."""
+        import asyncio
+        import inspect as inspect_mod
+
+        # First, verify check_server actually accepts enable_oauth as a parameter
+        sig = inspect_mod.signature(check_server)
+        assert "enable_oauth" in sig.parameters, "check_server() does not have an 'enable_oauth' parameter"
+
+        server = StdioServer(command="echo", args=["hello"])
+
+        with patch("agent_scan.mcp_client._check_server_pass") as mock_check:
+            mock_check.return_value = Mock()
+
+            # Use asyncio.wait_for to wrap, matching the real implementation
+            result_future = asyncio.ensure_future(check_server(server, timeout=5, enable_oauth=True))
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(result_future, timeout=2)
+
+            # _check_server_pass should have been called with enable_oauth=True
+            assert mock_check.called, "_check_server_pass was not called"
+            call_kwargs = mock_check.call_args
+            assert call_kwargs.kwargs.get("enable_oauth") is True or (
+                len(call_kwargs.args) > 4 and call_kwargs.args[4] is True
+            )

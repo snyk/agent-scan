@@ -1,11 +1,18 @@
 """Tests for CLI argument parsing, especially multiple control servers."""
 
+import argparse
 import sys
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from agent_scan.cli import MissingIdentifierError, parse_control_servers
+from agent_scan.cli import (
+    MissingIdentifierError,
+    add_common_arguments,
+    add_server_arguments,
+    parse_control_servers,
+    setup_scan_parser,
+)
 from agent_scan.models import ControlServer, Issue, ScanPathResult
 
 
@@ -531,3 +538,45 @@ class TestJSONOutput:
 
             parsed = json.loads(output)
             assert isinstance(parsed, dict)
+
+
+def _make_scan_parser():
+    """Helper: build a scan subcommand parser identical to the one in main()."""
+    parser = argparse.ArgumentParser(prog="agent-scan")
+    subparsers = parser.add_subparsers(dest="command")
+    scan_parser = subparsers.add_parser("scan")
+    setup_scan_parser(scan_parser)
+    return parser
+
+
+def _make_inspect_parser():
+    """Helper: build an inspect subcommand parser identical to the one in main()."""
+    parser = argparse.ArgumentParser(prog="agent-scan")
+    subparsers = parser.add_subparsers(dest="command")
+    inspect_parser = subparsers.add_parser("inspect")
+    add_common_arguments(inspect_parser)
+    add_server_arguments(inspect_parser)
+    inspect_parser.add_argument("files", type=str, nargs="*", default=[])
+    return parser
+
+
+class TestEnableOAuthFlag:
+    """Tests for the --enable-oauth CLI flag."""
+
+    def test_enable_oauth_flag_default_false(self):
+        """Parsing args for scan without --enable-oauth should default to False."""
+        parser = _make_scan_parser()
+        args = parser.parse_args(["scan"])
+        assert args.enable_oauth is False
+
+    def test_enable_oauth_flag_set_true(self):
+        """Parsing args with --enable-oauth should set enable_oauth to True."""
+        parser = _make_scan_parser()
+        args = parser.parse_args(["scan", "--enable-oauth"])
+        assert args.enable_oauth is True
+
+    def test_enable_oauth_flag_available_on_inspect_command(self):
+        """The --enable-oauth flag should be available on the inspect command."""
+        parser = _make_inspect_parser()
+        args = parser.parse_args(["inspect", "--enable-oauth"])
+        assert args.enable_oauth is True
