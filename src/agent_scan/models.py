@@ -1,7 +1,10 @@
+import base64
+import json
 import logging
 import os
 import re
 from itertools import chain
+from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
 from lark import Lark
@@ -454,7 +457,9 @@ class FileTokenStorage(TokenStorage):
         return self.data.token
 
     async def set_tokens(self, tokens: OAuthToken) -> None:
-        raise NotImplementedError("set_tokens is not supported for FileTokenStorage")
+        # [REVIEW][BEFORE] Raised NotImplementedError, preventing token refresh flows
+        # [REVIEW][AFTER] Update in-memory token so refresh cycles work with FileTokenStorage
+        self.data.token = tokens
 
     async def get_client_info(self) -> OAuthClientInformationFull | None:
         return OAuthClientInformationFull(
@@ -464,7 +469,63 @@ class FileTokenStorage(TokenStorage):
 
     async def set_client_info(self, client_info: OAuthClientInformationFull) -> None:
         """Store client information."""
-        raise NotImplementedError("set_client_info is not supported for FileTokenStorage")
+        # [REVIEW][BEFORE] Raised NotImplementedError, breaking dynamic client registration
+        # [REVIEW][AFTER] Update in-memory client_id so the provider can track registrations
+        self.data.client_id = client_info.client_id
+
+
+class InteractiveTokenStorage(TokenStorage):
+    """Persistent file-based token storage for interactive OAuth flows.
+
+    Stores tokens and client information as JSON files in a directory
+    derived from the server URL, under a configurable base directory.
+    """
+
+    def __init__(self, server_url: str, base_dir: str = "~/.mcp-scan-oauth") -> None:
+        self._server_url = server_url
+        self._base_dir = os.path.expanduser(base_dir)
+
+    async def get_tokens(self) -> OAuthToken | None:
+        """Read tokens from {storage_dir}/tokens.json, returning None if absent."""
+        token_path = self._get_storage_dir() / "tokens.json"
+        if not token_path.exists():
+            return None
+        with open(token_path, encoding="utf-8") as f:
+            data = json.load(f)
+        return OAuthToken.model_validate(data)
+
+    async def set_tokens(self, tokens: OAuthToken) -> None:
+        """Write tokens to {storage_dir}/tokens.json."""
+        token_path = self._get_storage_dir() / "tokens.json"
+        with open(token_path, "w", encoding="utf-8") as f:
+            json.dump(tokens.model_dump(mode="json"), f)
+
+    async def get_client_info(self) -> OAuthClientInformationFull | None:
+        """Read client info from {storage_dir}/client_info.json, returning None if absent."""
+        info_path = self._get_storage_dir() / "client_info.json"
+        if not info_path.exists():
+            return None
+        with open(info_path, encoding="utf-8") as f:
+            data = json.load(f)
+        return OAuthClientInformationFull.model_validate(data)
+
+    async def set_client_info(self, client_info: OAuthClientInformationFull) -> None:
+        """Write client info to {storage_dir}/client_info.json."""
+        info_path = self._get_storage_dir() / "client_info.json"
+        with open(info_path, "w", encoding="utf-8") as f:
+            json.dump(client_info.model_dump(mode="json"), f)
+
+    def _get_storage_dir(self) -> Path:
+        """Return the per-server storage directory, creating it if necessary."""
+        safe_name = self._url_safe_filename(self._server_url)
+        storage_dir = Path(self._base_dir) / safe_name
+        os.makedirs(storage_dir, exist_ok=True)
+        return storage_dir
+
+    @staticmethod
+    def _url_safe_filename(url: str) -> str:
+        """Convert a URL to a filesystem-safe directory name using base64url encoding."""
+        return base64.urlsafe_b64encode(url.encode()).decode().rstrip("=")
 
 
 class SerializedException(BaseModel):
