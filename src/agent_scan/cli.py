@@ -433,6 +433,12 @@ def main():
         default=None,
         help="Override the config file path (default: client-specific well-known path)",
     )
+    guard_install_parser.add_argument(
+        "--managed",
+        action="store_true",
+        default=False,
+        help="Install hooks to the managed (admin/MDM) config path instead of the user-level path",
+    )
 
     guard_uninstall_parser = guard_subparsers.add_parser(
         "uninstall",
@@ -448,6 +454,12 @@ def main():
         type=str,
         default=None,
         help="Override the config file path (default: client-specific well-known path)",
+    )
+    guard_uninstall_parser.add_argument(
+        "--managed",
+        action="store_true",
+        default=False,
+        help="Uninstall hooks from the managed (admin/MDM) config path instead of the user-level path",
     )
 
     # Parse arguments (default to 'scan' if no command provided)

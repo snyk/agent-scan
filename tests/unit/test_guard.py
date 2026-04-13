@@ -14,12 +14,18 @@ from pathlib import Path
 import pytest
 
 from agent_scan.guard import (
+    _PERMISSION_DENIED,
     CLAUDE_EVENTS_WITH_MATCHER,
     CLAUDE_HOOK_EVENTS,
+    CLAUDE_MANAGED_SETTINGS_PATH,
+    CLAUDE_SETTINGS_PATH,
     CURSOR_HOOK_EVENTS,
+    CURSOR_HOOKS_PATH,
+    CURSOR_MANAGED_HOOKS_PATH,
     _build_hook_command,
     _build_hook_command_powershell,
     _compact_events,
+    _config_path,
     _detect_claude_install,
     _detect_cursor_install,
     _extract_env_from_cmd,
@@ -30,6 +36,8 @@ from agent_scan.guard import (
     _is_agent_scan_command,
     _mask_key,
     _parse_command_info,
+    _preflight_writable,
+    _print_client_status,
     _shell_quote,
     _uninstall_claude,
     _uninstall_cursor,
@@ -1030,6 +1038,210 @@ class TestFilterCursorHooks:
         result = _filter_cursor_hooks(hooks)
         assert len(result["stop"]) == 1
         assert result["stop"][0]["command"] == CURSOR_OTHER_CMD
+
+
+# ===================================================================
+# Config path resolution (user vs managed)
+# ===================================================================
+
+
+class TestConfigPath:
+    def test_claude_user_default(self):
+        assert _config_path("claude") == CLAUDE_SETTINGS_PATH
+
+    def test_cursor_user_default(self):
+        assert _config_path("cursor") == CURSOR_HOOKS_PATH
+
+    def test_claude_managed(self):
+        assert _config_path("claude", managed=True) == CLAUDE_MANAGED_SETTINGS_PATH
+
+    def test_cursor_managed(self):
+        assert _config_path("cursor", managed=True) == CURSOR_MANAGED_HOOKS_PATH
+
+    def test_file_override_takes_precedence_over_managed(self):
+        override = "/custom/path/settings.json"
+        assert _config_path("claude", override=override, managed=True) == Path(override)
+
+    def test_file_override_takes_precedence_over_user(self):
+        override = "/custom/path/settings.json"
+        assert _config_path("claude", override=override) == Path(override)
+
+
+class TestManagedPathConstants:
+    def test_claude_managed_path_is_absolute(self):
+        assert CLAUDE_MANAGED_SETTINGS_PATH.is_absolute()
+
+    def test_cursor_managed_path_is_absolute(self):
+        assert CURSOR_MANAGED_HOOKS_PATH.is_absolute()
+
+    def test_claude_managed_filename(self):
+        assert CLAUDE_MANAGED_SETTINGS_PATH.name == "managed-settings.json"
+
+    def test_cursor_managed_filename(self):
+        assert CURSOR_MANAGED_HOOKS_PATH.name == "hooks.json"
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="macOS-specific paths")
+    def test_macos_claude_managed_path(self):
+        assert str(CLAUDE_MANAGED_SETTINGS_PATH) == "/Library/Application Support/ClaudeCode/managed-settings.json"
+
+    @pytest.mark.skipif(sys.platform != "darwin", reason="macOS-specific paths")
+    def test_macos_cursor_managed_path(self):
+        assert str(CURSOR_MANAGED_HOOKS_PATH) == "/Library/Application Support/Cursor/hooks.json"
+
+    @pytest.mark.skipif(sys.platform != "linux", reason="Linux-specific paths")
+    def test_linux_claude_managed_path(self):
+        assert str(CLAUDE_MANAGED_SETTINGS_PATH) == "/etc/claude-code/managed-settings.json"
+
+    @pytest.mark.skipif(sys.platform != "linux", reason="Linux-specific paths")
+    def test_linux_cursor_managed_path(self):
+        assert str(CURSOR_MANAGED_HOOKS_PATH) == "/etc/cursor/hooks.json"
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows-specific paths")
+    def test_windows_claude_managed_path(self):
+        assert "ClaudeCode" in str(CLAUDE_MANAGED_SETTINGS_PATH)
+        assert "managed-settings.json" in str(CLAUDE_MANAGED_SETTINGS_PATH)
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows-specific paths")
+    def test_windows_cursor_managed_path(self):
+        assert "Cursor" in str(CURSOR_MANAGED_HOOKS_PATH)
+        assert "hooks.json" in str(CURSOR_MANAGED_HOOKS_PATH)
+
+
+class TestManagedInstallClaude:
+    """Verify hooks can be installed/detected/uninstalled at a managed path."""
+
+    def test_install_to_managed_path(self, tmp_path):
+        path = tmp_path / "managed-settings.json"
+        _install_claude(AGENT_SCAN_CMD, path)
+
+        data = json.loads(path.read_text())
+        hooks = data["hooks"]
+        assert set(hooks.keys()) == set(CLAUDE_HOOK_EVENTS)
+
+    def test_detect_at_managed_path(self, tmp_path):
+        path = tmp_path / "managed-settings.json"
+        _install_claude(AGENT_SCAN_CMD, path)
+
+        info = _detect_claude_install(path)
+        assert info is not None
+        assert info["auth_value"] == "pk-1234"
+
+    def test_uninstall_from_managed_path(self, tmp_path):
+        path = tmp_path / "managed-settings.json"
+        _install_claude(AGENT_SCAN_CMD, path)
+        _uninstall_claude(path)
+
+        data = json.loads(path.read_text())
+        assert "hooks" not in data
+
+
+class TestManagedInstallCursor:
+    """Verify hooks can be installed/detected/uninstalled at a managed path."""
+
+    def test_install_to_managed_path(self, tmp_path):
+        path = tmp_path / "hooks.json"
+        _install_cursor(CURSOR_AGENT_SCAN_CMD, path)
+
+        data = json.loads(path.read_text())
+        hooks = data["hooks"]
+        assert set(hooks.keys()) == set(CURSOR_HOOK_EVENTS)
+
+    def test_detect_at_managed_path(self, tmp_path):
+        path = tmp_path / "hooks.json"
+        _install_cursor(CURSOR_AGENT_SCAN_CMD, path)
+
+        info = _detect_cursor_install(path)
+        assert info is not None
+        assert info["auth_value"] == "pk-1234"
+
+    def test_uninstall_from_managed_path(self, tmp_path):
+        path = tmp_path / "hooks.json"
+        _install_cursor(CURSOR_AGENT_SCAN_CMD, path)
+        _uninstall_cursor(path)
+
+        data = json.loads(path.read_text())
+        assert data["hooks"] == {}
+
+
+# ===================================================================
+# Permission denied handling (managed paths)
+# ===================================================================
+
+
+class TestPermissionDeniedStatus:
+    """Managed configs may be unreadable — status should not crash."""
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="chmod has no effect on Windows")
+    def test_detect_claude_raises_on_unreadable(self, tmp_path):
+        path = tmp_path / "managed-settings.json"
+        _write(path, {"hooks": {"PreToolUse": [_claude_group(AGENT_SCAN_CMD, "*")]}})
+        path.chmod(0o000)
+        try:
+            with pytest.raises(PermissionError):
+                _detect_claude_install(path)
+        finally:
+            path.chmod(0o644)
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="chmod has no effect on Windows")
+    def test_detect_cursor_raises_on_unreadable(self, tmp_path):
+        path = tmp_path / "hooks.json"
+        _write(path, {"version": 1, "hooks": {"stop": [_cursor_entry(CURSOR_AGENT_SCAN_CMD)]}})
+        path.chmod(0o000)
+        try:
+            with pytest.raises(PermissionError):
+                _detect_cursor_install(path)
+        finally:
+            path.chmod(0o644)
+
+    def test_print_client_status_permission_denied(self, tmp_path, capsys):
+        _print_client_status("Claude Code", tmp_path / "managed-settings.json", _PERMISSION_DENIED)
+        output = capsys.readouterr().out
+        assert "UNREADABLE" in output or "permission denied" in output.lower()
+
+    def test_print_client_status_not_installed(self, tmp_path, capsys):
+        _print_client_status("Claude Code", tmp_path / "settings.json", None)
+        output = capsys.readouterr().out
+        assert "NOT INSTALLED" in output
+
+    def test_print_client_status_installed(self, tmp_path, capsys):
+        info = {
+            "host": "api.snyk.io",
+            "auth_type": "pushkey",
+            "auth_value": "pk-1234567890",
+            "tenant_id": "tid-1",
+            "url": "https://api.snyk.io",
+            "events": ["PreToolUse"],
+        }
+        _print_client_status("Claude Code", tmp_path / "settings.json", info)
+        output = capsys.readouterr().out
+        assert "INSTALLED" in output
+
+
+# ===================================================================
+# Preflight writability check
+# ===================================================================
+
+
+class TestPreflightWritable:
+    def test_passes_when_parent_writable(self, tmp_path):
+        config = tmp_path / "subdir" / "settings.json"
+        config.parent.mkdir(parents=True)
+        _preflight_writable(config)  # should not raise
+
+    def test_passes_when_parent_does_not_exist(self, tmp_path):
+        config = tmp_path / "nonexistent" / "settings.json"
+        _preflight_writable(config)  # parent doesn't exist yet, nothing to check
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="chmod has no effect on Windows")
+    def test_raises_when_parent_not_writable(self, tmp_path):
+        config_dir = tmp_path / "locked"
+        config_dir.mkdir()
+        config_dir.chmod(0o555)
+        try:
+            with pytest.raises(PermissionError, match="not writable"):
+                _preflight_writable(config_dir / "settings.json")
+        finally:
+            config_dir.chmod(0o755)
 
 
 # ===================================================================
