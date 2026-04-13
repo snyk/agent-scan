@@ -214,6 +214,18 @@ def add_common_arguments(parser):
         default=False,
         help="Enable interactive OAuth authentication for remote MCP servers",
     )
+    parser.add_argument(
+        "--oauth-client-id",
+        type=str,
+        default=None,
+        help="Pre-registered OAuth client ID for remote MCP servers that don't support dynamic client registration",
+    )
+    parser.add_argument(
+        "--oauth-client-secret",
+        type=str,
+        default=None,
+        help="OAuth client secret for confidential pre-registered clients (optional)",
+    )
 
 
 def add_server_arguments(parser):
@@ -575,6 +587,13 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[Scan
 
     enable_oauth: bool = hasattr(args, "enable_oauth") and args.enable_oauth
 
+    oauth_client_id: str | None = getattr(args, "oauth_client_id", None)
+    oauth_client_secret: str | None = getattr(args, "oauth_client_secret", None)
+    # [REVIEW][BEFORE] enable_oauth was only set from the --enable-oauth flag
+    # [REVIEW][AFTER] Providing --oauth-client-id automatically implies --enable-oauth
+    if oauth_client_id:
+        enable_oauth = True
+
     inspect_args = InspectArgs(
         timeout=server_timeout,
         tokens=tokens,
@@ -582,6 +601,8 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[Scan
         all_users=scan_all_users,
         scan_skills=scan_skills,
         enable_oauth=enable_oauth,
+        oauth_client_id=oauth_client_id,
+        oauth_client_secret=oauth_client_secret,
     )
 
     if mode == "scan":
