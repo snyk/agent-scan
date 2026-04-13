@@ -1,7 +1,7 @@
 """Unit tests for the OAuth module (agent_scan.oauth)."""
 
 import asyncio
-import threading
+import contextlib
 from unittest.mock import patch
 
 import pytest
@@ -79,10 +79,8 @@ class TestWaitForOAuthCallback:
         async def send_callback():
             await asyncio.sleep(0.3)
             url = f"http://localhost:{port}/callback?state=test_state"
-            try:
+            with contextlib.suppress(Exception):
                 urllib.request.urlopen(url, timeout=5)
-            except Exception:
-                pass  # Server may respond with an error status
 
         task = asyncio.create_task(send_callback())
         with pytest.raises(OAuthCallbackError):

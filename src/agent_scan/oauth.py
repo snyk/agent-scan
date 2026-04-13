@@ -54,7 +54,7 @@ async def wait_for_oauth_callback(
     result_future: asyncio.Future[tuple[str, str | None]] = loop.create_future()
 
     class _CallbackHandler(BaseHTTPRequestHandler):
-        def do_GET(self) -> None:  # noqa: N802
+        def do_GET(self) -> None:
             parsed = urlparse(self.path)
             if parsed.path != "/callback":
                 self.send_response(404)
@@ -98,9 +98,7 @@ async def wait_for_oauth_callback(
     try:
         return await asyncio.wait_for(asyncio.shield(result_future), timeout=timeout)
     except asyncio.TimeoutError:
-        raise TimeoutError(
-            f"OAuth callback was not received within {timeout} seconds"
-        )
+        raise TimeoutError(f"OAuth callback was not received within {timeout} seconds") from None
     finally:
         server.shutdown()
         server_thread.join(timeout=2)
