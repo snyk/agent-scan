@@ -308,9 +308,7 @@ class TestOAuthIntegrationInGetClient:
             mock_cm.__aenter__.return_value = (AsyncMock(), AsyncMock())
             mock_sse.return_value = mock_cm
 
-            async with get_client(
-                server, timeout=10, enable_oauth=True, oauth_client_id="pre-reg-id", oauth_client_secret=None
-            ) as _:
+            async with get_client(server, timeout=10, enable_oauth=True, oauth_client_id="pre-reg-id") as _:
                 pass
 
             # set_client_info should have been called with an OAuthClientInformationFull
@@ -318,37 +316,6 @@ class TestOAuthIntegrationInGetClient:
             client_info = mock_set_client_info.call_args[0][0]
             assert isinstance(client_info, OAuthClientInformationFull)
             assert client_info.client_id == "pre-reg-id"
-            assert client_info.client_secret is None
-
-    @pytest.mark.asyncio
-    async def test_get_client_with_oauth_client_id_and_secret_prepopulates_storage(self):
-        """get_client should prepopulate InteractiveTokenStorage with client_id and client_secret."""
-        from agent_scan.models import InteractiveTokenStorage, OAuthClientInformationFull
-
-        server = RemoteServer(url="https://mcp.example.com/sse", type="sse")
-
-        with (
-            patch("agent_scan.mcp_client.sse_client") as mock_sse,
-            patch("agent_scan.mcp_client.build_oauth_client_provider") as mock_build,
-            patch.object(InteractiveTokenStorage, "set_client_info", new_callable=AsyncMock) as mock_set_client_info,
-        ):
-            mock_provider = Mock()
-            mock_build.return_value = (mock_provider, Mock())
-
-            mock_cm = AsyncMock()
-            mock_cm.__aenter__.return_value = (AsyncMock(), AsyncMock())
-            mock_sse.return_value = mock_cm
-
-            async with get_client(
-                server, timeout=10, enable_oauth=True, oauth_client_id="cid", oauth_client_secret="csec"
-            ) as _:
-                pass
-
-            assert mock_set_client_info.called, "set_client_info was not called"
-            client_info = mock_set_client_info.call_args[0][0]
-            assert isinstance(client_info, OAuthClientInformationFull)
-            assert client_info.client_id == "cid"
-            assert client_info.client_secret == "csec"
 
     @pytest.mark.asyncio
     async def test_get_client_without_oauth_client_id_does_not_prepopulate(self):
@@ -375,8 +342,8 @@ class TestOAuthIntegrationInGetClient:
             assert not mock_set_client_info.called, "set_client_info should NOT have been called"
 
     @pytest.mark.asyncio
-    async def test_get_client_passes_client_id_to_build_provider(self):
-        """get_client should pass client_id and client_secret kwargs to build_oauth_client_provider."""
+    async def test_get_client_passes_oauth_client_id_to_build_provider(self):
+        """get_client should call build_oauth_client_provider when oauth_client_id is set."""
         server = RemoteServer(url="https://mcp.example.com/sse", type="sse")
 
         with (
@@ -390,19 +357,14 @@ class TestOAuthIntegrationInGetClient:
             mock_cm.__aenter__.return_value = (AsyncMock(), AsyncMock())
             mock_sse.return_value = mock_cm
 
-            async with get_client(
-                server, timeout=10, enable_oauth=True, oauth_client_id="cid", oauth_client_secret="csec"
-            ) as _:
+            async with get_client(server, timeout=10, enable_oauth=True, oauth_client_id="cid") as _:
                 pass
 
             assert mock_build.called, "build_oauth_client_provider was not called"
-            call_kwargs = mock_build.call_args.kwargs
-            assert call_kwargs.get("client_id") == "cid", "client_id not passed to build_oauth_client_provider"
-            assert call_kwargs.get("client_secret") == "csec", "client_secret not passed to build_oauth_client_provider"
 
     @pytest.mark.asyncio
-    async def test_check_server_forwards_oauth_client_id_and_secret(self):
-        """check_server should forward oauth_client_id and oauth_client_secret to _check_server_pass."""
+    async def test_check_server_forwards_oauth_client_id(self):
+        """check_server should forward oauth_client_id to _check_server_pass."""
         import asyncio
 
         server = StdioServer(command="echo", args=["hello"])
@@ -410,13 +372,10 @@ class TestOAuthIntegrationInGetClient:
         with patch("agent_scan.mcp_client._check_server_pass") as mock_check:
             mock_check.return_value = Mock()
 
-            result_future = asyncio.ensure_future(
-                check_server(server, timeout=5, oauth_client_id="cid", oauth_client_secret="csec")
-            )
+            result_future = asyncio.ensure_future(check_server(server, timeout=5, oauth_client_id="cid"))
             with contextlib.suppress(Exception):
                 await asyncio.wait_for(result_future, timeout=2)
 
             assert mock_check.called, "_check_server_pass was not called"
             call_kwargs = mock_check.call_args
             assert call_kwargs.kwargs.get("oauth_client_id") == "cid"
-            assert call_kwargs.kwargs.get("oauth_client_secret") == "csec"

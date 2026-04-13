@@ -61,7 +61,6 @@ async def get_client(
     token: TokenAndClientInfo | None = None,
     enable_oauth: bool = False,
     oauth_client_id: str | None = None,
-    oauth_client_secret: str | None = None,
 ) -> AsyncIterator[tuple]:
     """
     Create an MCP client for the given server config.
@@ -83,15 +82,12 @@ async def get_client(
             await storage.set_client_info(
                 OAuthClientInformationFull(
                     client_id=oauth_client_id,
-                    client_secret=oauth_client_secret,
                     redirect_uris=["http://localhost:3030/callback"],
                 )
             )
         oauth_client_provider, _ = build_oauth_client_provider(
             server_url=server_config.url,
             storage=storage,
-            client_id=oauth_client_id,
-            client_secret=oauth_client_secret,
         )
 
     if isinstance(server_config, RemoteServer) and server_config.type == "sse":
@@ -153,7 +149,6 @@ async def _check_server_pass(
     token: TokenAndClientInfo | None = None,
     enable_oauth: bool = False,
     oauth_client_id: str | None = None,
-    oauth_client_secret: str | None = None,
 ) -> ServerSignature:
     async def _check_server() -> ServerSignature:
         async with get_client(
@@ -163,7 +158,6 @@ async def _check_server_pass(
             token=token,
             enable_oauth=enable_oauth,
             oauth_client_id=oauth_client_id,
-            oauth_client_secret=oauth_client_secret,
         ) as (
             read,
             write,
@@ -229,7 +223,6 @@ async def check_server(
     token: TokenAndClientInfo | None = None,
     enable_oauth: bool = False,
     oauth_client_id: str | None = None,
-    oauth_client_secret: str | None = None,
 ) -> tuple[ServerSignature, StdioServer | RemoteServer]:
     logger.debug("Checking server with timeout: %s seconds", timeout)
 
@@ -241,7 +234,6 @@ async def check_server(
                 traffic_capture,
                 enable_oauth=enable_oauth,
                 oauth_client_id=oauth_client_id,
-                oauth_client_secret=oauth_client_secret,
             ),
             timeout,
         )
@@ -293,7 +285,6 @@ async def check_server(
                         token,
                         enable_oauth=enable_oauth,
                         oauth_client_id=oauth_client_id,
-                        oauth_client_secret=oauth_client_secret,
                     ),
                     timeout,
                 )

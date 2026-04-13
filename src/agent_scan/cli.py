@@ -222,12 +222,6 @@ def add_common_arguments(parser):
         default=None,
         help="Pre-registered OAuth client ID for remote MCP servers that don't support dynamic client registration",
     )
-    parser.add_argument(
-        "--oauth-client-secret",
-        type=str,
-        default=None,
-        help="OAuth client secret for confidential pre-registered clients (optional)",
-    )
 
 
 def add_server_arguments(parser):
@@ -590,9 +584,6 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[Scan
     enable_oauth: bool = hasattr(args, "enable_oauth") and args.enable_oauth
 
     oauth_client_id: str | None = getattr(args, "oauth_client_id", None)
-    oauth_client_secret: str | None = getattr(args, "oauth_client_secret", None)
-    if oauth_client_secret and not oauth_client_id:
-        logger.warning("--oauth-client-secret provided without --oauth-client-id; secret will be ignored")
 
     if oauth_client_id:
         enable_oauth = True
@@ -605,7 +596,6 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[Scan
         scan_skills=scan_skills,
         enable_oauth=enable_oauth,
         oauth_client_id=oauth_client_id,
-        oauth_client_secret=oauth_client_secret,
     )
 
     if mode == "scan":

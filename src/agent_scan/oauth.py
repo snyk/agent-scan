@@ -141,8 +141,6 @@ def build_oauth_client_provider(
     server_url: str,
     storage: TokenStorage,
     port: int = 3030,
-    client_id: str | None = None,
-    client_secret: str | None = None,
 ) -> tuple[OAuthClientProvider, OAuthClientMetadata]:
     """Construct an OAuthClientProvider with interactive browser-based handlers.
 
@@ -150,24 +148,18 @@ def build_oauth_client_provider(
         server_url: The MCP server URL to authenticate against.
         storage: A TokenStorage instance for persisting tokens and client info.
         port: The local port for the OAuth redirect callback server.
-        client_id: Pre-registered OAuth client ID (optional).
-        client_secret: OAuth client secret for confidential clients (optional).
 
     Returns:
         A tuple of (provider, client_metadata) where provider is a configured
         OAuthClientProvider instance and client_metadata is the OAuthClientMetadata
         used to construct it.
     """
-    metadata_kwargs: dict = {
-        "client_name": "mcp-scan",
-        "grant_types": ["authorization_code", "refresh_token"],
-        "response_types": ["code"],
-        "redirect_uris": [f"http://localhost:{port}/callback"],
-    }
-    if client_secret:
-        metadata_kwargs["token_endpoint_auth_method"] = "client_secret_post"
-
-    client_metadata = OAuthClientMetadata(**metadata_kwargs)
+    client_metadata = OAuthClientMetadata(
+        client_name="mcp-scan",
+        grant_types=["authorization_code", "refresh_token"],
+        response_types=["code"],
+        redirect_uris=[f"http://localhost:{port}/callback"],
+    )
 
     provider = OAuthClientProvider(
         server_url=server_url,

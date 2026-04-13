@@ -158,7 +158,6 @@ async def inspect_extension(
     token: TokenAndClientInfo | None = None,
     enable_oauth: bool = False,
     oauth_client_id: str | None = None,
-    oauth_client_secret: str | None = None,
 ) -> InspectedExtensions:
     """
     Scan an extension (MCP server or skill) and return a InspectedExtensions object.
@@ -173,7 +172,6 @@ async def inspect_extension(
                 token,
                 enable_oauth=enable_oauth,
                 oauth_client_id=oauth_client_id,
-                oauth_client_secret=oauth_client_secret,
             )
             return InspectedExtensions(name=name, config=config, signature_or_error=signature)
         except Exception as e:
@@ -198,7 +196,6 @@ async def inspect_extension(
                 token,
                 enable_oauth=enable_oauth,
                 oauth_client_id=oauth_client_id,
-                oauth_client_secret=oauth_client_secret,
             )
             assert isinstance(fixed_config, RemoteServer), f"Fixed config is not a RemoteServer: {fixed_config}"
             return InspectedExtensions(name=name, config=fixed_config, signature_or_error=signature)
@@ -255,7 +252,6 @@ async def inspect_client(
     scan_skills: bool,
     enable_oauth: bool = False,
     oauth_client_id: str | None = None,
-    oauth_client_secret: str | None = None,
 ) -> InspectedClient:
     """
     Scan a client (Cursor, VSCode, etc.) and return a InspectedClient object.
@@ -277,7 +273,6 @@ async def inspect_client(
                 find_relevant_token(tokens, name),
                 enable_oauth=enable_oauth,
                 oauth_client_id=oauth_client_id,
-                oauth_client_secret=oauth_client_secret,
             )
             extensions_for_mcp_config.append(extension)
         extensions[mcp_config_path] = extensions_for_mcp_config
