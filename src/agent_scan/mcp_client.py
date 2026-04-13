@@ -79,10 +79,6 @@ async def get_client(
         )
     elif enable_oauth and isinstance(server_config, RemoteServer):
         storage = InteractiveTokenStorage(server_url=server_config.url)
-        # [REVIEW][BEFORE] Storage was created empty; provider was built without client_id/client_secret
-        # [REVIEW][AFTER] When oauth_client_id is supplied, pre-populate the storage with
-        #   OAuthClientInformationFull so the provider can skip dynamic client registration,
-        #   then forward client_id and client_secret to build_oauth_client_provider
         if oauth_client_id:
             await storage.set_client_info(
                 OAuthClientInformationFull(

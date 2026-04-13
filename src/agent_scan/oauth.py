@@ -158,8 +158,6 @@ def build_oauth_client_provider(
         OAuthClientProvider instance and client_metadata is the OAuthClientMetadata
         used to construct it.
     """
-    # [REVIEW][BEFORE] client_metadata was always built without token_endpoint_auth_method
-    # [REVIEW][AFTER] When client_secret is provided, set token_endpoint_auth_method="client_secret_post"
     metadata_kwargs: dict = {
         "client_name": "mcp-scan",
         "grant_types": ["authorization_code", "refresh_token"],

@@ -29,6 +29,8 @@ logging.getLogger().setLevel(logging.CRITICAL + 1)  # Higher than any standard l
 # Add null handler to prevent "No handler found" warnings
 logging.getLogger().addHandler(logging.NullHandler())
 
+logger = logging.getLogger(__name__)
+
 
 class MissingIdentifierError(Exception):
     """Raised when a control server is missing an identifier."""
@@ -589,8 +591,9 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[Scan
 
     oauth_client_id: str | None = getattr(args, "oauth_client_id", None)
     oauth_client_secret: str | None = getattr(args, "oauth_client_secret", None)
-    # [REVIEW][BEFORE] enable_oauth was only set from the --enable-oauth flag
-    # [REVIEW][AFTER] Providing --oauth-client-id automatically implies --enable-oauth
+    if oauth_client_secret and not oauth_client_id:
+        logger.warning("--oauth-client-secret provided without --oauth-client-id; secret will be ignored")
+
     if oauth_client_id:
         enable_oauth = True
 
