@@ -307,6 +307,49 @@ async def test_inspect_pipeline_deduplicates_usernames_across_clients():
 
 
 @pytest.mark.asyncio
+async def test_inspect_pipeline_no_clients_returns_empty_results():
+    """When no MCP clients are installed, inspect_pipeline should return empty scan_path_results."""
+    tmp = tempfile.mkdtemp()
+    try:
+        home_dirs = [(Path(tmp) / "alice", "alice")]
+        (Path(tmp) / "alice").mkdir()
+
+        candidate = CandidateClient(
+            name="nonexistent-client",
+            client_exists_paths=["~/.nonexistent-client"],
+            mcp_config_paths=[],
+            skills_dir_paths=[],
+        )
+
+        with (
+            patch("agent_scan.pipelines.get_readable_home_directories", return_value=home_dirs),
+            patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
+        ):
+            args = InspectArgs(timeout=10, tokens=[], paths=[])
+            results, _ = await inspect_pipeline(args)
+
+        assert results == []
+    finally:
+        shutil.rmtree(tmp)
+
+
+@pytest.mark.asyncio
+async def test_inspect_pipeline_missing_explicit_path_returns_file_not_found_error():
+    """When an explicit path doesn't exist, inspect_pipeline should return a file_not_found error result."""
+    with (
+        patch("agent_scan.pipelines.get_readable_home_directories", return_value=[]),
+        patch("agent_scan.pipelines.client_to_inspect_from_path", new_callable=AsyncMock, return_value=[]),
+    ):
+        args = InspectArgs(timeout=10, tokens=[], paths=["/nonexistent/path.json"])
+        results, _ = await inspect_pipeline(args)
+
+    assert len(results) == 1
+    assert results[0].path == "/nonexistent/path.json"
+    assert results[0].error is not None
+    assert results[0].error.category == "file_not_found"
+
+
+@pytest.mark.asyncio
 async def test_inspect_pipeline_paths_mode_does_not_leak_all_usernames():
     """When using --paths, scanned_usernames should not fall back to all readable usernames."""
     tmp = tempfile.mkdtemp()

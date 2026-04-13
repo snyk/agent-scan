@@ -562,6 +562,30 @@ async def test_upload_exponential_backoff():
 
 
 @pytest.mark.asyncio
+async def test_upload_sends_payload_when_results_empty():
+    """
+    When results is empty (no MCP configs on machine), upload should still POST
+    with user_info so the control server can register the machine.
+    """
+    mock_http_response = AsyncMock(status=200)
+    mock_http_response.json.return_value = []
+
+    mock_post_context_manager = AsyncMock()
+    mock_post_context_manager.__aenter__.return_value = mock_http_response
+
+    with patch("agent_scan.upload.aiohttp.ClientSession.post") as mock_post_method:
+        mock_post_method.return_value = mock_post_context_manager
+
+        await upload([], "https://control.mcp.scan", "test@example.com", scanned_usernames=["alice"])
+
+        mock_post_method.assert_called_once()
+        payload = json.loads(mock_post_method.call_args.kwargs["data"])
+        assert payload["scan_path_results"] == []
+        assert payload["scan_user_info"]["identifier"] == "test@example.com"
+        assert payload["scan_user_info"]["username"] == ["alice"]
+
+
+@pytest.mark.asyncio
 async def test_upload_does_not_retry_on_unexpected_error():
     """
     Test that upload does NOT retry on unexpected (non-network) errors and re-raises them.
