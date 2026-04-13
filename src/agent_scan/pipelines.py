@@ -36,6 +36,8 @@ class InspectArgs(BaseModel):
     all_users: bool = False
     scan_skills: bool = False
     enable_oauth: bool = False
+    oauth_client_id: str | None = None
+    oauth_client_secret: str | None = None
 
 
 class AnalyzeArgs(BaseModel):
@@ -114,6 +116,8 @@ async def inspect_pipeline(
                 inspect_args.tokens,
                 inspect_args.scan_skills,
                 enable_oauth=inspect_args.enable_oauth,
+                oauth_client_id=inspect_args.oauth_client_id,
+                oauth_client_secret=inspect_args.oauth_client_secret,
             )
             scan_path_results.append(inspected_client_to_scan_path_result(inspected_client))
     return scan_path_results, scanned_usernames

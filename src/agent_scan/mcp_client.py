@@ -14,6 +14,7 @@ from mcp.client.auth import OAuthClientProvider
 from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
+from mcp.shared.auth import OAuthClientInformationFull
 
 from agent_scan.models import (
     ClaudeCodeConfigFile,
@@ -59,6 +60,8 @@ async def get_client(
     traffic_capture: TrafficCapture | None = None,
     token: TokenAndClientInfo | None = None,
     enable_oauth: bool = False,
+    oauth_client_id: str | None = None,
+    oauth_client_secret: str | None = None,
 ) -> AsyncIterator[tuple]:
     """
     Create an MCP client for the given server config.
@@ -76,9 +79,23 @@ async def get_client(
         )
     elif enable_oauth and isinstance(server_config, RemoteServer):
         storage = InteractiveTokenStorage(server_url=server_config.url)
+        # [REVIEW][BEFORE] Storage was created empty; provider was built without client_id/client_secret
+        # [REVIEW][AFTER] When oauth_client_id is supplied, pre-populate the storage with
+        #   OAuthClientInformationFull so the provider can skip dynamic client registration,
+        #   then forward client_id and client_secret to build_oauth_client_provider
+        if oauth_client_id:
+            await storage.set_client_info(
+                OAuthClientInformationFull(
+                    client_id=oauth_client_id,
+                    client_secret=oauth_client_secret,
+                    redirect_uris=["http://localhost:3030/callback"],
+                )
+            )
         oauth_client_provider, _ = build_oauth_client_provider(
             server_url=server_config.url,
             storage=storage,
+            client_id=oauth_client_id,
+            client_secret=oauth_client_secret,
         )
 
     if isinstance(server_config, RemoteServer) and server_config.type == "sse":
@@ -139,10 +156,18 @@ async def _check_server_pass(
     traffic_capture: TrafficCapture | None = None,
     token: TokenAndClientInfo | None = None,
     enable_oauth: bool = False,
+    oauth_client_id: str | None = None,
+    oauth_client_secret: str | None = None,
 ) -> ServerSignature:
     async def _check_server() -> ServerSignature:
         async with get_client(
-            server_config, timeout=timeout, traffic_capture=traffic_capture, token=token, enable_oauth=enable_oauth
+            server_config,
+            timeout=timeout,
+            traffic_capture=traffic_capture,
+            token=token,
+            enable_oauth=enable_oauth,
+            oauth_client_id=oauth_client_id,
+            oauth_client_secret=oauth_client_secret,
         ) as (
             read,
             write,
@@ -207,12 +232,22 @@ async def check_server(
     traffic_capture: TrafficCapture | None = None,
     token: TokenAndClientInfo | None = None,
     enable_oauth: bool = False,
+    oauth_client_id: str | None = None,
+    oauth_client_secret: str | None = None,
 ) -> tuple[ServerSignature, StdioServer | RemoteServer]:
     logger.debug("Checking server with timeout: %s seconds", timeout)
 
     if not isinstance(server_config, RemoteServer):
         result = await asyncio.wait_for(
-            _check_server_pass(server_config, timeout, traffic_capture, enable_oauth=enable_oauth), timeout
+            _check_server_pass(
+                server_config,
+                timeout,
+                traffic_capture,
+                enable_oauth=enable_oauth,
+                oauth_client_id=oauth_client_id,
+                oauth_client_secret=oauth_client_secret,
+            ),
+            timeout,
         )
         logger.debug("Server check completed within timeout")
         return result, server_config
@@ -255,7 +290,15 @@ async def check_server(
                 server_config.url = url
                 logger.debug(f"Trying {protocol} with url: {url}")
                 result = await asyncio.wait_for(
-                    _check_server_pass(server_config, timeout, traffic_capture, token, enable_oauth=enable_oauth),
+                    _check_server_pass(
+                        server_config,
+                        timeout,
+                        traffic_capture,
+                        token,
+                        enable_oauth=enable_oauth,
+                        oauth_client_id=oauth_client_id,
+                        oauth_client_secret=oauth_client_secret,
+                    ),
                     timeout,
                 )
                 logger.debug("Server check completed within timeout")
