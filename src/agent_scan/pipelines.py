@@ -3,6 +3,7 @@ import logging
 import os
 from pathlib import Path
 
+import rich
 from pydantic import BaseModel
 
 from agent_scan.direct_scanner import direct_scan_to_server_config, is_direct_scan
@@ -58,28 +59,43 @@ async def inspect_pipeline(
     home_dirs_with_users = get_readable_home_directories(all_users=inspect_args.all_users)
     all_usernames: list[str] = [username for _path, username in home_dirs_with_users]
 
-    # fetch clients to inspect
+    # fetch clients to inspect, building scan_path_results for paths that don't exist
+    scan_path_results: list[ScanPathResult] = []
+    clients_to_inspect: list[ClientToInspect] = []
     if inspect_args.paths:
-        clients_to_inspect = [
-            cti
-            for path in inspect_args.paths
-            for cti in await client_to_inspect_from_path(path, True, home_dirs_with_users, inspect_args.scan_skills)
-        ]
+        for path in inspect_args.paths:
+            ctis = await client_to_inspect_from_path(path, True, home_dirs_with_users, inspect_args.scan_skills)
+            if ctis:
+                clients_to_inspect.extend(ctis)
+            else:
+                scan_path_results.append(
+                    ScanPathResult(
+                        path=path,
+                        client=path,
+                        servers=[],
+                        issues=[],
+                        labels=[],
+                        error=ScanError(
+                            message="File or folder not found", is_failure=False, category="file_not_found"
+                        ),
+                    )
+                )
     else:
-        clients_to_inspect = [
-            cti
-            for client in get_well_known_clients()
-            for cti in await get_mcp_config_per_client(client, home_dirs_with_users)
-        ]
+        for client in get_well_known_clients():
+            ctis = await get_mcp_config_per_client(client, home_dirs_with_users)
+            if ctis:
+                clients_to_inspect.extend(ctis)
+            else:
+                logger.info(f"Client {client.name} does not exist on this machine. {client.client_exists_paths}")
+        if not clients_to_inspect:
+            rich.print("No MCP client configurations found on this machine.")
 
     # Only report usernames where an agent was detected in their home directory.
     # When no usernames were associated with detected agents:
     #   - Discovery mode with --scan-all-users: fall back to all readable usernames.
     #   - Otherwise (explicit paths or single-user mode): fall back to the current OS user only,
     #     to avoid disclosing unrelated usernames on the machine.
-    detected_usernames: list[str] = sorted(
-        {cti.username for cti in clients_to_inspect if cti is not None and cti.username is not None}
-    )
+    detected_usernames: list[str] = sorted({cti.username for cti in clients_to_inspect if cti.username is not None})
     if detected_usernames:
         scanned_usernames = detected_usernames
     elif not inspect_args.paths and inspect_args.all_users:
@@ -87,30 +103,11 @@ async def inspect_pipeline(
     else:
         scanned_usernames = [getpass.getuser()]
     # inspect
-    scan_path_results: list[ScanPathResult] = []
-    for i, client_to_inspect in enumerate(clients_to_inspect):
-        if client_to_inspect is None and inspect_args.paths:
-            scan_path_results.append(
-                ScanPathResult(
-                    path=inspect_args.paths[i],
-                    client=inspect_args.paths[i],
-                    servers=[],
-                    issues=[],
-                    labels=[],
-                    error=ScanError(message="File or folder not found", is_failure=False, category="file_not_found"),
-                )
-            )
-            continue
-        elif client_to_inspect is None:
-            logger.info(
-                f"Client {get_well_known_clients()[i].name} does not exist os this machine. {get_well_known_clients()[i].client_exists_paths}"
-            )
-            continue
-        else:
-            inspected_client = await inspect_client(
-                client_to_inspect, inspect_args.timeout, inspect_args.tokens, inspect_args.scan_skills
-            )
-            scan_path_results.append(inspected_client_to_scan_path_result(inspected_client))
+    for client_to_inspect in clients_to_inspect:
+        inspected_client = await inspect_client(
+            client_to_inspect, inspect_args.timeout, inspect_args.tokens, inspect_args.scan_skills
+        )
+        scan_path_results.append(inspected_client_to_scan_path_result(inspected_client))
     return scan_path_results, scanned_usernames
 
 

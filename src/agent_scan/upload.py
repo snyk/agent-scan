@@ -58,10 +58,6 @@ async def upload(
         scan_context: Optional dict containing scan context metadata to include in upload
         scanned_usernames: List of usernames detected during the scan. When provided, used instead of the current OS username.
     """
-    if not results:
-        logger.info("No scan results to upload")
-        return
-
     additional_headers = additional_headers or {}
 
     user_info = ScanUserInfo(
