@@ -61,6 +61,7 @@ async def get_client(
     token: TokenAndClientInfo | None = None,
     enable_oauth: bool = False,
     oauth_client_id: str | None = None,
+    oauth_client_provider: OAuthClientProvider | None = None,
 ) -> AsyncIterator[tuple]:
     """
     Create an MCP client for the given server config.
@@ -68,9 +69,17 @@ async def get_client(
     If traffic_capture is provided, all MCP protocol traffic will be captured
     for debugging purposes.
     """
+    # [REVIEW-COMMENT]
+    # If a pre-built oauth_client_provider was passed in (shared across strategy
+    # attempts in check_server), skip re-constructing it here.  This ensures
+    # the provider is built exactly once against the *original* URL rather than
+    # once per mutated strategy URL.
+    # [/REVIEW-COMMENT]
     # Construct the OAuthClientProvider centrally
-    oauth_client_provider: OAuthClientProvider | None = None
-    if token and isinstance(server_config, RemoteServer):
+    if oauth_client_provider is not None:
+        # Use the pre-built provider (shared across strategy attempts)
+        pass
+    elif token and isinstance(server_config, RemoteServer):
         storage = FileTokenStorage(data=token)
         oauth_client_provider, _ = build_oauth_client_provider(
             server_url=token.mcp_server_url,
@@ -149,8 +158,13 @@ async def _check_server_pass(
     token: TokenAndClientInfo | None = None,
     enable_oauth: bool = False,
     oauth_client_id: str | None = None,
+    oauth_client_provider: OAuthClientProvider | None = None,
 ) -> ServerSignature:
     async def _check_server() -> ServerSignature:
+        # [REVIEW-COMMENT]
+        # Forward the pre-built oauth_client_provider so get_client can skip
+        # re-constructing it when one is already supplied.
+        # [/REVIEW-COMMENT]
         async with get_client(
             server_config,
             timeout=timeout,
@@ -158,6 +172,7 @@ async def _check_server_pass(
             token=token,
             enable_oauth=enable_oauth,
             oauth_client_id=oauth_client_id,
+            oauth_client_provider=oauth_client_provider,
         ) as (
             read,
             write,
@@ -241,6 +256,36 @@ async def check_server(
         return result, server_config
     else:
         logger.debug(f"Remote server with url: {server_config.url}, type: {server_config.type or 'none'}")
+
+        # [REVIEW-COMMENT]
+        # Build the shared OAuthClientProvider once before the strategy loop so
+        # that (a) the provider is keyed on the original/canonical URL rather
+        # than a mutated strategy variant, and (b) build_oauth_client_provider
+        # is called at most once instead of once per retry.
+        # [/REVIEW-COMMENT]
+        # Build shared OAuthClientProvider once, keyed on the canonical (original) URL
+        original_url = server_config.url
+        shared_oauth_provider: OAuthClientProvider | None = None
+        if token and isinstance(server_config, RemoteServer):
+            storage = FileTokenStorage(data=token)
+            shared_oauth_provider, _ = build_oauth_client_provider(
+                server_url=token.mcp_server_url,
+                storage=storage,
+            )
+        elif enable_oauth:
+            storage = InteractiveTokenStorage(server_url=original_url)
+            if oauth_client_id:
+                await storage.set_client_info(
+                    OAuthClientInformationFull(
+                        client_id=oauth_client_id,
+                        redirect_uris=["http://localhost:3030/callback"],
+                    )
+                )
+            shared_oauth_provider, _ = build_oauth_client_provider(
+                server_url=original_url,
+                storage=storage,
+            )
+
         strategy: list[tuple[Literal["sse", "http"], str]] = []
         url_path = urlparse(server_config.url).path
         if url_path.endswith("/sse"):
@@ -277,6 +322,10 @@ async def check_server(
                 server_config.type = protocol
                 server_config.url = url
                 logger.debug(f"Trying {protocol} with url: {url}")
+                # [REVIEW-COMMENT]
+                # Pass the shared provider so each strategy attempt reuses the
+                # same OAuthClientProvider built against the original URL.
+                # [/REVIEW-COMMENT]
                 result = await asyncio.wait_for(
                     _check_server_pass(
                         server_config,
@@ -285,6 +334,7 @@ async def check_server(
                         token,
                         enable_oauth=enable_oauth,
                         oauth_client_id=oauth_client_id,
+                        oauth_client_provider=shared_oauth_provider,
                     ),
                     timeout,
                 )
