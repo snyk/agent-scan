@@ -24,6 +24,7 @@ IS_WINDOWS = sys.platform == "win32"
 
 DEFAULT_REMOTE_URL = "https://api.snyk.io"
 DETECTION_MARKER = "snyk-agent-guard"
+_PERMISSION_DENIED = "__permission_denied__"
 
 CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 CURSOR_HOOKS_PATH = Path.home() / ".cursor" / "hooks.json"
@@ -144,6 +145,10 @@ def _run_install(args) -> None:
             rich.print("[bold red]Error:[/bold red] Tenant ID is required to mint a push key.")
             sys.exit(1)
 
+        # Preflight: verify target directory is writable before minting
+        config_path = _config_path(client, getattr(args, "file", None), managed=managed)
+        _preflight_writable(config_path)
+
         description = _get_machine_description(client)
         rich.print(f"[dim]Minting push key for {description}...[/dim]")
         try:
@@ -160,6 +165,33 @@ def _run_install(args) -> None:
     hook_client = "claude-code" if client == "claude" else "cursor"
     minted = not headless  # True if we minted the key in this run
     config_path = _config_path(client, getattr(args, "file", None), managed=managed)
+
+    try:
+        _install_hooks(
+            args, client, hook_client, push_key, url, config_path, scope, label, minted, tenant_id, snyk_token
+        )
+    except (SystemExit, KeyboardInterrupt):
+        raise
+    except BaseException:
+        if minted:
+            _revoke_after_failure(url, tenant_id, snyk_token, push_key)
+        raise
+
+
+def _install_hooks(
+    args,
+    client: str,
+    hook_client: str,
+    push_key: str,
+    url: str,
+    config_path: Path,
+    scope: str,
+    label: str,
+    minted: bool,
+    tenant_id: str,
+    snyk_token: str,
+) -> None:
+    """Post-mint install steps.  Extracted so _run_install can revoke on failure."""
     # Copy hook script first so we can use it for the test event
     dest_path, script_existed, script_updated = _copy_hook_script(client, config_path)
 
@@ -172,12 +204,7 @@ def _run_install(args) -> None:
         if not script_existed:
             dest_path.unlink(missing_ok=True)
         if minted:
-            rich.print("[dim]Revoking minted push key...[/dim]")
-            try:
-                revoke_push_key(url, tenant_id, snyk_token, push_key)
-                rich.print("[green]\u2713[/green]  Push key revoked")
-            except RuntimeError as e:
-                rich.print(f"[yellow]Warning:[/yellow] Could not revoke push key: {e}")
+            _revoke_after_failure(url, tenant_id, snyk_token, push_key)
         rich.print("[bold red]Aborting install — test event failed.[/bold red]")
         raise SystemExit(1)
 
@@ -368,11 +395,19 @@ def _run_status() -> None:
     rich.print()
 
     rich.print("[bold]Managed hooks:[/bold]")
-    _print_client_status(
-        "Claude Code", CLAUDE_MANAGED_SETTINGS_PATH, _detect_claude_install(CLAUDE_MANAGED_SETTINGS_PATH)
-    )
+    claude_managed_info: dict | str | None
+    try:
+        claude_managed_info = _detect_claude_install(CLAUDE_MANAGED_SETTINGS_PATH)
+    except PermissionError:
+        claude_managed_info = _PERMISSION_DENIED
+    _print_client_status("Claude Code", CLAUDE_MANAGED_SETTINGS_PATH, claude_managed_info)
     rich.print()
-    _print_client_status("Cursor", CURSOR_MANAGED_HOOKS_PATH, _detect_cursor_install(CURSOR_MANAGED_HOOKS_PATH))
+    cursor_managed_info: dict | str | None
+    try:
+        cursor_managed_info = _detect_cursor_install(CURSOR_MANAGED_HOOKS_PATH)
+    except PermissionError:
+        cursor_managed_info = _PERMISSION_DENIED
+    _print_client_status("Cursor", CURSOR_MANAGED_HOOKS_PATH, cursor_managed_info)
     rich.print()
 
     rich.print("[dim]# interactive flow (user-level)[/dim]")
@@ -389,8 +424,11 @@ def _run_status() -> None:
     )
 
 
-def _print_client_status(label: str, path: Path, info: dict | None) -> None:
+def _print_client_status(label: str, path: Path, info: dict | str | None) -> None:
     rich.print(f"[bold white]{label}[/bold white]   [dim]{path}[/dim]")
+    if isinstance(info, str):
+        rich.print("    [yellow]UNREADABLE (permission denied)[/yellow]")
+        return
     if info is None:
         rich.print("    [dim]NOT INSTALLED[/dim]")
         return
@@ -617,6 +655,27 @@ def _config_path(client: str, override: str | None = None, managed: bool = False
     if managed:
         return CLAUDE_MANAGED_SETTINGS_PATH if client == "claude" else CURSOR_MANAGED_HOOKS_PATH
     return CLAUDE_SETTINGS_PATH if client == "claude" else CURSOR_HOOKS_PATH
+
+
+def _preflight_writable(config_path: Path) -> None:
+    """Verify that the config file's parent directory is writable.
+
+    Raises PermissionError early (before minting a push key) so we don't
+    leave orphaned credentials when the filesystem operation would fail.
+    """
+    parent = config_path.parent
+    if parent.exists() and not os.access(parent, os.W_OK):
+        raise PermissionError(f"Directory not writable: {parent}")
+
+
+def _revoke_after_failure(url: str, tenant_id: str, snyk_token: str, push_key: str) -> None:
+    """Best-effort revocation of a push key after a failed install."""
+    rich.print("[dim]Revoking minted push key...[/dim]")
+    try:
+        revoke_push_key(url, tenant_id, snyk_token, push_key)
+        rich.print("[green]\u2713[/green]  Push key revoked")
+    except RuntimeError as e:
+        rich.print(f"[yellow]Warning:[/yellow] Could not revoke push key: {e}")
 
 
 def _build_hook_command(push_key: str, url: str, script_path: Path, hook_client: str, *, tenant_id: str = "") -> str:

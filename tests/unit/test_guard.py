@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from agent_scan.guard import (
+    _PERMISSION_DENIED,
     CLAUDE_EVENTS_WITH_MATCHER,
     CLAUDE_HOOK_EVENTS,
     CLAUDE_MANAGED_SETTINGS_PATH,
@@ -35,6 +36,8 @@ from agent_scan.guard import (
     _is_agent_scan_command,
     _mask_key,
     _parse_command_info,
+    _preflight_writable,
+    _print_client_status,
     _shell_quote,
     _uninstall_claude,
     _uninstall_cursor,
@@ -1158,6 +1161,87 @@ class TestManagedInstallCursor:
 
         data = json.loads(path.read_text())
         assert data["hooks"] == {}
+
+
+# ===================================================================
+# Permission denied handling (managed paths)
+# ===================================================================
+
+
+class TestPermissionDeniedStatus:
+    """Managed configs may be unreadable — status should not crash."""
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="chmod has no effect on Windows")
+    def test_detect_claude_raises_on_unreadable(self, tmp_path):
+        path = tmp_path / "managed-settings.json"
+        _write(path, {"hooks": {"PreToolUse": [_claude_group(AGENT_SCAN_CMD, "*")]}})
+        path.chmod(0o000)
+        try:
+            with pytest.raises(PermissionError):
+                _detect_claude_install(path)
+        finally:
+            path.chmod(0o644)
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="chmod has no effect on Windows")
+    def test_detect_cursor_raises_on_unreadable(self, tmp_path):
+        path = tmp_path / "hooks.json"
+        _write(path, {"version": 1, "hooks": {"stop": [_cursor_entry(CURSOR_AGENT_SCAN_CMD)]}})
+        path.chmod(0o000)
+        try:
+            with pytest.raises(PermissionError):
+                _detect_cursor_install(path)
+        finally:
+            path.chmod(0o644)
+
+    def test_print_client_status_permission_denied(self, tmp_path, capsys):
+        _print_client_status("Claude Code", tmp_path / "managed-settings.json", _PERMISSION_DENIED)
+        output = capsys.readouterr().out
+        assert "UNREADABLE" in output or "permission denied" in output.lower()
+
+    def test_print_client_status_not_installed(self, tmp_path, capsys):
+        _print_client_status("Claude Code", tmp_path / "settings.json", None)
+        output = capsys.readouterr().out
+        assert "NOT INSTALLED" in output
+
+    def test_print_client_status_installed(self, tmp_path, capsys):
+        info = {
+            "host": "api.snyk.io",
+            "auth_type": "pushkey",
+            "auth_value": "pk-1234567890",
+            "tenant_id": "tid-1",
+            "url": "https://api.snyk.io",
+            "events": ["PreToolUse"],
+        }
+        _print_client_status("Claude Code", tmp_path / "settings.json", info)
+        output = capsys.readouterr().out
+        assert "INSTALLED" in output
+
+
+# ===================================================================
+# Preflight writability check
+# ===================================================================
+
+
+class TestPreflightWritable:
+    def test_passes_when_parent_writable(self, tmp_path):
+        config = tmp_path / "subdir" / "settings.json"
+        config.parent.mkdir(parents=True)
+        _preflight_writable(config)  # should not raise
+
+    def test_passes_when_parent_does_not_exist(self, tmp_path):
+        config = tmp_path / "nonexistent" / "settings.json"
+        _preflight_writable(config)  # parent doesn't exist yet, nothing to check
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="chmod has no effect on Windows")
+    def test_raises_when_parent_not_writable(self, tmp_path):
+        config_dir = tmp_path / "locked"
+        config_dir.mkdir()
+        config_dir.chmod(0o555)
+        try:
+            with pytest.raises(PermissionError, match="not writable"):
+                _preflight_writable(config_dir / "settings.json")
+        finally:
+            config_dir.chmod(0o755)
 
 
 # ===================================================================
