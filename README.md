@@ -28,7 +28,7 @@ Agent Scan helps you keep an inventory of all your installed agent components (h
 ## Highlights
 
 - Auto-discover MCP configurations, agent tools, skills
-- Scanning of Claude, Cursor, Windsurf, Gemini CLI, and other agents.
+- Scanning of Claude, Cursor, Windsurf, Gemini CLI, Amp, Amazon Q, and other agents.
 - Detects [15+ distinct security risks](docs/issue-codes.md) across MCP servers and agent skills:
   - MCP: [Prompt Injection](docs/issue-codes.md#E001), [Tool Poisoning](docs/issue-codes.md#E001), [Tool Shadowing](docs/issue-codes.md#E002), [Toxic Flows](docs/issue-codes.md#ToxicFlows)
   - Skills: [Prompt Injection](docs/issue-codes.md#E004), [Malware Payloads](docs/issue-codes.md#E006), [Untrusted Content](docs/issue-codes.md#W011), [Credential Handling](docs/issue-codes.md#W007), [Hardcoded Secrets](docs/issue-codes.md#W008)
@@ -51,11 +51,12 @@ Agent Scan auto-discovers agents and their capabilities (MCP servers or skills) 
 | Claude Code | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Gemini CLI | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | OpenClaw | ✗ | ✓ | ✗ | ✓ | ✗ | ✓ |
+| Amp | ✗ | ✓ | ✗ | ✓ | ✗ | ✓ |
 | Kiro | ✓ | ✗ | ✓ | ✗ | ✓ | ✗ |
 | OpenCode | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
 | Antigravity | ✓ | ✗ | ✓ | ✗ | ✓ | ✗ |
 | Codex | ✗ | ✓ | ✗ | ✓ | — | — |
-| Amazon Q | ✓ | ✗ | ✓ | ✗ | ✗ | ✗ |
+| Amazon Q | ✓ | ✗ | ✓ | ✗ | — | — |
 
 ## Quick Start
 
