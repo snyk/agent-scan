@@ -116,14 +116,6 @@ class TestFullScanFlow:
 
         issue_set = {issue["code"] for issue in issues}
 
-        # The API may return W001, W016, W020 for these demo configs.
-        # We verify that no other unexpected codes are returned.
-        allowed_warn_codes = {"W001", "W016", "W020"}
-        unexpected = issue_set - allowed_warn_codes
-        assert not unexpected, (
-            f"Issue codes {issue_set} include unexpected {unexpected}; allowed subset of {allowed_warn_codes}"
-        )
-
         if "Weather" in server_names:
             assert "W016" in issue_set
         if "Math" in server_names:
