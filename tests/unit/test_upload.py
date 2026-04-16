@@ -15,6 +15,14 @@ def test_get_hostname_returns_valid_string():
         assert hostname != "unknown", "get_hostname() returned 'unknown', which means platform.node() failed"
 
 
+def test_get_hostname_empty_fallback():
+    """Test that get_hostname falls back to 'unknown' if platform.node() returns an empty string."""
+    with patch("agent_scan.upload.get_environment", return_value="local"):
+        with patch("platform.node", return_value=""):
+            hostname = get_hostname()
+            assert hostname == "unknown"
+
+
 def test_get_hostname_ci_override():
     """Test that the CI environment variable override works."""
     with patch("agent_scan.upload.get_environment", return_value="ci"):
