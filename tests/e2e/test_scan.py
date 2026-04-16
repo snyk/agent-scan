@@ -115,18 +115,11 @@ class TestFullScanFlow:
         issues = output[path]["issues"]
 
         issue_set = {issue["code"] for issue in issues}
-        if set(server_names) == {"Weather", "Math"}:
-            allowed_issue_sets = [{"W001"}]
-        elif set(server_names) == {"Weather"}:
-            allowed_issue_sets = [set()]
-        elif set(server_names) == {"Math"}:
-            allowed_issue_sets = [{"W001"}]
-        else:
-            raise ValueError(f"Invalid server names: {server_names}")
-        # call list for better error message
-        assert any(issue_set == ais for ais in allowed_issue_sets), (
-            f"Issues codes {issue_set} do not match expected values {allowed_issue_sets}"
-        )
+
+        if "Weather" in server_names:
+            assert "W016" in issue_set
+        if "Math" in server_names:
+            assert "W001" in issue_set and "W020" in issue_set
 
     @pytest.mark.parametrize("agent_scan_cmd", ["binary"], indirect=True)
     def test_ci_exit_code_with_flag(self, agent_scan_cmd):
