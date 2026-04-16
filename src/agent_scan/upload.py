@@ -2,6 +2,7 @@ import asyncio
 import getpass
 import logging
 import os
+import platform
 
 import aiohttp
 import rich
@@ -21,7 +22,7 @@ def get_hostname() -> str:
         return ci_hostname
     else:
         try:
-            return os.uname().nodename
+            return platform.node()
         except Exception:
             return "unknown"
 
