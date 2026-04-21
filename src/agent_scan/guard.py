@@ -116,9 +116,7 @@ def _ensure_observe_preview_agent_guard_install(tenant_id: str) -> None:
     """Abort install when the tenant does not have observe-preview (Agent Guard / Observe) enabled."""
     if not tenant_id.strip():
         rich.print()
-        rich.print(
-            "[bold red]Error:[/bold red] Cannot verify Agent Guard access without a tenant ID."
-        )
+        rich.print("[bold red]Error:[/bold red] Cannot verify Agent Guard access without a tenant ID.")
         rich.print()
         rich.print(
             "Set environment variable [bold]TENANT_ID[/bold] or pass [bold]--tenant-id[/bold] "
@@ -143,16 +141,11 @@ def _ensure_observe_preview_agent_guard_install(tenant_id: str) -> None:
         "Installation is limited to tenants where the Observe preview feature is enabled."
     )
     rich.print()
+    rich.print("What you can do:")
     rich.print(
-        "What you can do:"
+        "  • Ask your Snyk administrator or org owner to confirm Observe / Agent Guard is enabled for your tenant."
     )
-    rich.print(
-        "  • Ask your Snyk administrator or org owner to confirm Observe / Agent Guard "
-        "is enabled for your tenant."
-    )
-    rich.print(
-        "  • If your team should have access, contact your Snyk account representative."
-    )
+    rich.print("  • If your team should have access, contact your Snyk account representative.")
     rich.print()
     rich.print(
         "[dim]Details: entitlement flag [bold]observe-preview[/bold] "
