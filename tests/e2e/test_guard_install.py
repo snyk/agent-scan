@@ -58,7 +58,12 @@ class TestGuardInstallE2E:
             capture_output=True,
             text=True,
             timeout=30,
-            env={**os.environ, "PUSH_KEY": "test-pk-e2e"},
+            env={
+                **os.environ,
+                "PUSH_KEY": "test-pk-e2e",
+                "TENANT_ID": "550e8400-e29b-41d4-a716-446655440000",
+                "AGENT_SCAN_ENVIRONMENT": "local",
+            },
         )
         assert result.returncode == 0, f"guard install failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
 
@@ -86,7 +91,12 @@ class TestGuardInstallE2E:
             capture_output=True,
             text=True,
             timeout=30,
-            env={**os.environ, "PUSH_KEY": "test-pk-e2e"},
+            env={
+                **os.environ,
+                "PUSH_KEY": "test-pk-e2e",
+                "TENANT_ID": "550e8400-e29b-41d4-a716-446655440000",
+                "AGENT_SCAN_ENVIRONMENT": "local",
+            },
         )
         assert result.returncode == 0, f"guard install failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
 

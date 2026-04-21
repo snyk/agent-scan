@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 
 import rich
 
+from agent_scan.observe_preview import is_observe_preview_enabled
 from agent_scan.pushkeys import mint_push_key, revoke_push_key
 
 IS_WINDOWS = sys.platform == "win32"
@@ -111,6 +112,59 @@ def _get_machine_description(client: str) -> str:
     return f"agent-guard ({hostname}) {label}"
 
 
+def _ensure_observe_preview_agent_guard_install(tenant_id: str) -> None:
+    """Abort install when the tenant does not have observe-preview (Agent Guard / Observe) enabled."""
+    if not tenant_id.strip():
+        rich.print()
+        rich.print(
+            "[bold red]Error:[/bold red] Cannot verify Agent Guard access without a tenant ID."
+        )
+        rich.print()
+        rich.print(
+            "Set environment variable [bold]TENANT_ID[/bold] or pass [bold]--tenant-id[/bold] "
+            "so your entitlement to Evo Agent Guard can be checked."
+        )
+        rich.print()
+        rich.print(
+            "[dim]Your tenant ID appears in the Snyk web app URL when you open a group or organization "
+            "(for example: [bold]https://app.snyk.io/group/&lt;tenant-id&gt;/…[/bold]).[/dim]"
+        )
+        rich.print()
+        sys.exit(1)
+
+    if is_observe_preview_enabled(tenant_id.strip()):
+        return
+
+    rich.print()
+    rich.print("[bold red]Agent Guard is not available for this tenant[/bold red]")
+    rich.print()
+    rich.print(
+        "Your Snyk organization is not entitled to [bold]Evo Agent Guard[/bold] (Observe). "
+        "Installation is limited to tenants where the Observe preview feature is enabled."
+    )
+    rich.print()
+    rich.print(
+        "What you can do:"
+    )
+    rich.print(
+        "  • Ask your Snyk administrator or org owner to confirm Observe / Agent Guard "
+        "is enabled for your tenant."
+    )
+    rich.print(
+        "  • If your team should have access, contact your Snyk account representative."
+    )
+    rich.print()
+    rich.print(
+        "[dim]Details: entitlement flag [bold]observe-preview[/bold] "
+        "(namespace [bold]tenant-release[/bold]) is not enabled for tenant "
+        f"[bold]{tenant_id.strip()}[/bold]. "
+        "In development, set [bold]AGENT_SCAN_ENVIRONMENT[/bold] (or legacy [bold]MCP_SCAN_ENVIRONMENT[/bold]) "
+        "to [bold]local[/bold], [bold]test[/bold], or [bold]dev[/bold] only if you intentionally bypass this check.[/dim]"
+    )
+    rich.print()
+    sys.exit(1)
+
+
 def _run_install(args) -> None:
     client: str = args.client
     url: str = args.url
@@ -118,6 +172,10 @@ def _run_install(args) -> None:
     headless = bool(push_key)
     tenant_id: str = getattr(args, "tenant_id", None) or ""
     managed: bool = getattr(args, "managed", False)
+
+    if headless:
+        tenant_id = tenant_id or os.environ.get("TENANT_ID", "")
+        _ensure_observe_preview_agent_guard_install(tenant_id)
 
     label = _client_label(client)
     scope = "managed" if managed else "user"
@@ -144,6 +202,8 @@ def _run_install(args) -> None:
         if not tenant_id:
             rich.print("[bold red]Error:[/bold red] Tenant ID is required to mint a push key.")
             sys.exit(1)
+
+        _ensure_observe_preview_agent_guard_install(tenant_id)
 
         # Preflight: verify target directory is writable before minting
         config_path = _config_path(client, getattr(args, "file", None), managed=managed)
