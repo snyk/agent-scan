@@ -10,6 +10,8 @@ import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -41,7 +43,10 @@ from agent_scan.guard import (
     _shell_quote,
     _uninstall_claude,
     _uninstall_cursor,
+    _ensure_guard_enabled_for_tenant,
+    _run_install,
 )
+from agent_scan.pushkeys import GuardEnabledAccessDeniedError
 
 # ---------------------------------------------------------------------------
 # Helpers to build hook data
@@ -1542,3 +1547,141 @@ class TestCursorStyleBashInvocation:
         assert req["headers"]["X-Client-Id"] == "test-pk-cursor"
         decoded = base64.b64decode(req["body"].removeprefix("base64:"))
         assert json.loads(decoded) == json.loads(payload)
+
+
+# ===================================================================
+# _ensure_guard_enabled_for_tenant + _run_install integration
+# ===================================================================
+
+
+class TestEnsureGuardEnabledForTenant:
+    """Branch coverage for guard tenant verification (non-local API, Flipt / agent-monitor)."""
+
+    @patch("agent_scan.guard.fetch_guard_enabled")
+    def test_empty_tenant_returns_without_fetch(self, mock_fetch, capsys):
+        _ensure_guard_enabled_for_tenant("https://api.snyk.io", "", "token")
+        mock_fetch.assert_not_called()
+
+    def test_missing_token_non_localhost_exits(self, capsys):
+        with pytest.raises(SystemExit) as e:
+            _ensure_guard_enabled_for_tenant("https://api.snyk.io", "550e8400-e29b-41d4-a716-446655440000", "")
+        assert e.value.args[0] == 1
+        out = capsys.readouterr().out
+        assert "SNYK_TOKEN is required" in out
+
+    def test_whitespace_token_treated_as_missing(self, capsys):
+        with pytest.raises(SystemExit) as e:
+            _ensure_guard_enabled_for_tenant("https://api.snyk.io", "550e8400-e29b-41d4-a716-446655440000", "   ")
+        assert e.value.args[0] == 1
+        assert "SNYK_TOKEN is required" in capsys.readouterr().out
+
+    @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
+    def test_localhost_allows_empty_token(self, mock_fetch):
+        _ensure_guard_enabled_for_tenant("http://127.0.0.1:9", "550e8400-e29b-41d4-a716-446655440000", "")
+        mock_fetch.assert_called_once_with(
+            "http://127.0.0.1:9", "550e8400-e29b-41d4-a716-446655440000", ""
+        )
+
+    @patch("agent_scan.guard.fetch_guard_enabled")
+    def test_access_denied_exits(self, mock_fetch, capsys):
+        mock_fetch.side_effect = GuardEnabledAccessDeniedError("forbidden")
+        with pytest.raises(SystemExit) as e:
+            _ensure_guard_enabled_for_tenant("https://api.snyk.io", "550e8400-e29b-41d4-a716-446655440000", "tok")
+        assert e.value.args[0] == 1
+        out = capsys.readouterr().out
+        assert "Access denied" in out
+        assert "not eligible" in out
+
+    @patch("agent_scan.guard.fetch_guard_enabled")
+    def test_endpoint_error_exits(self, mock_fetch, capsys):
+        mock_fetch.side_effect = RuntimeError("connection refused")
+        with pytest.raises(SystemExit) as e:
+            _ensure_guard_enabled_for_tenant("https://api.snyk.io", "550e8400-e29b-41d4-a716-446655440000", "tok")
+        assert e.value.args[0] == 1
+        out = capsys.readouterr().out
+        assert "Could not verify Agent Guard status" in out
+        assert "Ensure --url" in out
+
+    @patch("agent_scan.guard.fetch_guard_enabled", return_value=False)
+    def test_guard_disabled_tenant_exits(self, mock_fetch, capsys):
+        with pytest.raises(SystemExit) as e:
+            _ensure_guard_enabled_for_tenant("https://api.snyk.io", "550e8400-e29b-41d4-a716-446655440000", "tok")
+        assert e.value.args[0] == 1
+        out = capsys.readouterr().out
+        assert "not enabled for this Snyk tenant" in out
+        assert "550e8400-e29b-41d4-a716-446655440000" in out
+
+    @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
+    def test_guard_enabled_continues(self, mock_fetch):
+        _ensure_guard_enabled_for_tenant("https://api.snyk.io", "550e8400-e29b-41d4-a716-446655440000", "tok")
+        mock_fetch.assert_called_once_with(
+            "https://api.snyk.io", "550e8400-e29b-41d4-a716-446655440000", "tok"
+        )
+
+
+class TestRunInstallCallsEnsureGuardEnabled:
+    """_run_install invokes _ensure_guard_enabled_for_tenant only in the interactive (mint) path."""
+
+    @patch("agent_scan.guard._install_hooks")
+    @patch("agent_scan.guard.mint_push_key", return_value="minted-pk")
+    @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
+    def test_interactive_mint_path_calls_ensure_with_token(
+        self, mock_fetch, mock_mint, mock_install, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("PUSH_KEY", raising=False)
+        monkeypatch.setenv("SNYK_TOKEN", "snyk-from-env")
+        config = tmp_path / "settings.json"
+        args = SimpleNamespace(
+            client="claude",
+            url="https://api.snyk.io",
+            tenant_id="tid-interactive",
+            file=str(config),
+            managed=False,
+            test=False,
+        )
+        _run_install(args)
+        mock_fetch.assert_called_once_with("https://api.snyk.io", "tid-interactive", "snyk-from-env")
+        mock_mint.assert_called_once()
+        mock_install.assert_called_once()
+
+    @patch("agent_scan.guard._install_hooks")
+    @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
+    def test_headless_with_push_key_skips_ensure(
+        self, mock_fetch, mock_install, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("PUSH_KEY", "existing-pk")
+        monkeypatch.setenv("TENANT_ID", "tid-headless")
+        monkeypatch.setenv("SNYK_TOKEN", "headless-token")
+        config = tmp_path / "hooks.json"
+        args = SimpleNamespace(
+            client="cursor",
+            url="https://api.snyk.io",
+            tenant_id="",
+            file=str(config),
+            managed=False,
+            test=False,
+        )
+        _run_install(args)
+        mock_fetch.assert_not_called()
+        mock_install.assert_called_once()
+
+    @patch("agent_scan.guard._install_hooks")
+    @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
+    def test_headless_installs_without_snyk_token(
+        self, mock_fetch, mock_install, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("PUSH_KEY", "existing-pk")
+        monkeypatch.setenv("TENANT_ID", "tid-hl")
+        monkeypatch.delenv("SNYK_TOKEN", raising=False)
+        config = tmp_path / "hooks.json"
+        args = SimpleNamespace(
+            client="cursor",
+            url="https://api.snyk.io",
+            tenant_id="tid-hl",
+            file=str(config),
+            managed=False,
+            test=False,
+        )
+        _run_install(args)
+        mock_fetch.assert_not_called()
+        mock_install.assert_called_once()

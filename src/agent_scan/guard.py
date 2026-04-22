@@ -139,8 +139,10 @@ def _ensure_guard_enabled_for_tenant(url: str, tenant_id: str, snyk_token: str) 
         )
         rich.print()
         sys.exit(1)
-    except RuntimeError as e:
-        rich.print(f"[bold red]Error:[/bold red] Could not reach the Agent Guard status endpoint: {e}")
+    except RuntimeError:
+        rich.print(
+            "[bold red]Error:[/bold red] Could not verify Agent Guard status for your tenant."
+        )
         rich.print(
             "[yellow]Ensure --url points to the Snyk API for your environment (for example "
             "[bold]https://api.snyk.io[/bold] for production, or the matching dev API host), that "
@@ -149,7 +151,7 @@ def _ensure_guard_enabled_for_tenant(url: str, tenant_id: str, snyk_token: str) 
         sys.exit(1)
     if not enabled:
         rich.print()
-        rich.print("[bold red]Agent Guard is not enabled for this Snyk tenant.[/bold red]", highlight=False)
+        rich.print("[bold red]Agent Guard is not enabled for this Snyk tenant.[/bold red]")
         rich.print()
         rich.print(
             "The Agent Guard (Observe) feature is controlled per tenant. Your organization has not "
@@ -212,10 +214,6 @@ def _run_install(args) -> None:
                 )
             sys.exit(1)
         rich.print(f"[green]\u2713[/green]  Push key minted  [yellow]{_mask_key(push_key)}[/yellow]")
-
-    token_for_guard = (os.environ.get("SNYK_TOKEN", "") or "").strip() if headless else snyk_token
-    if headless:
-        _ensure_guard_enabled_for_tenant(url, tenant_id, token_for_guard)
 
     hook_client = "claude-code" if client == "claude" else "cursor"
     minted = not headless  # True if we minted the key in this run

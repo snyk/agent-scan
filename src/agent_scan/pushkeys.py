@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import logging
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
+
+logger = logging.getLogger(__name__)
 
 PLATFORM_API_VERSION = "2025-08-28"
 
@@ -88,12 +91,16 @@ def fetch_guard_enabled(base_url: str, tenant_id: str, snyk_token: str) -> bool:
         body_text = e.read().decode(errors="replace")
         if e.code == 403:
             raise GuardEnabledAccessDeniedError(body_text) from e
-        raise RuntimeError(f"Guard enabled check failed: HTTP {e.code} — {body_text}") from e
+        # Do not include body_text in the raised message (may contain internal or sensitive details).
+        logger.debug("guard_enabled HTTP %s: %s", e.code, body_text[:2000])
+        raise RuntimeError(f"Guard enabled check failed: HTTP {e.code}") from e
     except (TimeoutError, URLError) as e:
-        raise RuntimeError(f"Guard enabled check failed: {e}") from e
+        logger.debug("guard_enabled network error", exc_info=True)
+        raise RuntimeError("Guard enabled check failed: network error") from e
 
     if not isinstance(data, dict) or "enabled" not in data:
-        raise RuntimeError(f"Unexpected guard-enabled response: {data}")
+        logger.debug("guard_enabled unexpected JSON shape: %r", data)
+        raise RuntimeError("Unexpected guard-enabled response from server")
     return bool(data["enabled"])
 
 

@@ -74,6 +74,20 @@ class TestFetchGuardEnabled:
                 fetch_guard_enabled("https://api.snyk.io", "tid", "tok")
         assert '{"detail"' in str(exc_info.value)
 
+    def test_non_403_http_error_message_omits_response_body(self):
+        url = "https://api.snyk.io/hidden/tenants/tid/guard-enabled"
+        secret_body = b'{"internal":"do-not-leak","stack":"..."}'
+
+        def boom(*args, **kwargs):
+            raise _http_error(url, 500, secret_body)
+
+        with patch("agent_scan.pushkeys.urlopen", side_effect=boom):
+            with pytest.raises(RuntimeError, match="HTTP 500") as exc_info:
+                fetch_guard_enabled("https://api.snyk.io", "tid", "tok")
+        err = str(exc_info.value)
+        assert "internal" not in err
+        assert "do-not-leak" not in err
+
 
 class TestMintPushKeyUrl:
     """Smoke test for shared URL normalization (guard-enabled matches push-key style)."""
