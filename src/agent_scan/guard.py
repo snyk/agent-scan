@@ -14,7 +14,6 @@ from urllib.parse import urlparse
 
 import rich
 
-from agent_scan.hook_version import HOOK_VERSION
 from agent_scan.pushkeys import (
     GuardEnabledAccessDeniedError,
     _is_localhost,
