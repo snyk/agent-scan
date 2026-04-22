@@ -280,7 +280,30 @@ def get_well_known_clients() -> list[CandidateClient]:
     elif sys.platform == "darwin":
         return MACOS_WELL_KNOWN_CLIENTS
     elif sys.platform == "win32":
-        return WINDOWS_WELL_KNOWN_CLIENTS
+        # On Windows we may also be scanning Linux home directories that live
+        # inside WSL distros (exposed as \\wsl.localhost\<Distro>\home\<user>).
+        # The Linux client definitions use Linux-conventional paths
+        # (e.g. ~/.config/Code, ~/.claude.json), which only match when
+        # expanded against a WSL home; the Windows definitions only match
+        # against Windows-native homes. Merge both lists so WSL homes get
+        # probed with Linux paths, but drop Linux entries whose discovery
+        # paths are structurally identical to an existing Windows entry
+        # (e.g. `cursor` uses `~/.cursor/mcp.json` on both platforms) to
+        # avoid scanning the same MCP server twice per home.
+        seen: set[tuple[str, tuple[str, ...], tuple[str, ...], tuple[str, ...]]] = set()
+        merged: list[CandidateClient] = []
+        for client in WINDOWS_WELL_KNOWN_CLIENTS + LINUX_WELL_KNOWN_CLIENTS:
+            key = (
+                client.name,
+                tuple(client.client_exists_paths),
+                tuple(client.mcp_config_paths),
+                tuple(client.skills_dir_paths),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(client)
+        return merged
     else:
         return []
 
@@ -361,10 +384,96 @@ def get_readable_home_directories(all_users: bool = False) -> list[tuple[Path, s
         except (subprocess.CalledProcessError, FileNotFoundError) as e:
             logger.error(f"Failed to fetch Windows profiles: {e}")
 
+        for wsl_home, wsl_user in get_wsl_home_directories():
+            if wsl_home in home_dirs:
+                continue
+            home_dirs[wsl_home] = wsl_user
+
     else:
         raise NotImplementedError(f"Unsupported OS: {system}")
 
     return list(home_dirs.items())
+
+
+def _list_wsl_distros() -> list[str]:
+    """
+    Return the list of installed, non-hidden WSL distro names (e.g. "Ubuntu-24.04").
+    Returns an empty list if WSL is not installed or the call fails.
+    """
+    try:
+        # `wsl.exe -l -q` emits one distro name per line in UTF-16LE.
+        proc = subprocess.run(
+            ["wsl.exe", "--list", "--quiet"],
+            capture_output=True,
+            check=True,
+            timeout=10,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+        logger.info(f"WSL not available or failed to list distros: {e}")
+        return []
+
+    raw = proc.stdout
+    # wsl.exe output is UTF-16LE on most Windows builds; fall back to utf-8.
+    for encoding in ("utf-16-le", "utf-16", "utf-8"):
+        try:
+            text = raw.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        return []
+
+    distros: list[str] = []
+    for line in text.splitlines():
+        name = line.strip().replace("\x00", "")
+        if name:
+            distros.append(name)
+    return distros
+
+
+def get_wsl_home_directories() -> list[tuple[Path, str]]:
+    """
+    Enumerate human home directories that live inside WSL distros, exposed to
+    Windows via the `\\\\wsl.localhost\\<Distro>\\home\\<user>` UNC share.
+
+    Only runs on Windows; returns an empty list otherwise. Silently returns []
+    if WSL is not installed, no distros are registered, or the filesystem is
+    not reachable (e.g. the distro cannot be started).
+    """
+    if platform.system() != "Windows":
+        return []
+
+    results: dict[Path, str] = {}
+    for distro in _list_wsl_distros():
+        # Prefer the modern \\wsl.localhost alias; fall back to \\wsl$ which is
+        # what older Windows builds expose.
+        for prefix in (r"\\wsl.localhost", r"\\wsl$"):
+            distro_home = Path(f"{prefix}\\{distro}\\home")
+            try:
+                if not distro_home.is_dir():
+                    continue
+                user_dirs = list(distro_home.iterdir())
+            except OSError as e:
+                logger.info(f"WSL home unreachable for {distro} via {prefix}: {e}")
+                continue
+
+            for user_dir in user_dirs:
+                try:
+                    if not user_dir.is_dir():
+                        continue
+                    if not os.access(user_dir, os.R_OK | os.X_OK):
+                        logger.info(f"WSL home {user_dir} -> Access: DENIED")
+                        continue
+                except OSError as e:
+                    logger.info(f"WSL home {user_dir} not inspectable: {e}")
+                    continue
+
+                logger.info(f"Found WSL user '{user_dir.name}' in distro '{distro}' -> Access: GRANTED")
+                results[user_dir] = user_dir.name
+            # Found a working prefix for this distro; no need to try the alias.
+            break
+
+    return list(results.items())
 
 
 def expand_path(path: Path, home_directory: Path | None) -> Path:
