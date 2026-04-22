@@ -31,7 +31,7 @@ class TestFullScanFlow:
         """Test a basic complete scan workflow from CLI to results. This does not mean that the results are correct or the servers can be run."""
         # Run mcp-scan with JSON output mode
         result = subprocess.run(
-            [*agent_scan_cmd, "scan", "--json", sample_config_file],
+            [*agent_scan_cmd, "scan", "--json", "--dangerously-run-mcp-servers", sample_config_file],
             capture_output=True,
             text=True,
         )
@@ -61,7 +61,7 @@ class TestFullScanFlow:
     def test_scan_sse_http(self, agent_scan_cmd, sample_config_file):
         """Test scanning with SSE and HTTP transport configurations."""
         result = subprocess.run(
-            [*agent_scan_cmd, "scan", "--json", sample_config_file],
+            [*agent_scan_cmd, "scan", "--json", "--dangerously-run-mcp-servers", sample_config_file],
             capture_output=True,
             text=True,
         )
@@ -90,6 +90,7 @@ class TestFullScanFlow:
                 *agent_scan_cmd,
                 "scan",
                 "--json",
+                "--dangerously-run-mcp-servers",
                 path,
                 "--analysis-url",
                 "https://api.snyk.io/hidden/mcp-scan/analysis-machine?version=2025-09-07",
@@ -130,13 +131,14 @@ class TestFullScanFlow:
             *agent_scan_cmd,
             "scan",
             "--json",
+            "--dangerously-run-mcp-servers",
             math_config,
             "--analysis-url",
             analysis_url,
         ]
 
         with_ci = subprocess.run(
-            [*base_cmd, "--ci"],
+            [*base_cmd, "--ci", "--suppress-mcpserver-io=false"],
             capture_output=True,
             text=True,
         )
@@ -155,7 +157,7 @@ class TestFullScanFlow:
     def test_scan_skills_without_flag(self, agent_scan_cmd, skill_path):
         """Test that scanning skill paths does NOT produce skill results without --skills flag."""
         result = subprocess.run(
-            [*agent_scan_cmd, "scan", "--json", skill_path],
+            [*agent_scan_cmd, "scan", "--json", "--dangerously-run-mcp-servers", skill_path],
             capture_output=True,
             text=True,
         )
@@ -171,7 +173,13 @@ class TestFullScanFlow:
     def test_scan_server_in_catalog(self, agent_scan_cmd, remote_server_with_oauth_in_catalog_file):
         """Test that scanning a server in the catalog works."""
         result = subprocess.run(
-            [*agent_scan_cmd, "scan", "--json", remote_server_with_oauth_in_catalog_file],
+            [
+                *agent_scan_cmd,
+                "scan",
+                "--json",
+                "--dangerously-run-mcp-servers",
+                remote_server_with_oauth_in_catalog_file,
+            ],
             capture_output=True,
             text=True,
         )

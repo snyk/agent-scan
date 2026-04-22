@@ -51,14 +51,16 @@ class PushArgs(BaseModel):
     version: str | None = None
 
 
-async def inspect_pipeline(
+async def discover_clients_to_inspect(
     inspect_args: InspectArgs,
-) -> tuple[list[ScanPathResult], list[str]]:
-    # collect discovered usernames
+) -> tuple[list[ClientToInspect], list[ScanPathResult], list[str]]:
+    """
+    Discover the clients/configs that would be inspected, without actually
+    starting any MCP servers.
+    """
     home_dirs_with_users = get_readable_home_directories(all_users=inspect_args.all_users)
     all_usernames: list[str] = [username for _path, username in home_dirs_with_users]
 
-    # fetch clients to inspect, building scan_path_results for paths that don't exist
     scan_path_results: list[ScanPathResult] = []
     clients_to_inspect: list[ClientToInspect] = []
     if inspect_args.paths:
@@ -99,13 +101,39 @@ async def inspect_pipeline(
         scanned_usernames = all_usernames
     else:
         scanned_usernames = [getpass.getuser()]
-    # inspect
+
+    return clients_to_inspect, scan_path_results, scanned_usernames
+
+
+async def inspect_pipeline(
+    inspect_args: InspectArgs,
+    *,
+    clients_to_inspect: list[ClientToInspect] | None = None,
+    precomputed_scan_path_results: list[ScanPathResult] | None = None,
+    scanned_usernames: list[str] | None = None,
+    stream_stderr: bool = False,
+    declined_servers: set[tuple[str, str]] | None = None,
+) -> tuple[list[ScanPathResult], list[str]]:
+    """
+    Inspect each discovered client's MCP servers.
+    """
+    if clients_to_inspect is None:
+        clients_to_inspect, precomputed_scan_path_results, scanned_usernames = await discover_clients_to_inspect(
+            inspect_args
+        )
+    scan_path_results: list[ScanPathResult] = list(precomputed_scan_path_results or [])
+
     for client_to_inspect in clients_to_inspect:
         inspected_client = await inspect_client(
-            client_to_inspect, inspect_args.timeout, inspect_args.tokens, inspect_args.scan_skills
+            client_to_inspect,
+            inspect_args.timeout,
+            inspect_args.tokens,
+            inspect_args.scan_skills,
+            stream_stderr=stream_stderr,
+            declined_servers=declined_servers,
         )
         scan_path_results.append(inspected_client_to_scan_path_result(inspected_client))
-    return scan_path_results, scanned_usernames
+    return scan_path_results, scanned_usernames or []
 
 
 async def inspect_analyze_push_pipeline(
@@ -113,12 +141,25 @@ async def inspect_analyze_push_pipeline(
     analyze_args: AnalyzeArgs,
     push_args: PushArgs,
     verbose: bool = False,
+    *,
+    clients_to_inspect: list[ClientToInspect] | None = None,
+    precomputed_scan_path_results: list[ScanPathResult] | None = None,
+    scanned_usernames: list[str] | None = None,
+    stream_stderr: bool = False,
+    declined_servers: set[tuple[str, str]] | None = None,
 ) -> list[ScanPathResult]:
     """
     Pipeline the scan and analyze the machine.
     """
     # inspect
-    scan_path_results, scanned_usernames = await inspect_pipeline(inspect_args)
+    scan_path_results, scanned_usernames = await inspect_pipeline(
+        inspect_args,
+        clients_to_inspect=clients_to_inspect,
+        precomputed_scan_path_results=precomputed_scan_path_results,
+        scanned_usernames=scanned_usernames,
+        stream_stderr=stream_stderr,
+        declined_servers=declined_servers,
+    )
 
     # redact
     redacted_scan_path_results = [redact_scan_result(rv) for rv in scan_path_results]

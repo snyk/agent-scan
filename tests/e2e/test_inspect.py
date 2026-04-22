@@ -33,7 +33,7 @@ class TestInspect:
             temp_file.write(json.dumps(config))
             temp_file.flush()
             result = subprocess.run(
-                [*agent_scan_cmd, "inspect", "--json", file_name],
+                [*agent_scan_cmd, "inspect", "--json", "--dangerously-run-mcp-servers", file_name],
                 capture_output=True,
                 text=True,
             )
@@ -74,7 +74,7 @@ class TestInspect:
             temp_file.write(config)
             temp_file.flush()
             result = subprocess.run(
-                [*agent_scan_cmd, "inspect", "--json", file_name],
+                [*agent_scan_cmd, "inspect", "--json", "--dangerously-run-mcp-servers", file_name],
                 capture_output=True,
                 text=True,
             )
@@ -87,7 +87,7 @@ class TestInspect:
     def test_inspect(self, agent_scan_cmd):
         path = "tests/mcp_servers/configs_files/all_config.json"
         result = subprocess.run(
-            [*agent_scan_cmd, "inspect", "--json", path],
+            [*agent_scan_cmd, "inspect", "--json", "--dangerously-run-mcp-servers", path],
             capture_output=True,
             text=True,
         )
@@ -136,7 +136,7 @@ class TestInspect:
     def test_inspect_skills_with_flag(self, agent_scan_cmd, skill_path):
         """Test that scanning skill paths works when --skills flag is provided."""
         result = subprocess.run(
-            [*agent_scan_cmd, "inspect", "--json", "--skills", skill_path],
+            [*agent_scan_cmd, "inspect", "--json", "--dangerously-run-mcp-servers", "--skills", skill_path],
             capture_output=True,
             text=True,
         )
@@ -163,7 +163,7 @@ class TestInspect:
     def test_inspect_skills_without_flag(self, agent_scan_cmd, skill_path):
         """Test that scanning skill paths does NOT produce skill results without --skills flag."""
         result = subprocess.run(
-            [*agent_scan_cmd, "inspect", "--json", skill_path],
+            [*agent_scan_cmd, "inspect", "--json", "--dangerously-run-mcp-servers", skill_path],
             capture_output=True,
             text=True,
         )
@@ -205,7 +205,7 @@ class TestInspect:
 
             time.sleep(1)
             result = subprocess.run(
-                [*agent_scan_cmd, "inspect", "--json", direct_scan_path],
+                [*agent_scan_cmd, "inspect", "--json", "--dangerously-run-mcp-servers", direct_scan_path],
                 capture_output=True,
                 text=True,
             )
@@ -252,7 +252,7 @@ class TestInspect:
     ):
         """Test that stdio-based direct scan paths produce the correct server configs (these servers won't actually start)."""
         result = subprocess.run(
-            [*agent_scan_cmd, "inspect", "--json", direct_scan_path],
+            [*agent_scan_cmd, "inspect", "--json", "--dangerously-run-mcp-servers", direct_scan_path],
             capture_output=True,
             text=True,
         )
@@ -271,7 +271,7 @@ class TestInspect:
     def test_vscode_settings_no_mcp(self, agent_scan_cmd, vscode_settings_no_mcp_file):
         """Test scanning VSCode settings with no MCP configurations."""
         result = subprocess.run(
-            [*agent_scan_cmd, "inspect", "--json", vscode_settings_no_mcp_file],
+            [*agent_scan_cmd, "inspect", "--json", "--dangerously-run-mcp-servers", vscode_settings_no_mcp_file],
             capture_output=True,
             text=True,
         )

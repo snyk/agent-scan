@@ -78,12 +78,19 @@ async def get_client(
     timeout: int | None = None,
     traffic_capture: TrafficCapture | None = None,
     token: TokenAndClientInfo | None = None,
+    *,
+    server_name: str | None = None,
+    config_path: str | None = None,
+    stream_stderr: bool = False,
 ) -> AsyncIterator[tuple]:
     """
     Create an MCP client for the given server config.
 
     If traffic_capture is provided, all MCP protocol traffic will be captured
     for debugging purposes.
+
+    If stream_stderr is True and server_name is provided, server stderr
+    is also streamed live to the console with a [server-name] at the start of each line.
     """
     if isinstance(server_config, RemoteServer) and server_config.type == "sse":
         logger.debug("Creating SSE client with URL: %s", server_config.url)
@@ -112,8 +119,16 @@ async def get_client(
             args=args,
             env=server_config.env,
         )
-        # Create stderr capture with real pipe if traffic capture is enabled
-        stderr_capture = PipeStderrCapture(traffic_capture) if traffic_capture else None
+        # Create stderr capture with real pipe if traffic capture is enabled.
+        # When streaming is requested, the capture also forwards each line to
+        # the console with a server-name prefix.
+        stderr_capture: PipeStderrCapture | None = None
+        if traffic_capture:
+            stderr_capture = PipeStderrCapture(
+                traffic_capture,
+                stream_server_name=server_name if (stream_stderr and server_name) else None,
+                stream_config_path=config_path if (stream_stderr and server_name) else None,
+            )
         client_cm = stdio_client(server_params, errlog=stderr_capture)
     else:
         raise ValueError(f"Invalid server config: {server_config}")
@@ -140,9 +155,21 @@ async def _check_server_pass(
     timeout: int,
     traffic_capture: TrafficCapture | None = None,
     token: TokenAndClientInfo | None = None,
+    *,
+    server_name: str | None = None,
+    config_path: str | None = None,
+    stream_stderr: bool = False,
 ) -> ServerSignature:
     async def _check_server() -> ServerSignature:
-        async with get_client(server_config, timeout=timeout, traffic_capture=traffic_capture, token=token) as (
+        async with get_client(
+            server_config,
+            timeout=timeout,
+            traffic_capture=traffic_capture,
+            token=token,
+            server_name=server_name,
+            config_path=config_path,
+            stream_stderr=stream_stderr,
+        ) as (
             read,
             write,
         ):
@@ -205,11 +232,25 @@ async def check_server(
     timeout: int,
     traffic_capture: TrafficCapture | None = None,
     token: TokenAndClientInfo | None = None,
+    *,
+    server_name: str | None = None,
+    config_path: str | None = None,
+    stream_stderr: bool = False,
 ) -> tuple[ServerSignature, StdioServer | RemoteServer]:
     logger.debug("Checking server with timeout: %s seconds", timeout)
 
     if not isinstance(server_config, RemoteServer):
-        result = await asyncio.wait_for(_check_server_pass(server_config, timeout, traffic_capture), timeout)
+        result = await asyncio.wait_for(
+            _check_server_pass(
+                server_config,
+                timeout,
+                traffic_capture,
+                server_name=server_name,
+                config_path=config_path,
+                stream_stderr=stream_stderr,
+            ),
+            timeout,
+        )
         logger.debug("Server check completed within timeout")
         return result, server_config
     else:
@@ -251,7 +292,16 @@ async def check_server(
                 server_config.url = url
                 logger.debug(f"Trying {protocol} with url: {url}")
                 result = await asyncio.wait_for(
-                    _check_server_pass(server_config, timeout, traffic_capture, token), timeout
+                    _check_server_pass(
+                        server_config,
+                        timeout,
+                        traffic_capture,
+                        token,
+                        server_name=server_name,
+                        config_path=config_path,
+                        stream_stderr=False,  # stream_stderr is stdio-only
+                    ),
+                    timeout,
                 )
                 logger.debug("Server check completed within timeout")
                 return result, server_config

@@ -29,6 +29,7 @@ ErrorCategory = Literal[
     "server_http_error",  # MCP server returned HTTP error
     "analysis_error",  # Could not reach/use analysis server
     "skill_scan_error",  # Could not scan skill
+    "user_declined",  # User declined to start a stdio server during the consent prompt
 ]
 
 # Mapping from failure categories to codes
@@ -42,6 +43,7 @@ FAILURE_CATEGORY_TO_CODE: dict[ErrorCategory | None, str] = {
     "server_http_error": "X006",
     "analysis_error": "X007",
     None: "X008",
+    "user_declined": "X009",
 }
 
 logger = logging.getLogger(__name__)
@@ -516,6 +518,10 @@ class ServerHTTPError(SerializedException):
     server_output: str | None = None
 
 
+class UserDeclinedError(SerializedException):
+    category: Literal["user_declined"] = "user_declined"
+
+
 class AnalysisError(SerializedException):
     category: Literal["analysis_error"] = "analysis_error"
 
@@ -545,7 +551,7 @@ class ClientToInspect(BaseModel):
 class InspectedExtensions(BaseModel):
     name: str  # ignore if name is available in the config
     config: StdioServer | RemoteServer | SkillServer
-    signature_or_error: ServerSignature | ServerStartupError | ServerHTTPError | SkillScannError
+    signature_or_error: ServerSignature | ServerStartupError | ServerHTTPError | SkillScannError | UserDeclinedError
 
 
 class InspectedClient(BaseModel):
