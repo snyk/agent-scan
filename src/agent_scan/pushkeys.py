@@ -28,7 +28,7 @@ def _build_guard_enabled_url(base_url: str, tenant_id: str) -> str:
     base = base_url.rstrip("/")
     if "/hidden" not in base:
         base += "/hidden"
-    return f"{base}/tenants/{tenant_id}/guard-enabled"
+    return f"{base}/tenants/{tenant_id}/agent-monitor/guard-enabled?version={PLATFORM_API_VERSION}"
 
 
 def _is_localhost(url: str) -> bool:
@@ -93,7 +93,7 @@ def fetch_guard_enabled(base_url: str, tenant_id: str, snyk_token: str) -> bool:
             raise GuardEnabledAccessDeniedError(body_text) from e
         # Do not include body_text in the raised message (may contain internal or sensitive details).
         logger.debug("guard_enabled HTTP %s: %s", e.code, body_text[:2000])
-        raise RuntimeError(f"Guard enabled check failed: HTTP {e.code}") from e
+        raise RuntimeError(f"Guard enabled check failed: HTTP {e.code}, url: {url}") from e
     except (TimeoutError, URLError) as e:
         logger.debug("guard_enabled network error", exc_info=True)
         raise RuntimeError("Guard enabled check failed: network error") from e

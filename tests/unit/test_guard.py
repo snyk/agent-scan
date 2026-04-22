@@ -1592,12 +1592,13 @@ class TestEnsureGuardEnabledForTenant:
 
     @patch("agent_scan.guard.fetch_guard_enabled")
     def test_endpoint_error_exits(self, mock_fetch, capsys):
-        mock_fetch.side_effect = RuntimeError("connection refused")
+        mock_fetch.side_effect = RuntimeError("Guard enabled check failed: HTTP 502")
         with pytest.raises(SystemExit) as e:
             _ensure_guard_enabled_for_tenant("https://api.snyk.io", "550e8400-e29b-41d4-a716-446655440000", "tok")
         assert e.value.args[0] == 1
         out = capsys.readouterr().out
         assert "Could not verify Agent Guard status" in out
+        assert "HTTP 502" in out
         assert "Ensure --url" in out
 
     @patch("agent_scan.guard.fetch_guard_enabled", return_value=False)

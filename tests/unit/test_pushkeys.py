@@ -7,7 +7,12 @@ from urllib.error import HTTPError
 
 import pytest
 
-from agent_scan.pushkeys import GuardEnabledAccessDeniedError, fetch_guard_enabled
+from agent_scan.pushkeys import (
+    PLATFORM_API_VERSION,
+    GuardEnabledAccessDeniedError,
+    _build_guard_enabled_url,
+    fetch_guard_enabled,
+)
 
 
 def _http_error(url: str, code: int, body: bytes = b"") -> HTTPError:
@@ -27,7 +32,7 @@ class TestFetchGuardEnabled:
             assert fetch_guard_enabled("https://api.snyk.io", "tid", "tok") is True
 
         request_obj = mock_urlopen.call_args[0][0]
-        assert request_obj.get_full_url().endswith("/hidden/tenants/tid/guard-enabled")
+        assert request_obj.get_full_url() == _build_guard_enabled_url("https://api.snyk.io", "tid")
         assert request_obj.get_header("Authorization") == "token tok"
 
     def test_returns_false_when_api_disables(self):
@@ -65,7 +70,7 @@ class TestFetchGuardEnabled:
                 fetch_guard_enabled("https://api.snyk.io", "tid", "tok")
 
     def test_raises_access_denied_on_403(self):
-        url = "https://api.snyk.io/hidden/tenants/tid/guard-enabled"
+        url = _build_guard_enabled_url("https://api.snyk.io", "tid")
 
         def boom(*args, **kwargs):
             raise _http_error(url, 403, b'{"detail":"Forbidden"}')
@@ -76,7 +81,7 @@ class TestFetchGuardEnabled:
         assert '{"detail"' in str(exc_info.value)
 
     def test_non_403_http_error_message_omits_response_body(self):
-        url = "https://api.snyk.io/hidden/tenants/tid/guard-enabled"
+        url = _build_guard_enabled_url("https://api.snyk.io", "tid")
         secret_body = b'{"internal":"do-not-leak","stack":"..."}'
 
         def boom(*args, **kwargs):
@@ -94,9 +99,7 @@ class TestMintPushKeyUrl:
     """Smoke test for shared URL normalization (guard-enabled matches push-key style)."""
 
     def test_builds_hidden_tenants_path(self):
-        from agent_scan.pushkeys import _build_guard_enabled_url
-
-        assert (
-            _build_guard_enabled_url("https://api.snyk.io", "tid-1")
-            == "https://api.snyk.io/hidden/tenants/tid-1/guard-enabled"
+        assert _build_guard_enabled_url("https://api.snyk.io", "tid-1") == (
+            f"https://api.snyk.io/hidden/tenants/tid-1/agent-monitor/guard-enabled"
+            f"?version={PLATFORM_API_VERSION}"
         )
