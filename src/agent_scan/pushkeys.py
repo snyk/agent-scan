@@ -8,6 +8,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
+from agent_scan.hook_version import HOOK_VERSION
+
 logger = logging.getLogger(__name__)
 
 PLATFORM_API_VERSION = "2025-08-28"
@@ -28,7 +30,7 @@ def _build_guard_enabled_url(base_url: str, tenant_id: str) -> str:
     base = base_url.rstrip("/")
     if "/hidden" not in base:
         base += "/hidden"
-    return f"{base}/tenants/{tenant_id}/agent-monitor/guard-enabled?version={PLATFORM_API_VERSION}"
+    return f"{base}/tenants/{tenant_id}/agent-monitor/guard-enabled?version={HOOK_VERSION}"
 
 
 def _is_localhost(url: str) -> bool:

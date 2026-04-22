@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 
 import rich
 
+from agent_scan.hook_version import HOOK_VERSION
 from agent_scan.pushkeys import (
     GuardEnabledAccessDeniedError,
     _is_localhost,
@@ -78,8 +79,6 @@ CURSOR_HOOK_EVENTS = [
     "subagentStart",
     "subagentStop",
 ]
-
-HOOK_VERSION = "2025-11-11"
 
 # ---------------------------------------------------------------------------
 # Entry point

@@ -7,8 +7,8 @@ from urllib.error import HTTPError
 
 import pytest
 
+from agent_scan.hook_version import HOOK_VERSION
 from agent_scan.pushkeys import (
-    PLATFORM_API_VERSION,
     GuardEnabledAccessDeniedError,
     _build_guard_enabled_url,
     fetch_guard_enabled,
@@ -101,5 +101,5 @@ class TestMintPushKeyUrl:
     def test_builds_hidden_tenants_path(self):
         assert _build_guard_enabled_url("https://api.snyk.io", "tid-1") == (
             f"https://api.snyk.io/hidden/tenants/tid-1/agent-monitor/guard-enabled"
-            f"?version={PLATFORM_API_VERSION}"
+            f"?version={HOOK_VERSION}"
         )
