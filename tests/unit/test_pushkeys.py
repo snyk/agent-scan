@@ -100,6 +100,5 @@ class TestMintPushKeyUrl:
 
     def test_builds_hidden_tenants_path(self):
         assert _build_guard_enabled_url("https://api.snyk.io", "tid-1") == (
-            f"https://api.snyk.io/hidden/tenants/tid-1/agent-monitor/guard-enabled"
-            f"?version={HOOK_VERSION}"
+            f"https://api.snyk.io/hidden/tenants/tid-1/agent-monitor/guard-enabled?version={HOOK_VERSION}"
         )
