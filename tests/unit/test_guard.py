@@ -1608,7 +1608,7 @@ class TestEnsureGuardEnabledForTenant:
         assert e.value.args[0] == 1
         out = capsys.readouterr().out
         assert "not enabled for this Snyk tenant" in out
-        assert "550e8400-e29b-41d4-a716-446655440000" in out
+        assert "Please reach out to your Snyk administrators" in out
 
     @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
     def test_guard_enabled_continues(self, mock_fetch):
