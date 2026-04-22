@@ -30,6 +30,7 @@ from agent_scan.guard import (
     _config_path,
     _detect_claude_install,
     _detect_cursor_install,
+    _ensure_guard_enabled_for_tenant,
     _extract_env_from_cmd,
     _filter_claude_hooks,
     _filter_cursor_hooks,
@@ -40,11 +41,10 @@ from agent_scan.guard import (
     _parse_command_info,
     _preflight_writable,
     _print_client_status,
+    _run_install,
     _shell_quote,
     _uninstall_claude,
     _uninstall_cursor,
-    _ensure_guard_enabled_for_tenant,
-    _run_install,
 )
 from agent_scan.pushkeys import GuardEnabledAccessDeniedError
 
