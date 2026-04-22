@@ -1,5 +1,6 @@
 """Tests for agent_scan.pushkeys HTTP helpers."""
 
+import http.client
 from io import BytesIO
 from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError
@@ -10,7 +11,7 @@ from agent_scan.pushkeys import GuardEnabledAccessDeniedError, fetch_guard_enabl
 
 
 def _http_error(url: str, code: int, body: bytes = b"") -> HTTPError:
-    return HTTPError(url, code, "msg", {}, BytesIO(body))
+    return HTTPError(url, code, "msg", http.client.HTTPMessage(), BytesIO(body))
 
 
 class TestFetchGuardEnabled:

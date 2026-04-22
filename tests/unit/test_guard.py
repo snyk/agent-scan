@@ -1578,9 +1578,7 @@ class TestEnsureGuardEnabledForTenant:
     @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
     def test_localhost_allows_empty_token(self, mock_fetch):
         _ensure_guard_enabled_for_tenant("http://127.0.0.1:9", "550e8400-e29b-41d4-a716-446655440000", "")
-        mock_fetch.assert_called_once_with(
-            "http://127.0.0.1:9", "550e8400-e29b-41d4-a716-446655440000", ""
-        )
+        mock_fetch.assert_called_once_with("http://127.0.0.1:9", "550e8400-e29b-41d4-a716-446655440000", "")
 
     @patch("agent_scan.guard.fetch_guard_enabled")
     def test_access_denied_exits(self, mock_fetch, capsys):
@@ -1614,9 +1612,7 @@ class TestEnsureGuardEnabledForTenant:
     @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
     def test_guard_enabled_continues(self, mock_fetch):
         _ensure_guard_enabled_for_tenant("https://api.snyk.io", "550e8400-e29b-41d4-a716-446655440000", "tok")
-        mock_fetch.assert_called_once_with(
-            "https://api.snyk.io", "550e8400-e29b-41d4-a716-446655440000", "tok"
-        )
+        mock_fetch.assert_called_once_with("https://api.snyk.io", "550e8400-e29b-41d4-a716-446655440000", "tok")
 
 
 class TestRunInstallCallsEnsureGuardEnabled:
@@ -1646,9 +1642,7 @@ class TestRunInstallCallsEnsureGuardEnabled:
 
     @patch("agent_scan.guard._install_hooks")
     @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
-    def test_headless_with_push_key_skips_ensure(
-        self, mock_fetch, mock_install, tmp_path, monkeypatch
-    ):
+    def test_headless_with_push_key_skips_ensure(self, mock_fetch, mock_install, tmp_path, monkeypatch):
         monkeypatch.setenv("PUSH_KEY", "existing-pk")
         monkeypatch.setenv("TENANT_ID", "tid-headless")
         monkeypatch.setenv("SNYK_TOKEN", "headless-token")
@@ -1667,9 +1661,7 @@ class TestRunInstallCallsEnsureGuardEnabled:
 
     @patch("agent_scan.guard._install_hooks")
     @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
-    def test_headless_installs_without_snyk_token(
-        self, mock_fetch, mock_install, tmp_path, monkeypatch
-    ):
+    def test_headless_installs_without_snyk_token(self, mock_fetch, mock_install, tmp_path, monkeypatch):
         monkeypatch.setenv("PUSH_KEY", "existing-pk")
         monkeypatch.setenv("TENANT_ID", "tid-hl")
         monkeypatch.delenv("SNYK_TOKEN", raising=False)
