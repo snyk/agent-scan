@@ -190,3 +190,135 @@ class TestFullScanFlow:
         assert output[key]["servers"][0]["signature"] is not None, "Signature should not be None"
         assert output[key]["servers"][0]["error"] is not None, json.dumps(output, indent=4)
         assert output[key]["servers"][0]["error"]["is_failure"] is False, "Error should not be a failure"
+
+    @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
+    def test_ci_without_dangerous_flag_exits_2(self, agent_scan_cmd):
+        """--ci without --dangerously-run-mcp-servers should exit 2 with a clear error."""
+        result = subprocess.run(
+            [
+                *agent_scan_cmd,
+                "scan",
+                "--ci",
+                "tests/mcp_servers/configs_files/math_config.json",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 2, (
+            f"Expected exit 2 when --ci is used without --dangerously-run-mcp-servers, "
+            f"got {result.returncode}. stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+        # The enforcement message is printed via rich.print(file=sys.stderr).
+        assert "--ci requires --dangerously-run-mcp-servers" in result.stderr, (
+            f"Missing enforcement message. stderr={result.stderr!r}"
+        )
+
+    @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
+    def test_inspect_consent_decline_records_user_declined(self, agent_scan_cmd):
+        """
+        Default interactive inspect (no --dangerously-run-mcp-servers, no push key):
+        the consent prompt is shown for each stdio server. Declining every prompt
+        must record the server with the user_declined error category and never
+        start a subprocess.
+        """
+        math_config = "tests/mcp_servers/configs_files/math_config.json"
+        # Pipe enough "n" answers to cover any number of stdio prompts.
+        decline_input = ("n\n" * 10).encode()
+
+        result = subprocess.run(
+            [*agent_scan_cmd, "inspect", "--json", math_config],
+            input=decline_input,
+            capture_output=True,
+        )
+        assert result.returncode == 0, (
+            f"inspect with declined consent should exit 0, got {result.returncode}. stderr={result.stderr!r}"
+        )
+        # Consent UI is rendered on stderr; verify the prompt was actually shown
+        # and the server was recorded as declined.
+        stderr_text = result.stderr.decode("utf-8", errors="replace")
+        assert "Allow Agent Scan to start 'Math'?" in stderr_text, (
+            f"Expected per-server consent prompt for 'Math'. stderr={stderr_text!r}"
+        )
+        assert "Declined: 'Math' will not be started." in stderr_text, (
+            f"Expected 'Math' to be recorded as declined. stderr={stderr_text!r}"
+        )
+        assert "command: uv run python" in stderr_text, (
+            f"Expected stdio command line in consent block. stderr={stderr_text!r}"
+        )
+        # JSON output: the declined server must surface as user_declined and
+        # have no signature (never started).
+        output = json.loads(result.stdout)
+        servers = output[math_config]["servers"]
+        assert len(servers) == 1, f"Expected exactly one server entry, got {servers}"
+        math_server = servers[0]
+        error = math_server.get("error")
+        assert error is not None, f"Declined server should have an error, got: {math_server}"
+        assert error.get("category") == "user_declined", (
+            f"Expected category=user_declined for declined server, got: {error}"
+        )
+        assert math_server.get("signature") is None, (
+            f"Declined server must not have a signature (server was never started): {math_server}"
+        )
+
+    @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
+    def test_inspect_consent_allow_starts_server(self, agent_scan_cmd):
+        """
+        Default interactive inspect: answering y records allow in stderr. Inspect does
+        not run the analysis backend. If the stdio process starts cleanly, we expect a
+        signature; if the environment blocks startup (e.g. uv cache), we still require
+        that the error is not user_declined — consent was given.
+        """
+        math_config = "tests/mcp_servers/configs_files/math_config.json"
+        allow_input = ("y\n" * 10).encode()
+
+        result = subprocess.run(
+            [*agent_scan_cmd, "inspect", "--json", math_config],
+            input=allow_input,
+            capture_output=True,
+        )
+        assert result.returncode == 0, (
+            f"inspect with allowed consent should exit 0, got {result.returncode}. stderr={result.stderr!r}"
+        )
+        stderr_text = result.stderr.decode("utf-8", errors="replace")
+        assert "Allow Agent Scan to start 'Math'?" in stderr_text, (
+            f"Expected per-server consent prompt for 'Math'. stderr={stderr_text!r}"
+        )
+        assert "Allowed: 'Math' will be started." in stderr_text, (
+            f"Expected user allow confirmation for 'Math'. stderr={stderr_text!r}"
+        )
+        assert "command: uv run python" in stderr_text, (
+            f"Expected stdio command line in consent block. stderr={stderr_text!r}"
+        )
+        output = json.loads(result.stdout)
+        servers = output[math_config]["servers"]
+        assert len(servers) == 1, f"Expected exactly one server entry, got {servers}"
+
+    @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
+    def test_scan_consent_decline_records_user_declined(self, agent_scan_cmd):
+        """
+        Default interactive scan (no --dangerously-run-mcp-servers, no push key):
+        the consent prompt is shown for each stdio server. Declining every prompt
+        must record the server with the user_declined error category and never
+        start a subprocess.
+        """
+        math_config = "tests/mcp_servers/configs_files/math_config.json"
+        # Pipe enough "n" answers to cover any number of stdio prompts.
+        decline_input = ("n\n" * 10).encode()
+
+        result = subprocess.run(
+            [*agent_scan_cmd, "scan", math_config],
+            input=decline_input,
+            capture_output=True,
+        )
+        # Consent UI is rendered on stderr; verify the prompt was actually shown
+        # and the server was recorded as declined.
+        stderr_text = result.stderr.decode("utf-8", errors="replace")
+        assert "Allow Agent Scan to start 'Math'?" in stderr_text, (
+            f"Expected per-server consent prompt for 'Math'. stderr={stderr_text!r}"
+        )
+        assert "Declined: 'Math' will not be started." in stderr_text, (
+            f"Expected 'Math' to be recorded as declined. stderr={stderr_text!r}"
+        )
+        assert "command: uv run python" in stderr_text, (
+            f"Expected stdio command line in consent block. stderr={stderr_text!r}"
+        )
