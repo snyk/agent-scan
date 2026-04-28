@@ -319,8 +319,6 @@ def is_interactive_run(args) -> bool:
     answer yes or no consent prompts.
     """
     command = getattr(args, "command", None)
-    if command in ("mcp-server", "install-mcp-server"):
-        return False
     if command in ("evo", "inspect"):
         return True
     # If the scan is run with a push key, skip consent prompts.
@@ -415,43 +413,6 @@ def main():
         help="Configuration files to inspect (default: known MCP config locations)",
         metavar="CONFIG_FILE",
     )
-
-    # install
-    install_autoscan_parser = subparsers.add_parser(
-        "install-mcp-server", help="Install itself as a MCP server for automatic scanning (experimental)"
-    )
-    install_autoscan_parser.add_argument("file", type=str, default=None, help="File to install the MCP server in")
-    install_autoscan_parser.add_argument(
-        "--tool", action="store_true", default=False, help="Expose a tool for scanning"
-    )
-    install_autoscan_parser.add_argument(
-        "--background", action="store_true", default=False, help="Periodically run the scan in the background"
-    )
-    install_autoscan_parser.add_argument(
-        "--scan-interval",
-        type=int,
-        default=60 * 30,
-        help="Scan interval in seconds (default: 1800 seconds = 30 minutes)",
-    )
-    install_autoscan_parser.add_argument(
-        "--client-name", type=str, default=None, help="Name of the client issuing the scan"
-    )
-    setup_scan_parser(install_autoscan_parser, add_files=False)
-
-    # mcp server mode
-    mcp_server_parser = subparsers.add_parser("mcp-server", help="Start an MCP server (experimental)")
-    mcp_server_parser.add_argument("--tool", action="store_true", default=False, help="Expose a tool for scanning")
-    mcp_server_parser.add_argument(
-        "--background", action="store_true", default=False, help="Periodically run the scan in the background"
-    )
-    mcp_server_parser.add_argument(
-        "--scan-interval",
-        type=int,
-        default=60 * 30,
-        help="Scan interval in seconds (default: 1800 seconds = 30 minutes)",
-    )
-    mcp_server_parser.add_argument("--client-name", type=str, default=None, help="Name of the client issuing the scan")
-    setup_scan_parser(mcp_server_parser)
 
     # HELP command
     help_parser = subparsers.add_parser(  # noqa: F841
@@ -561,12 +522,12 @@ def main():
     enforce_consent_requirements(args)
 
     # Display version banner
-    if not ((hasattr(args, "json") and args.json) or (args.command == "mcp-server")):
+    if not (hasattr(args, "json") and args.json):
         rich.print(f"[bold blue]Snyk Agent Scan v{version_info}[/bold blue]\n")
 
     # Set up logging if verbose flag is enabled
     do_log = hasattr(args, "verbose") and args.verbose
-    setup_logging(do_log, log_to_stderr=(args.command != "mcp-server"))
+    setup_logging(do_log, log_to_stderr=True)
 
     # Handle commands
     if args.command == "help" or (args.command is None and hasattr(args, "help") and args.help):
@@ -578,14 +539,6 @@ def main():
     elif args.command == "scan" or args.command is None:  # default to scan
         asyncio.run(print_scan_inspect(args=args))
         sys.exit(0)
-    elif args.command == "mcp-server":
-        from agent_scan.mcp_server import mcp_server
-
-        sys.exit(mcp_server(args))
-    elif args.command == "install-mcp-server":
-        from agent_scan.mcp_server import install_mcp_server
-
-        sys.exit(install_mcp_server(args))
     elif args.command == "evo":
         asyncio.run(evo(args))
         sys.exit(0)

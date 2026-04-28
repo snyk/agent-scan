@@ -71,9 +71,3 @@ reset-uv:
 	rm -rf .venv || true
 	rm uv.lock || true
 	uv venv
-
-install-dev-server-cursor:
-	uv run --directory $PWD -m src.agent_scan.run install-mcp-server ~/.cursor/mcp.json --background --tool --client-name Cursor
-
-install-dev-server-windsurf:
-	uv run --directory $PWD -m src.agent_scan.run install-mcp-server ~/.codeium/windsurf/mcp_config.json --background --tool --client-name Windsurf
