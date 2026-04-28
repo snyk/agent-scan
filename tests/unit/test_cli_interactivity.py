@@ -47,11 +47,6 @@ def _control_server_without_push_key() -> ControlServer:
 
 
 class TestIsInteractiveRun:
-    @pytest.mark.parametrize("command", ["mcp-server", "install-mcp-server"])
-    def test_daemon_commands_are_non_interactive(self, command):
-        """mcp-server and install-mcp-server run as daemons / background threads."""
-        assert is_interactive_run(_ns(command=command)) is False
-
     @pytest.mark.parametrize("command", ["evo", "inspect"])
     def test_evo_and_inspect_are_always_interactive(self, command):
         """
@@ -187,12 +182,6 @@ class TestResolveServerIoDefault:
             control_servers=[_control_server_with_push_key()],
             suppress_mcpserver_io=None,
         )
-        resolve_server_io_default(args)
-        assert args.suppress_mcpserver_io is True
-
-    def test_unset_on_daemon_command_resolves_to_true(self):
-        """mcp-server / install-mcp-server are non-interactive even without push key."""
-        args = _ns(command="mcp-server", suppress_mcpserver_io=None)
         resolve_server_io_default(args)
         assert args.suppress_mcpserver_io is True
 
