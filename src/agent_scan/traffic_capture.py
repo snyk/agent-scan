@@ -7,11 +7,84 @@ messages, plus stderr output) for debugging failed server connections.
 
 import asyncio
 import contextlib
+import hashlib
 import os
+import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
+
+import rich
+
+# Palette used to color per-server stderr prefixes.
+_STREAM_COLOR_PALETTE: tuple[str, ...] = (
+    "cyan",
+    "green",
+    "yellow",
+    "magenta",
+    "blue",
+    "bright_cyan",
+    "bright_green",
+    "bright_yellow",
+    "bright_magenta",
+    "bright_blue",
+    "color(33)",  # dodger blue
+    "color(39)",  # deep sky blue
+    "color(44)",  # dark turquoise
+    "color(49)",  # spring green
+    "color(75)",  # steel blue
+    "color(78)",  # sea green
+    "color(81)",  # light sky blue
+    "color(108)",  # dark sea green
+    "color(111)",  # light cornflower
+    "color(114)",  # sea green
+    "color(117)",  # sky blue
+    "color(141)",  # medium purple
+    "color(147)",  # light steel blue
+    "color(150)",  # pale sea green
+    "color(156)",  # pale green
+    "color(159)",  # pale turquoise
+    "color(179)",  # light goldenrod
+    "color(180)",  # tan
+    "color(186)",  # khaki
+    "color(214)",  # orange
+    "color(220)",  # gold
+    "color(228)",  # khaki
+)
+
+# Shared lock so concurrent servers don't interleave lines mid-write.
+_STREAM_PRINT_LOCK = threading.Lock()
+
+
+def _color_for_server(name: str, config_path: str | None = None) -> str:
+    """
+    Pick a stable palette color for a server using the config_path.
+    """
+    key = f"{config_path or ''}\x00{name}".encode()
+    digest = hashlib.sha1(key, usedforsecurity=False).digest()
+    # Use the first 4 bytes to reduce bucketing bias now that the palette is
+    # larger than 256 entries could tolerate from a single byte.
+    idx = int.from_bytes(digest[:4], "big") % len(_STREAM_COLOR_PALETTE)
+    return _STREAM_COLOR_PALETTE[idx]
+
+
+def _print_server_line(
+    server_name: str,
+    line: str,
+    console: "rich.console.Console | None",
+    *,
+    config_path: str | None = None,
+) -> None:
+    """Print a single captured stderr line prefixed with the server name."""
+    color = _color_for_server(server_name, config_path)
+    # rich markup is escaped on the content to prevent a hostile server from
+    # emitting our own style tags.
+    from rich.markup import escape
+
+    target = console or rich.get_console()
+    with _STREAM_PRINT_LOCK:
+        target.print(f"[{color}]\\[{escape(server_name)}][/{color}] {escape(line)}")
 
 
 @dataclass
@@ -49,11 +122,19 @@ class PipeStderrCapture:
     file descriptor via fileno().
     """
 
-    def __init__(self, capture: TrafficCapture):
+    def __init__(
+        self,
+        capture: TrafficCapture,
+        *,
+        stream_server_name: str | None = None,
+        stream_config_path: str | None = None,
+        stream_console: "rich.console.Console | None" = None,
+    ):
         self._capture = capture
-        # Create a real OS pipe
+        self._stream_server_name = stream_server_name
+        self._stream_config_path = stream_config_path
+        self._stream_console = stream_console
         self._read_fd, self._write_fd = os.pipe()
-        # Wrap write end as a file object for the subprocess
         self._write_file = os.fdopen(self._write_fd, "w")
         self._reader_task: asyncio.Task | None = None
         self._closed = False
@@ -87,6 +168,13 @@ class PipeStderrCapture:
                 line = line.rstrip("\n\r")
                 if line:
                     self._capture.stderr.append(line)
+                    if self._stream_server_name is not None:
+                        _print_server_line(
+                            self._stream_server_name,
+                            line,
+                            self._stream_console,
+                            config_path=self._stream_config_path,
+                        )
         except Exception:
             pass  # Pipe closed or error
         finally:

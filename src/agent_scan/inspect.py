@@ -25,6 +25,7 @@ from agent_scan.models import (
     TokenAndClientInfo,
     UnknownConfigFormat,
     UnknownMCPConfig,
+    UserDeclinedError,
 )
 from agent_scan.signed_binary import check_server_signature
 from agent_scan.skill_client import inspect_skill, inspect_skills_dir
@@ -156,14 +157,29 @@ async def inspect_extension(
     config: StdioServer | RemoteServer | SkillServer,
     timeout: int,
     token: TokenAndClientInfo | None = None,
+    *,
+    config_path: str | None = None,
+    stream_stderr: bool = False,
 ) -> InspectedExtensions:
     """
     Scan an extension (MCP server or skill) and return a InspectedExtensions object.
+
+    When ``stream_stderr`` is True, stdio server stderr is streamed to the
+    console with a ``[name]`` prefix while also being captured for error
+    reports.
     """
     traffic_capture = TrafficCapture()
     if isinstance(config, StdioServer):
         try:
-            signature, _ = await check_server(config, timeout, traffic_capture, token)
+            signature, _ = await check_server(
+                config,
+                timeout,
+                traffic_capture,
+                token,
+                server_name=name,
+                config_path=config_path,
+                stream_stderr=stream_stderr,
+            )
             return InspectedExtensions(name=name, config=config, signature_or_error=signature)
         except Exception as e:
             return InspectedExtensions(
@@ -180,7 +196,15 @@ async def inspect_extension(
 
     if isinstance(config, RemoteServer):
         try:
-            signature, fixed_config = await check_server(config.model_copy(deep=True), timeout, traffic_capture, token)
+            signature, fixed_config = await check_server(
+                config.model_copy(deep=True),
+                timeout,
+                traffic_capture,
+                token,
+                server_name=name,
+                config_path=config_path,
+                stream_stderr=False,  # no-op for remote; flag is stdio-only
+            )
             assert isinstance(fixed_config, RemoteServer), f"Fixed config is not a RemoteServer: {fixed_config}"
             return InspectedExtensions(name=name, config=fixed_config, signature_or_error=signature)
         except HTTPStatusError as e:
@@ -234,10 +258,18 @@ async def inspect_client(
     timeout: int,
     tokens: list[TokenAndClientInfo],
     scan_skills: bool,
+    *,
+    stream_stderr: bool = False,
+    declined_servers: set[tuple[str, str]] | None = None,
 ) -> InspectedClient:
     """
     Scan a client (Cursor, VSCode, etc.) and return a InspectedClient object.
+
+    declined_servers is an optional set of (mcp_config_path, server_name)
+    pairs the user declined during the consent flow. Declined stdio servers are
+    not started. They are recorded as errors with category user_declined.
     """
+    declined = declined_servers or set()
     extensions: dict[
         str,
         list[InspectedExtensions] | FileNotFoundConfig | UnknownConfigFormat | CouldNotParseMCPConfig | SkillScannError,
@@ -248,7 +280,26 @@ async def inspect_client(
             continue
         extensions_for_mcp_config: list[InspectedExtensions] = []
         for name, server in mcp_configs:
-            extension = await inspect_extension(name, server, timeout, find_relevant_token(tokens, name))
+            if (mcp_config_path, name) in declined:
+                extensions_for_mcp_config.append(
+                    InspectedExtensions(
+                        name=name,
+                        config=server,
+                        signature_or_error=UserDeclinedError(
+                            message="Skipped by user consent (stdio server was not started)",
+                            is_failure=True,
+                        ),
+                    )
+                )
+                continue
+            extension = await inspect_extension(
+                name,
+                server,
+                timeout,
+                find_relevant_token(tokens, name),
+                config_path=mcp_config_path,
+                stream_stderr=stream_stderr,
+            )
             extensions_for_mcp_config.append(extension)
         extensions[mcp_config_path] = extensions_for_mcp_config
 

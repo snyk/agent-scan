@@ -17,6 +17,7 @@ import psutil
 import rich
 from rich.logging import RichHandler
 
+from agent_scan.consent import collect_consent
 from agent_scan.models import (
     FAILURE_CATEGORY_TO_CODE,
     ControlServer,
@@ -24,10 +25,17 @@ from agent_scan.models import (
     TokenAndClientInfo,
     TokenAndClientInfoList,
 )
-from agent_scan.pipelines import AnalyzeArgs, InspectArgs, PushArgs, inspect_analyze_push_pipeline, inspect_pipeline
+from agent_scan.pipelines import (
+    AnalyzeArgs,
+    InspectArgs,
+    PushArgs,
+    discover_clients_to_inspect,
+    inspect_analyze_push_pipeline,
+    inspect_pipeline,
+)
 from agent_scan.printer import print_scan_result
 from agent_scan.upload import get_hostname
-from agent_scan.utils import ensure_unicode_console, parse_headers, suppress_stdout
+from agent_scan.utils import ensure_unicode_console, get_push_key, parse_headers, suppress_stdout
 from agent_scan.version import version_info
 
 # Configure logging to suppress all output by default
@@ -212,7 +220,7 @@ def add_common_arguments(parser):
         "--ci",
         action="store_true",
         default=False,
-        help="Exit with a non-zero code when there are analysis findings or runtime failures",
+        help="Exit with a non-zero code when there are analysis findings or runtime failures. Requires --dangerously-run-mcp-servers.",
     )
     parser.add_argument(
         "--ignore-issues-codes",
@@ -232,12 +240,30 @@ def add_server_arguments(parser):
         help="Seconds to wait before timing out server connections (default: 10)",
         metavar="SECONDS",
     )
+    # Only stdio MCP server stderr is relayed; stdout is reserved for the
+    # JSON-RPC protocol and is always consumed by the MCP client, never shown.
+    # Default is None so we can distinguish three cases:
+    #   1. None  -> unset. resolve_server_io_default() picks based on
+    #               interactivity of the command.
+    #   2. True  -> explicit override to silence MCP server stderr.
+    #   3. False -> explicit override to stream MCP server stderr.
     server_group.add_argument(
         "--suppress-mcpserver-io",
-        default=True,
+        default=None,
         type=str2bool,
-        help="Suppress stdout/stderr from MCP servers (default: True)",
+        help=(
+            "Suppress stderr from stdio MCP servers (stdout carries the "
+            "JSON-RPC protocol and is never shown). "
+            "Default: False for interactive runs (stderr is streamed with a "
+            "[server-name] prefix), True otherwise."
+        ),
         metavar="BOOL",
+    )
+    server_group.add_argument(
+        "--dangerously-run-mcp-servers",
+        default=False,
+        action="store_true",
+        help=("Skip the interactive consent prompt and start every stdio MCP server listed in the scanned configs."),
     )
 
 
@@ -285,6 +311,48 @@ def setup_scan_parser(scan_parser, add_files=True):
     add_common_arguments(scan_parser)
     add_server_arguments(scan_parser)
     add_scan_arguments(scan_parser)
+
+
+def is_interactive_run(args) -> bool:
+    """
+    True when the run is a manual, interactive invocation by a human who can
+    answer yes or no consent prompts.
+    """
+    command = getattr(args, "command", None)
+    if command in ("mcp-server", "install-mcp-server"):
+        return False
+    if command in ("evo", "inspect"):
+        return True
+    # If the scan is run with a push key, skip consent prompts.
+    has_push_key = bool(get_push_key(getattr(args, "control_servers", []) or []))
+    return not has_push_key
+
+
+def resolve_server_io_default(args) -> None:
+    """
+    Fill in a value for --suppress-mcpserver-io when the user didn't pass
+    it explicitly: False for interactive runs, else True.
+    """
+    if getattr(args, "suppress_mcpserver_io", None) is None:
+        args.suppress_mcpserver_io = not is_interactive_run(args)
+
+
+def enforce_consent_requirements(args) -> None:
+    """
+    --ci must opt into starting subprocesses explicitly, because CI runs
+    cannot answer the interactive per-server consent prompt.
+    """
+    dangerous = getattr(args, "dangerously_run_mcp_servers", False)
+    ci_mode = getattr(args, "ci", False)
+
+    if ci_mode and not dangerous:
+        rich.print(
+            "[bold red]Running with --ci requires --dangerously-run-mcp-servers.[/bold red]\n"
+            "Agent Scan starts subprocesses for every stdio MCP server it "
+            "scans, so CI runs must confirm trust explicitly.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
 
 
 def main():
@@ -488,6 +556,10 @@ def main():
     # Attach parsed control servers to args
     args.control_servers = control_servers
 
+    # Resolve deferred defaults and enforce safety rules before dispatching.
+    resolve_server_io_default(args)
+    enforce_consent_requirements(args)
+
     # Display version banner
     if not ((hasattr(args, "json") and args.json) or (args.command == "mcp-server")):
         rich.print(f"[bold blue]Snyk Agent Scan v{version_info}[/bold blue]\n")
@@ -579,6 +651,15 @@ async def evo(args):
 async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[ScanPathResult]:
     """
     Run the scan/inspect pipeline and return results.
+
+    Flow:
+    1. Build InspectArgs from CLI args.
+    2. Discover the clients/configs that would be inspected.
+    3. If interactive and --dangerously-run-mcp-servers is not set, prompt
+       the user per stdio server for consent. Declined servers are recorded as
+       user_declined errors and never started.
+    4. Run the existing inspect / analyze / push pipeline with the filtered
+       plan and optional live stderr streaming.
     """
     verbose: bool = hasattr(args, "verbose") and args.verbose
     scan_all_users: bool = hasattr(args, "scan_all_users") and args.scan_all_users
@@ -599,6 +680,32 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[Scan
         scan_skills=scan_skills,
     )
 
+    # Resolve the MCP server IO flag and the consent flag.
+    if getattr(args, "suppress_mcpserver_io", None) is None:
+        args.suppress_mcpserver_io = not is_interactive_run(args)
+    suppress_io: bool = bool(args.suppress_mcpserver_io)
+    stream_stderr: bool = not suppress_io
+    dangerous: bool = bool(getattr(args, "dangerously_run_mcp_servers", False))
+
+    # Step 1: Discover everything we would inspect without starting any server.
+    clients_to_inspect, precomputed_scan_path_results, scanned_usernames = await discover_clients_to_inspect(
+        inspect_args
+    )
+
+    # Step 2: Collect consent per stdio server when running interactively.
+    declined_servers: set[tuple[str, str]] = set()
+    if is_interactive_run(args) and not dangerous:
+        declined_servers = collect_consent(clients_to_inspect)
+    elif dangerous and is_interactive_run(args):
+        message = (
+            "[bold red]--dangerously-run-mcp-servers is set: starting every "
+            "stdio MCP server listed in the scanned configs without "
+            "prompting.[/bold red]\n"
+        )
+        if not suppress_io:
+            message += "Tip: set --suppress-mcpserver-io=true to hide server stderr output.\n"
+        rich.print(message)
+
     if mode == "scan":
         skip_ssl_verify: bool = bool(hasattr(args, "skip_ssl_verify") and args.skip_ssl_verify)
 
@@ -617,9 +724,26 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[Scan
             skip_ssl_verify=skip_ssl_verify,
             version=version_info,
         )
-        return await inspect_analyze_push_pipeline(inspect_args, analyze_args, push_args, verbose=verbose)
+        return await inspect_analyze_push_pipeline(
+            inspect_args,
+            analyze_args,
+            push_args,
+            verbose=verbose,
+            clients_to_inspect=clients_to_inspect,
+            precomputed_scan_path_results=precomputed_scan_path_results,
+            scanned_usernames=scanned_usernames,
+            stream_stderr=stream_stderr,
+            declined_servers=declined_servers,
+        )
     elif mode == "inspect":
-        scan_path_results, _scanned_usernames = await inspect_pipeline(inspect_args)
+        scan_path_results, _scanned_usernames = await inspect_pipeline(
+            inspect_args,
+            clients_to_inspect=clients_to_inspect,
+            precomputed_scan_path_results=precomputed_scan_path_results,
+            scanned_usernames=scanned_usernames,
+            stream_stderr=stream_stderr,
+            declined_servers=declined_servers,
+        )
         return scan_path_results
     else:
         raise ValueError(f"Unknown mode: {mode}, expected 'scan' or 'inspect'")

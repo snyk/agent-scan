@@ -117,7 +117,20 @@ Agent Scan operates in two main modes which can be used jointly or separately:
 
 Agent Scan searches through your local agent's configuration files to find agents, skills, and MCP servers. For MCP, it connects to servers and retrieves tool descriptions.
 
-It then validates the components, both with local checks and by invoking the Agent Scan API. For this, skills, agent applications, tool names, and descriptions are shared with Snyk. By using Agent Scan, you agree to the Snyk [terms of use for Agent Scan](./TERMS.md).
+#### Interactive Consent for MCP Servers
+
+By default, Agent Scan prompts for user consent before starting each stdio MCP server during interactive runs. This consent flow:
+
+- Shows the server name, command, and environment variables (redacted) that will be executed
+- Allows you to approve or decline each server individually
+- Prevents potentially untrusted servers from running without your explicit permission
+- Records declined servers with a `user_declined` error (they are never started)
+
+For non-interactive environments (e.g., CI/CD pipelines), you must use the `--dangerously-run-mcp-servers` flag to bypass the consent prompt and start all servers automatically.
+
+#### Analysis and Validation
+
+Agent Scan validates the components, both with local checks and by invoking the Agent Scan API. For this, skills, agent applications, tool names, and descriptions are shared with Snyk. By using Agent Scan, you agree to the Snyk [terms of use for Agent Scan](./TERMS.md).
 
 A unique, persistent, and anonymous ID is assigned to your scans for analysis. You can opt out of sending this information using the `--opt-out` flag.
 
@@ -159,7 +172,11 @@ Options:
 --skills                          Also scan agent skills (default: off)
 --checks-per-server NUM           Number of checks to perform on each server (default: 1)
 --server-timeout SECONDS          Seconds to wait before timing out server connections (default: 10)
---suppress-mcpserver-io BOOL      Suppress stdout/stderr from MCP servers (default: True)
+--suppress-mcpserver-io BOOL      Suppress stderr from stdio MCP servers (stdout carries the JSON-RPC protocol
+                                  and is never shown). Default: False for interactive runs (stderr is streamed
+                                  with a [server-name] prefix), True otherwise.
+--dangerously-run-mcp-servers     Skip the interactive consent prompt and start every stdio MCP server listed
+                                  in the scanned configs.
 ```
 
 #### inspect
@@ -173,8 +190,12 @@ snyk-agent-scan inspect [CONFIG_FILE...]
 Options:
 
 ```
---server-timeout SECONDS      Seconds to wait before timing out server connections (default: 10)
---suppress-mcpserver-io BOOL  Suppress stdout/stderr from MCP servers (default: True)
+--server-timeout SECONDS          Seconds to wait before timing out server connections (default: 10)
+--suppress-mcpserver-io BOOL      Suppress stderr from stdio MCP servers (stdout carries the JSON-RPC protocol
+                                  and is never shown). Default: False for interactive runs (stderr is streamed
+                                  with a [server-name] prefix), True otherwise.
+--dangerously-run-mcp-servers     Skip the interactive consent prompt and start every stdio MCP server listed
+                                  in the scanned configs.
 ```
 
 #### help
@@ -205,6 +226,15 @@ snyk-agent-scan --skills ~/.claude/skills
 
 # Just inspect tools without verification
 snyk-agent-scan inspect
+
+# Skip consent prompts and run all servers (for CI/CD or trusted environments)
+snyk-agent-scan --dangerously-run-mcp-servers
+
+# Suppress MCP server stderr output during scanning
+snyk-agent-scan --suppress-mcpserver-io=true
+
+# CI mode (requires --dangerously-run-mcp-servers)
+snyk-agent-scan --ci --dangerously-run-mcp-servers
 ```
 
 ## Demo
