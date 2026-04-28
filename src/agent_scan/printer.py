@@ -20,13 +20,6 @@ MAX_ENTITY_NAME_LENGTH = 25
 MAX_ENTITY_NAME_LENGTH_SKILL = 35
 MAX_ENTITY_NAME_TOXIC_FLOW_LENGTH = 30
 
-ISSUE_COLOR_MAP = {
-    "successful": "[green]",
-    "issue": "[red]",
-    "analysis_error": "[gray62]",
-    "warning": "[yellow]",
-    "inspect_mode": "[white]",
-}
 
 SEVERITY_COLOR_MAP = {
     None: "[green]",
@@ -36,16 +29,6 @@ SEVERITY_COLOR_MAP = {
     "high": "[orange_red1]",
     "critical": "[bold][red]",
 }
-ICON_MAP = {
-    "ok": ":white_heavy_check_mark:",
-    "error": ":cross_mark:",
-    "analysis_error": "",
-    "warning": "⚠️ ",
-    "whitelisted": ":white_heavy_check_mark:",
-    "inspect_mode": "  ",
-}
-
-FAILURE_CATEGORY_TO_CODE_MAPPING = FAILURE_CATEGORY_TO_CODE
 
 
 def format_exception(e: Exception | str | None) -> tuple[str, rTraceback | None]:
@@ -76,7 +59,7 @@ def format_error(
     if e.traceback:
         traceback = e.traceback
     return Issue(
-        code=FAILURE_CATEGORY_TO_CODE_MAPPING[e.category],
+        code=FAILURE_CATEGORY_TO_CODE[e.category],
         message=status,
         extra_data={
             "severity": "info",
@@ -121,12 +104,6 @@ def format_servers_line(
     if issues:
         text += format_issues(issues, new_line=True)
     return Text.from_markup(text)
-
-
-def append_status(status: str, new_status: str) -> str:
-    if status == "":
-        return new_status
-    return f"{new_status}, {status}"
 
 
 def get_severity(issue: Issue) -> Literal["info", "low", "medium", "high", "critical"]:
@@ -218,9 +195,6 @@ def format_entity_line(
     is_skill: bool = False,
     full_description: bool = False,
 ) -> Text:
-    # is_verified = verified.value
-    # if is_verified is not None and changed.value is not None:
-    #     is_verified = is_verified and not changed.value
     include_description = len(issues) > 0
 
     # right-pad & truncate name
@@ -260,25 +234,11 @@ def format_entity_line(
     return formatted_text
 
 
-def format_tool_flow(tool_name: str, server_name: str, value: float) -> Text:
-    text = "{tool_name} {risk}"
-    tool_name = f"{server_name}/{tool_name}"
-    if len(tool_name) > MAX_ENTITY_NAME_TOXIC_FLOW_LENGTH:
-        tool_name = tool_name[: (MAX_ENTITY_NAME_TOXIC_FLOW_LENGTH - 3)] + "..."
-    tool_name = tool_name + " " * (MAX_ENTITY_NAME_TOXIC_FLOW_LENGTH - len(tool_name))
-
-    risk = "[yellow]Low[/yellow]" if value <= 1.5 else "[red]High[/red]"
-    return Text.from_markup(text.format(tool_name=tool_name, risk=risk))
-
-
 def format_global_issue(result: ScanPathResult, issue: Issue, show_all: bool = False) -> Tree:
     """
     Format issues about the whole scan.
     """
     assert issue.reference is None, "Global issues should not have a reference"
-    # assert issue.code in ["TF001", "TF002", "W002"] , (
-    #     f"Only issues with code TF001, TF002 or W002 can be global issues. {issue.code}"
-    # )
     tree = Tree(f"[yellow]\n⚠️ [{issue.code}]: {issue.message}[/yellow]")
 
     def _format_tool_kind_name(tool_kind_name: str) -> str:
