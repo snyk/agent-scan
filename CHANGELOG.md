@@ -74,3 +74,4 @@
 - `0.4.16` Bug fixes and improvements.
 - `0.4.17` WSL support for well known client paths.
 - `0.4.18` Add support for --ignore-issues-codes with --ci.
+- `0.5.0` Add user consent flow for interactive commands and deprecate mcp-server and install-mcp-server options.
