@@ -25,6 +25,19 @@
 
 Agent Scan helps you keep an inventory of all your installed agent components (harnesses, MCP servers, and skills) and scans them for common threats like prompt injections, sensitive data handling, or malware payloads hidden in natural language. **By default** it focuses on MCP servers; add `--skills` to autodiscover and scan agent skills.
 
+## Security Warning
+
+> **⚠️ IMPORTANT: Scanning MCP configurations will execute the commands defined in them.**
+>
+> When Agent Scan scans an MCP configuration file, it starts the stdio MCP servers by executing the commands and arguments specified in the config. This is necessary to retrieve tool descriptions and perform security analysis.
+>
+> **Recommendations:**
+> - **Run scans inside a sandbox** (Docker container, VM, or disposable environment) when evaluating untrusted or third-party MCP configs
+> - **Review the consent prompt carefully** during interactive scans, it shows the exact command and arguments that will be executed for each server
+> - **Use `--dangerously-run-mcp-servers`** only in trusted environments where you've verified all MCP server commands
+>
+> By default, Agent Scan requires explicit user consent (y/n) before starting each stdio MCP server during interactive runs. This gives you control over what gets executed on your system.
+
 ## Highlights
 
 - Auto-discover MCP configurations, agent tools, skills
@@ -119,6 +132,8 @@ Agent Scan searches through your local agent's configuration files to find agent
 
 #### Interactive Consent for MCP Servers
 
+> **⚠️ Security Note**: Scanning an MCP config executes the commands defined in it. Always review what will be executed before approving.
+
 By default, Agent Scan prompts for user consent before starting each stdio MCP server during interactive runs. This consent flow:
 
 - Shows the server name, command, and environment variables (redacted) that will be executed
@@ -126,7 +141,12 @@ By default, Agent Scan prompts for user consent before starting each stdio MCP s
 - Prevents potentially untrusted servers from running without your explicit permission
 - Records declined servers with a `user_declined` error (they are never started)
 
-For non-interactive environments (e.g., CI/CD pipelines), you must use the `--dangerously-run-mcp-servers` flag to bypass the consent prompt and start all servers automatically.
+**Best Practices:**
+- Review the command and arguments carefully before approving
+- When scanning untrusted or third-party MCP configs, run Agent Scan inside a sandbox (Docker, VM, or disposable environment)
+- Decline any servers with unfamiliar or suspicious commands
+
+For non-interactive environments (e.g., CI/CD pipelines), you must use the `--dangerously-run-mcp-servers` flag to bypass the consent prompt and start all servers automatically. **Only use this flag in trusted environments where all MCP server commands have been verified.**
 
 #### Analysis and Validation
 
@@ -175,8 +195,9 @@ Options:
 --suppress-mcpserver-io BOOL      Suppress stderr from stdio MCP servers (stdout carries the JSON-RPC protocol
                                   and is never shown). Default: False for interactive runs (stderr is streamed
                                   with a [server-name] prefix), True otherwise.
---dangerously-run-mcp-servers     Skip the interactive consent prompt and start every stdio MCP server listed
-                                  in the scanned configs.
+--dangerously-run-mcp-servers     ⚠️ DANGER: Skip the interactive consent prompt and automatically start every
+                                  stdio MCP server listed in the scanned configs. Only use in trusted
+                                  environments where you've verified all MCP server commands.
 ```
 
 #### inspect
@@ -194,8 +215,9 @@ Options:
 --suppress-mcpserver-io BOOL      Suppress stderr from stdio MCP servers (stdout carries the JSON-RPC protocol
                                   and is never shown). Default: False for interactive runs (stderr is streamed
                                   with a [server-name] prefix), True otherwise.
---dangerously-run-mcp-servers     Skip the interactive consent prompt and start every stdio MCP server listed
-                                  in the scanned configs.
+--dangerously-run-mcp-servers     ⚠️ DANGER: Skip the interactive consent prompt and automatically start every
+                                  stdio MCP server listed in the scanned configs. Only use in trusted
+                                  environments where you've verified all MCP server commands.
 ```
 
 #### help
@@ -227,13 +249,13 @@ snyk-agent-scan --skills ~/.claude/skills
 # Just inspect tools without verification
 snyk-agent-scan inspect
 
-# Skip consent prompts and run all servers (for CI/CD or trusted environments)
+# Skip consent prompts and run all servers (ONLY for CI/CD or fully trusted environments)
 snyk-agent-scan --dangerously-run-mcp-servers
 
 # Suppress MCP server stderr output during scanning
 snyk-agent-scan --suppress-mcpserver-io=true
 
-# CI mode (requires --dangerously-run-mcp-servers)
+# CI mode (requires --dangerously-run-mcp-servers in non-interactive environments)
 snyk-agent-scan --ci --dangerously-run-mcp-servers
 ```
 
