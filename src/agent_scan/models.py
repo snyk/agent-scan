@@ -2,7 +2,7 @@ import logging
 import os
 import re
 from itertools import chain
-from typing import Any, Literal, TypeAlias
+from typing import Annotated, Any, Literal, TypeAlias
 
 from lark import Lark
 from mcp.client.auth import TokenStorage
@@ -11,6 +11,7 @@ from mcp.types import Completion, InitializeResult, Prompt, Resource, ResourceTe
 from pydantic import (
     AliasChoices,
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     RootModel,
@@ -114,10 +115,37 @@ class RemoteServer(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
 
 
+# [REVIEW-COMMENT]
+# Production bug: when a user MCP config omits "args" (or sets it to null) and
+# the command is an absolute path that exists on disk, the resulting
+# StdioServer carried args=None all the way down to mcp.StdioServerParameters,
+# whose `args: list[str]` field rejects None with a Pydantic ValidationError.
+# We use a BeforeValidator (rather than just a default_factory) so that an
+# explicit `"args": null` in the user JSON is also coerced to [] before
+# Pydantic enforces the list[str] type on StdioServer.args itself.
+# [/REVIEW-COMMENT]
+def _coerce_none_to_empty_list(v: Any) -> Any:
+    """Coerce None to [] before Pydantic type-checks the args field.
+
+    Used as a BeforeValidator so user JSON containing `"args": null` (or
+    omitting `args` entirely) is normalized to an empty list rather than
+    rejected by the `list[str]` type check on StdioServer.args.
+    """
+    return [] if v is None else v
+
+
 class StdioServer(BaseModel):
     model_config = ConfigDict()
     command: str
-    args: list[str] | None = None
+    # [REVIEW-COMMENT]
+    # Was: `args: list[str] | None = None`. The Optional shape let None flow
+    # through the model and break downstream consumers (mcp.StdioServerParameters
+    # rejects None). It is now non-optional with a default_factory of list and a
+    # BeforeValidator that coerces explicit JSON `null` to []. Net effect: args
+    # is always a `list[str]` after model validation, regardless of whether the
+    # user omitted the key, supplied null, an empty list, or a populated list.
+    # [/REVIEW-COMMENT]
+    args: Annotated[list[str], BeforeValidator(_coerce_none_to_empty_list)] = Field(default_factory=list)
     type: Literal["stdio"] | None = "stdio"
     env: dict[str, str] | None = None
     binary_identifier: str | None = None
