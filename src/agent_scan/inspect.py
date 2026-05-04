@@ -111,7 +111,15 @@ async def get_mcp_config_per_home_directory(
             server_configs_by_name = mcp_config.get_servers()
             for server_config in server_configs_by_name.values():
                 if isinstance(server_config, StdioServer):
-                    server_config = check_server_signature(server_config)
+                    # [REVIEW-COMMENT]
+                    # home_directory must be forwarded to check_server_signature so
+                    # that resolve_command_and_args searches the server owner's home
+                    # directory first (e.g. when scanning another user's config).
+                    # Previously this argument was omitted, causing the function to
+                    # always resolve commands relative to the current user's home,
+                    # which is incorrect when home_directory != current user home.
+                    # [/REVIEW-COMMENT]
+                    server_config = check_server_signature(server_config, home_directory=home_directory)
             mcp_configs[mcp_config_path_expanded.as_posix()] = [
                 (server_name, server) for server_name, server in server_configs_by_name.items()
             ]
