@@ -69,18 +69,6 @@ def _is_path(arg: str) -> bool:
     return len(arg) >= 3 and arg[1] == ":" and arg[2] in "/\\"
 
 
-# [REVIEW-COMMENT]
-# Signature tightened from `(args: list[str] | None) -> list[str] | None` to
-# `(args: list[str]) -> list[str]`. This is a cascade from StdioServer.args
-# moving from `list[str] | None` to `list[str]` (see spec at
-# /Users/cristian/prod_scans_analysis/requirement_args_none_fix.md): the
-# assignment `server_scan_result.server.args = redact_args(...)` in
-# redact_server below would otherwise be a mypy assignment error.
-# The function body is intentionally unchanged — the falsy early-return
-# (`if not args: return args`) still handles None at runtime, so the
-# existing `test_redact_args_none` test continues to pass even though the
-# static type now disallows None.
-# [/REVIEW-COMMENT]
 def redact_args(args: list[str]) -> list[str]:
     """
     Redact values of key-value arguments in a command line argument list.
