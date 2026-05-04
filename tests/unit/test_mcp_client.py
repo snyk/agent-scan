@@ -3,6 +3,7 @@
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
+from mcp import StdioServerParameters
 from mcp.types import (
     Implementation,
     InitializeResult,
@@ -18,6 +19,7 @@ from pytest_lazy_fixtures import lf
 
 from agent_scan.mcp_client import _check_server_pass, check_server, scan_mcp_config_file
 from agent_scan.models import StdioServer
+from agent_scan.utils import resolve_command_and_args
 
 
 @pytest.mark.parametrize(
@@ -169,3 +171,21 @@ def remote_mcp_server_just_url():
 @pytest.mark.asyncio
 async def test_parse_server():
     pass
+
+
+class TestResolveCommandAndArgsRegression:
+    """Regression: resolve_command_and_args must return list[str] for omitted args."""
+
+    def test_resolve_returns_list_for_omitted_args_and_stdio_params_accepts_it(self, tmp_path):
+        script = tmp_path / "run.sh"
+        script.write_text("#!/bin/sh\necho hi\n")
+        script.chmod(0o755)
+
+        server = StdioServer.model_validate({"command": str(script)})
+        command, args = resolve_command_and_args(server)
+        params = StdioServerParameters(command=command, args=args)
+
+        assert isinstance(args, list) is True
+        assert args == []
+        assert command == str(script)
+        assert params.args == []

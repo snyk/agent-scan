@@ -160,3 +160,50 @@ class TestStdioServerRebalance:
         """Test that whitespace-only commands raise an error."""
         with pytest.raises(CommandParsingError):
             StdioServer(command="   ", args=None)
+
+
+class TestStdioServerArgsCoercion:
+    """args=None / missing args must coerce to [] regardless of command shape."""
+
+    def test_args_omitted(self):
+        s = StdioServer.model_validate({"command": "npx"})
+        assert s.args == []
+
+    def test_args_explicit_null(self):
+        s = StdioServer.model_validate({"command": "npx", "args": None})
+        assert s.args == []
+
+    def test_args_empty_list_preserved(self):
+        s = StdioServer.model_validate({"command": "npx", "args": []})
+        assert s.args == []
+
+    def test_args_populated_preserved(self):
+        s = StdioServer.model_validate({"command": "npx", "args": ["-y", "pkg"]})
+        assert s.args == ["-y", "pkg"]
+
+    def test_existing_absolute_path_with_no_args(self, tmp_path):
+        """Reproduces the production failure mode: run.sh wrapper, no args."""
+        script = tmp_path / "run.sh"
+        script.write_text("#!/bin/sh\necho hi\n")
+        script.chmod(0o755)
+        s = StdioServer.model_validate({"command": str(script)})
+        assert s.command == str(script)
+        assert s.args == []
+
+    def test_existing_absolute_path_with_explicit_null_args(self, tmp_path):
+        """Explicit null args on an existing-path command must coerce to []."""
+        script = tmp_path / "run.sh"
+        script.write_text("#!/bin/sh\necho hi\n")
+        script.chmod(0o755)
+        s = StdioServer.model_validate({"command": str(script), "args": None})
+        assert s.command == str(script)
+        assert s.args == []
+
+    def test_existing_absolute_path_with_populated_args_preserved(self, tmp_path):
+        """Populated args on an existing-path command must be preserved verbatim."""
+        script = tmp_path / "run.sh"
+        script.write_text("#!/bin/sh\necho hi\n")
+        script.chmod(0o755)
+        s = StdioServer.model_validate({"command": str(script), "args": ["--foo", "bar"]})
+        assert s.command == str(script)
+        assert s.args == ["--foo", "bar"]
