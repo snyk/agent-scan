@@ -2,13 +2,15 @@ import io
 import os
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
-from agent_scan.models import CommandParsingError, rebalance_command_args
+from agent_scan.models import CommandParsingError, StdioServer, rebalance_command_args
 from agent_scan.utils import (
     calculate_distance,
     get_relative_path,
+    resolve_command_and_args,
     suppress_stdout,
 )
 
@@ -155,11 +157,6 @@ class TestResolveCommandAndArgs:
 
     def test_resolve_command_and_args_no_home_directory_searches_current_user_dirs(self, tmp_path):
         """When home_directory=None, a command in ~/.local/bin is found via the current user's dirs."""
-        from unittest.mock import patch
-
-        from agent_scan.models import StdioServer
-        from agent_scan.utils import resolve_command_and_args
-
         # Arrange
         local_bin = tmp_path / ".local" / "bin"
         executable = local_bin / "mycommand"
@@ -177,11 +174,6 @@ class TestResolveCommandAndArgs:
 
     def test_resolve_command_and_args_with_home_directory_searches_owner_home_first(self, tmp_path):
         """When home_directory differs from current home, the owner's dirs are searched first."""
-        from unittest.mock import patch
-
-        from agent_scan.models import StdioServer
-        from agent_scan.utils import resolve_command_and_args
-
         # Arrange
         owner_home = tmp_path / "owner"
         current_home = tmp_path / "current"
@@ -205,11 +197,6 @@ class TestResolveCommandAndArgs:
 
     def test_resolve_command_and_args_with_home_directory_same_as_current_user_no_duplication(self, tmp_path):
         """When home_directory equals the current user's home, dirs are searched once and command is found."""
-        from unittest.mock import patch
-
-        from agent_scan.models import StdioServer
-        from agent_scan.utils import resolve_command_and_args
-
         # Arrange
         local_bin = tmp_path / ".local" / "bin"
         executable = local_bin / "mycommand"
@@ -227,11 +214,6 @@ class TestResolveCommandAndArgs:
 
     def test_resolve_command_and_args_with_home_directory_falls_back_to_current_user_dirs(self, tmp_path):
         """When command is absent from owner's dirs but present in current user's dirs, it is still found."""
-        from unittest.mock import patch
-
-        from agent_scan.models import StdioServer
-        from agent_scan.utils import resolve_command_and_args
-
         # Arrange
         owner_home = tmp_path / "owner"
         current_home = tmp_path / "current"
@@ -256,13 +238,6 @@ class TestResolveCommandAndArgs:
 
     def test_resolve_command_and_args_raises_when_not_found_anywhere(self, tmp_path):
         """When home_directory is provided but the command doesn't exist anywhere, ValueError is raised."""
-        from unittest.mock import patch
-
-        import pytest
-
-        from agent_scan.models import StdioServer
-        from agent_scan.utils import resolve_command_and_args
-
         # Arrange
         owner_home = tmp_path / "owner"
         current_home = tmp_path / "current"
@@ -275,3 +250,25 @@ class TestResolveCommandAndArgs:
         with patch("agent_scan.utils.os.path.expanduser", return_value=str(current_home)):
             with pytest.raises(ValueError, match="not found"):
                 resolve_command_and_args(server_config, home_directory=owner_home)
+
+    def test_resolve_command_and_args_with_home_directory_owner_wins_when_both_have_command(self, tmp_path):
+        """When both owner and current user have the command, the owner's binary is returned."""
+        # Arrange
+        owner_home = tmp_path / "owner"
+        current_home = tmp_path / "current"
+
+        owner_executable = owner_home / ".local" / "bin" / "mycommand"
+        self._make_executable(owner_executable)
+
+        current_executable = current_home / ".local" / "bin" / "mycommand"
+        self._make_executable(current_executable)
+
+        server_config = StdioServer(command="mycommand")
+
+        # Act — owner's home is provided; current user's home is mocked to current_home
+        with patch("agent_scan.utils.os.path.expanduser", return_value=str(current_home)):
+            resolved_command, resolved_args = resolve_command_and_args(server_config, home_directory=owner_home)
+
+        # Assert — owner's path wins over current user's path
+        assert resolved_command == str(owner_executable)
+        assert not resolved_args  # no args were passed; model normalises None -> []
