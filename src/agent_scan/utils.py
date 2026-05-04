@@ -82,7 +82,14 @@ def check_executable_exists(command: str) -> bool:
     return path.exists() or shutil.which(command) is not None
 
 
-def resolve_command_and_args(server_config: StdioServer) -> tuple[str, list[str] | None]:
+# [REVIEW-COMMENT]
+# Return type tightened from `tuple[str, list[str] | None]` to
+# `tuple[str, list[str]]`. StdioServer.args is now guaranteed to be a
+# `list[str]` at the model layer (via BeforeValidator + default_factory),
+# so callers no longer need to handle the `None` arm. Function body is
+# unchanged.
+# [/REVIEW-COMMENT]
+def resolve_command_and_args(server_config: StdioServer) -> tuple[str, list[str]]:
     """
     Resolve the command and arguments for a StdioServer.
     """
