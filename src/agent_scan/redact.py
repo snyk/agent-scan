@@ -91,10 +91,10 @@ def redact_args(args: list[str]) -> list[str]:
     Also redacts file paths (arguments starting with /, ~/, or drive letters).
 
     Args:
-        args: List of command line arguments, or None
+        args: List of command line arguments
 
     Returns:
-        List of arguments with values redacted, or None if input was None
+        List of arguments with values redacted
     """
     if not args:
         return args
