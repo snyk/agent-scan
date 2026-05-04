@@ -539,13 +539,6 @@ class ClientToInspect(BaseModel):
     name: str
     client_path: str
     username: str | None = None
-    # [REVIEW-COMMENT]
-    # Added `home_directory` to carry the config-file owner's home directory
-    # through the inspection pipeline. This allows `resolve_command_and_args`
-    # to search the owner's per-user binary directories (e.g. ~/.local/bin)
-    # when the scanning process runs as a *different* user (e.g. root scanning
-    # another user's config). Defaults to None to preserve backward compat.
-    # [/REVIEW-COMMENT]
     home_directory: Path | None = None
     mcp_configs: dict[
         str,

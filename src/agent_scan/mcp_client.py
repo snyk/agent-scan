@@ -74,13 +74,6 @@ async def streamablehttp_client_without_session(
 
 
 @asynccontextmanager
-# [REVIEW-COMMENT]
-# Added `home_directory` keyword parameter to `get_client` so the config-file
-# owner's home is forwarded to `resolve_command_and_args`. This enables the
-# resolver to search the owner's per-user binary directories (e.g. ~/.local/bin)
-# when the scanning process runs as a different user. Defaults to None to keep
-# all existing call-sites working without changes.
-# [/REVIEW-COMMENT]
 async def get_client(
     server_config: StdioServer | RemoteServer,
     timeout: int | None = None,
@@ -159,11 +152,6 @@ async def get_client(
             yield streams
 
 
-# [REVIEW-COMMENT]
-# Added `home_directory` keyword parameter to `_check_server_pass` so it can
-# be forwarded to `get_client` (and ultimately to `resolve_command_and_args`).
-# The nested `_check_server` closure captures it via the enclosing scope.
-# [/REVIEW-COMMENT]
 async def _check_server_pass(
     server_config: StdioServer | RemoteServer,
     timeout: int,
@@ -243,13 +231,6 @@ async def _check_server_pass(
     return await _check_server()
 
 
-# [REVIEW-COMMENT]
-# Added `home_directory` keyword parameter to `check_server` (the public entry
-# point for server checks) so callers that know the config-file owner's home
-# directory can pass it through. It is forwarded to `_check_server_pass`.
-# For remote servers `home_directory` has no effect (they don't use a local
-# binary), but accepting it here keeps the call-chain uniform.
-# [/REVIEW-COMMENT]
 async def check_server(
     server_config: StdioServer | RemoteServer,
     timeout: int,

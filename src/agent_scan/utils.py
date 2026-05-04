@@ -82,11 +82,6 @@ def check_executable_exists(command: str) -> bool:
     return path.exists() or shutil.which(command) is not None
 
 
-# [REVIEW-COMMENT]
-# Extracted system-wide (non-user-specific) binary directories into a module-level
-# constant so they can be reused by `_user_specific_dirs` callers and tested in
-# isolation. These paths are the same regardless of which user owns the MCP config.
-# [/REVIEW-COMMENT]
 _SYSTEM_DIRS: list[str] = [
     # package manager paths
     "/opt/homebrew/bin",
@@ -103,12 +98,6 @@ _SYSTEM_DIRS: list[str] = [
 ]
 
 
-# [REVIEW-COMMENT]
-# Extracted per-user binary directory logic into a helper so it can be called
-# independently for different home directories (e.g. the owner's home vs the
-# current user's home). This makes the home_directory parameter on
-# resolve_command_and_args feasible without code duplication.
-# [/REVIEW-COMMENT]
 def _user_specific_dirs(home: str) -> list[str]:
     """Return per-user binary directories rooted at `home`."""
     nvm_pattern = os.path.join(home, ".nvm", "versions", "node", "*", "bin")
@@ -130,20 +119,6 @@ def _user_specific_dirs(home: str) -> list[str]:
     ]
 
 
-# [REVIEW-COMMENT]
-# Added `home_directory` parameter to `resolve_command_and_args` so callers that
-# know the *owner* of an MCP config file (which may differ from the scanning
-# user) can point us at that user's per-user binary directories.
-#
-# Search order when `home_directory` is provided and differs from the current
-# user's home:
-#   1. owner's per-user dirs  (most likely location for the config owner's tools)
-#   2. current user's per-user dirs  (fallback; scanner may share some tools)
-#   3. system dirs  (last resort, platform-wide paths)
-#
-# When `home_directory` is None *or* equals the current user's home we fall back
-# to the original single-user + system behaviour to preserve backward compat.
-# [/REVIEW-COMMENT]
 def resolve_command_and_args(
     server_config: StdioServer,
     home_directory: Path | None = None,

@@ -111,14 +111,6 @@ async def get_mcp_config_per_home_directory(
             server_configs_by_name = mcp_config.get_servers()
             for server_config in server_configs_by_name.values():
                 if isinstance(server_config, StdioServer):
-                    # [REVIEW-COMMENT]
-                    # home_directory must be forwarded to check_server_signature so
-                    # that resolve_command_and_args searches the server owner's home
-                    # directory first (e.g. when scanning another user's config).
-                    # Previously this argument was omitted, causing the function to
-                    # always resolve commands relative to the current user's home,
-                    # which is incorrect when home_directory != current user home.
-                    # [/REVIEW-COMMENT]
                     server_config = check_server_signature(server_config, home_directory=home_directory)
             mcp_configs[mcp_config_path_expanded.as_posix()] = [
                 (server_name, server) for server_name, server in server_configs_by_name.items()
@@ -142,13 +134,6 @@ async def get_mcp_config_per_home_directory(
                 message=f"Skills dir {skills_dir_path_expanded.as_posix()} does not exist"
             )
 
-    # [REVIEW-COMMENT]
-    # Pass `home_directory` through to `ClientToInspect` so downstream code
-    # (inspect_extension → check_server → get_client → resolve_command_and_args)
-    # can locate binaries in the config-file owner's per-user directories even
-    # when the scan runs as a different user. When `home_directory` is None the
-    # behaviour is unchanged from before.
-    # [/REVIEW-COMMENT]
     return ClientToInspect(
         name=client.name,
         client_path=client_path,
@@ -168,13 +153,6 @@ def find_relevant_token(tokens: list[TokenAndClientInfo], name: str) -> TokenAnd
     return None
 
 
-# [REVIEW-COMMENT]
-# Added `home_directory` keyword parameter to `inspect_extension` so the
-# config-file owner's home directory can be passed all the way down to
-# `resolve_command_and_args` via `check_server`. This is part of the chain:
-#   inspect_client → inspect_extension → check_server → get_client → resolve_command_and_args
-# Defaults to None to preserve existing call-sites that don't need it.
-# [/REVIEW-COMMENT]
 async def inspect_extension(
     name: str,
     config: StdioServer | RemoteServer | SkillServer,
@@ -317,11 +295,6 @@ async def inspect_client(
                     )
                 )
                 continue
-            # [REVIEW-COMMENT]
-            # Pass `client.home_directory` to `inspect_extension` so that the
-            # owner's per-user binary directories are searched when resolving
-            # the server command for stdio servers belonging to another user.
-            # [/REVIEW-COMMENT]
             extension = await inspect_extension(
                 name,
                 server,
