@@ -23,7 +23,6 @@ class TestControlServerParsing:
                     "Auth: token1",
                     "--control-identifier",
                     "user@example.com",
-                    "--opt-out",
                 ],
                 [ControlServer(url="https://server1.com", headers={"Auth": " token1"}, identifier="user@example.com")],
                 id="single_server_with_all_options",
@@ -195,7 +194,6 @@ class TestCLIArgumentParsing:
             "Auth: token1",
             "--control-identifier",
             "user1@example.com",
-            "--opt-out",
             "--control-server",
             "https://server2.com",
             "--control-server-H",
@@ -285,10 +283,8 @@ class TestControlServerUploadIntegration:
                 analysis_url="https://test.com/analysis",
                 skip_ssl_verify=False,
                 control_servers=[
-                    ControlServer(url="https://server1.com", headers={"Auth": " token1"}, identifier="user1"),
-                    ControlServer(
-                        url="https://server2.com", headers={"Auth": " token2", "X-Custom": " value"}, identifier="user2"
-                    ),
+                    ControlServer(url="https://server1.com", headers={"x-client-id": "push-key-1"}, identifier="user1"),
+                    ControlServer(url="https://server2.com", headers={"x-client-id": "push-key-2"}, identifier="user2"),
                 ],
             )
 
@@ -311,9 +307,12 @@ class TestControlServerUploadIntegration:
 
         mock_result = ScanPathResult(path="/test/path")
 
-        with patch(
-            "agent_scan.cli.inspect_analyze_push_pipeline", new_callable=AsyncMock, return_value=[mock_result]
-        ) as mock_pipeline:
+        with (
+            patch("agent_scan.cli.collect_consent", return_value=set()),
+            patch(
+                "agent_scan.cli.inspect_analyze_push_pipeline", new_callable=AsyncMock, return_value=[mock_result]
+            ) as mock_pipeline,
+        ):
             args = Namespace(
                 verification_H=None,
                 verbose=False,
@@ -352,7 +351,9 @@ class TestControlServerUploadIntegration:
                 files=[],
                 mcp_oauth_tokens_path=None,
                 analysis_url="https://test.com/analysis",
-                control_servers=[ControlServer(url="https://server1.com", headers={}, identifier="host1")],
+                control_servers=[
+                    ControlServer(url="https://server1.com", headers={"x-client-id": "push-key"}, identifier="host1")
+                ],
             )
 
             await run_scan(args_without, mode="scan")
@@ -373,7 +374,9 @@ class TestControlServerUploadIntegration:
                 mcp_oauth_tokens_path=None,
                 analysis_url="https://test.com/analysis",
                 skip_ssl_verify=True,
-                control_servers=[ControlServer(url="https://server1.com", headers={}, identifier="host1")],
+                control_servers=[
+                    ControlServer(url="https://server1.com", headers={"x-client-id": "push-key"}, identifier="host1")
+                ],
             )
 
             await run_scan(args_with, mode="scan")

@@ -1,4 +1,4 @@
-.PHONY: run test tests ci pre-commit clean binary build shiv publish-pypi publish reset-uv install-dev-server-cursor install-dev-server-windsurf
+.PHONY: run test tests coverage ci pre-commit clean binary build shiv publish-pypi publish reset-uv install-dev-server-cursor install-dev-server-windsurf
 
 # Pass extra arguments via ARGS, e.g.: make test ARGS="-v -k test_basic tests/e2e/"
 ARGS ?=
@@ -22,6 +22,11 @@ run:
 
 test tests:
 	AGENT_SCAN_ENVIRONMENT=test uv run --extra test -m pytest --runner=uv $(PYTEST_PATH_ARGS) $(ARGS)
+
+coverage:
+	AGENT_SCAN_ENVIRONMENT=test uv run --extra test -m pytest --runner=uv --cov=src/agent_scan --cov-report=term-missing --cov-report=html $(PYTEST_PATH_ARGS) $(ARGS)
+	@echo ""
+	@echo "📊 Coverage report generated! Open htmlcov/index.html in your browser"
 
 ci:
 	$(MAKE) binary
