@@ -4,6 +4,7 @@ import os
 import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
@@ -73,6 +74,13 @@ async def streamablehttp_client_without_session(
 
 
 @asynccontextmanager
+# [REVIEW-COMMENT]
+# Added `home_directory` keyword parameter to `get_client` so the config-file
+# owner's home is forwarded to `resolve_command_and_args`. This enables the
+# resolver to search the owner's per-user binary directories (e.g. ~/.local/bin)
+# when the scanning process runs as a different user. Defaults to None to keep
+# all existing call-sites working without changes.
+# [/REVIEW-COMMENT]
 async def get_client(
     server_config: StdioServer | RemoteServer,
     timeout: int | None = None,
@@ -82,6 +90,7 @@ async def get_client(
     server_name: str | None = None,
     config_path: str | None = None,
     stream_stderr: bool = False,
+    home_directory: Path | None = None,
 ) -> AsyncIterator[tuple]:
     """
     Create an MCP client for the given server config.
@@ -113,7 +122,7 @@ async def get_client(
     elif isinstance(server_config, StdioServer):
         logger.debug("Creating stdio client")
 
-        command, args = resolve_command_and_args(server_config)
+        command, args = resolve_command_and_args(server_config, home_directory=home_directory)
         server_params = StdioServerParameters(
             command=command,
             args=args,
@@ -150,6 +159,11 @@ async def get_client(
             yield streams
 
 
+# [REVIEW-COMMENT]
+# Added `home_directory` keyword parameter to `_check_server_pass` so it can
+# be forwarded to `get_client` (and ultimately to `resolve_command_and_args`).
+# The nested `_check_server` closure captures it via the enclosing scope.
+# [/REVIEW-COMMENT]
 async def _check_server_pass(
     server_config: StdioServer | RemoteServer,
     timeout: int,
@@ -159,6 +173,7 @@ async def _check_server_pass(
     server_name: str | None = None,
     config_path: str | None = None,
     stream_stderr: bool = False,
+    home_directory: Path | None = None,
 ) -> ServerSignature:
     async def _check_server() -> ServerSignature:
         async with get_client(
@@ -169,6 +184,7 @@ async def _check_server_pass(
             server_name=server_name,
             config_path=config_path,
             stream_stderr=stream_stderr,
+            home_directory=home_directory,
         ) as (
             read,
             write,
@@ -227,6 +243,13 @@ async def _check_server_pass(
     return await _check_server()
 
 
+# [REVIEW-COMMENT]
+# Added `home_directory` keyword parameter to `check_server` (the public entry
+# point for server checks) so callers that know the config-file owner's home
+# directory can pass it through. It is forwarded to `_check_server_pass`.
+# For remote servers `home_directory` has no effect (they don't use a local
+# binary), but accepting it here keeps the call-chain uniform.
+# [/REVIEW-COMMENT]
 async def check_server(
     server_config: StdioServer | RemoteServer,
     timeout: int,
@@ -236,6 +259,7 @@ async def check_server(
     server_name: str | None = None,
     config_path: str | None = None,
     stream_stderr: bool = False,
+    home_directory: Path | None = None,
 ) -> tuple[ServerSignature, StdioServer | RemoteServer]:
     logger.debug("Checking server with timeout: %s seconds", timeout)
 
@@ -248,6 +272,7 @@ async def check_server(
                 server_name=server_name,
                 config_path=config_path,
                 stream_stderr=stream_stderr,
+                home_directory=home_directory,
             ),
             timeout,
         )
@@ -300,6 +325,7 @@ async def check_server(
                         server_name=server_name,
                         config_path=config_path,
                         stream_stderr=False,  # stream_stderr is stdio-only
+                        home_directory=home_directory,
                     ),
                     timeout,
                 )

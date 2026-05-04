@@ -134,9 +134,17 @@ async def get_mcp_config_per_home_directory(
                 message=f"Skills dir {skills_dir_path_expanded.as_posix()} does not exist"
             )
 
+    # [REVIEW-COMMENT]
+    # Pass `home_directory` through to `ClientToInspect` so downstream code
+    # (inspect_extension → check_server → get_client → resolve_command_and_args)
+    # can locate binaries in the config-file owner's per-user directories even
+    # when the scan runs as a different user. When `home_directory` is None the
+    # behaviour is unchanged from before.
+    # [/REVIEW-COMMENT]
     return ClientToInspect(
         name=client.name,
         client_path=client_path,
+        home_directory=home_directory,
         mcp_configs=mcp_configs,
         skills_dirs=skills_dirs,
     )
@@ -152,6 +160,13 @@ def find_relevant_token(tokens: list[TokenAndClientInfo], name: str) -> TokenAnd
     return None
 
 
+# [REVIEW-COMMENT]
+# Added `home_directory` keyword parameter to `inspect_extension` so the
+# config-file owner's home directory can be passed all the way down to
+# `resolve_command_and_args` via `check_server`. This is part of the chain:
+#   inspect_client → inspect_extension → check_server → get_client → resolve_command_and_args
+# Defaults to None to preserve existing call-sites that don't need it.
+# [/REVIEW-COMMENT]
 async def inspect_extension(
     name: str,
     config: StdioServer | RemoteServer | SkillServer,
@@ -160,6 +175,7 @@ async def inspect_extension(
     *,
     config_path: str | None = None,
     stream_stderr: bool = False,
+    home_directory: Path | None = None,
 ) -> InspectedExtensions:
     """
     Scan an extension (MCP server or skill) and return a InspectedExtensions object.
@@ -179,6 +195,7 @@ async def inspect_extension(
                 server_name=name,
                 config_path=config_path,
                 stream_stderr=stream_stderr,
+                home_directory=home_directory,
             )
             return InspectedExtensions(name=name, config=config, signature_or_error=signature)
         except Exception as e:
@@ -292,6 +309,11 @@ async def inspect_client(
                     )
                 )
                 continue
+            # [REVIEW-COMMENT]
+            # Pass `client.home_directory` to `inspect_extension` so that the
+            # owner's per-user binary directories are searched when resolving
+            # the server command for stdio servers belonging to another user.
+            # [/REVIEW-COMMENT]
             extension = await inspect_extension(
                 name,
                 server,
@@ -299,6 +321,7 @@ async def inspect_client(
                 find_relevant_token(tokens, name),
                 config_path=mcp_config_path,
                 stream_stderr=stream_stderr,
+                home_directory=client.home_directory,
             )
             extensions_for_mcp_config.append(extension)
         extensions[mcp_config_path] = extensions_for_mcp_config

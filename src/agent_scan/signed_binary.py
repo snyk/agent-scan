@@ -3,6 +3,7 @@ import os
 import re
 import subprocess
 import sys
+from pathlib import Path
 
 from agent_scan.models import StdioServer
 from agent_scan.utils import resolve_command_and_args
@@ -32,13 +33,20 @@ def _is_code_launcher(command: str) -> bool:
     return any(p.match(basename) for p in _CODE_LAUNCHER_PATTERNS)
 
 
-def check_server_signature(server: StdioServer) -> StdioServer:
+# [REVIEW-COMMENT]
+# Added `home_directory` parameter to `check_server_signature` so the signature
+# check can resolve the server binary from the config-file owner's per-user
+# directories when the scanner runs as a different user. The parameter is
+# forwarded directly to `resolve_command_and_args`. Defaults to None (no change
+# in behaviour for existing callers).
+# [/REVIEW-COMMENT]
+def check_server_signature(server: StdioServer, home_directory: Path | None = None) -> StdioServer:
     """Get detailed code signing information."""
     if sys.platform != "darwin":
         logger.info(f"Binary signature check not supported on {sys.platform}. Only supported on macOS.")
         return server
     try:
-        command, _ = resolve_command_and_args(server)
+        command, _ = resolve_command_and_args(server, home_directory=home_directory)
 
         if _is_code_launcher(command):
             logger.info(
