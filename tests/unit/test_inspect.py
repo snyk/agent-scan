@@ -6,8 +6,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from agent_scan.inspect import get_mcp_config_per_client
-from agent_scan.models import CandidateClient, ClientToInspect
+from agent_scan.inspect import get_mcp_config_per_client, inspect_client
+from agent_scan.models import CandidateClient, ClientToInspect, StdioServer
 from agent_scan.pipelines import InspectArgs, inspect_pipeline
 
 TEST_CANDIDATE_CLIENT = CandidateClient(
@@ -442,3 +442,67 @@ async def test_inspect_pipeline_discovery_mode_without_all_users_falls_back_to_c
         assert scanned_usernames == [getpass.getuser()]
     finally:
         shutil.rmtree(tmp)
+
+
+# --- inspect_client home_directory threading test ---
+
+
+@pytest.mark.asyncio
+async def test_inspect_client_threads_home_directory_to_resolve_command_and_args():
+    """home_directory must reach resolve_command_and_args through the full call chain.
+
+    Guards against an intermediate layer (inspect_extension -> check_server ->
+    _check_server_pass -> get_client) silently dropping the kwarg, which would
+    break --scan-all-users binary lookup for the config owner's per-user dirs.
+    """
+    expected_home = Path("/fake/owner/home")
+    client = ClientToInspect(
+        name="fake-client",
+        client_path="/fake/client",
+        username="owner",
+        home_directory=expected_home,
+        mcp_configs={
+            "/fake/mcp.json": [
+                ("dummy-server", StdioServer(command="dummycmd", args=["--flag"])),
+            ],
+        },
+        skills_dirs={},
+    )
+
+    # Raising from resolve_command_and_args short-circuits the subprocess path
+    # cleanly: the exception is caught by inspect_extension and turned into a
+    # ServerStartupError, but the call (with kwargs) is still recorded.
+    with patch(
+        "agent_scan.mcp_client.resolve_command_and_args",
+        side_effect=RuntimeError("short-circuit after capture"),
+    ) as mock_resolve:
+        await inspect_client(client, timeout=1, tokens=[], scan_skills=False)
+
+    assert mock_resolve.called, "resolve_command_and_args was never invoked"
+    assert mock_resolve.call_args.kwargs.get("home_directory") == expected_home
+
+
+@pytest.mark.asyncio
+async def test_inspect_client_passes_none_home_directory_when_unset():
+    """When ClientToInspect.home_directory is None (single-user scan),
+    resolve_command_and_args must still receive home_directory=None — not a
+    stale value from elsewhere — so the current user's PATH is used."""
+    client = ClientToInspect(
+        name="fake-client",
+        client_path="/fake/client",
+        mcp_configs={
+            "/fake/mcp.json": [
+                ("dummy-server", StdioServer(command="dummycmd", args=[])),
+            ],
+        },
+        skills_dirs={},
+    )
+
+    with patch(
+        "agent_scan.mcp_client.resolve_command_and_args",
+        side_effect=RuntimeError("short-circuit after capture"),
+    ) as mock_resolve:
+        await inspect_client(client, timeout=1, tokens=[], scan_skills=False)
+
+    assert mock_resolve.called
+    assert mock_resolve.call_args.kwargs.get("home_directory") is None
