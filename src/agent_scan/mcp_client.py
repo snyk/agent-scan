@@ -4,6 +4,7 @@ import os
 import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
@@ -82,6 +83,7 @@ async def get_client(
     server_name: str | None = None,
     config_path: str | None = None,
     stream_stderr: bool = False,
+    home_directory: Path | None = None,
 ) -> AsyncIterator[tuple]:
     """
     Create an MCP client for the given server config.
@@ -113,7 +115,7 @@ async def get_client(
     elif isinstance(server_config, StdioServer):
         logger.debug("Creating stdio client")
 
-        command, args = resolve_command_and_args(server_config)
+        command, args = resolve_command_and_args(server_config, home_directory=home_directory)
         server_params = StdioServerParameters(
             command=command,
             args=args,
@@ -159,6 +161,7 @@ async def _check_server_pass(
     server_name: str | None = None,
     config_path: str | None = None,
     stream_stderr: bool = False,
+    home_directory: Path | None = None,
 ) -> ServerSignature:
     async def _check_server() -> ServerSignature:
         async with get_client(
@@ -169,6 +172,7 @@ async def _check_server_pass(
             server_name=server_name,
             config_path=config_path,
             stream_stderr=stream_stderr,
+            home_directory=home_directory,
         ) as (
             read,
             write,
@@ -236,6 +240,7 @@ async def check_server(
     server_name: str | None = None,
     config_path: str | None = None,
     stream_stderr: bool = False,
+    home_directory: Path | None = None,
 ) -> tuple[ServerSignature, StdioServer | RemoteServer]:
     logger.debug("Checking server with timeout: %s seconds", timeout)
 
@@ -248,6 +253,7 @@ async def check_server(
                 server_name=server_name,
                 config_path=config_path,
                 stream_stderr=stream_stderr,
+                home_directory=home_directory,
             ),
             timeout,
         )
@@ -300,6 +306,7 @@ async def check_server(
                         server_name=server_name,
                         config_path=config_path,
                         stream_stderr=False,  # stream_stderr is stdio-only
+                        home_directory=home_directory,
                     ),
                     timeout,
                 )

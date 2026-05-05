@@ -111,7 +111,7 @@ async def get_mcp_config_per_home_directory(
             server_configs_by_name = mcp_config.get_servers()
             for server_config in server_configs_by_name.values():
                 if isinstance(server_config, StdioServer):
-                    server_config = check_server_signature(server_config)
+                    server_config = check_server_signature(server_config, home_directory=home_directory)
             mcp_configs[mcp_config_path_expanded.as_posix()] = [
                 (server_name, server) for server_name, server in server_configs_by_name.items()
             ]
@@ -137,6 +137,7 @@ async def get_mcp_config_per_home_directory(
     return ClientToInspect(
         name=client.name,
         client_path=client_path,
+        home_directory=home_directory,
         mcp_configs=mcp_configs,
         skills_dirs=skills_dirs,
     )
@@ -160,6 +161,7 @@ async def inspect_extension(
     *,
     config_path: str | None = None,
     stream_stderr: bool = False,
+    home_directory: Path | None = None,
 ) -> InspectedExtensions:
     """
     Scan an extension (MCP server or skill) and return a InspectedExtensions object.
@@ -179,6 +181,7 @@ async def inspect_extension(
                 server_name=name,
                 config_path=config_path,
                 stream_stderr=stream_stderr,
+                home_directory=home_directory,
             )
             return InspectedExtensions(name=name, config=config, signature_or_error=signature)
         except Exception as e:
@@ -299,6 +302,7 @@ async def inspect_client(
                 find_relevant_token(tokens, name),
                 config_path=mcp_config_path,
                 stream_stderr=stream_stderr,
+                home_directory=client.home_directory,
             )
             extensions_for_mcp_config.append(extension)
         extensions[mcp_config_path] = extensions_for_mcp_config

@@ -2,6 +2,7 @@ import logging
 import os
 import re
 from itertools import chain
+from pathlib import Path
 from typing import Any, Literal, TypeAlias
 
 from lark import Lark
@@ -538,6 +539,7 @@ class ClientToInspect(BaseModel):
     name: str
     client_path: str
     username: str | None = None
+    home_directory: Path | None = None
     mcp_configs: dict[
         str,
         list[tuple[str, StdioServer | RemoteServer]]

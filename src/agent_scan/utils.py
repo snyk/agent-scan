@@ -82,9 +82,58 @@ def check_executable_exists(command: str) -> bool:
     return path.exists() or shutil.which(command) is not None
 
 
-def resolve_command_and_args(server_config: StdioServer) -> tuple[str, list[str] | None]:
+_SYSTEM_DIRS: list[str] = [
+    # package manager paths
+    "/opt/homebrew/bin",
+    "/opt/local/bin",
+    "/snap/bin",
+    # system paths
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+    # docker path
+    "/Applications/Docker.app/Contents/Resources/bin",
+]
+
+
+def _user_specific_dirs(home: str) -> list[str]:
+    """Return per-user binary directories rooted at `home`."""
+    nvm_pattern = os.path.join(home, ".nvm", "versions", "node", "*", "bin")
+    nvm_dirs = sorted(glob.glob(nvm_pattern), reverse=True)
+    return [
+        # node / npx
+        *nvm_dirs,
+        os.path.join(home, ".npm-global", "bin"),
+        os.path.join(home, ".yarn", "bin"),
+        os.path.join(home, ".local", "share", "pnpm"),
+        os.path.join(home, ".config", "yarn", "global", "node_modules", ".bin"),
+        # python / uvx
+        os.path.join(home, ".cargo", "bin"),
+        os.path.join(home, ".pyenv", "shims"),
+        # user local paths
+        os.path.join(home, ".local", "bin"),
+        os.path.join(home, ".bin"),
+        os.path.join(home, "bin"),
+    ]
+
+
+def resolve_command_and_args(
+    server_config: StdioServer,
+    home_directory: Path | None = None,
+) -> tuple[str, list[str] | None]:
     """
     Resolve the command and arguments for a StdioServer.
+
+    Parameters
+    ----------
+    server_config:
+        The server configuration containing the command to resolve.
+    home_directory:
+        Optional home directory of the user who *owns* the MCP config file.
+        When provided and different from the current user's home, the owner's
+        per-user binary directories are searched before the current user's.
     """
     # check if command points to an executable and whether it exists absolute or on the path
     if check_executable_exists(server_config.command):
@@ -96,36 +145,16 @@ def resolve_command_and_args(server_config: StdioServer) -> tuple[str, list[str]
         raise ValueError(f"Path does not exist: {command}")
 
     # attempt to find the command in well-known directories
-    # npx via nvm - look for node versions directory
-    nvm_pattern = os.path.expanduser("~/.nvm/versions/node/*/bin")
-    nvm_dirs = sorted(glob.glob(nvm_pattern), reverse=True)
-    fallback_dirs = [
-        # node / npx
-        *nvm_dirs,
-        os.path.expanduser("~/.npm-global/bin"),
-        os.path.expanduser("~/.yarn/bin"),
-        os.path.expanduser("~/.local/share/pnpm"),
-        os.path.expanduser("~/.config/yarn/global/node_modules/.bin"),
-        # python / uvx
-        os.path.expanduser("~/.cargo/bin"),
-        os.path.expanduser("~/.pyenv/shims"),
-        # user local paths
-        os.path.expanduser("~/.local/bin"),
-        os.path.expanduser("~/.bin"),
-        os.path.expanduser("~/bin"),
-        # package manager paths
-        "/opt/homebrew/bin",
-        "/opt/local/bin",
-        "/snap/bin",
-        # system paths
-        "/usr/local/bin",
-        "/usr/bin",
-        "/bin",
-        "/usr/sbin",
-        "/sbin",
-        # docker path
-        "/Applications/Docker.app/Contents/Resources/bin",
-    ]
+    current_home = os.path.expanduser("~")
+
+    # Build the ordered list of directories to search.
+    # If home_directory differs from the current user's home, prepend the
+    # owner's per-user dirs so that the config owner's toolchain is preferred.
+    fallback_dirs: list[str] = []
+    if home_directory is not None and str(home_directory) != current_home:
+        fallback_dirs.extend(_user_specific_dirs(str(home_directory)))
+    fallback_dirs.extend(_user_specific_dirs(current_home))
+    fallback_dirs.extend(_SYSTEM_DIRS)
 
     for d in fallback_dirs:
         potential_path = os.path.join(d, command)
