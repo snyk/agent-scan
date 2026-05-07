@@ -85,7 +85,7 @@ def redact_args(args: list[str]) -> list[str]:
         List of arguments with values redacted
     """
     if not args:
-        return args
+        return []
 
     redacted: list[str] = []
     i = 0

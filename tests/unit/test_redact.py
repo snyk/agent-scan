@@ -43,10 +43,6 @@ class TestRedactAbsolutePaths:
 class TestRedactArgs:
     """Unit tests for redact_args function."""
 
-    def test_redact_args_none(self):
-        """Test that None input returns None."""
-        assert redact_args(None) is None
-
     def test_redact_args_empty(self):
         """Test that empty list returns empty list."""
         assert redact_args([]) == []
