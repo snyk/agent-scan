@@ -663,6 +663,7 @@ def _parse_command_info(cmd: str, events: list[str]) -> dict:
 _PS_PARAM_MAP = {
     "PUSH_KEY": "PushKey",
     "REMOTE_HOOKS_BASE_URL": "RemoteUrl",
+    "TENANT_ID": "TenantId",
 }
 
 
@@ -740,7 +741,10 @@ def _build_hook_command(push_key: str, url: str, script_path: Path, hook_client:
 def _build_hook_command_powershell(
     push_key: str, url: str, script_path: Path, hook_client: str, *, tenant_id: str = ""
 ) -> str:
-    return f"powershell -File '{script_path}' -Client {hook_client} -PushKey '{push_key}' -RemoteUrl '{url}'"
+    cmd = f"powershell -File '{script_path}' -Client {hook_client} -PushKey '{push_key}' -RemoteUrl '{url}'"
+    if tenant_id:
+        cmd += f" -TenantId '{tenant_id}'"
+    return cmd
 
 
 def _shell_quote(s: str) -> str:

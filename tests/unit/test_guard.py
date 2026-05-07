@@ -189,6 +189,14 @@ class TestBuildHookCommand:
     def test_without_tenant_powershell_no_tenant_id(self):
         cmd = _build_hook_command("pk", "https://api.snyk.io", Path("/x/hook.ps1"), "claude-code")
         assert "TENANT_ID" not in cmd
+        assert "-TenantId" not in cmd
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="powershell command format")
+    def test_with_tenant_powershell(self):
+        cmd = _build_hook_command(
+            "pk", "https://api.snyk.io", Path("/x/hook.ps1"), "claude-code", tenant_id="tid"
+        )
+        assert "-TenantId 'tid'" in cmd
 
     def test_roundtrip_extract(self):
         cmd = _build_hook_command(
@@ -196,9 +204,7 @@ class TestBuildHookCommand:
         )
         assert _extract_env_from_cmd(cmd, "PUSH_KEY") == "my-key"
         assert _extract_env_from_cmd(cmd, "REMOTE_HOOKS_BASE_URL") == "https://example.com"
-        # tenant_id is only in bash commands, not powershell
-        if sys.platform != "win32":
-            assert _extract_env_from_cmd(cmd, "TENANT_ID") == "t-1"
+        assert _extract_env_from_cmd(cmd, "TENANT_ID") == "t-1"
 
 
 class TestParseCommandInfo:

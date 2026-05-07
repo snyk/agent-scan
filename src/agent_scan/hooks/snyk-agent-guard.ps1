@@ -18,7 +18,10 @@ param(
     [string]$PushKey,
 
     [Parameter(Mandatory=$false)]
-    [string]$RemoteUrl
+    [string]$RemoteUrl,
+
+    [Parameter(Mandatory=$false)]
+    [string]$TenantId
 )
 
 $ErrorActionPreference = "Stop"
