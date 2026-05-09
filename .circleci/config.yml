@@ -2,12 +2,79 @@ version: 2.1
 
 orbs:
   prodsec: snyk/prodsec-orb@1
+  slack: circleci/slack@4.12.5
 
 parameters:
   snyk-scan-context:
     description: CircleCI context that provides SNYK_TOKEN to Snyk security scanning.
     type: string
     default: etso_llm
+  run-daily-security-scan:
+    description: When true, runs the daily security-scans workflow (used by scheduled trigger).
+    type: boolean
+    default: false
+
+commands:
+  notify_slack_on_failure:
+    steps:
+      - slack/notify:
+          channel: mcp-scan-alerting
+          event: fail
+          custom: |
+            {
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": {
+                    "type": "plain_text",
+                    "text": "CICD pipeline failed :circleci-fail:",
+                    "emoji": true
+                  }
+                },
+                {
+                  "type": "divider"
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Project*: ${CIRCLE_PROJECT_REPONAME}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Job*: ${CIRCLE_JOB}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Branch*: ${CIRCLE_BRANCH}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Author*: ${CIRCLE_USERNAME}"
+                    }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": " "
+                    }
+                  ],
+                  "accessory": {
+                    "type": "button",
+                    "text": {
+                      "type": "plain_text",
+                      "emoji": true,
+                      "text": "View Job"
+                    },
+                    "value": "${CIRCLE_BUILD_URL}"
+                  }
+                }
+              ]
+            }
 
 jobs:
   security-scans:
@@ -24,6 +91,7 @@ jobs:
           open-source-additional-arguments: --exclude=mcp-builder,slack-gif-creator
           open-source-scan: medium
           iac-scan: disabled
+      - notify_slack_on_failure
 
 workflows:
   version: 2
@@ -38,6 +106,16 @@ workflows:
 
       - security-scans:
           name: Security Scans
+          context:
+            - << pipeline.parameters.snyk-scan-context >>
+            - snyk-bot-slack
+
+
+  daily-security-scan:
+    when: << pipeline.parameters.run-daily-security-scan >>
+    jobs:
+      - security-scans:
+          name: Daily Security Scans
           context:
             - << pipeline.parameters.snyk-scan-context >>
             - snyk-bot-slack

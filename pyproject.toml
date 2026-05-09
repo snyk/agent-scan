@@ -26,7 +26,8 @@ dependencies = [
 [tool.uv]
 # Override transitive dependencies for security fixes
 override-dependencies = [
-    "click>=8.3.3",  # Fix SNYK-PYTHON-CLICK-16347201 (Command Injection)
+    "click>=8.3.3",
+    "python-multipart>=0.0.27",
 ]
 
 [project.scripts]
