@@ -14,6 +14,7 @@ from mcp.types import (
     Tool,
     ToolsCapability,
 )
+from yaml.error import YAMLError
 
 from agent_scan.models import ServerSignature, SkillServer
 
@@ -45,8 +46,10 @@ def inspect_skill(config: SkillServer) -> ServerSignature:
         )
     yaml_content = content_chunks[1].strip()
     text_content = "---".join(content_chunks[2:])
-
-    yaml_data = yaml.safe_load(yaml_content)
+    try:
+        yaml_data = yaml.safe_load(yaml_content)
+    except YAMLError as e:
+        raise Exception(f"Invalid SKILL.md file: {config.path}. YAML formatter contains invalid yaml.") from e
     if "name" not in yaml_data:
         raise Exception(f"Invalid SKILL.md file: {config.path}. Missing name in the YAML frontmatter.")
     name = yaml_data["name"]
