@@ -5,7 +5,7 @@ from urllib.parse import parse_qsl, urlsplit
 import pytest
 
 from agent_scan.models import RemoteServer, ScanPathResult, ServerScanResult, StdioServer
-from agent_scan.redact import REDACTED_SECRET, redact_absolute_paths, redact_args, redact_scan_result
+from agent_scan.redact import redact_absolute_paths, redact_args, redact_scan_result
 
 # High-entropy 40-char mixed-case+digit literal that should be flagged by
 # detect-secrets' default high-entropy plugins. NOT a known-prefix token
@@ -13,6 +13,11 @@ from agent_scan.redact import REDACTED_SECRET, redact_absolute_paths, redact_arg
 # this exact string is not flagged by the default plugins, swap to another
 # high-entropy random string of similar shape.
 FAKE_API_KEY = "Xk9mPq2vNwBzRtY7Lc4hJfDsAe6uGiQoVpWbZxMr"
+
+# FAKE_API_KEY is high-entropy alphanumeric, so Base64HighEntropyString flags
+# it first. The redaction marker is computed from the triggering plugin's
+# class name uppercased.
+FAKE_API_KEY_MARKER = "**REDACTED_SECRET_BASE64HIGHENTROPYSTRING***"
 
 
 class TestRedactAbsolutePaths:
@@ -83,13 +88,13 @@ class TestRedactArgs:
         args = ["--api-key", FAKE_API_KEY]
         result = redact_args(args)
         assert result[0] == "--api-key"
-        assert result[1] == "**REDACTED_SECRET***"
+        assert result[1] == FAKE_API_KEY_MARKER
 
     def test_redact_args_equals_high_entropy_value_redacted(self):
         """--flag=<high-entropy-value> redacts only the value half."""
         args = [f"--api-key={FAKE_API_KEY}"]
         result = redact_args(args)
-        assert result == ["--api-key=**REDACTED_SECRET***"]
+        assert result == [f"--api-key={FAKE_API_KEY_MARKER}"]
 
     def test_redact_args_equals_low_entropy_value_preserved(self):
         """--flag=<low-entropy-value> is preserved (not flagged by detect-secrets)."""
@@ -100,7 +105,7 @@ class TestRedactArgs:
         """-k=<high-entropy-value> redacts only the value half."""
         args = [f"-k={FAKE_API_KEY}"]
         result = redact_args(args)
-        assert result == ["-k=**REDACTED_SECRET***"]
+        assert result == [f"-k={FAKE_API_KEY_MARKER}"]
 
     def test_redact_args_boolean_flags_preserved(self):
         """Boolean flags without values are preserved."""
@@ -123,9 +128,9 @@ class TestRedactArgs:
         assert redact_args(args) == ["-y", "@modelcontextprotocol/server-github"]
 
     def test_redact_args_positional_high_entropy_redacted(self):
-        """A bare positional arg that itself contains a secret is redacted to REDACTED_SECRET."""
+        """A bare positional arg that itself contains a secret is redacted with the plugin-named marker."""
         args = [FAKE_API_KEY]
-        assert redact_args(args) == ["**REDACTED_SECRET***"]
+        assert redact_args(args) == [FAKE_API_KEY_MARKER]
 
     def test_redact_args_mixed_realistic(self):
         """Realistic mix: package name, boolean flag, low-entropy flag value, high-entropy flag value."""
@@ -137,19 +142,28 @@ class TestRedactArgs:
             "--port",
             "3000",
             "--api-key",
-            "**REDACTED_SECRET***",
-            "--token=**REDACTED_SECRET***",
+            FAKE_API_KEY_MARKER,
+            f"--token={FAKE_API_KEY_MARKER}",
         ]
 
-    def test_redact_args_uses_new_constant_not_old(self):
-        """Sanity: the new constant is used for arg redaction, NOT the old **REDACTED** literal."""
+    def test_redact_args_marker_names_triggering_plugin(self):
+        """The marker has the form **REDACTED_SECRET_<PLUGIN_NAME>*** and does NOT collide with the env-var **REDACTED** literal."""
         args = ["--api-key", FAKE_API_KEY]
         result = redact_args(args)
         joined = " ".join(result)
-        assert "**REDACTED_SECRET***" in joined
-        assert "**REDACTED**" not in joined
-        # And the constant value matches the literal
-        assert REDACTED_SECRET == "**REDACTED_SECRET***"
+        assert joined.endswith("***")
+        assert "**REDACTED_SECRET_" in joined
+        # The bare **REDACTED** marker (used for env vars / headers / paths)
+        # is a substring of every secret marker, so check that the secret
+        # marker is the one present, not a standalone **REDACTED**.
+        assert FAKE_API_KEY_MARKER in result
+
+    def test_redact_args_known_format_token_uses_named_detector(self):
+        """A recognized-format token (e.g. AWS) is flagged by its named detector, not by entropy."""
+        aws_token = "AKIAIOSFODNN7EXAMPLE"
+        args = [f"--aws-key={aws_token}"]
+        result = redact_args(args)
+        assert result == ["--aws-key=**REDACTED_SECRET_AWSKEYDETECTOR***"]
 
 
 def test_redact_remote_url_query_and_headers():
@@ -240,8 +254,8 @@ def test_redact_stdio_args():
         "-y",
         "some-server",
         "--api-key",
-        "**REDACTED_SECRET***",
-        "--token=**REDACTED_SECRET***",
+        FAKE_API_KEY_MARKER,
+        f"--token={FAKE_API_KEY_MARKER}",
     ]
 
 
@@ -276,7 +290,8 @@ def test_redact_scan_result_removes_api_key(server, kind):
     Ensure redact_scan_result removes API keys from server configs.
 
     Env-var values use the legacy REDACTED constant (sibling-constant
-    preservation); CLI arg values use REDACTED_SECRET.
+    preservation); CLI arg values use the plugin-named REDACTED_SECRET
+    marker.
     """
     result = ScanPathResult(path="/dummy/path", servers=[server])
 
@@ -293,5 +308,4 @@ def test_redact_scan_result_removes_api_key(server, kind):
     else:
         # args case
         joined = " ".join(srv.server.args or [])
-        assert "**REDACTED_SECRET***" in joined
-        assert "**REDACTED**" not in joined
+        assert FAKE_API_KEY_MARKER in joined
