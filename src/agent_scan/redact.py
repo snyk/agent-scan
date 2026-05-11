@@ -10,13 +10,10 @@ This module provides functions to redact sensitive data like:
 """
 
 import logging
-import os
 import re
-import tempfile
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from detect_secrets import SecretsCollection
-from detect_secrets.settings import transient_settings
+from detect_secrets.settings import get_plugins, transient_settings
 
 from agent_scan.models import RemoteServer, ScanPathResult, ServerScanResult, StdioServer
 
@@ -104,16 +101,15 @@ def _contains_secret(value: str) -> bool:
     """
     Return True if detect-secrets flags any token in ``value``.
 
-    Uses ``SecretsCollection.scan_file`` (the canonical detect-secrets
-    API, which respects per-plugin entropy ``limit`` values). The value
-    is written to a temporary file because ``scan_file`` reads paths
-    rather than in-memory strings.
+    Scans the value in-memory by feeding it to each configured plugin's
+    ``analyze_line`` inside a ``transient_settings`` block. No filesystem
+    writes are performed for the value being scanned.
 
-    The value is also wrapped in matching quotes before being written:
-    the ``Base64HighEntropyString`` plugin's tokenizing regex requires
-    the candidate string to appear inside a quoted literal (its pattern
-    is ``(['"])(token)(\\1)``). CLI argument values arrive unquoted, so
-    we add quotes purely as a tokenization aid. This does not change
+    The value is wrapped in a quoted assignment line because the
+    ``Base64HighEntropyString`` plugin's tokenizing regex requires the
+    candidate string to appear inside a quoted literal (its pattern is
+    ``(['"])(token)(\\1)``); a bare value would never reach the entropy
+    filter. The wrapper is a tokenization aid only and does not change
     detection semantics — entropy and named-detector logic operate on
     the inner value either way.
     """
@@ -129,19 +125,12 @@ def _contains_secret(value: str) -> bool:
         # so the outer wrapping still matches as a quoted literal.
         wrapped = '"' + value.replace('"', '\\"') + '"'
 
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tf:
-        tf.write(wrapped)
-        tmp_path = tf.name
-    try:
-        with transient_settings(_DETECT_SECRETS_CONFIG):
-            secrets = SecretsCollection()
-            secrets.scan_file(tmp_path)
-            return bool(list(secrets))
-    finally:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            logger.debug("Failed to remove temp file used for secret scan: %s", tmp_path)
+    line = f"x = {wrapped}"
+    with transient_settings(_DETECT_SECRETS_CONFIG):
+        for plugin in get_plugins():
+            if plugin.analyze_line(filename="adhoc", line=line, line_number=1):
+                return True
+    return False
 
 
 def redact_args(args: list[str]) -> list[str]:
