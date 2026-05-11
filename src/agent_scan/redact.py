@@ -11,7 +11,6 @@ This module provides functions to redact sensitive data like:
 
 import logging
 import re
-from contextlib import ExitStack
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from detect_secrets.plugins.high_entropy_strings import HighEntropyStringsPlugin
@@ -87,29 +86,54 @@ def redact_absolute_paths(text: str | None) -> str | None:
     return result
 
 
+def _wrap_for_entropy(value: str) -> str:
+    """
+    Build a synthetic ``x = "<value>"`` line that the entropy plugins'
+    default quoted-literal regex (``(['"])(token)(\\1)``) can tokenize.
+
+    Picks whichever quote style does not appear in ``value`` to avoid
+    escaping. If both quote styles are present, falls back to
+    double-quotes with embedded double-quotes backslash-escaped.
+    """
+    if '"' not in value:
+        return f'x = "{value}"'
+    if "'" not in value:
+        return f"x = '{value}'"
+    return 'x = "' + value.replace('"', r"\"") + '"'
+
+
 def _detect_secret(value: str) -> str | None:
     """
     Return the class name of the first detect-secrets plugin that flags
     ``value``, or ``None`` if no plugin flags it.
 
-    Scans the raw value in-memory. For ``HighEntropyStringsPlugin``
-    subclasses, ``non_quoted_string_regex(is_exact_match=True)`` is
-    entered so the plugin's regex matches the whole value as a single
-    token; the entropy ``limit`` filter is still applied because we do
-    not pass ``enable_eager_search=True`` (that path bypasses entropy
-    filtering and was the cause of an earlier false-positive avalanche).
+    Two-pass scan to give each plugin family the input format it expects:
+
+    1. Named-format detectors (``AWSKeyDetector``, ``GitHubTokenDetector``,
+       etc.) match self-contained format patterns and work on the raw
+       value directly.
+    2. ``HighEntropyStringsPlugin`` subclasses default to scanning quoted
+       string literals (``(['"])(token)(\\1)``); they receive the value
+       wrapped in a synthetic ``x = "..."`` line so their regex tokenizes
+       the whole value, then the entropy ``limit`` filter is applied.
     """
     if not value:
         return None
     with transient_settings(_DETECT_SECRETS_CONFIG):
         plugins = list(get_plugins())
-        with ExitStack() as stack:
-            for plugin in plugins:
-                if isinstance(plugin, HighEntropyStringsPlugin):
-                    stack.enter_context(plugin.non_quoted_string_regex(is_exact_match=True))
-            for plugin in plugins:
-                if plugin.analyze_line(filename="adhoc", line=value, line_number=1):
-                    return type(plugin).__name__
+        # Pass 1: format-based named detectors on the bare value.
+        for plugin in plugins:
+            if isinstance(plugin, HighEntropyStringsPlugin):
+                continue
+            if plugin.analyze_line(filename="adhoc", line=value, line_number=1):
+                return type(plugin).__name__
+        # Pass 2: entropy plugins on the quote-wrapped value.
+        wrapped = _wrap_for_entropy(value)
+        for plugin in plugins:
+            if not isinstance(plugin, HighEntropyStringsPlugin):
+                continue
+            if plugin.analyze_line(filename="adhoc", line=wrapped, line_number=1):
+                return type(plugin).__name__
     return None
 
 
