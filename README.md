@@ -23,7 +23,7 @@
 
 <br>
 
-Agent Scan helps you keep an inventory of all your installed agent components (harnesses, MCP servers, and skills) and scans them for common threats like prompt injections, sensitive data handling, or malware payloads hidden in natural language. **By default** it focuses on MCP servers; add `--skills` to autodiscover and scan agent skills.
+Agent Scan helps you keep an inventory of all your installed agent components (harnesses, MCP servers, and skills) and scans them for common threats like prompt injections, sensitive data handling, or malware payloads hidden in natural language. Ignore analysis on skills by using `--no-skills`.
 
 ## Security Warning
 
@@ -53,7 +53,7 @@ Agent Scan auto-discovers agents and their capabilities (MCP servers or skills) 
 - **✓**: at least one path is defined for that capability.
 - **✗**: the agent is listed for that OS but has no paths for that capability.
 - **—**: that agent is not included for that OS.
-- **Skills** columns apply when using `--skills`.
+- **Skills** Skills can be ignored by using `--no-skills`
 
 | Agent | macOS MCP | macOS Skills | Linux MCP | Linux Skills | Windows MCP | Windows Skills |
 | --- | :---: | :---: | :---: | :---: | :---: | :---: |
@@ -93,10 +93,8 @@ uvx snyk-agent-scan@latest
 
 This will scan for security vulnerabilities in MCP servers, tools, prompts, and resources. It will automatically discover a variety of agent configurations, including Claude Code/Desktop, Cursor, Gemini CLI, and Windsurf.
 
-To also auto-discover and scan agent skills, pass the `--skills` flag:
-
 ```bash
-uvx snyk-agent-scan@latest --skills
+uvx snyk-agent-scan@latest
 ```
 
 You can also scan particular MCP configuration files or skills:
@@ -105,9 +103,9 @@ You can also scan particular MCP configuration files or skills:
 # scan a specific mcp configuration
 uvx snyk-agent-scan@latest ~/.vscode/mcp.json
 # scan a single agent skill
-uvx snyk-agent-scan@latest --skills ~/path/to/my/SKILL.md
+uvx snyk-agent-scan@latest ~/path/to/my/SKILL.md
 # scan all claude skills
-uvx snyk-agent-scan@latest --skills ~/.claude/skills
+uvx snyk-agent-scan@latest ~/.claude/skills
 ```
 
 #### Example Run
@@ -187,7 +185,6 @@ snyk-agent-scan scan [CONFIG_FILE...]
 Options:
 
 ```
---skills                          Also scan agent skills (default: off)
 --checks-per-server NUM           Number of checks to perform on each server (default: 1)
 --server-timeout SECONDS          Seconds to wait before timing out server connections (default: 10)
 --suppress-mcpserver-io BOOL      Suppress stderr from stdio MCP servers (stdout carries the JSON-RPC protocol
@@ -196,6 +193,7 @@ Options:
 --dangerously-run-mcp-servers     ⚠️ DANGER: Skip the interactive consent prompt and automatically start every
                                   stdio MCP server listed in the scanned configs. Only use in trusted
                                   environments where you've verified all MCP server commands.
+--no-skills                       Skip analysis on skills.
 ```
 
 #### inspect
@@ -229,20 +227,17 @@ snyk-agent-scan help
 ### Examples
 
 ```bash
-# Scan all known MCP configs
-snyk-agent-scan
-
 # Scan all known MCP configs and agent skills
-snyk-agent-scan --skills
+snyk-agent-scan
 
 # Scan a specific config file
 snyk-agent-scan ~/custom/config.json
 
 # Scan a specific skill file
-snyk-agent-scan --skills ~/path/to/my/SKILL.md
+snyk-agent-scan ~/path/to/my/SKILL.md
 
 # Scan a directory for skills
-snyk-agent-scan --skills ~/.claude/skills
+snyk-agent-scan ~/.claude/skills
 
 # Just inspect tools without verification
 snyk-agent-scan inspect

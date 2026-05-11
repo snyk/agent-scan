@@ -154,10 +154,10 @@ class TestFullScanFlow:
         ],
         ids=["skills_parent_dir", "skill_folder", "skill_md_file"],
     )
-    def test_scan_skills_without_flag(self, agent_scan_cmd, skill_path):
+    def test_scan_skills_with_negative_flag(self, agent_scan_cmd, skill_path):
         """Test that scanning skill paths does NOT produce skill results without --skills flag."""
         result = subprocess.run(
-            [*agent_scan_cmd, "scan", "--json", "--dangerously-run-mcp-servers", skill_path],
+            [*agent_scan_cmd, "scan", "--json", "--no-skills", "--dangerously-run-mcp-servers", skill_path],
             capture_output=True,
             text=True,
         )

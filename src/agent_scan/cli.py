@@ -206,9 +206,9 @@ def add_common_arguments(parser):
     )
     parser.add_argument(
         "--skills",
-        default=False,
-        action="store_true",
-        help="Scan skills beyond mcp servers.",
+        default=True,
+        action=argparse.BooleanOptionalAction,
+        help="Scan skills beyond mcp servers (default: enabled). Use --no-skills to disable.",
     )
     parser.add_argument(
         "--scan-all-users",
@@ -366,7 +366,7 @@ def main():
             f"  {program_name}                     # Scan all known MCP configs\n"
             f"  {program_name} ~/custom/config.json # Scan a specific config file\n"
             f"  {program_name} inspect             # Just inspect tools without verification\n"
-            f"  {program_name} --skills            # Scan skills beyond mcp servers.\n"
+            f"  {program_name} --no-skills         # Scan only mcp servers, skip skills.\n"
             f"  {program_name} --verbose           # Enable detailed logging output\n"
             f"  {program_name} --print-errors      # Show error details and tracebacks\n"
             f"  {program_name} --json              # Output results in JSON format\n"

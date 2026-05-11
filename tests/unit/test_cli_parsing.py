@@ -211,6 +211,31 @@ class TestCLIArgumentParsing:
         assert control_servers[1].identifier == "serial-123"
 
 
+class TestSkillsFlag:
+    """--skills is on by default; --no-skills opts out; --skills is still accepted."""
+
+    def _parse(self, extra_argv: list[str]) -> bool:
+        import argparse
+
+        from agent_scan.cli import add_common_arguments
+
+        parser = argparse.ArgumentParser()
+        add_common_arguments(parser)
+        return parser.parse_args(extra_argv).skills
+
+    def test_skills_default_is_true(self):
+        assert self._parse([]) is True
+
+    def test_skills_flag_keeps_true(self):
+        assert self._parse(["--skills"]) is True
+
+    def test_no_skills_disables(self):
+        assert self._parse(["--no-skills"]) is False
+
+    def test_no_skills_then_skills_re_enables(self):
+        assert self._parse(["--no-skills", "--skills"]) is True
+
+
 class TestControlServerHeaderParsing:
     """Test suite for header parsing in control servers."""
 
