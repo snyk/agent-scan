@@ -13,7 +13,7 @@ import logging
 import re
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from detect_secrets.settings import get_plugins, transient_settings
+from detect_secrets.settings import default_settings, get_plugins, transient_settings
 
 from agent_scan.models import RemoteServer, ScanPathResult, ServerScanResult, StdioServer
 
@@ -23,41 +23,24 @@ REDACTED = "**REDACTED**"
 REDACTED_SECRET = "**REDACTED_SECRET***"
 
 
-# detect-secrets plugin configuration used by redact_args to scan CLI
-# argument values for high-entropy and known-format tokens. Default
-# entropy limits (Base64=4.5, Hex=3.0) converged cleanly against the
-# realistic must-pass-through / must-flag corpus during empirical
-# probing; raising them was unnecessary. KeywordDetector is omitted on
-# purpose to avoid false positives on common substrings like "token="
-# or "password=".
-_DETECT_SECRETS_CONFIG: dict = {
-    "plugins_used": [
-        {"name": "Base64HighEntropyString", "limit": 4.5},
-        {"name": "HexHighEntropyString", "limit": 3.0},
-        {"name": "AWSKeyDetector"},
-        {"name": "GitHubTokenDetector"},
-        {"name": "OpenAIDetector"},
-        {"name": "PrivateKeyDetector"},
-        {"name": "JwtTokenDetector"},
-        {"name": "SlackDetector"},
-        {"name": "StripeDetector"},
-        {"name": "TwilioKeyDetector"},
-        {"name": "AzureStorageKeyDetector"},
-        {"name": "MailchimpDetector"},
-        {"name": "ArtifactoryDetector"},
-        {"name": "CloudantDetector"},
-        {"name": "DiscordBotTokenDetector"},
-        {"name": "GitLabTokenDetector"},
-        {"name": "IbmCloudIamDetector"},
-        {"name": "IbmCosHmacDetector"},
-        {"name": "IPPublicDetector"},
-        {"name": "NpmDetector"},
-        {"name": "PypiTokenDetector"},
-        {"name": "SendGridDetector"},
-        {"name": "SquareOAuthDetector"},
-        {"name": "TelegramBotTokenDetector"},
-    ],
-}
+def _build_detect_secrets_config() -> dict:
+    """
+    Build a ``transient_settings`` config from detect-secrets' default
+    plugin set, excluding ``KeywordDetector``.
+
+    KeywordDetector is excluded because it flags tokens that appear
+    near words like ``password=``, ``token=``, or ``secret=`` regardless
+    of the token's content -- it would aggressively redact mundane flag
+    values whose surrounding key happens to contain a keyword.
+    """
+    with default_settings() as settings:
+        plugins_used = [
+            {"name": name, **kwargs} for name, kwargs in settings.plugins.items() if name != "KeywordDetector"
+        ]
+    return {"plugins_used": plugins_used}
+
+
+_DETECT_SECRETS_CONFIG: dict = _build_detect_secrets_config()
 
 
 def redact_absolute_paths(text: str | None) -> str | None:
