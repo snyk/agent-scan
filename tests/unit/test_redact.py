@@ -5,7 +5,14 @@ from urllib.parse import parse_qsl, urlsplit
 import pytest
 
 from agent_scan.models import RemoteServer, ScanPathResult, ServerScanResult, StdioServer
-from agent_scan.redact import redact_absolute_paths, redact_args, redact_scan_result
+from agent_scan.redact import REDACTED_SECRET, redact_absolute_paths, redact_args, redact_scan_result
+
+# High-entropy 40-char mixed-case+digit literal that should be flagged by
+# detect-secrets' default high-entropy plugins. NOT a known-prefix token
+# (the user explicitly forbade ghp_/sk-proj-/etc.). If during the red phase
+# this exact string is not flagged by the default plugins, swap to another
+# high-entropy random string of similar shape.
+FAKE_API_KEY = "Xk9mPq2vNwBzRtY7Lc4hJfDsAe6uGiQoVpWbZxMr"
 
 
 class TestRedactAbsolutePaths:
@@ -41,80 +48,108 @@ class TestRedactAbsolutePaths:
 
 
 class TestRedactArgs:
-    """Unit tests for redact_args function."""
+    """Unit tests for redact_args function (detect-secrets-based)."""
 
     def test_redact_args_empty(self):
-        """Test that empty list returns empty list."""
+        """Empty list returns empty list."""
         assert redact_args([]) == []
 
-    def test_redact_args_positional_only(self):
-        """Test that positional arguments are preserved."""
+    def test_redact_args_positional_non_secret(self):
+        """Plain positional args (no secrets) are preserved."""
         args = ["script.js", "input.txt", "output.txt"]
-        result = redact_args(args)
-        assert result == ["script.js", "input.txt", "output.txt"]
+        assert redact_args(args) == ["script.js", "input.txt", "output.txt"]
 
-    def test_redact_args_flag_with_value(self):
-        """Test that flag values are redacted."""
-        args = ["--api-key", "secret123"]
-        result = redact_args(args)
-        assert result == ["--api-key", "**REDACTED**"]
+    def test_redact_args_flag_alone_preserved(self):
+        """A flag with no value attached is preserved (no look-ahead)."""
+        args = ["--api-key"]
+        assert redact_args(args) == ["--api-key"]
 
-    def test_redact_args_short_flag_with_value(self):
-        """Test that short flag values are redacted."""
-        args = ["-k", "secret123"]
-        result = redact_args(args)
-        assert result == ["-k", "**REDACTED**"]
+    def test_redact_args_short_flag_alone_preserved(self):
+        """A short flag with no value attached is preserved."""
+        args = ["-k"]
+        assert redact_args(args) == ["-k"]
 
-    def test_redact_args_equals_syntax(self):
-        """Test that --flag=value syntax is handled."""
-        args = ["--api-key=secret123", "--token=xyz"]
-        result = redact_args(args)
-        assert result == ["--api-key=**REDACTED**", "--token=**REDACTED**"]
+    def test_redact_args_flag_then_low_entropy_value_preserved(self):
+        """Flag followed by a low-entropy value: neither is redacted.
 
-    def test_redact_args_flag_without_value(self):
-        """Test that flags without values are preserved."""
-        args = ["--verbose", "--debug"]
-        result = redact_args(args)
-        assert result == ["--verbose", "--debug"]
-
-    def test_redact_args_mixed(self):
-        """Test mixed positional, flags, and flag-value pairs."""
-        args = ["script.js", "--verbose", "--api-key", "secret", "-o", "output.txt"]
-        result = redact_args(args)
-        assert result == ["script.js", "--verbose", "--api-key", "**REDACTED**", "-o", "**REDACTED**"]
-
-    def test_redact_args_complex_command(self):
-        """Test a realistic MCP server command.
-        Note: -y is treated as a boolean flag (like in npx -y), so the following arg is not its value.
+        No look-ahead is performed; the low-entropy value is not flagged
+        by detect-secrets either, so both args are preserved as-is.
         """
-        args = ["-y", "some-mcp-server", "--token", "abc123", "--port", "3000"]
-        result = redact_args(args)
-        # -y is a boolean flag, so "some-mcp-server" is preserved as a positional arg
-        assert result == ["-y", "some-mcp-server", "--token", "**REDACTED**", "--port", "**REDACTED**"]
+        args = ["--api-key", "secret123"]
+        assert redact_args(args) == ["--api-key", "secret123"]
 
-    def test_redact_args_mixed_equals_and_space(self):
-        """Test mix of equals and space-separated values."""
-        args = ["--key=value1", "--secret", "value2", "--flag"]
+    def test_redact_args_flag_then_high_entropy_value_redacted(self):
+        """Flag followed by a high-entropy secret value: the value (only) is redacted."""
+        args = ["--api-key", FAKE_API_KEY]
         result = redact_args(args)
-        assert result == ["--key=**REDACTED**", "--secret", "**REDACTED**", "--flag"]
+        assert result[0] == "--api-key"
+        assert result[1] == "**REDACTED_SECRET***"
 
-    def test_redact_args_unix_paths(self):
-        """Test that Unix absolute paths are redacted."""
+    def test_redact_args_equals_high_entropy_value_redacted(self):
+        """--flag=<high-entropy-value> redacts only the value half."""
+        args = [f"--api-key={FAKE_API_KEY}"]
+        result = redact_args(args)
+        assert result == ["--api-key=**REDACTED_SECRET***"]
+
+    def test_redact_args_equals_low_entropy_value_preserved(self):
+        """--flag=<low-entropy-value> is preserved (not flagged by detect-secrets)."""
+        args = ["--port=3000"]
+        assert redact_args(args) == ["--port=3000"]
+
+    def test_redact_args_short_equals_high_entropy_value_redacted(self):
+        """-k=<high-entropy-value> redacts only the value half."""
+        args = [f"-k={FAKE_API_KEY}"]
+        result = redact_args(args)
+        assert result == ["-k=**REDACTED_SECRET***"]
+
+    def test_redact_args_boolean_flags_preserved(self):
+        """Boolean flags without values are preserved."""
+        args = ["--verbose", "--debug", "-y"]
+        assert redact_args(args) == ["--verbose", "--debug", "-y"]
+
+    def test_redact_args_unix_path_preserved(self):
+        """Absolute Unix paths are NOT redacted by redact_args anymore (handled elsewhere)."""
         args = ["-y", "@modelcontextprotocol/server-filesystem", "/Users/developer/code"]
-        result = redact_args(args)
-        assert result == ["-y", "@modelcontextprotocol/server-filesystem", "**REDACTED**"]
+        assert redact_args(args) == ["-y", "@modelcontextprotocol/server-filesystem", "/Users/developer/code"]
 
-    def test_redact_args_home_paths(self):
-        """Test that home directory paths are redacted."""
+    def test_redact_args_home_path_preserved(self):
+        """Home-directory paths are NOT redacted by redact_args anymore."""
         args = ["-y", "some-server", "~/Documents/projects"]
-        result = redact_args(args)
-        assert result == ["-y", "some-server", "**REDACTED**"]
+        assert redact_args(args) == ["-y", "some-server", "~/Documents/projects"]
 
-    def test_redact_args_preserves_package_names(self):
-        """Test that npm package names are not redacted."""
-        args = ["-y", "@modelcontextprotocol/server-github", "--token", "secret"]
+    def test_redact_args_package_name_preserved(self):
+        """npm-style package names are preserved (no entropy)."""
+        args = ["-y", "@modelcontextprotocol/server-github"]
+        assert redact_args(args) == ["-y", "@modelcontextprotocol/server-github"]
+
+    def test_redact_args_positional_high_entropy_redacted(self):
+        """A bare positional arg that itself contains a secret is redacted to REDACTED_SECRET."""
+        args = [FAKE_API_KEY]
+        assert redact_args(args) == ["**REDACTED_SECRET***"]
+
+    def test_redact_args_mixed_realistic(self):
+        """Realistic mix: package name, boolean flag, low-entropy flag value, high-entropy flag value."""
+        args = ["-y", "some-server", "--port", "3000", "--api-key", FAKE_API_KEY, f"--token={FAKE_API_KEY}"]
         result = redact_args(args)
-        assert result == ["-y", "@modelcontextprotocol/server-github", "--token", "**REDACTED**"]
+        assert result == [
+            "-y",
+            "some-server",
+            "--port",
+            "3000",
+            "--api-key",
+            "**REDACTED_SECRET***",
+            "--token=**REDACTED_SECRET***",
+        ]
+
+    def test_redact_args_uses_new_constant_not_old(self):
+        """Sanity: the new constant is used for arg redaction, NOT the old **REDACTED** literal."""
+        args = ["--api-key", FAKE_API_KEY]
+        result = redact_args(args)
+        joined = " ".join(result)
+        assert "**REDACTED_SECRET***" in joined
+        assert "**REDACTED**" not in joined
+        # And the constant value matches the literal
+        assert REDACTED_SECRET == "**REDACTED_SECRET***"
 
 
 def test_redact_remote_url_query_and_headers():
@@ -178,7 +213,9 @@ def test_redact_stdio_env_vars():
 def test_redact_stdio_args():
     """
     Ensure StdioServer argument values are redacted via redact_scan_result.
-    Note: -y is treated as a boolean flag (like in npx -y), so the package name is preserved.
+
+    -y is a boolean flag; the package name is preserved; only high-entropy
+    secret values are redacted (via detect-secrets).
     """
     result = ScanPathResult(
         path="/dummy/path",
@@ -187,7 +224,7 @@ def test_redact_stdio_args():
                 name="stdio",
                 server=StdioServer(
                     command="npx",
-                    args=["-y", "some-server", "--api-key", "secret123", "--token=xyz"],
+                    args=["-y", "some-server", "--api-key", FAKE_API_KEY, f"--token={FAKE_API_KEY}"],
                     env={},
                 ),
             )
@@ -199,39 +236,62 @@ def test_redact_stdio_args():
     assert result.servers is not None and len(result.servers) == 1
     srv = result.servers[0]
     assert isinstance(srv.server, StdioServer)
-    assert srv.server.args == ["-y", "some-server", "--api-key", "**REDACTED**", "--token=**REDACTED**"]
-
-
-FAKE_API_KEY = "sk-this-is-a-fake-api-key"
+    assert srv.server.args == [
+        "-y",
+        "some-server",
+        "--api-key",
+        "**REDACTED_SECRET***",
+        "--token=**REDACTED_SECRET***",
+    ]
 
 
 @pytest.mark.parametrize(
-    "server",
+    "server,kind",
     [
-        ServerScanResult(
-            name="Weather",
-            server=StdioServer(
-                command="uv run python",
-                args=["tests/mcp_servers/weather_server.py"],
-                env={"API_KEY": FAKE_API_KEY},
+        (
+            ServerScanResult(
+                name="Weather",
+                server=StdioServer(
+                    command="uv run python",
+                    args=["tests/mcp_servers/weather_server.py"],
+                    env={"API_KEY": FAKE_API_KEY},
+                ),
             ),
+            "env",
         ),
-        ServerScanResult(
-            name="Math",
-            server=StdioServer(
-                command="uv run python",
-                args=["tests/mcp_servers/math_server.py", f"--api-key={FAKE_API_KEY}"],
+        (
+            ServerScanResult(
+                name="Math",
+                server=StdioServer(
+                    command="uv run python",
+                    args=["tests/mcp_servers/math_server.py", f"--api-key={FAKE_API_KEY}"],
+                ),
             ),
+            "args",
         ),
     ],
 )
-def test_redact_scan_result_removes_api_key(server):
+def test_redact_scan_result_removes_api_key(server, kind):
     """
     Ensure redact_scan_result removes API keys from server configs.
+
+    Env-var values use the legacy REDACTED constant (sibling-constant
+    preservation); CLI arg values use REDACTED_SECRET.
     """
     result = ScanPathResult(path="/dummy/path", servers=[server])
 
     redacted = redact_scan_result(result)
-
     dump = redacted.model_dump_json()
+
     assert FAKE_API_KEY not in dump
+
+    srv = redacted.servers[0]
+    assert isinstance(srv.server, StdioServer)
+    if kind == "env":
+        assert srv.server.env is not None
+        assert srv.server.env["API_KEY"] == "**REDACTED**"
+    else:
+        # args case
+        joined = " ".join(srv.server.args or [])
+        assert "**REDACTED_SECRET***" in joined
+        assert "**REDACTED**" not in joined
