@@ -88,18 +88,17 @@ def redact_absolute_paths(text: str | None) -> str | None:
 
 def _wrap_for_entropy(value: str) -> str:
     """
-    Build a synthetic ``x = "<value>"`` line that the entropy plugins'
-    default quoted-literal regex (``(['"])(token)(\\1)``) can tokenize.
+    Wrap ``value`` in quotes so the entropy plugins' quoted-literal
+    regex (``(['"])(token)(\\1)``) can tokenize it.
 
-    Picks whichever quote style does not appear in ``value`` to avoid
-    escaping. If both quote styles are present, falls back to
-    double-quotes with embedded double-quotes backslash-escaped.
+    Returns one of ``"<value>"``, ``'<value>'``, or ``"<escaped>"``
+    (when both quote styles appear in ``value``).
     """
     if '"' not in value:
-        return f'x = "{value}"'
+        return f'"{value}"'
     if "'" not in value:
-        return f"x = '{value}'"
-    return 'x = "' + value.replace('"', r"\"") + '"'
+        return f"'{value}'"
+    return '"' + value.replace('"', r"\"") + '"'
 
 
 def _detect_secret(value: str) -> str | None:
@@ -114,8 +113,9 @@ def _detect_secret(value: str) -> str | None:
        value directly.
     2. ``HighEntropyStringsPlugin`` subclasses default to scanning quoted
        string literals (``(['"])(token)(\\1)``); they receive the value
-       wrapped in a synthetic ``x = "..."`` line so their regex tokenizes
-       the whole value, then the entropy ``limit`` filter is applied.
+       wrapped as ``"<value>"``, ``'<value>'``, or ``"<escaped>"`` so
+       their regex tokenizes the whole value, then the entropy ``limit``
+       filter is applied.
     """
     if not value:
         return None
@@ -137,56 +137,24 @@ def _detect_secret(value: str) -> str | None:
     return None
 
 
+def _redact_one_arg(arg: str) -> str:
+    """Return ``arg`` with any detect-secrets-flagged value replaced by a plugin-named marker.
+
+    For ``--flag=value`` / ``-f=value``, the value half is scanned and
+    the flag prefix is preserved. For everything else (bare positional,
+    flag-without-value), the whole token is scanned.
+    """
+    if arg.startswith("-") and "=" in arg:
+        flag, _, value = arg.partition("=")
+        plugin_name = _detect_secret(value)
+        return f"{flag}={_redaction_marker(plugin_name)}" if plugin_name else arg
+    plugin_name = _detect_secret(arg)
+    return _redaction_marker(plugin_name) if plugin_name else arg
+
+
 def redact_args(args: list[str]) -> list[str]:
-    """
-    Redact only the **secret-bearing** values of CLI argument tokens.
-
-    Each argument is inspected independently (no look-ahead between
-    tokens). Detection uses detect-secrets via :func:`_detect_secret`,
-    and the redaction marker names the triggering plugin (e.g.
-    ``**REDACTED_SECRET_BASE64HIGHENTROPYSTRING***``):
-
-    - ``--flag=value`` / ``-f=value``: the value half is replaced with
-      the plugin-named marker if the value is flagged; the flag prefix
-      (and the ``=``) is preserved.
-    - Bare tokens (no ``=``, or that don't start with ``-``): the entire
-      token is replaced with the plugin-named marker if it is flagged.
-    - Low-entropy values, flags-without-values, package names, paths,
-      and other non-secret tokens are preserved verbatim.
-
-    Args:
-        args: List of command line arguments.
-
-    Returns:
-        A new list with secret-bearing values replaced; non-secret
-        tokens passed through unchanged. An empty input yields an empty
-        list.
-    """
-    if not args:
-        return []
-
-    redacted: list[str] = []
-    for arg in args:
-        # --flag=value or -f=value: only inspect/replace the value half.
-        if arg.startswith("-") and "=" in arg:
-            eq_idx = arg.index("=")
-            flag_part = arg[: eq_idx + 1]  # includes the trailing '='
-            value_part = arg[eq_idx + 1 :]
-            plugin_name = _detect_secret(value_part)
-            if plugin_name:
-                redacted.append(flag_part + _redaction_marker(plugin_name))
-            else:
-                redacted.append(arg)
-            continue
-
-        # Bare token (positional or flag-without-value): inspect whole arg.
-        plugin_name = _detect_secret(arg)
-        if plugin_name:
-            redacted.append(_redaction_marker(plugin_name))
-        else:
-            redacted.append(arg)
-
-    return redacted
+    """Redact only the secret-bearing values of CLI argument tokens."""
+    return [_redact_one_arg(arg) for arg in args]
 
 
 def redact_server(server_scan_result: ServerScanResult) -> ServerScanResult:
