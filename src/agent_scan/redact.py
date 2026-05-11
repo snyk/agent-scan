@@ -45,8 +45,12 @@ _DETECT_SECRETS_CONFIG: dict = _build_detect_secrets_config()
 
 
 def _redaction_marker(plugin_name: str) -> str:
-    """Format the redaction marker for a triggering detect-secrets plugin."""
-    return f"**REDACTED_SECRET_{plugin_name.upper()}***"
+    """Format the redaction marker for a triggering detect-secrets plugin.
+
+    Uses the same ``**...**`` delimiter shape as the legacy ``REDACTED`` constant
+    so both marker styles render and grep consistently.
+    """
+    return f"**REDACTED_SECRET_{plugin_name.upper()}**"
 
 
 def redact_absolute_paths(text: str | None) -> str | None:

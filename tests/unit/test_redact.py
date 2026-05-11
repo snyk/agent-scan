@@ -17,7 +17,7 @@ FAKE_API_KEY = "Xk9mPq2vNwBzRtY7Lc4hJfDsAe6uGiQoVpWbZxMr"
 # FAKE_API_KEY is high-entropy alphanumeric, so Base64HighEntropyString flags
 # it first. The redaction marker is computed from the triggering plugin's
 # class name uppercased.
-FAKE_API_KEY_MARKER = "**REDACTED_SECRET_BASE64HIGHENTROPYSTRING***"
+FAKE_API_KEY_MARKER = "**REDACTED_SECRET_BASE64HIGHENTROPYSTRING**"
 
 
 class TestRedactAbsolutePaths:
@@ -147,15 +147,13 @@ class TestRedactArgs:
         ]
 
     def test_redact_args_marker_names_triggering_plugin(self):
-        """The marker has the form **REDACTED_SECRET_<PLUGIN_NAME>*** and does NOT collide with the env-var **REDACTED** literal."""
+        """The marker has the form **REDACTED_SECRET_<PLUGIN_NAME>** with balanced asterisks matching the legacy **REDACTED** constant."""
         args = ["--api-key", FAKE_API_KEY]
         result = redact_args(args)
         joined = " ".join(result)
-        assert joined.endswith("***")
+        assert joined.endswith("**")
+        assert not joined.endswith("***")
         assert "**REDACTED_SECRET_" in joined
-        # The bare **REDACTED** marker (used for env vars / headers / paths)
-        # is a substring of every secret marker, so check that the secret
-        # marker is the one present, not a standalone **REDACTED**.
         assert FAKE_API_KEY_MARKER in result
 
     def test_redact_args_known_format_token_uses_named_detector(self):
@@ -163,7 +161,7 @@ class TestRedactArgs:
         aws_token = "AKIAIOSFODNN7EXAMPLE"
         args = [f"--aws-key={aws_token}"]
         result = redact_args(args)
-        assert result == ["--aws-key=**REDACTED_SECRET_AWSKEYDETECTOR***"]
+        assert result == ["--aws-key=**REDACTED_SECRET_AWSKEYDETECTOR**"]
 
 
 def test_redact_remote_url_query_and_headers():
