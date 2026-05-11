@@ -3,21 +3,64 @@ Redaction utilities for sanitizing sensitive information from scan results.
 
 This module provides functions to redact sensitive data like:
 - Environment variables
-- Command line argument values
+- Command line argument values (detected via the detect-secrets library)
 - HTTP headers
 - URL query parameters
 - File paths in tracebacks
 """
 
 import logging
+import os
 import re
+import tempfile
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+from detect_secrets import SecretsCollection
+from detect_secrets.settings import transient_settings
 
 from agent_scan.models import RemoteServer, ScanPathResult, ServerScanResult, StdioServer
 
 logger = logging.getLogger(__name__)
 
 REDACTED = "**REDACTED**"
+REDACTED_SECRET = "**REDACTED_SECRET***"
+
+
+# detect-secrets plugin configuration used by redact_args to scan CLI
+# argument values for high-entropy and known-format tokens. Default
+# entropy limits (Base64=4.5, Hex=3.0) converged cleanly against the
+# realistic must-pass-through / must-flag corpus during empirical
+# probing; raising them was unnecessary. KeywordDetector is omitted on
+# purpose to avoid false positives on common substrings like "token="
+# or "password=".
+_DETECT_SECRETS_CONFIG: dict = {
+    "plugins_used": [
+        {"name": "Base64HighEntropyString", "limit": 4.5},
+        {"name": "HexHighEntropyString", "limit": 3.0},
+        {"name": "AWSKeyDetector"},
+        {"name": "GitHubTokenDetector"},
+        {"name": "OpenAIDetector"},
+        {"name": "PrivateKeyDetector"},
+        {"name": "JwtTokenDetector"},
+        {"name": "SlackDetector"},
+        {"name": "StripeDetector"},
+        {"name": "TwilioKeyDetector"},
+        {"name": "AzureStorageKeyDetector"},
+        {"name": "MailchimpDetector"},
+        {"name": "ArtifactoryDetector"},
+        {"name": "CloudantDetector"},
+        {"name": "DiscordBotTokenDetector"},
+        {"name": "GitLabTokenDetector"},
+        {"name": "IbmCloudIamDetector"},
+        {"name": "IbmCosHmacDetector"},
+        {"name": "IPPublicDetector"},
+        {"name": "NpmDetector"},
+        {"name": "PypiTokenDetector"},
+        {"name": "SendGridDetector"},
+        {"name": "SquareOAuthDetector"},
+        {"name": "TelegramBotTokenDetector"},
+    ],
+}
 
 
 def redact_absolute_paths(text: str | None) -> str | None:
@@ -57,68 +100,96 @@ def redact_absolute_paths(text: str | None) -> str | None:
     return result
 
 
-def _is_path(arg: str) -> bool:
-    """Check if an argument looks like a file path that should be redacted."""
-    # Unix absolute path
-    if arg.startswith("/") and len(arg) > 1:
-        return True
-    # Home directory path
-    if arg.startswith("~/"):
-        return True
-    # Windows absolute path (C:\, D:\, etc.)
-    return len(arg) >= 3 and arg[1] == ":" and arg[2] in "/\\"
+def _contains_secret(value: str) -> bool:
+    """
+    Return True if detect-secrets flags any token in ``value``.
+
+    Uses ``SecretsCollection.scan_file`` (the canonical detect-secrets
+    API, which respects per-plugin entropy ``limit`` values). The value
+    is written to a temporary file because ``scan_file`` reads paths
+    rather than in-memory strings.
+
+    The value is also wrapped in matching quotes before being written:
+    the ``Base64HighEntropyString`` plugin's tokenizing regex requires
+    the candidate string to appear inside a quoted literal (its pattern
+    is ``(['"])(token)(\\1)``). CLI argument values arrive unquoted, so
+    we add quotes purely as a tokenization aid. This does not change
+    detection semantics — entropy and named-detector logic operate on
+    the inner value either way.
+    """
+    if not value:
+        return False
+
+    if '"' not in value:
+        wrapped = f'"{value}"'
+    elif "'" not in value:
+        wrapped = f"'{value}'"
+    else:
+        # Both quote types present in the value: escape inner double quotes
+        # so the outer wrapping still matches as a quoted literal.
+        wrapped = '"' + value.replace('"', '\\"') + '"'
+
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as tf:
+        tf.write(wrapped)
+        tmp_path = tf.name
+    try:
+        with transient_settings(_DETECT_SECRETS_CONFIG):
+            secrets = SecretsCollection()
+            secrets.scan_file(tmp_path)
+            return bool(list(secrets))
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            logger.debug("Failed to remove temp file used for secret scan: %s", tmp_path)
 
 
 def redact_args(args: list[str]) -> list[str]:
     """
-    Redact values of key-value arguments in a command line argument list.
+    Redact only the **secret-bearing** values of CLI argument tokens.
 
-    Identifies flags (arguments starting with - or --) and redacts their values.
-    Handles both space-separated (--arg value) and equals-separated (--arg=value) syntax.
-    The -y flag is treated as a boolean flag (common in npx) and doesn't consume the next arg.
-    Also redacts file paths (arguments starting with /, ~/, or drive letters).
+    Each argument is inspected independently (no look-ahead between
+    tokens). Detection uses detect-secrets via :func:`_contains_secret`:
+
+    - ``--flag=value`` / ``-f=value``: the value half is replaced with
+      :data:`REDACTED_SECRET` if and only if the value contains a
+      detect-secrets-flagged token. The flag prefix (and the ``=``) is
+      preserved as-is.
+    - Bare tokens (no ``=``, or that don't start with ``-``): the entire
+      token is replaced with :data:`REDACTED_SECRET` if and only if it
+      contains a detect-secrets-flagged token.
+    - Low-entropy values, flags-without-values, package names, paths,
+      and other non-secret tokens are preserved verbatim.
 
     Args:
-        args: List of command line arguments
+        args: List of command line arguments.
 
     Returns:
-        List of arguments with values redacted
+        A new list with secret-bearing values replaced; non-secret
+        tokens passed through unchanged. An empty input yields an empty
+        list.
     """
     if not args:
         return []
 
     redacted: list[str] = []
-    i = 0
-
-    while i < len(args):
-        arg = args[i]
-
-        # Check for --flag=value or -f=value syntax
+    for arg in args:
+        # --flag=value or -f=value: only inspect/replace the value half.
         if arg.startswith("-") and "=" in arg:
-            # Split on first = only, preserve the flag part
             eq_idx = arg.index("=")
-            flag_part = arg[: eq_idx + 1]  # includes the =
-            redacted.append(flag_part + REDACTED)
-            i += 1
-        # Check for --flag or -f followed by a value (but not -y which is a boolean flag)
-        elif arg.startswith("-") and arg != "-y":
-            redacted.append(arg)
-            # Look ahead to see if next arg is a value (not a flag)
-            if i + 1 < len(args) and not args[i + 1].startswith("-"):
-                # Next arg is likely a value for this flag - redact it
-                redacted.append(REDACTED)
-                i += 2
+            flag_part = arg[: eq_idx + 1]  # includes the trailing '='
+            value_part = arg[eq_idx + 1 :]
+            if _contains_secret(value_part):
+                redacted.append(flag_part + REDACTED_SECRET)
             else:
-                # Flag with no value or next arg is also a flag
-                i += 1
-        elif _is_path(arg):
-            # Redact file paths
-            redacted.append(REDACTED)
-            i += 1
+                redacted.append(arg)
+            continue
+
+        # Bare token (positional or flag-without-value): inspect whole arg.
+        if _contains_secret(arg):
+            redacted.append(REDACTED_SECRET)
         else:
-            # Positional argument - preserve as-is
             redacted.append(arg)
-            i += 1
 
     return redacted
 
@@ -145,7 +216,7 @@ def redact_server(server_scan_result: ServerScanResult) -> ServerScanResult:
         # Redact all environment variables
         if server_scan_result.server.env:
             server_scan_result.server.env = dict.fromkeys(server_scan_result.server.env, REDACTED)
-        # Redact argument values (e.g., --api-key secret → --api-key **REDACTED**)
+        # Redact argument values (e.g., --api-key secret → --api-key **REDACTED_SECRET***)
         if server_scan_result.server.args:
             server_scan_result.server.args = redact_args(server_scan_result.server.args)
 
