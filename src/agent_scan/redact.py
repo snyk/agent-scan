@@ -14,6 +14,14 @@ import re
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from detect_secrets.plugins.high_entropy_strings import HighEntropyStringsPlugin
+
+# [REVIEW-COMMENT]
+# Why: KeywordDetector lives in detect-secrets but is never reached by the
+# bare-value scan in _detect_secret (it needs a quoted-literal assignment line).
+# We instantiate it directly in _detect_keyword and pair it with a sliding-window
+# context lookup to catch flag-named, low-entropy secrets like --api-key=hello123.
+# [/REVIEW-COMMENT]
+from detect_secrets.plugins.keyword import KeywordDetector
 from detect_secrets.settings import default_settings, get_plugins, transient_settings
 
 from agent_scan.models import RemoteServer, ScanPathResult, ServerScanResult, StdioServer
@@ -141,24 +149,131 @@ def _detect_secret(value: str) -> str | None:
     return None
 
 
-def _redact_one_arg(arg: str) -> str:
-    """Return ``arg`` with any detect-secrets-flagged value replaced by a plugin-named marker.
-
-    For ``--flag=value`` / ``-f=value``, the value half is scanned and
-    the flag prefix is preserved. For everything else (bare positional,
-    flag-without-value), the whole token is scanned.
+# [REVIEW-COMMENT]
+# Why: KeywordDetector is a context-sensitive plugin; it only fires when it
+# sees an assignment line of the form ``key="value"``. The bare-value scan
+# in _detect_secret cannot satisfy that shape, so we build a synthetic line
+# here using the previous token (the flag) as the key half and the current
+# token as the quoted-literal value half. Returns the plugin class name
+# (``"KeywordDetector"``) on a hit so reassembly can format the marker
+# uniformly with the format/entropy passes.
+# [/REVIEW-COMMENT]
+def _detect_keyword(prev_normalized: str, curr_raw: str) -> str | None:
     """
-    if arg.startswith("-") and "=" in arg:
-        flag, _, value = arg.partition("=")
-        plugin_name = _detect_secret(value)
-        return f"{flag}={_redaction_marker(plugin_name)}" if plugin_name else arg
-    plugin_name = _detect_secret(arg)
-    return _redaction_marker(plugin_name) if plugin_name else arg
+    Run only ``KeywordDetector`` against a synthetic assignment line
+    ``f'{prev_normalized}={_wrap_for_entropy(curr_raw)}'``.
+
+    ``KeywordDetector`` matches denylist tokens like ``api_?key``,
+    ``password``, ``secret`` (see upstream ``DENYLIST`` in
+    ``detect_secrets/plugins/keyword.py``) when they appear next to a
+    quoted literal. The bare-value scan in ``_detect_secret`` never
+    fires this plugin; this helper supplies the missing keyword
+    context via a previous-token-as-key lookup.
+
+    Returns ``"KeywordDetector"`` on a hit, else ``None``.
+    """
+    if not prev_normalized or not curr_raw:
+        return None
+    plugin = KeywordDetector()
+    synthetic = f"{prev_normalized}={_wrap_for_entropy(curr_raw)}"
+    if plugin.analyze_line(filename="adhoc", line=synthetic, line_number=1):
+        return type(plugin).__name__
+    return None
 
 
+# [REVIEW-COMMENT]
+# Why: redact_args runs three detection passes against a flat token view of
+# the args list (``--flag=value`` splits into two tokens; everything else is
+# one). Pass order is format -> entropy -> keyword so the most-specific
+# detector wins (e.g. AWSKeyDetector beats KeywordDetector on
+# ``--api-key AKIA...``). Pass B (keyword via sliding window of 2) is
+# skipped on tokens already marked by Pass A and skipped (D1 defensive)
+# when the candidate value looks like another CLI flag, so
+# ``["--password", "--api-key"]`` does not redact the second flag.
+# Reassembly never replaces the flag half of a ``--flag=value`` arg.
+# [/REVIEW-COMMENT]
 def redact_args(args: list[str]) -> list[str]:
-    """Redact only the secret-bearing values of CLI argument tokens."""
-    return [_redact_one_arg(arg) for arg in args]
+    """Redact secret-bearing values in CLI argument tokens.
+
+    Detection runs in three passes against a tokenized view of ``args``
+    (each ``--flag=value`` arg yields two tokens; everything else
+    yields one):
+
+    1. Format detectors (AWSKeyDetector, GitHubTokenDetector, ...) on
+       the bare token value.
+    2. High-entropy string detectors on the quote-wrapped token value.
+    3. KeywordDetector via a sliding window of 2: for each adjacent
+       ``(prev, curr)`` pair, build a synthetic ``prev="curr"`` line
+       and ask the keyword plugin whether ``prev`` is in its denylist.
+
+    Pass order is format -> entropy -> keyword; the most-specific
+    detector wins (Pass B is skipped when Pass A already marked the
+    token). Pass B is also skipped when ``curr`` looks like another
+    CLI flag (starts with ``-``), so ``["--password", "--api-key"]``
+    does not redact the second flag.
+
+    The flag half of a ``--flag=value`` arg is never replaced; only
+    the value half (or a bare positional) can be redacted.
+    """
+    # Tokenize args into a flat token list with positional metadata.
+    # Each token is a tuple (arg_idx, slot, raw, normalized) where
+    # slot 0 is the "whole arg" or the flag half of --flag=value,
+    # and slot 1 is the value half of --flag=value.
+    tokens: list[tuple[int, int, str, str]] = []
+    for i, arg in enumerate(args):
+        if arg.startswith("-") and "=" in arg:
+            flag, _, value = arg.partition("=")
+            tokens.append((i, 0, flag, flag.lstrip("-").replace("-", "_")))
+            tokens.append((i, 1, value, value.lstrip("-").replace("-", "_")))
+        else:
+            tokens.append((i, 0, arg, arg.lstrip("-").replace("-", "_")))
+
+    marks: list[str | None] = [None] * len(tokens)
+
+    # Pass A: format + entropy on each token's raw value.
+    for t_idx, (_, _, raw, _) in enumerate(tokens):
+        plugin_name = _detect_secret(raw)
+        if plugin_name is not None:
+            marks[t_idx] = plugin_name
+
+    # [REVIEW-COMMENT]
+    # D1 defensive: skip Pass B when ``curr`` itself looks like a CLI flag.
+    # Without this guard, ``["--password", "--api-key"]`` would feed
+    # ``password="--api-key"`` to KeywordDetector, which the quoted-literal
+    # regex would happily match, redacting a flag name instead of a value.
+    # [/REVIEW-COMMENT]
+    # Pass B: sliding window of 2 for keyword detection.
+    for t_idx in range(1, len(tokens)):
+        if marks[t_idx] is not None:
+            continue
+        prev = tokens[t_idx - 1]
+        curr = tokens[t_idx]
+        if curr[2].startswith("-"):
+            # Defensive: skip Pass B when the candidate looks like a CLI flag.
+            continue
+        plugin_name = _detect_keyword(prev[3], curr[2])
+        if plugin_name is not None:
+            marks[t_idx] = plugin_name
+
+    # Reassemble.
+    out = list(args)
+    # First, group tokens by arg_idx for the slot-0/slot-1 lookup.
+    for t_idx, (arg_idx, slot, _raw, _normalized) in enumerate(tokens):
+        mark = marks[t_idx]
+        if mark is None:
+            continue
+        if slot == 0:
+            # If the original arg had "=" in it, slot 0 is the flag name;
+            # never replace the flag name itself.
+            original = args[arg_idx]
+            if original.startswith("-") and "=" in original:
+                continue
+            out[arg_idx] = _redaction_marker(mark)
+        else:
+            # slot == 1: replace only the value half, preserve flag name.
+            flag = args[arg_idx].partition("=")[0]
+            out[arg_idx] = f"{flag}={_redaction_marker(mark)}"
+    return out
 
 
 def redact_server(server_scan_result: ServerScanResult) -> ServerScanResult:
