@@ -14,13 +14,6 @@ import re
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from detect_secrets.plugins.high_entropy_strings import HighEntropyStringsPlugin
-
-# [REVIEW-COMMENT]
-# Why: KeywordDetector lives in detect-secrets but is never reached by the
-# bare-value scan in _detect_secret (it needs a quoted-literal assignment line).
-# We instantiate it directly in _detect_keyword and pair it with a sliding-window
-# context lookup to catch flag-named, low-entropy secrets like --api-key=hello123.
-# [/REVIEW-COMMENT]
 from detect_secrets.plugins.keyword import KeywordDetector
 from detect_secrets.settings import default_settings, get_plugins, transient_settings
 
@@ -149,15 +142,6 @@ def _detect_secret(value: str) -> str | None:
     return None
 
 
-# [REVIEW-COMMENT]
-# Why: KeywordDetector is a context-sensitive plugin; it only fires when it
-# sees an assignment line of the form ``key="value"``. The bare-value scan
-# in _detect_secret cannot satisfy that shape, so we build a synthetic line
-# here using the previous token (the flag) as the key half and the current
-# token as the quoted-literal value half. Returns the plugin class name
-# (``"KeywordDetector"``) on a hit so reassembly can format the marker
-# uniformly with the format/entropy passes.
-# [/REVIEW-COMMENT]
 def _detect_keyword(prev_normalized: str, curr_raw: str) -> str | None:
     """
     Run only ``KeywordDetector`` against a synthetic assignment line
@@ -181,17 +165,6 @@ def _detect_keyword(prev_normalized: str, curr_raw: str) -> str | None:
     return None
 
 
-# [REVIEW-COMMENT]
-# Why: redact_args runs three detection passes against a flat token view of
-# the args list (``--flag=value`` splits into two tokens; everything else is
-# one). Pass order is format -> entropy -> keyword so the most-specific
-# detector wins (e.g. AWSKeyDetector beats KeywordDetector on
-# ``--api-key AKIA...``). Pass B (keyword via sliding window of 2) is
-# skipped on tokens already marked by Pass A and skipped (D1 defensive)
-# when the candidate value looks like another CLI flag, so
-# ``["--password", "--api-key"]`` does not redact the second flag.
-# Reassembly never replaces the flag half of a ``--flag=value`` arg.
-# [/REVIEW-COMMENT]
 def redact_args(args: list[str]) -> list[str]:
     """Redact secret-bearing values in CLI argument tokens.
 
@@ -243,12 +216,6 @@ def redact_args(args: list[str]) -> list[str]:
         if triggering_plugin is not None:
             marks[t_idx] = triggering_plugin
 
-    # [REVIEW-COMMENT]
-    # D1 defensive: skip Pass B when ``curr`` itself looks like a CLI flag.
-    # Without this guard, ``["--password", "--api-key"]`` would feed
-    # ``password="--api-key"`` to KeywordDetector, which the quoted-literal
-    # regex would happily match, redacting a flag name instead of a value.
-    # [/REVIEW-COMMENT]
     # Pass B: sliding window of 2 for keyword detection.
     for t_idx in range(1, len(tokens)):
         if marks[t_idx] is not None:
