@@ -239,9 +239,9 @@ def redact_args(args: list[str]) -> list[str]:
 
     # Pass A: format + entropy on each token's raw value.
     for t_idx, (_, _, raw, _) in enumerate(tokens):
-        plugin_name = _detect_secret(raw)
-        if plugin_name is not None:
-            marks[t_idx] = plugin_name
+        triggering_plugin = _detect_secret(raw)
+        if triggering_plugin is not None:
+            marks[t_idx] = triggering_plugin
 
     # [REVIEW-COMMENT]
     # D1 defensive: skip Pass B when ``curr`` itself looks like a CLI flag.
@@ -258,9 +258,9 @@ def redact_args(args: list[str]) -> list[str]:
         if curr[2].startswith("-"):
             # Defensive: skip Pass B when the candidate looks like a CLI flag.
             continue
-        plugin_name = _detect_keyword(prev[3], curr[2])
-        if plugin_name is not None:
-            marks[t_idx] = plugin_name
+        triggering_plugin = _detect_keyword(prev[3], curr[2])
+        if triggering_plugin is not None:
+            marks[t_idx] = triggering_plugin
 
     # Reassemble.
     out = list(args)
