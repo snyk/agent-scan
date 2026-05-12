@@ -261,6 +261,17 @@ class TestRedactArgs:
         result = redact_args(args)
         assert result == ["--api-key", "**REDACTED_SECRET_AWSKEYDETECTOR**"]
 
+    def test_redact_args_keyword_flag_then_flag_value_preserved(self):
+        """D1 defensive guard: when curr looks like a CLI flag, Pass B is skipped.
+
+        Without the D1 guard, the sliding-window pass would feed
+        'password="--debug"' to KeywordDetector and redact ``--debug`` as a
+        secret. The guard ensures that follow-on flags are never confused
+        for values.
+        """
+        args = ["--password", "--debug"]
+        assert redact_args(args) == ["--password", "--debug"]
+
 
 def test_redact_remote_url_query_and_headers():
     """

@@ -214,6 +214,13 @@ def redact_args(args: list[str]) -> list[str]:
 
     The flag half of a ``--flag=value`` arg is never replaced; only
     the value half (or a bare positional) can be redacted.
+
+    A bare token that happens to contain a secret-shaped substring (e.g.
+    a positional ``AKIAIOSFODNN7EXAMPLE`` or even a flag-shaped token
+    ``--AKIAIOSFODNN7EXAMPLE`` with no ``=``) is replaced wholesale by
+    the marker. This is intentionally conservative: a secret-looking
+    token should never appear verbatim in upload payloads, even if it
+    masquerades as a CLI flag.
     """
     # Tokenize args into a flat token list with positional metadata.
     # Each token is a tuple (arg_idx, slot, raw, normalized) where
@@ -257,7 +264,8 @@ def redact_args(args: list[str]) -> list[str]:
 
     # Reassemble.
     out = list(args)
-    # First, group tokens by arg_idx for the slot-0/slot-1 lookup.
+    # Iterate each token once; for slot-1 tokens we look up the sibling
+    # flag (slot 0 of the same arg_idx) directly from args[arg_idx].
     for t_idx, (arg_idx, slot, _raw, _normalized) in enumerate(tokens):
         mark = marks[t_idx]
         if mark is None:
