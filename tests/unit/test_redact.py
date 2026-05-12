@@ -80,14 +80,20 @@ class TestRedactArgs:
         args = ["-k"]
         assert redact_args(args) == ["-k"]
 
-    def test_redact_args_flag_then_low_entropy_value_preserved(self):
-        """Flag followed by a low-entropy value: neither is redacted.
+    def test_redact_args_flag_then_low_entropy_value_redacts_via_keyword(self):
+        """Flag followed by a low-entropy value: keyword-detector pass redacts the value.
 
-        No look-ahead is performed; the low-entropy value is not flagged
-        by detect-secrets either, so both args are preserved as-is.
+        With the sliding-window keyword pass, the previous token (--api-key)
+        provides the keyword context that makes a synthetic line
+        'api_key="secret123"' fire detect-secrets' KeywordDetector. The flag
+        name itself is preserved; only the value half is replaced with a
+        plugin-named marker.
         """
         args = ["--api-key", "secret123"]
-        assert redact_args(args) == ["--api-key", "secret123"]
+        result = redact_args(args)
+        assert result[0] == "--api-key"
+        assert is_secret_marker(result[1])
+        assert "secret123" not in result[1]
 
     def test_redact_args_flag_then_high_entropy_value_redacted(self):
         """Flag followed by a high-entropy secret value: the value (only) is redacted."""
@@ -177,6 +183,83 @@ class TestRedactArgs:
         args = [f"--aws-key={aws_token}"]
         result = redact_args(args)
         assert result == ["--aws-key=**REDACTED_SECRET_AWSKEYDETECTOR**"]
+
+    def test_redact_args_equals_form_keyword_low_entropy_redacted(self):
+        """--api-key=<low-entropy-value> redacts only the value half via keyword pass.
+
+        Pass A (format + entropy) does not flag a bare 'hello123' (low entropy,
+        no recognised format). Pass B builds the synthetic line
+        'api_key="hello123"' and KeywordDetector fires on the api_?key
+        denylist entry.
+        """
+        args = ["--api-key=hello123"]
+        result = redact_args(args)
+        assert len(result) == 1
+        flag, sep, value = result[0].partition("=")
+        assert (flag, sep) == ("--api-key", "=")
+        assert is_secret_marker(value)
+        assert "hello123" not in result[0]
+
+    def test_redact_args_space_form_keyword_low_entropy_redacted(self):
+        """--api-key <low-entropy-value> (space-separated) redacts the value, preserves the flag.
+
+        Same denylist hit as the equals form, exercised via the sliding-window
+        path where prev and curr live in separate args list entries.
+        """
+        args = ["--api-key", "hello123"]
+        result = redact_args(args)
+        assert result[0] == "--api-key"
+        assert is_secret_marker(result[1])
+        assert "hello123" not in result[1]
+
+    def test_redact_args_equals_form_password_redacted(self):
+        """--password=<value> redacts via keyword pass (password denylist family).
+
+        Exercises a different denylist family than api_?key, confirming the
+        keyword pass is not hardcoded to a single keyword.
+        """
+        args = ["--password=swordfish"]
+        result = redact_args(args)
+        assert len(result) == 1
+        flag, sep, value = result[0].partition("=")
+        assert (flag, sep) == ("--password", "=")
+        assert is_secret_marker(value)
+        assert "swordfish" not in result[0]
+
+    def test_redact_args_space_form_password_redacted(self):
+        """--password <value> (space-separated) redacts the value via keyword pass."""
+        args = ["--password", "swordfish"]
+        result = redact_args(args)
+        assert result[0] == "--password"
+        assert is_secret_marker(result[1])
+        assert "swordfish" not in result[1]
+
+    def test_redact_args_compound_flag_keyword_match_redacted(self):
+        """--openai-api-key=<value> redacts via keyword pass.
+
+        Verifies that compound flag names containing a denylist substring
+        (openai_api_key contains api_key) trigger the keyword pass via the
+        upstream regex's natural prefix/suffix handling.
+        """
+        args = ["--openai-api-key=hello123"]
+        result = redact_args(args)
+        assert len(result) == 1
+        flag, sep, value = result[0].partition("=")
+        assert (flag, sep) == ("--openai-api-key", "=")
+        assert is_secret_marker(value)
+        assert "hello123" not in result[0]
+
+    def test_redact_args_format_detector_wins_over_keyword(self):
+        """Format detector (AWSKeyDetector) wins over keyword pass on the same token.
+
+        Pass-order requirement: format > entropy > keyword. The marker must
+        identify the AWS detector, not KeywordDetector. This asserts the
+        specific plugin name (rather than is_secret_marker) to lock in the
+        precedence.
+        """
+        args = ["--api-key", "AKIAIOSFODNN7EXAMPLE"]
+        result = redact_args(args)
+        assert result == ["--api-key", "**REDACTED_SECRET_AWSKEYDETECTOR**"]
 
 
 def test_redact_remote_url_query_and_headers():
