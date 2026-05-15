@@ -45,7 +45,6 @@ def inspect_skill(config: SkillServer) -> ServerSignature:
             f"Invalid SKILL.md file: {config.path}. Could not find the YAML and the MD parts in the SKILL.md file."
         )
     yaml_content = content_chunks[1].strip()
-    text_content = "---".join(content_chunks[2:])
     try:
         yaml_data = yaml.safe_load(yaml_content)
     except YAMLError as e:
@@ -58,7 +57,7 @@ def inspect_skill(config: SkillServer) -> ServerSignature:
     description = yaml_data["description"]
     base_prompt = Prompt(
         name="SKILL.md",
-        description=text_content,
+        description=content,
         arguments=[],
     )
     prompts, resources, tools = traverse_skill_tree(config.path, None)
