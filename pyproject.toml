@@ -33,6 +33,7 @@ override-dependencies = [
 
 [project.scripts]
 snyk-agent-scan = "agent_scan.run:run"
+snyk-agent-scan-mcp-shim = "agent_scan.mcp_shim:main"
 
 [build-system]
 requires = ["hatchling"]
