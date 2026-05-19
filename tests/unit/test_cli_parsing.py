@@ -621,6 +621,99 @@ class TestJSONOutput:
             assert isinstance(parsed, dict)
 
 
+class TestSarifOutput:
+    """Test suite for SARIF output functionality."""
+
+    @pytest.mark.asyncio
+    async def test_sarif_output_only_contains_sarif(self):
+        """Test that SARIF stdout mode suppresses scan-time stdout."""
+        import io
+        import json
+        from argparse import Namespace
+
+        from agent_scan.cli import print_scan_inspect
+
+        mock_result = ScanPathResult(
+            path="/test/path.json",
+            issues=[Issue(code="W001", message="warning", reference=None)],
+        )
+
+        async def mock_run_scan_with_print(*args, **kwargs):
+            print("scan progress")
+            return [mock_result]
+
+        with patch("agent_scan.cli.run_scan", side_effect=mock_run_scan_with_print):
+            args = Namespace(
+                json=False,
+                sarif=True,
+                sarif_output=None,
+                print_errors=False,
+                print_full_descriptions=False,
+                verbose=False,
+                ci=False,
+            )
+
+            captured_output = io.StringIO()
+            original_stdout = sys.stdout
+
+            try:
+                sys.stdout = captured_output
+                await print_scan_inspect(mode="scan", args=args)
+            finally:
+                sys.stdout = original_stdout
+
+            output = captured_output.getvalue()
+            assert "scan progress" not in output
+            parsed = json.loads(output)
+            assert parsed["version"] == "2.1.0"
+            assert parsed["runs"][0]["results"][0]["ruleId"] == "W001"
+
+    @pytest.mark.asyncio
+    async def test_sarif_output_file_is_written(self, tmp_path):
+        """Test that --sarif-output writes a SARIF file without replacing rich output."""
+        import json
+        from argparse import Namespace
+
+        from agent_scan.cli import print_scan_inspect
+
+        sarif_path = tmp_path / "agent-scan.sarif"
+        mock_result = ScanPathResult(
+            path="/test/path.json",
+            issues=[Issue(code="E001", message="error", reference=None)],
+        )
+
+        with patch("agent_scan.cli.run_scan", new_callable=AsyncMock, return_value=[mock_result]):
+            args = Namespace(
+                json=False,
+                sarif=False,
+                sarif_output=str(sarif_path),
+                print_errors=False,
+                print_full_descriptions=False,
+                verbose=False,
+                ci=False,
+            )
+
+            await print_scan_inspect(mode="scan", args=args)
+
+        parsed = json.loads(sarif_path.read_text(encoding="utf-8"))
+        assert parsed["version"] == "2.1.0"
+        assert parsed["runs"][0]["results"][0]["ruleId"] == "E001"
+
+    @pytest.mark.asyncio
+    async def test_json_and_sarif_stdout_conflict_exits_2(self):
+        """--json and --sarif both write machine-readable stdout, so they are mutually exclusive."""
+        from argparse import Namespace
+
+        from agent_scan.cli import print_scan_inspect
+
+        args = Namespace(json=True, sarif=True, sarif_output=None, verbose=False, ci=False)
+
+        with pytest.raises(SystemExit) as exc_info:
+            await print_scan_inspect(mode="scan", args=args)
+
+        assert exc_info.value.code == 2
+
+
 class TestIgnoreIssuesCodes:
     """Tests for --ignore-issues-codes filtering."""
 

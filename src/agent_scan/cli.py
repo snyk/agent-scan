@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import sys
+from pathlib import Path
 
 import psutil
 import rich
@@ -34,6 +35,7 @@ from agent_scan.pipelines import (
     inspect_pipeline,
 )
 from agent_scan.printer import print_scan_result
+from agent_scan.sarif import scan_results_to_sarif
 from agent_scan.upload import get_hostname
 from agent_scan.utils import ensure_unicode_console, get_push_key, parse_headers, suppress_stdout
 from agent_scan.version import version_info
@@ -197,6 +199,19 @@ def add_common_arguments(parser):
         action="store_true",
         default=False,
         help="Output results in JSON format instead of rich text",
+    )
+    parser.add_argument(
+        "--sarif",
+        action="store_true",
+        default=False,
+        help="Output results in SARIF 2.1.0 format for GitHub code scanning",
+    )
+    parser.add_argument(
+        "--sarif-output",
+        type=str,
+        default=None,
+        metavar="FILE",
+        help="Write SARIF 2.1.0 results to a file for GitHub code scanning upload",
     )
     parser.add_argument(
         "--skip-ssl-verify",
@@ -370,6 +385,7 @@ def main():
             f"  {program_name} --verbose           # Enable detailed logging output\n"
             f"  {program_name} --print-errors      # Show error details and tracebacks\n"
             f"  {program_name} --json              # Output results in JSON format\n"
+            f"  {program_name} --sarif-output agent-scan.sarif # Write SARIF for GitHub code scanning\n"
             f"  {program_name} --ci                # With --ci, exit with a non-zero code when there are analysis findings or runtime failures\n\n"
             f"  # Multiple control servers with individual options:\n"
             f'  {program_name} --control-server https://server1.com --control-server-H "Auth: token1" \\\n'
@@ -735,6 +751,12 @@ def _apply_ignore_codes(result: list[ScanPathResult], ignore_codes: set[str]) ->
         scan_result.issues = [i for i in scan_result.issues if i.code not in ignore_codes]
 
 
+def _validate_output_args(json_output: bool, sarif_stdout: bool) -> None:
+    if json_output and sarif_stdout:
+        rich.print("[bold red]Error: --json and --sarif cannot both write to stdout.[/bold red]", file=sys.stderr)
+        sys.exit(2)
+
+
 def _handle_ci_exit(result: list[ScanPathResult], json_output: bool, ignore_codes: set[str]) -> None:
     """In CI mode, exit with code 1 if any issues or unignored failures remain."""
     has_issues = any(scan_result.issues for scan_result in result)
@@ -755,13 +777,16 @@ def _handle_ci_exit(result: list[ScanPathResult], json_output: bool, ignore_code
 
 async def print_scan_inspect(mode="scan", args=None):
     json_output: bool = hasattr(args, "json") and args.json
+    sarif_stdout: bool = hasattr(args, "sarif") and args.sarif
+    sarif_output_path: str | None = getattr(args, "sarif_output", None)
     print_errors: bool = hasattr(args, "print_errors") and args.print_errors
     full_description: bool = hasattr(args, "print_full_descriptions") and args.print_full_descriptions
     verbose: bool = hasattr(args, "verbose") and args.verbose
     ci_mode: bool = hasattr(args, "ci") and args.ci
+    _validate_output_args(json_output, sarif_stdout)
     ignore_codes = _parse_ignore_codes(args, ci_mode)
 
-    if json_output:
+    if json_output or sarif_stdout:
         with suppress_stdout():
             result = await run_scan(args, mode=mode)
     else:
@@ -773,6 +798,8 @@ async def print_scan_inspect(mode="scan", args=None):
     if json_output:
         result_dict = {r.path: r.model_dump(mode="json") for r in result}
         print(json.dumps(result_dict, indent=2))
+    elif sarif_stdout:
+        print(json.dumps(scan_results_to_sarif(result), indent=2))
     else:
         print_scan_result(
             result,
@@ -782,6 +809,10 @@ async def print_scan_inspect(mode="scan", args=None):
             full_description=full_description,
             args=args,
         )
+
+    if sarif_output_path:
+        sarif_text = json.dumps(scan_results_to_sarif(result), indent=2)
+        Path(sarif_output_path).write_text(sarif_text + "\n", encoding="utf-8")
 
     if ci_mode:
         _handle_ci_exit(result, json_output, ignore_codes)

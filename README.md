@@ -170,7 +170,19 @@ These options are available for all commands:
 --verbose              Enable detailed logging output
 --print-errors         Show error details and tracebacks
 --json                 Output results in JSON format instead of rich text
+--sarif                Output results in SARIF 2.1.0 format for GitHub code scanning
+--sarif-output FILE    Write SARIF 2.1.0 results to a file for GitHub code scanning upload
 ```
+
+### GitHub Advanced Security
+
+Agent Scan can emit SARIF for GitHub Advanced Security code scanning:
+
+```bash
+uvx snyk-agent-scan@latest scan --sarif-output agent-scan.sarif
+```
+
+Upload the generated SARIF with `github/codeql-action/upload-sarif`. See [GitHub Advanced Security code scanning](docs/github-advanced-security.md) for a complete workflow.
 
 ### Commands
 
