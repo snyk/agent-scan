@@ -17,6 +17,7 @@ import psutil
 import rich
 from rich.logging import RichHandler
 
+from agent_scan.bootstrap import bootstrap_first_control_server
 from agent_scan.consent import collect_consent
 from agent_scan.models import (
     FAILURE_CATEGORY_TO_CODE,
@@ -34,8 +35,8 @@ from agent_scan.pipelines import (
     inspect_pipeline,
 )
 from agent_scan.printer import print_scan_result
-from agent_scan.upload import get_hostname
-from agent_scan.utils import ensure_unicode_console, get_push_key, parse_headers, suppress_stdout
+from agent_scan.runtime_config import set_runtime_config
+from agent_scan.utils import ensure_unicode_console, get_hostname, get_push_key, parse_headers, suppress_stdout
 from agent_scan.version import version_info
 
 # Configure logging to suppress all output by default
@@ -210,6 +211,7 @@ def add_common_arguments(parser):
         action=argparse.BooleanOptionalAction,
         help="Scan skills beyond mcp servers (default: enabled). Use --no-skills to disable.",
     )
+    add_bootstrap_argument(parser)
     parser.add_argument(
         "--scan-all-users",
         default=False,
@@ -227,6 +229,19 @@ def add_common_arguments(parser):
         type=str,
         default=None,
         help="Comma-separated list of issue codes to ignore (e.g. W001,W015)",
+    )
+
+
+def add_bootstrap_argument(parser):
+    # [REVIEW-COMMENT]
+    # Centralize the opt-out flag so scan, inspect, evo, and guard all expose
+    # the same way to disable best-effort control-server startup bootstrap.
+    # [/REVIEW-COMMENT]
+    parser.add_argument(
+        "--no-bootstrap",
+        default=False,
+        action="store_true",
+        help="Disable the startup bootstrap call to the control server.",
     )
 
 
@@ -405,6 +420,7 @@ def main():
     )
     add_common_arguments(inspect_parser)
     add_server_arguments(inspect_parser)
+    add_scan_arguments(inspect_parser)
     inspect_parser.add_argument(
         "files",
         type=str,
@@ -433,6 +449,8 @@ def main():
         help="Install, uninstall, or check status of Agent Guard hooks",
         description="Manage Agent Guard hooks for Claude Code, Cursor, and Codex.",
     )
+    add_bootstrap_argument(guard_parser)
+    add_scan_arguments(guard_parser)
     guard_subparsers = guard_parser.add_subparsers(
         dest="guard_command",
         title="Guard commands",
@@ -591,6 +609,12 @@ async def evo(args):
             headers=parse_headers([f"x-client-id:{client_id}"]),
         )
     ]
+    # [REVIEW-COMMENT]
+    # Evo creates its push control server after minting the temporary client ID,
+    # so bootstrap must run here rather than at command entry to obtain a scan
+    # event ID for the same destination that receives the later push.
+    # [/REVIEW-COMMENT]
+    await bootstrap_runtime_config(args, command="evo")
     await run_scan(args, mode="scan")
 
     # Revoke the push key
@@ -599,6 +623,23 @@ async def evo(args):
         rich.print("Client ID revoked")
     except RuntimeError as e:
         rich.print(f"[bold red]Error revoking client_id[/bold red]: {e}")
+
+
+async def bootstrap_runtime_config(args, command: Literal["scan", "inspect", "evo", "guard"], subcommand: str | None = None) -> None:
+    # [REVIEW-COMMENT]
+    # Wire CLI commands to the shared bootstrap helper and store the resulting
+    # runtime config for downstream upload correlation.
+    # [/REVIEW-COMMENT]
+    control_servers: list[ControlServer] = getattr(args, "control_servers", []) or []
+    runtime_config = await bootstrap_first_control_server(
+        control_servers=control_servers,
+        command=command,
+        subcommand=subcommand,
+        control_identifier=control_servers[0].identifier if control_servers else None,
+        argv=sys.argv[1:],
+        no_bootstrap=getattr(args, "no_bootstrap", False),
+    )
+    set_runtime_config(runtime_config)
 
 
 async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[ScanPathResult]:
@@ -754,6 +795,12 @@ def _handle_ci_exit(result: list[ScanPathResult], json_output: bool, ignore_code
 
 
 async def print_scan_inspect(mode="scan", args=None):
+    # [REVIEW-COMMENT]
+    # Run bootstrap before scan/inspect discovery so startup metadata is sent
+    # once per invocation and uploads can later include the returned event ID.
+    # [/REVIEW-COMMENT]
+    await bootstrap_runtime_config(args, command="inspect" if mode == "inspect" else "scan")
+
     json_output: bool = hasattr(args, "json") and args.json
     print_errors: bool = hasattr(args, "print_errors") and args.print_errors
     full_description: bool = hasattr(args, "print_full_descriptions") and args.print_full_descriptions

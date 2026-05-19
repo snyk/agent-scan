@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -14,6 +15,7 @@ from urllib.parse import urlparse
 
 import rich
 
+from agent_scan.bootstrap import bootstrap_first_control_server
 from agent_scan.pushkeys import (
     GuardEnabledAccessDeniedError,
     _is_localhost,
@@ -21,6 +23,7 @@ from agent_scan.pushkeys import (
     mint_push_key,
     revoke_push_key,
 )
+from agent_scan.runtime_config import RuntimeConfig, set_runtime_config
 
 IS_WINDOWS = sys.platform == "win32"
 
@@ -100,6 +103,28 @@ CURSOR_HOOK_EVENTS = [
 
 
 def run_guard(args) -> int:
+    control_servers = getattr(args, "control_servers", []) or []
+    no_bootstrap = getattr(args, "no_bootstrap", False)
+    # [REVIEW-COMMENT]
+    # Guard bypasses the scan pipeline, so it performs its own best-effort
+    # bootstrap before install/uninstall/status work and seeds the same runtime
+    # config used by push correlation.
+    # [/REVIEW-COMMENT]
+    if control_servers and not no_bootstrap:
+        set_runtime_config(
+            asyncio.run(
+                bootstrap_first_control_server(
+                    control_servers=control_servers,
+                    command="guard",
+                    subcommand=getattr(args, "guard_command", None),
+                    control_identifier=control_servers[0].identifier,
+                    argv=sys.argv[1:],
+                    no_bootstrap=no_bootstrap,
+                )
+            )
+        )
+    else:
+        set_runtime_config(RuntimeConfig())
     try:
         guard_command = getattr(args, "guard_command", None)
         if guard_command == "install":
