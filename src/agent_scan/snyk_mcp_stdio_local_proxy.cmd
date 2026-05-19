@@ -6,17 +6,20 @@ exit /b %ERRORLEVEL%
 
 #---PS---
 param(
-  [string]$uuid = "",
   [Parameter(ValueFromRemainingArguments=$true)][string[]]$Cmd
 )
 
-if (-not $Cmd) { [Console]::Error.WriteLine("mcp_shim: no command"); exit 2 }
+if (-not $Cmd) { [Console]::Error.WriteLine("snyk_mcp_stdio_local_proxy: no command"); exit 2 }
+
+$joined = ($Cmd -join "`0")
+$bytes  = [System.Text.Encoding]::UTF8.GetBytes($joined)
+$sha    = [System.Security.Cryptography.SHA256]::Create()
+$hash   = (-join ($sha.ComputeHash($bytes) | ForEach-Object { '{0:x2}' -f $_ })).Substring(0, 12)
 
 $dir    = if ($env:TEMP) { $env:TEMP } else { "C:\Windows\Temp" }
 $rand   = -join ((1..6) | ForEach-Object { '{0:x}' -f (Get-Random -Max 16) })
-$prefix = if ($uuid) { "mcp_shim.$uuid" } else { "mcp_shim" }
-$log    = Join-Path $dir "$prefix.$rand.log"
-[Console]::Error.WriteLine("shim log: $log")
+$log    = Join-Path $dir "snyk_mcp_stdio_local_proxy.$hash.$rand.log"
+[Console]::Error.WriteLine("snyk_mcp_stdio_local_proxy log: $log")
 
 $exe  = $Cmd[0]
 $rest = if ($Cmd.Count -gt 1) { $Cmd[1..($Cmd.Count-1)] } else { @() }
