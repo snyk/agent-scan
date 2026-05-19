@@ -158,7 +158,9 @@ When `--control-server` is configured, Agent Scan sends a startup bootstrap requ
 
 The request contains an allowlisted host/process fingerprint: Agent Scan version and command, redacted CLI arguments, OS and Python details, hostname, current username, CI/WSL/container flags, shell, terminal, locale, timezone, current working directory, current home directory, executable path, and readable home directories capped at 1000 entries. It does not include `schema_version` or scanned usernames.
 
-Bootstrap failures never abort the command. Timeouts, network errors, HTTP errors, and malformed responses fall back to defaults. Home-directory enumeration may take noticeably longer on Windows because it can query Windows profiles and WSL homes; the HTTP timeout only applies after the payload has been assembled. Use `--no-bootstrap` to disable this startup request on any command.
+Home-directory enumeration mirrors the scan itself: by default the payload only reports the current user's home directory. Passing `--scan-all-users` opts in to enumerating every readable human home directory on the machine (and, on Windows, WSL profile directories) — exactly the set the scan would touch — for inclusion in the bootstrap payload.
+
+Bootstrap failures never abort the command. Timeouts, network errors, HTTP errors, and malformed responses fall back to defaults. Home-directory enumeration may take noticeably longer on Windows with `--scan-all-users` because it can query Windows profiles and WSL homes; the HTTP timeout only applies after the payload has been assembled. Use `--no-bootstrap` to disable this startup request on any command.
 
 > **Snyk-managed control server required.** Bootstrap is only sent when the configured `--control-server` URL ends in `/mcp-scan/push` — the canonical Snyk-managed endpoint. Self-hosted or custom control-server deployments whose URLs do not match this shape will skip the bootstrap call (a warning is logged) and uploads will not include the `X-Scan-Event-ID` correlation header. Self-hosted deployments should pass `--no-bootstrap` to suppress the warning and make the opt-out explicit.
 

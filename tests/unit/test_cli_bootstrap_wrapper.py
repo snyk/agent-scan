@@ -131,6 +131,49 @@ async def test_bootstrap_runtime_config_with_no_bootstrap_makes_zero_http_calls(
 
 
 @pytest.mark.asyncio
+async def test_bootstrap_runtime_config_forwards_scan_all_users():
+    """args.scan_all_users must reach bootstrap_first_control_server unchanged.
+
+    The bootstrap payload's home-directory enumeration mirrors the scan: when
+    --scan-all-users is set, both touch every readable home; otherwise both
+    stay limited to the current user. The wrapper is the only place that maps
+    args -> helper kwarg, so a regression here would silently widen what gets
+    sent to the control server.
+    """
+    fake_helper = AsyncMock(return_value=RuntimeConfig())
+    args = Namespace(
+        control_servers=[_control_server("http://example/mcp-scan/push")],
+        no_bootstrap=False,
+        scan_all_users=True,
+    )
+
+    with patch("agent_scan.cli.bootstrap_first_control_server", fake_helper):
+        await cli.bootstrap_runtime_config(args, command="scan")
+
+    assert fake_helper.call_args.kwargs["scan_all_users"] is True
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_runtime_config_defaults_scan_all_users_to_false_when_attr_missing():
+    """Subparsers that omit --scan-all-users (e.g. guard) must not crash the wrapper.
+
+    Default is False so the bootstrap payload stays narrow when the flag was
+    never registered on the parser.
+    """
+    fake_helper = AsyncMock(return_value=RuntimeConfig())
+    args = Namespace(
+        control_servers=[_control_server("http://example/mcp-scan/push")],
+        no_bootstrap=False,
+    )
+    # Deliberately no `scan_all_users` attribute on args.
+
+    with patch("agent_scan.cli.bootstrap_first_control_server", fake_helper):
+        await cli.bootstrap_runtime_config(args, command="scan")
+
+    assert fake_helper.call_args.kwargs["scan_all_users"] is False
+
+
+@pytest.mark.asyncio
 async def test_bootstrap_runtime_config_stores_helper_result_in_runtime_config():
     """The wrapper must call `set_runtime_config` with whatever the helper returns.
 

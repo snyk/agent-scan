@@ -121,6 +121,7 @@ def run_guard(args) -> int:
                     control_identifier=control_servers[0].identifier,
                     argv=sys.argv[1:],
                     no_bootstrap=no_bootstrap,
+                    scan_all_users=getattr(args, "scan_all_users", False),
                 )
             )
         )

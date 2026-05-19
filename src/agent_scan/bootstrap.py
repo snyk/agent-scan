@@ -39,13 +39,21 @@ logger = logging.getLogger(__name__)
 _RETRY_STATUSES = {408, 429}
 _HOME_DIRECTORIES_LIMIT = 1000
 
+# Canonical control-server URL contract. The push endpoint is the surface
+# users configure via --control-server; the bootstrap endpoint is its
+# sibling on the same host. Changing one without the other will silently
+# disable startup correlation, so both live here as a single source of
+# truth — update together if Snyk renames either path.
+CANONICAL_PUSH_PATH_SUFFIX = "/mcp-scan/push"
+CLIENT_BOOTSTRAP_PATH_SUFFIX = "/mcp-scan/client-bootstrap"
+
 
 def _client_bootstrap_url(control_server_url: str) -> str | None:
     parsed = urlsplit(control_server_url)
     path = parsed.path.rstrip("/")
-    if not path.endswith("/mcp-scan/push"):
+    if not path.endswith(CANONICAL_PUSH_PATH_SUFFIX):
         return None
-    path = f"{path.rsplit('/', 1)[0]}/client-bootstrap"
+    path = path[: -len(CANONICAL_PUSH_PATH_SUFFIX)] + CLIENT_BOOTSTRAP_PATH_SUFFIX
     return urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, parsed.fragment))
 
 
@@ -90,6 +98,7 @@ async def _build_request(
     subcommand: str | None,
     control_identifier: str | None,
     argv: list[str],
+    scan_all_users: bool = False,
 ) -> ClientBootstrapRequest:
     # [REVIEW-COMMENT]
     # Build the privacy-reviewed startup payload once before the HTTP retry
@@ -101,7 +110,9 @@ async def _build_request(
     # locale/timezone, cwd/home/executable paths, readable home directories capped
     # at 1000 entries, and redacted argv tokens. It intentionally excludes
     # scanned_usernames and schema_version.
-    home_dirs_raw = await asyncio.to_thread(get_readable_home_directories, all_users=True)
+    # Home enumeration mirrors the scan's --scan-all-users opt-in: a single-user
+    # scan only reports the current user's home, matching what discovery touches.
+    home_dirs_raw = await asyncio.to_thread(get_readable_home_directories, all_users=scan_all_users)
     home_dirs_sorted = sorted(home_dirs_raw, key=lambda item: str(item[0]))
     home_dirs_truncated = len(home_dirs_sorted) > _HOME_DIRECTORIES_LIMIT
     home_dirs = home_dirs_sorted[:_HOME_DIRECTORIES_LIMIT]
@@ -154,6 +165,7 @@ async def bootstrap_first_control_server(
     control_identifier: str | None,
     argv: list[str],
     no_bootstrap: bool,
+    scan_all_users: bool = False,
     timeout_seconds: float = 3.0,
     max_attempts: int = 3,
 ) -> RuntimeConfig:
@@ -174,7 +186,7 @@ async def bootstrap_first_control_server(
         )
 
     try:
-        payload = await _build_request(command, subcommand, control_identifier, argv)
+        payload = await _build_request(command, subcommand, control_identifier, argv, scan_all_users)
     except Exception as exc:
         logger.warning("Client bootstrap failed; using defaults: %s", exc)
         return RuntimeConfig()
@@ -182,8 +194,9 @@ async def bootstrap_first_control_server(
     url = _client_bootstrap_url(control_server.url)
     if url is None:
         logger.warning(
-            "control-server URL %r does not end in /mcp-scan/push; skipping bootstrap",
+            "control-server URL %r does not end in %s; skipping bootstrap",
             control_server.url,
+            CANONICAL_PUSH_PATH_SUFFIX,
         )
         return RuntimeConfig()
     headers = dict(control_server.headers)

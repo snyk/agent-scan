@@ -36,12 +36,53 @@ async def test_home_directories_match_helper_and_are_capped(monkeypatch):
         lambda all_users=False: [(Path(f"/home/user-{i}"), f"user-{i}") for i in range(1002)],
     )
 
-    payload = await bootstrap_module._build_request("scan", None, None, [])
+    payload = await bootstrap_module._build_request("scan", None, None, [], scan_all_users=True)
     paths = payload.model_dump()["paths"]
 
     assert len(paths["home_directories"]) == 1000
     assert paths["home_directories"][0] == {"path": "/home/user-0", "username": "user-0"}
     assert paths["home_directories_truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_home_enumeration_defaults_to_current_user_only(monkeypatch):
+    """Without --scan-all-users, bootstrap must not enumerate every readable home dir.
+
+    The bootstrap payload's home_directories field is intended to mirror what the
+    scan itself touches — so a single-user scan should only report the current
+    user's home, never the full /home/* tree (or Windows profiles / WSL homes).
+    """
+    captured_kwargs: dict = {}
+
+    def fake_home_dirs(all_users=False):
+        captured_kwargs["all_users"] = all_users
+        return [(Path("/home/me"), "me")] if not all_users else [(Path(f"/home/u{i}"), f"u{i}") for i in range(50)]
+
+    monkeypatch.setattr(bootstrap_module, "get_readable_home_directories", fake_home_dirs)
+
+    payload = await bootstrap_module._build_request("scan", None, None, [])
+    paths = payload.model_dump()["paths"]
+
+    assert captured_kwargs["all_users"] is False
+    assert paths["home_directories"] == [{"path": "/home/me", "username": "me"}]
+
+
+@pytest.mark.asyncio
+async def test_home_enumeration_opts_in_when_scan_all_users(monkeypatch):
+    """Passing scan_all_users=True must forward all_users=True to the helper."""
+    captured_kwargs: dict = {}
+
+    def fake_home_dirs(all_users=False):
+        captured_kwargs["all_users"] = all_users
+        return [(Path(f"/home/u{i}"), f"u{i}") for i in range(3)]
+
+    monkeypatch.setattr(bootstrap_module, "get_readable_home_directories", fake_home_dirs)
+
+    payload = await bootstrap_module._build_request("scan", None, None, [], scan_all_users=True)
+    paths = payload.model_dump()["paths"]
+
+    assert captured_kwargs["all_users"] is True
+    assert {entry["username"] for entry in paths["home_directories"]} == {"u0", "u1", "u2"}
 
 
 @pytest.mark.asyncio

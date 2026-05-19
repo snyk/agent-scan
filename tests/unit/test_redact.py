@@ -186,6 +186,32 @@ class TestRedactArgs:
         args = ["--server", "http://example.com:8080/path"]
         assert redact_args(args) == ["--server", "http://example.com:8080/path"]
 
+    def test_redact_args_single_char_header_name_high_entropy_value_redacted(self):
+        """Pass C accepts single-char HTTP header names (e.g. RFC-valid `X:value`).
+
+        Prior regex required ≥2 chars on the name half, silently skipping
+        Pass C for tokens like "X:<secret>". Widening to ≥1 char closes
+        that gap; the value-side detectors still gate the actual redaction.
+        """
+        header_token = f"X:{FAKE_API_KEY}"
+        args = ["--control-server-H", header_token]
+        result = redact_args(args)
+        assert result[0] == "--control-server-H"
+        assert is_secret_marker(result[1])
+        assert FAKE_API_KEY not in result[1]
+        # The header name itself is part of the redacted token, never leaked.
+        assert "X:" not in result[1]
+
+    def test_redact_args_single_char_header_name_innocuous_value_preserved(self):
+        """Widening the header-name regex must not cause over-redaction.
+
+        A single-char name with a non-secret value is still preserved
+        verbatim, because Pass C only marks a token when the value half
+        triggers an independent secret detector.
+        """
+        args = ["--control-server-H", "X:application/json"]
+        assert redact_args(args) == ["--control-server-H", "X:application/json"]
+
     def test_redact_args_mixed_realistic(self):
         """Realistic mix: package name, boolean flag, low-entropy flag value, high-entropy flag value."""
         args = ["-y", "some-server", "--port", "3000", "--api-key", FAKE_API_KEY, f"--token={FAKE_API_KEY}"]

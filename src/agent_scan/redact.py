@@ -165,7 +165,7 @@ def _detect_keyword(prev_normalized: str, curr_raw: str) -> str | None:
     return None
 
 
-_HEADER_TOKEN_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]+$")
+_HEADER_TOKEN_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
 
 # Flag names whose value is *always* a credential, regardless of shape or
 # entropy. Names are stored in the same normalized form produced during
