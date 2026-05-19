@@ -1,0 +1,237 @@
+from __future__ import annotations
+
+import asyncio
+import locale as locale_module
+import logging
+import os
+import platform
+import sys
+from datetime import datetime
+from pathlib import Path
+from typing import Literal
+from urllib.parse import urlsplit, urlunsplit
+
+import aiohttp
+from pydantic import ValidationError
+
+from agent_scan.models import (
+    ClientBootstrapRequest,
+    ClientBootstrapResponse,
+    ClientInfo,
+    ControlServer,
+    HomeDirectoryEntry,
+    HostInfo,
+    PathsInfo,
+)
+from agent_scan.redact import redact_args
+from agent_scan.runtime_config import RuntimeConfig
+from agent_scan.utils import (
+    get_environment,
+    get_hostname,
+    get_readable_home_directories,
+    get_username,
+)
+from agent_scan.verify_api import setup_aiohttp_debug_logging, setup_tcp_connector
+from agent_scan.version import version_info
+
+logger = logging.getLogger(__name__)
+
+_RETRY_STATUSES = {408, 429}
+_HOME_DIRECTORIES_LIMIT = 1000
+
+
+# [REVIEW-COMMENT]
+# Derive the bootstrap endpoint from the first configured control-server URL so
+# push URLs correlate to their sibling startup endpoint without requiring a new
+# CLI flag.
+# [/REVIEW-COMMENT]
+def _client_bootstrap_url(control_server_url: str) -> str:
+    parsed = urlsplit(control_server_url)
+    path = parsed.path.rstrip("/")
+    if path.endswith("/mcp-scan/push"):
+        path = f"{path.rsplit('/', 1)[0]}/client-bootstrap"
+    else:
+        path = f"{path}/mcp-scan/client-bootstrap" if path else "/mcp-scan/client-bootstrap"
+    return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+
+
+# [REVIEW-COMMENT]
+# Collect host-environment signals defensively: these fields improve backend
+# context, but failures must never block a scan from falling back to defaults.
+# [/REVIEW-COMMENT]
+def _detect_wsl() -> bool:
+    try:
+        return bool(os.environ.get("WSL_DISTRO_NAME")) or "microsoft" in platform.release().lower()
+    except Exception:
+        return False
+
+
+def _detect_container() -> bool:
+    try:
+        if Path("/.dockerenv").exists():
+            return True
+        cgroup = Path("/proc/1/cgroup").read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False
+    return "container=" in cgroup or "docker" in cgroup or "kubepods" in cgroup
+
+
+def _get_locale() -> str | None:
+    try:
+        return locale_module.setlocale(locale_module.LC_CTYPE)
+    except locale_module.Error:
+        return None
+
+
+def _get_timezone() -> str | None:
+    try:
+        tzinfo = datetime.now().astimezone().tzinfo
+        return str(tzinfo) if tzinfo is not None else None
+    except Exception:
+        return None
+
+
+async def _build_request(
+    command: Literal["scan", "inspect", "evo", "guard"],
+    subcommand: str | None,
+    control_identifier: str | None,
+    argv: list[str],
+) -> ClientBootstrapRequest:
+    # [REVIEW-COMMENT]
+    # Build the privacy-reviewed startup payload once before the HTTP retry
+    # loop. Home-directory enumeration can be slow, so it is offloaded to a
+    # thread and is intentionally outside the per-request network timeout.
+    # [/REVIEW-COMMENT]
+    # Security review allowlist: this payload sends client metadata, host OS/Python
+    # details, hostname/current username, CI/WSL/container booleans, shell/term,
+    # locale/timezone, cwd/home/executable paths, readable home directories capped
+    # at 1000 entries, and redacted argv tokens. It intentionally excludes
+    # scanned_usernames and schema_version.
+    home_dirs_raw = await asyncio.to_thread(get_readable_home_directories, all_users=True)
+    home_dirs_sorted = sorted(home_dirs_raw, key=lambda item: str(item[0]))
+    home_dirs_truncated = len(home_dirs_sorted) > _HOME_DIRECTORIES_LIMIT
+    home_dirs = home_dirs_sorted[:_HOME_DIRECTORIES_LIMIT]
+
+    return ClientBootstrapRequest(
+        client=ClientInfo(
+            name="agent-scan",
+            version=version_info,
+            command=command,
+            subcommand=subcommand,
+            control_identifier=control_identifier,
+            argv_flags=redact_args(argv),
+        ),
+        host=HostInfo(
+            os=platform.system(),
+            os_release=platform.release(),
+            os_version=platform.version(),
+            arch=platform.machine(),
+            processor=platform.processor(),
+            python_version=platform.python_version(),
+            python_implementation=platform.python_implementation(),
+            hostname=get_hostname(),
+            current_username=get_username(),
+            is_ci=get_environment() == "ci",
+            is_wsl=_detect_wsl(),
+            is_container=_detect_container(),
+            shell=os.environ.get("SHELL"),
+            term=os.environ.get("TERM"),
+            locale=_get_locale(),
+            timezone=_get_timezone(),
+            ip_address=None,
+        ),
+        paths=PathsInfo(
+            cwd=os.getcwd(),
+            current_home_dir=str(Path.home()),
+            home_directories=[
+                HomeDirectoryEntry(path=str(path), username=username) for path, username in home_dirs
+            ],
+            home_directories_truncated=home_dirs_truncated,
+            executable=sys.executable,
+        ),
+    )
+
+
+def _should_retry(status: int) -> bool:
+    return status in _RETRY_STATUSES or status >= 500
+
+
+async def bootstrap_first_control_server(
+    control_servers: list[ControlServer],
+    command: Literal["scan", "inspect", "evo", "guard"],
+    subcommand: str | None,
+    control_identifier: str | None,
+    argv: list[str],
+    no_bootstrap: bool,
+    timeout_seconds: float = 3.0,
+    max_attempts: int = 3,
+) -> RuntimeConfig:
+    # [REVIEW-COMMENT]
+    # Bootstrap is best-effort and targets only the first control server so a
+    # startup correlation ID can be obtained without duplicating side effects
+    # across multiple push destinations.
+    # [/REVIEW-COMMENT]
+    if not control_servers or no_bootstrap:
+        return RuntimeConfig()
+
+    control_server = control_servers[0]
+    if len(control_servers) > 1:
+        logger.warning(
+            "bootstrap sent only to %s; %s additional control servers will receive scan results but not bootstrap",
+            control_server.url,
+            len(control_servers) - 1,
+        )
+
+    try:
+        payload = await _build_request(command, subcommand, control_identifier, argv)
+    except Exception as exc:
+        logger.warning("Client bootstrap failed; using defaults: %s", exc)
+        return RuntimeConfig()
+
+    url = _client_bootstrap_url(control_server.url)
+    headers = dict(control_server.headers)
+    headers.setdefault("Content-Type", "application/json")
+    timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+    # Bootstrap emits one final warning on failure; avoid per-attempt trace errors.
+    trace_configs = setup_aiohttp_debug_logging(verbose=True)
+    last_error = "unknown error"
+
+    for attempt in range(max_attempts):
+        if attempt > 0:
+            await asyncio.sleep(attempt)
+
+        try:
+            async with aiohttp.ClientSession(
+                trace_configs=trace_configs,
+                connector=setup_tcp_connector(),
+                trust_env=True,
+            ) as session:
+                async with session.post(
+                    url,
+                    data=payload.model_dump_json(),
+                    headers=headers,
+                    timeout=timeout,
+                ) as response:
+                    if response.status == 200:
+                        data = await response.json(content_type=None)
+                        response_model = ClientBootstrapResponse.model_validate(data)
+                        return RuntimeConfig(
+                            scan_event_id=response_model.scan_event_id,
+                            config=response_model.runtime_config,
+                            source="bootstrap",
+                        )
+
+                    error_text = await response.text()
+                    last_error = f"HTTP {response.status}: {error_text}"
+                    if not _should_retry(response.status) or attempt == max_attempts - 1:
+                        break
+        except (TimeoutError, asyncio.TimeoutError, aiohttp.ClientError) as exc:
+            last_error = str(exc) or exc.__class__.__name__
+            if attempt == max_attempts - 1:
+                break
+        except (ValidationError, ValueError, TypeError) as exc:
+            last_error = str(exc) or exc.__class__.__name__
+            break
+
+    logger.warning("Client bootstrap failed; using defaults: %s", last_error)
+    return RuntimeConfig()
