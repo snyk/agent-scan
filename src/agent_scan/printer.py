@@ -210,13 +210,11 @@ def format_entity_line(
 ) -> Text:
     include_description = len(issues) > 0
 
-    # right-pad & truncate name
+    # right-pad name
     name = entity.name
     if not full_description:
         max_name_length = MAX_ENTITY_NAME_LENGTH_SKILL if is_skill else MAX_ENTITY_NAME_LENGTH
-        if len(name) > max_name_length:
-            name = name[: (max_name_length - 3)] + "..."
-        name = name + " " * (max_name_length - len(name))
+        name = name + " " * max(0, max_name_length - len(name))
 
     # right-pad type (with at least one trailing space so it never abuts the name)
     type_str = format_entity_type(entity, is_skill)
@@ -259,9 +257,7 @@ def format_global_issue(result: ScanPathResult, issue: Issue, show_all: bool = F
 
     def _format_tool_name(server_name: str, tool_name: str, value: float) -> str:
         tool_string = f"{server_name}/{tool_name}"
-        if len(tool_string) > MAX_ENTITY_NAME_TOXIC_FLOW_LENGTH:
-            tool_string = tool_string[: (MAX_ENTITY_NAME_TOXIC_FLOW_LENGTH - 3)] + "..."
-        tool_string = tool_string + " " * (MAX_ENTITY_NAME_TOXIC_FLOW_LENGTH - len(tool_string))
+        tool_string = tool_string + " " * max(0, MAX_ENTITY_NAME_TOXIC_FLOW_LENGTH - len(tool_string))
         if value <= 1.5:
             severity = "[yellow]Low[/yellow]"
         elif value <= 2.5:
