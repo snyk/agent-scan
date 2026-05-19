@@ -58,6 +58,8 @@ class _BootstrapServer:
 
 
 def _control_server(url: str) -> ControlServer:
+    if "/mcp-scan/push" not in url:
+        url = f"{url.rstrip('/')}/mcp-scan/push"
     return ControlServer(url=url, headers={"x-client-id": str(uuid4())}, identifier="machine-1")
 
 
@@ -97,6 +99,22 @@ async def test_single_control_server_posts_to_bootstrap_endpoint():
     assert cfg.scan_event_id == scan_event_id
     assert len(server.requests) == 1
     assert server.requests[0]["path"] == "/mcp-scan/client-bootstrap"
+
+
+@pytest.mark.asyncio
+async def test_non_canonical_url_skips_bootstrap(caplog):
+    async with _BootstrapServer() as server:
+        cs = ControlServer(
+            url=f"{server.url}/push",
+            headers={"x-client-id": str(uuid4())},
+            identifier="machine-1",
+        )
+        with caplog.at_level(logging.WARNING, logger="agent_scan.bootstrap"):
+            cfg = await bootstrap_first_control_server([cs], "scan", None, "machine-1", [], False)
+
+    assert cfg.source == "default"
+    assert server.requests == []
+    assert "does not end in /mcp-scan/push" in caplog.text
 
 
 @pytest.mark.asyncio

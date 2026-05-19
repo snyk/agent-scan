@@ -40,18 +40,12 @@ _RETRY_STATUSES = {408, 429}
 _HOME_DIRECTORIES_LIMIT = 1000
 
 
-# [REVIEW-COMMENT]
-# Derive the bootstrap endpoint from the first configured control-server URL so
-# push URLs correlate to their sibling startup endpoint without requiring a new
-# CLI flag.
-# [/REVIEW-COMMENT]
-def _client_bootstrap_url(control_server_url: str) -> str:
+def _client_bootstrap_url(control_server_url: str) -> str | None:
     parsed = urlsplit(control_server_url)
     path = parsed.path.rstrip("/")
-    if path.endswith("/mcp-scan/push"):
-        path = f"{path.rsplit('/', 1)[0]}/client-bootstrap"
-    else:
-        path = f"{path}/mcp-scan/client-bootstrap" if path else "/mcp-scan/client-bootstrap"
+    if not path.endswith("/mcp-scan/push"):
+        return None
+    path = f"{path.rsplit('/', 1)[0]}/client-bootstrap"
     return urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, ""))
 
 
@@ -131,7 +125,7 @@ async def _build_request(
             python_implementation=platform.python_implementation(),
             hostname=get_hostname(),
             current_username=get_username(),
-            is_ci=get_environment() == "ci",
+            is_ci=(get_environment() or "").lower() == "ci",
             is_wsl=_detect_wsl(),
             is_container=_detect_container(),
             shell=os.environ.get("SHELL"),
@@ -189,6 +183,12 @@ async def bootstrap_first_control_server(
         return RuntimeConfig()
 
     url = _client_bootstrap_url(control_server.url)
+    if url is None:
+        logger.warning(
+            "control-server URL %r does not end in /mcp-scan/push; skipping bootstrap",
+            control_server.url,
+        )
+        return RuntimeConfig()
     headers = dict(control_server.headers)
     headers.setdefault("Content-Type", "application/json")
     timeout = aiohttp.ClientTimeout(total=timeout_seconds)

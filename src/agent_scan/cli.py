@@ -282,15 +282,8 @@ def add_server_arguments(parser):
     )
 
 
-def add_scan_arguments(scan_parser):
-    scan_parser.add_argument(
-        "--checks-per-server",
-        type=int,
-        default=1,
-        help="Number of times to check each server (default: 1)",
-        metavar="NUM",
-    )
-    scan_parser.add_argument(
+def add_control_server_arguments(parser):
+    parser.add_argument(
         "--control-server",
         action="append",
         help=(
@@ -299,12 +292,12 @@ def add_scan_arguments(scan_parser):
             "Can be specified multiple times."
         ),
     )
-    scan_parser.add_argument(
+    parser.add_argument(
         "--control-server-H",
         action="append",
         help="Additional header for the current --control-server block (repeatable)",
     )
-    scan_parser.add_argument(
+    parser.add_argument(
         "--control-identifier",
         action="append",
         help=(
@@ -312,6 +305,17 @@ def add_scan_arguments(scan_parser):
             "Non-anonymous identifier for that control server (for example: email, hostname, serial number)."
         ),
     )
+
+
+def add_scan_arguments(scan_parser):
+    scan_parser.add_argument(
+        "--checks-per-server",
+        type=int,
+        default=1,
+        help="Number of times to check each server (default: 1)",
+        metavar="NUM",
+    )
+    add_control_server_arguments(scan_parser)
 
 
 def setup_scan_parser(scan_parser, add_files=True):
@@ -420,7 +424,7 @@ def main():
     )
     add_common_arguments(inspect_parser)
     add_server_arguments(inspect_parser)
-    add_scan_arguments(inspect_parser)
+    add_control_server_arguments(inspect_parser)
     inspect_parser.add_argument(
         "files",
         type=str,
@@ -450,7 +454,7 @@ def main():
         description="Manage Agent Guard hooks for Claude Code, Cursor, and Codex.",
     )
     add_bootstrap_argument(guard_parser)
-    add_scan_arguments(guard_parser)
+    add_control_server_arguments(guard_parser)
     guard_subparsers = guard_parser.add_subparsers(
         dest="guard_command",
         title="Guard commands",
