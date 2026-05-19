@@ -152,6 +152,12 @@ Agent Scan validates the components, both with local checks and by invoking the 
 
 Agent Scan does not store or log any usage data, i.e. the contents and results of your MCP tool calls.
 
+#### Control Server Bootstrap
+
+When `--control-server` is configured, Agent Scan sends a startup bootstrap request to the first configured control server before the scan begins. The request contains an allowlisted host/process fingerprint: Agent Scan version and command, redacted CLI arguments, OS and Python details, hostname, current username, CI/WSL/container flags, shell, terminal, locale, timezone, current working directory, current home directory, executable path, and readable home directories capped at 1000 entries. It does not include `schema_version` or scanned usernames.
+
+Bootstrap failures never abort the scan. Timeouts, network errors, HTTP errors, and malformed responses fall back to defaults. Home-directory enumeration may take noticeably longer on Windows because it can query Windows profiles and WSL homes; the HTTP timeout only applies after the payload has been assembled. Use `--no-bootstrap` to disable this startup request.
+
 ## CLI Parameters
 
 Agent Scan provides the following commands:
@@ -170,6 +176,7 @@ These options are available for all commands:
 --verbose              Enable detailed logging output
 --print-errors         Show error details and tracebacks
 --json                 Output results in JSON format instead of rich text
+--no-bootstrap         Disable the startup bootstrap call to the control server
 ```
 
 ### Commands
