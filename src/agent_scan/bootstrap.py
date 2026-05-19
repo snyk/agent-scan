@@ -132,7 +132,6 @@ async def _build_request(
             term=os.environ.get("TERM"),
             locale=_get_locale(),
             timezone=_get_timezone(),
-            ip_address=None,
         ),
         paths=PathsInfo(
             cwd=os.getcwd(),

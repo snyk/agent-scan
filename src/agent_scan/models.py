@@ -483,7 +483,6 @@ class HostInfo(BaseModel):
     term: str | None = None
     locale: str | None = None
     timezone: str | None = None
-    ip_address: str | None = None
 
 
 class PathsInfo(BaseModel):
