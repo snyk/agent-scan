@@ -69,13 +69,18 @@ async def test_argv_flags_are_redacted(monkeypatch):
         "get_readable_home_directories",
         lambda all_users=False: [(Path("/home/alice"), "alice")],
     )
+    # High-entropy hex placeholders (not real AWS/GitHub formats) — they
+    # exercise the high-entropy detector in redact_args while avoiding any
+    # token shape that secret scanners would false-positive on this test file.
+    push_key_value = "Hk9mPq2vNwBzRtY7Lc4hJfDsAe6u"
+    client_id_value = "Vp3WbZxMrTcLqYn8XfJgAk5Bs7Hu"
     argv = [
         "--ci",
         "--no-skills",
         "--push-key",
-        "AKIAIOSFODNN7EXAMPLE",
+        push_key_value,
         "--control-server-H",
-        "x-client-id:fake-pat-placeholder-not-a-real-token",
+        f"x-client-id:{client_id_value}",
     ]
 
     payload = await bootstrap_module._build_request("scan", None, None, argv)
@@ -83,8 +88,9 @@ async def test_argv_flags_are_redacted(monkeypatch):
 
     assert "--ci" in argv_flags
     assert "--no-skills" in argv_flags
-    assert "AKIAIOSFODNN7EXAMPLE" not in argv_flags
-    assert "x-client-id:fake-pat-placeholder-not-a-real-token" not in argv_flags
+    assert push_key_value not in argv_flags
+    assert client_id_value not in argv_flags
+    assert any(flag.startswith("**REDACTED_SECRET_") for flag in argv_flags)
 
 
 @pytest.mark.asyncio

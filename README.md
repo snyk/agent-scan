@@ -154,9 +154,11 @@ Agent Scan does not store or log any usage data, i.e. the contents and results o
 
 #### Control Server Bootstrap
 
-When `--control-server` is configured, Agent Scan sends a startup bootstrap request to the first configured control server before the scan begins. The request contains an allowlisted host/process fingerprint: Agent Scan version and command, redacted CLI arguments, OS and Python details, hostname, current username, CI/WSL/container flags, shell, terminal, locale, timezone, current working directory, current home directory, executable path, and readable home directories capped at 1000 entries. It does not include `schema_version` or scanned usernames.
+When `--control-server` is configured, Agent Scan sends a startup bootstrap request to the first configured control server before doing any other work. This applies to every command that accepts `--control-server` — `scan`, `inspect`, `evo`, and `guard` — including read-only commands like `inspect` and `guard status` that perform no other network egress on their own. If more than one `--control-server` is configured, only the first one receives the bootstrap; the rest receive the eventual scan-result push only.
 
-Bootstrap failures never abort the scan. Timeouts, network errors, HTTP errors, and malformed responses fall back to defaults. Home-directory enumeration may take noticeably longer on Windows because it can query Windows profiles and WSL homes; the HTTP timeout only applies after the payload has been assembled. Use `--no-bootstrap` to disable this startup request.
+The request contains an allowlisted host/process fingerprint: Agent Scan version and command, redacted CLI arguments, OS and Python details, hostname, current username, CI/WSL/container flags, shell, terminal, locale, timezone, current working directory, current home directory, executable path, and readable home directories capped at 1000 entries. It does not include `schema_version` or scanned usernames.
+
+Bootstrap failures never abort the command. Timeouts, network errors, HTTP errors, and malformed responses fall back to defaults. Home-directory enumeration may take noticeably longer on Windows because it can query Windows profiles and WSL homes; the HTTP timeout only applies after the payload has been assembled. Use `--no-bootstrap` to disable this startup request on any command.
 
 ## CLI Parameters
 
@@ -206,6 +208,8 @@ Options:
 #### inspect
 
 Print descriptions of tools, prompts, and resources without verification.
+
+When invoked with `--control-server`, `inspect` also sends a one-shot startup bootstrap to that server before reading any config files — see [Control Server Bootstrap](#control-server-bootstrap). Use `--no-bootstrap` to skip it.
 
 ```
 snyk-agent-scan inspect [CONFIG_FILE...]

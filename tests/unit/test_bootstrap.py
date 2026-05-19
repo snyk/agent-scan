@@ -41,6 +41,7 @@ class _BootstrapServer:
         self.requests.append(
             {
                 "path": request.path,
+                "query_string": request.query_string,
                 "headers": dict(request.headers),
                 "body": None,
             }
@@ -111,6 +112,7 @@ async def test_push_url_is_rewritten_to_sibling_bootstrap_endpoint():
         )
 
     assert server.requests[0]["path"] == "/hidden/mcp-scan/client-bootstrap"
+    assert server.requests[0]["query_string"] == "version=2025-08-28"
 
 
 @pytest.mark.asyncio

@@ -31,7 +31,7 @@ from agent_scan.utils import (
     get_readable_home_directories,
     get_username,
 )
-from agent_scan.verify_api import setup_aiohttp_debug_logging, setup_tcp_connector
+from agent_scan.verify_api import setup_tcp_connector
 from agent_scan.version import version_info
 
 logger = logging.getLogger(__name__)
@@ -52,7 +52,7 @@ def _client_bootstrap_url(control_server_url: str) -> str:
         path = f"{path.rsplit('/', 1)[0]}/client-bootstrap"
     else:
         path = f"{path}/mcp-scan/client-bootstrap" if path else "/mcp-scan/client-bootstrap"
-    return urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+    return urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, ""))
 
 
 # [REVIEW-COMMENT]
@@ -192,8 +192,8 @@ async def bootstrap_first_control_server(
     headers = dict(control_server.headers)
     headers.setdefault("Content-Type", "application/json")
     timeout = aiohttp.ClientTimeout(total=timeout_seconds)
-    # Bootstrap emits one final warning on failure; avoid per-attempt trace errors.
-    trace_configs = setup_aiohttp_debug_logging(verbose=True)
+    # Bootstrap is best-effort: a single warning on failure is enough, so we
+    # skip aiohttp trace configs to avoid mutating process-wide logger levels.
     last_error = "unknown error"
 
     for attempt in range(max_attempts):
@@ -202,7 +202,6 @@ async def bootstrap_first_control_server(
 
         try:
             async with aiohttp.ClientSession(
-                trace_configs=trace_configs,
                 connector=setup_tcp_connector(),
                 trust_env=True,
             ) as session:

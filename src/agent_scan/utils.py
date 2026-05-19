@@ -8,7 +8,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from functools import cache
 from pathlib import Path
 from typing import Any
 
@@ -198,7 +197,6 @@ def get_push_key(control_servers: list[ControlServer] | list[dict[str, Any]]) ->
 # discovery share one permission-aware implementation across Linux, macOS,
 # Windows, and WSL.
 # [/REVIEW-COMMENT]
-@cache
 def get_readable_home_directories(all_users: bool = False) -> list[tuple[Path, str]]:
     """
     Retrieve a list of all human user home directories on the machine
