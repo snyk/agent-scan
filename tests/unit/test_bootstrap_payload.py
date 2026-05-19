@@ -94,6 +94,39 @@ async def test_argv_flags_are_redacted(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_control_server_header_value_is_redacted_as_single_token(monkeypatch):
+    # The --control-server-H value has the shape "header_name:header_value"
+    # and is passed to the CLI as a single argv token (no "=" splitting).
+    # This test isolates that behaviour: the entire "x-client-id:<hex>"
+    # token must be replaced by exactly one redaction marker, with no
+    # partial-leak of either the header name or the header value, and
+    # the surrounding flag token must remain intact.
+    monkeypatch.setattr(
+        bootstrap_module,
+        "get_readable_home_directories",
+        lambda all_users=False: [(Path("/home/alice"), "alice")],
+    )
+    client_id_value = "Vp3WbZxMrTcLqYn8XfJgAk5Bs7Hu"
+    header_token = f"x-client-id:{client_id_value}"
+    argv = ["--control-server-H", header_token]
+
+    payload = await bootstrap_module._build_request("scan", None, None, argv)
+    argv_flags = payload.model_dump()["client"]["argv_flags"]
+
+    # Surrounding flag is preserved at its original index.
+    assert argv_flags[0] == "--control-server-H"
+    # The header-value token is fully replaced by exactly one redaction
+    # marker — the entire "header_name:header_value" pair is treated as
+    # a single unit, so neither the header name nor the value leaks.
+    assert len(argv_flags) == 2
+    assert argv_flags[1].startswith("**REDACTED_SECRET_")
+    assert argv_flags[1].endswith("**")
+    assert client_id_value not in argv_flags[1]
+    assert "x-client-id" not in argv_flags[1]
+    assert ":" not in argv_flags[1]
+
+
+@pytest.mark.asyncio
 async def test_is_ci_flips_with_environment(monkeypatch):
     monkeypatch.setenv("AGENT_SCAN_ENVIRONMENT", "ci")
     monkeypatch.setattr(

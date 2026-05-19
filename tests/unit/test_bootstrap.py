@@ -11,6 +11,7 @@ from aiohttp import web
 from agent_scan import bootstrap as bootstrap_module
 from agent_scan.bootstrap import bootstrap_first_control_server
 from agent_scan.models import ControlServer
+from agent_scan.runtime_config import get_runtime_config, set_runtime_config
 
 REAL_ASYNCIO_SLEEP = asyncio.sleep
 
@@ -299,3 +300,112 @@ async def test_home_directory_enumeration_uses_to_thread(monkeypatch):
 
     assert cfg.source == "bootstrap"
     assert called is True
+
+
+@pytest.mark.asyncio
+async def test_control_server_headers_forwarded_to_bootstrap_request():
+    """Custom headers configured on ControlServer (e.g. auth) must be sent on the bootstrap POST."""
+    async with _BootstrapServer() as server:
+        cs = ControlServer(
+            url=f"{server.url}/mcp-scan/push",
+            headers={
+                "x-client-id": "client-abc",
+                "Authorization": "Bearer secret-token",
+                "X-Custom-Trace": "trace-42",
+            },
+            identifier="machine-1",
+        )
+        await bootstrap_first_control_server([cs], "scan", None, "machine-1", [], False)
+
+    assert len(server.requests) == 1
+    sent_headers = server.requests[0]["headers"]
+    assert sent_headers["x-client-id"] == "client-abc"
+    assert sent_headers["Authorization"] == "Bearer secret-token"
+    assert sent_headers["X-Custom-Trace"] == "trace-42"
+    # The bootstrap layer must default the content type when the caller has
+    # not supplied one, but never overwrite a caller-supplied value.
+    assert sent_headers["Content-Type"] == "application/json"
+
+
+@pytest.mark.asyncio
+async def test_caller_supplied_content_type_header_is_not_overwritten():
+    async with _BootstrapServer() as server:
+        cs = ControlServer(
+            url=f"{server.url}/mcp-scan/push",
+            headers={"x-client-id": "client-abc", "Content-Type": "application/vnd.snyk+json"},
+            identifier="machine-1",
+        )
+        await bootstrap_first_control_server([cs], "scan", None, "machine-1", [], False)
+
+    assert server.requests[0]["headers"]["Content-Type"] == "application/vnd.snyk+json"
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_runtime_config_payload_reaches_singleton():
+    """The runtime_config dict from the bootstrap response must reach get_runtime_config().config."""
+    scan_event_id = uuid4()
+    server_config = {"feature_x": True, "scan_limit": 100, "nested": {"k": "v"}}
+    async with _BootstrapServer(
+        [(200, {"scan_event_id": str(scan_event_id), "runtime_config": server_config}, 0)]
+    ) as server:
+        result = await bootstrap_first_control_server(
+            [_control_server(server.url)], "scan", None, "machine-1", [], False
+        )
+
+    # The helper returns a RuntimeConfig holding the response's runtime_config.
+    assert result.scan_event_id == scan_event_id
+    assert result.config == server_config
+
+    # And once the caller stores it, get_runtime_config() reflects the same dict.
+    set_runtime_config(result)
+    assert get_runtime_config().config == server_config
+    assert get_runtime_config().scan_event_id == scan_event_id
+
+
+@pytest.mark.asyncio
+async def test_concurrent_bootstrap_calls_do_not_interleave():
+    """Two bootstrap calls running concurrently must each return their own coherent
+    RuntimeConfig — no field mixing between the two responses — and the singleton
+    plumbing must stay atomic per ``set_runtime_config`` call."""
+    event_id_a = uuid4()
+    event_id_b = uuid4()
+    config_a = {"who": "A", "shared_key": "value-from-A"}
+    config_b = {"who": "B", "shared_key": "value-from-B"}
+
+    async with (
+        _BootstrapServer([(200, {"scan_event_id": str(event_id_a), "runtime_config": config_a}, 0.05)]) as server_a,
+        _BootstrapServer([(200, {"scan_event_id": str(event_id_b), "runtime_config": config_b}, 0.05)]) as server_b,
+    ):
+        cfg_a, cfg_b = await asyncio.gather(
+            bootstrap_first_control_server(
+                [_control_server(server_a.url)], "scan", None, "machine-a", [], False
+            ),
+            bootstrap_first_control_server(
+                [_control_server(server_b.url)], "scan", None, "machine-b", [], False
+            ),
+        )
+
+    # Each result must be coherent: scan_event_id and config from the same server,
+    # never mixed.
+    assert cfg_a.scan_event_id == event_id_a
+    assert cfg_a.config == config_a
+    assert cfg_b.scan_event_id == event_id_b
+    assert cfg_b.config == config_b
+
+    # Atomicity check on the singleton: setting A then reading must yield A whole;
+    # then setting B and reading must yield B whole — no field bleed between
+    # consecutive writes.
+    set_runtime_config(cfg_a)
+    snapshot_a = get_runtime_config()
+    assert snapshot_a.scan_event_id == event_id_a
+    assert snapshot_a.config == config_a
+
+    set_runtime_config(cfg_b)
+    snapshot_b = get_runtime_config()
+    assert snapshot_b.scan_event_id == event_id_b
+    assert snapshot_b.config == config_b
+
+    # The earlier snapshot must still hold its own value — the singleton's deep
+    # copy on get prevents the second write from rewriting earlier readers.
+    assert snapshot_a.scan_event_id == event_id_a
+    assert snapshot_a.config == config_a

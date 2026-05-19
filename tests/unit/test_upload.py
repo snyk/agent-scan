@@ -1,7 +1,7 @@
 import os
 from unittest.mock import patch
 
-from agent_scan.upload import get_hostname
+from agent_scan.utils import get_hostname
 
 
 def test_get_hostname_returns_valid_string():

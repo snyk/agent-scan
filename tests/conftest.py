@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from agent_scan.runtime_config import reset_runtime_config
 from agent_scan.utils import TempFile, ensure_unicode_console
 
 # Repository root (parent of tests/)
@@ -48,6 +49,19 @@ def pytest_collection_modifyitems(config, items):
 def _ensure_unicode_console():
     """Reconfigure stdout/stderr to UTF-8 on Windows so tests can print Unicode (e.g. emoji) without UnicodeEncodeError."""
     ensure_unicode_console()
+
+
+@pytest.fixture(autouse=True)
+def _reset_runtime_config():
+    """Clear the process-wide runtime-config singleton around every test.
+
+    `agent_scan.runtime_config` holds the bootstrap response (scan event id,
+    server-provided config) in a module-level global. Tests that mutate it
+    must not leak state to other tests, so reset on both entry and exit.
+    """
+    reset_runtime_config()
+    yield
+    reset_runtime_config()
 
 
 def _get_binary_path() -> Path:

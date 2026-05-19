@@ -156,6 +156,36 @@ class TestRedactArgs:
         assert is_secret_marker(result[0])
         assert FAKE_API_KEY not in result[0]
 
+    def test_redact_args_header_token_high_entropy_value_redacted(self):
+        """An HTTP-header-shaped token "name:value" with a high-entropy value is fully redacted."""
+        header_token = f"x-client-id:{FAKE_API_KEY}"
+        args = ["--control-server-H", header_token]
+        result = redact_args(args)
+        assert result[0] == "--control-server-H"
+        assert is_secret_marker(result[1])
+        # Neither the header name nor the value half may leak through.
+        assert "x-client-id" not in result[1]
+        assert FAKE_API_KEY not in result[1]
+
+    def test_redact_args_header_token_keyword_match_redacted(self):
+        """A "name:value" token whose name is a known secret keyword is redacted even at low entropy."""
+        args = ["--header", "api-key:hello-world"]
+        result = redact_args(args)
+        assert result[0] == "--header"
+        assert is_secret_marker(result[1])
+        assert "api-key" not in result[1]
+        assert "hello-world" not in result[1]
+
+    def test_redact_args_header_token_innocuous_value_preserved(self):
+        """A "name:value" token with no secret signal is preserved verbatim."""
+        args = ["--header", "Accept:application/json"]
+        assert redact_args(args) == ["--header", "Accept:application/json"]
+
+    def test_redact_args_url_with_port_preserved(self):
+        """URLs containing ':' (e.g. host:port) are not mistaken for header tokens."""
+        args = ["--server", "http://example.com:8080/path"]
+        assert redact_args(args) == ["--server", "http://example.com:8080/path"]
+
     def test_redact_args_mixed_realistic(self):
         """Realistic mix: package name, boolean flag, low-entropy flag value, high-entropy flag value."""
         args = ["-y", "some-server", "--port", "3000", "--api-key", FAKE_API_KEY, f"--token={FAKE_API_KEY}"]

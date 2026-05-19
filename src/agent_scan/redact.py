@@ -165,10 +165,13 @@ def _detect_keyword(prev_normalized: str, curr_raw: str) -> str | None:
     return None
 
 
+_HEADER_TOKEN_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]+$")
+
+
 def redact_args(args: list[str]) -> list[str]:
     """Redact secret-bearing values in CLI argument tokens.
 
-    Detection runs in three passes against a tokenized view of ``args``
+    Detection runs in four passes against a tokenized view of ``args``
     (each ``--flag=value`` arg yields two tokens; everything else
     yields one):
 
@@ -178,12 +181,21 @@ def redact_args(args: list[str]) -> list[str]:
     3. KeywordDetector via a sliding window of 2: for each adjacent
        ``(prev, curr)`` pair, build a synthetic ``prev="curr"`` line
        and ask the keyword plugin whether ``prev`` is in its denylist.
+    4. Header-shape detection: for a bare positional token of the form
+       ``name:value`` where ``name`` looks like an HTTP header name,
+       split on the first colon and rerun format/entropy/keyword
+       detection against the value half (with ``name`` as the keyword
+       context). This catches secrets passed as a single argv token
+       (e.g. ``--control-server-H x-client-id:<hex>``), which Pass A
+       tends to miss because the header-name prefix dilutes the
+       entropy score and Pass B has no separate ``prev`` token to pair
+       the value with.
 
-    Pass order is format -> entropy -> keyword; the most-specific
-    detector wins (Pass B is skipped when Pass A already marked the
-    token). Pass B is also skipped when ``curr`` looks like another
-    CLI flag (starts with ``-``), so ``["--password", "--api-key"]``
-    does not redact the second flag.
+    Pass order is format -> entropy -> keyword -> header; the most-
+    specific detector wins (later passes skip tokens an earlier pass
+    already marked). Pass B is also skipped when ``curr`` looks like
+    another CLI flag (starts with ``-``), so ``["--password",
+    "--api-key"]`` does not redact the second flag.
 
     The flag half of a ``--flag=value`` arg is never replaced; only
     the value half (or a bare positional) can be redacted.
@@ -226,6 +238,22 @@ def redact_args(args: list[str]) -> list[str]:
             # Defensive: skip Pass B when the candidate looks like a CLI flag.
             continue
         triggering_plugin = _detect_keyword(prev[3], curr[2])
+        if triggering_plugin is not None:
+            marks[t_idx] = triggering_plugin
+
+    # Pass C: header-shape detection on intra-token "name:value" pairs.
+    for t_idx, (_, _, raw, _) in enumerate(tokens):
+        if marks[t_idx] is not None:
+            continue
+        if raw.startswith("-"):
+            continue
+        name, sep, value = raw.partition(":")
+        if not sep or not value or not _HEADER_TOKEN_RE.match(name):
+            continue
+        triggering_plugin = _detect_secret(value)
+        if triggering_plugin is None:
+            normalized_name = name.replace("-", "_")
+            triggering_plugin = _detect_keyword(normalized_name, value)
         if triggering_plugin is not None:
             marks[t_idx] = triggering_plugin
 

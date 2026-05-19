@@ -507,6 +507,13 @@ class ClientBootstrapResponse(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     scan_event_id: UUID
+    # TODO: plumbing only — the bootstrap response carries a free-form
+    # runtime_config dict that the client currently stores on
+    # RuntimeConfig.config but does not yet read. Future work will consume
+    # specific keys (feature flags, scan limits, etc.) on the client side;
+    # until then this field is intentionally parsed-and-stashed so the
+    # control server can begin emitting it without a coordinated client
+    # release. See follow-up tracked alongside the bootstrap rollout.
     runtime_config: dict[str, Any] = Field(default_factory=dict)
 
 

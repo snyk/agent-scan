@@ -3,12 +3,7 @@ import os
 import sys
 from pathlib import Path
 
-from agent_scan import utils as scan_utils
 from agent_scan.models import CandidateClient
-
-get_readable_home_directories = scan_utils.get_readable_home_directories
-get_wsl_home_directories = scan_utils.get_wsl_home_directories
-_list_wsl_distros = scan_utils._list_wsl_distros
 
 # Set up logger for this module
 logger = logging.getLogger(__name__)

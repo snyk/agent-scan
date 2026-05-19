@@ -3,7 +3,7 @@ from uuid import uuid4
 import pytest
 from aiohttp import web
 
-from agent_scan.runtime_config import RuntimeConfig, reset_runtime_config, set_runtime_config
+from agent_scan.runtime_config import RuntimeConfig, set_runtime_config
 from agent_scan.upload import upload
 
 
@@ -35,7 +35,6 @@ class _RecordingServer:
 
 @pytest.mark.asyncio
 async def test_upload_includes_scan_event_id_after_successful_bootstrap():
-    reset_runtime_config()
     scan_event_id = uuid4()
     set_runtime_config(RuntimeConfig(scan_event_id=scan_event_id, source="bootstrap"))
 
@@ -47,7 +46,6 @@ async def test_upload_includes_scan_event_id_after_successful_bootstrap():
 
 @pytest.mark.asyncio
 async def test_upload_omits_scan_event_id_after_default_runtime_config():
-    reset_runtime_config()
     set_runtime_config(RuntimeConfig())
 
     async with _RecordingServer() as server:
