@@ -629,7 +629,11 @@ async def evo(args):
         rich.print(f"[bold red]Error revoking client_id[/bold red]: {e}")
 
 
-async def bootstrap_runtime_config(args, command: Literal["scan", "inspect", "evo", "guard"], subcommand: str | None = None) -> None:
+async def bootstrap_runtime_config(
+    args,
+    command: Literal["scan", "inspect", "evo", "guard"],
+    subcommand: str | None = None,
+) -> None:
     # [REVIEW-COMMENT]
     # Wire CLI commands to the shared bootstrap helper and store the resulting
     # runtime config for downstream upload correlation.

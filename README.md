@@ -160,6 +160,8 @@ The request contains an allowlisted host/process fingerprint: Agent Scan version
 
 Bootstrap failures never abort the command. Timeouts, network errors, HTTP errors, and malformed responses fall back to defaults. Home-directory enumeration may take noticeably longer on Windows because it can query Windows profiles and WSL homes; the HTTP timeout only applies after the payload has been assembled. Use `--no-bootstrap` to disable this startup request on any command.
 
+> **Snyk-managed control server required.** Bootstrap is only sent when the configured `--control-server` URL ends in `/mcp-scan/push` — the canonical Snyk-managed endpoint. Self-hosted or custom control-server deployments whose URLs do not match this shape will skip the bootstrap call (a warning is logged) and uploads will not include the `X-Scan-Event-ID` correlation header. Self-hosted deployments should pass `--no-bootstrap` to suppress the warning and make the opt-out explicit.
+
 ## CLI Parameters
 
 Agent Scan provides the following commands:

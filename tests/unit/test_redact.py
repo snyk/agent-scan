@@ -302,6 +302,56 @@ class TestRedactArgs:
         args = ["--password", "--debug"]
         assert redact_args(args) == ["--password", "--debug"]
 
+    def test_redact_args_push_key_low_entropy_space_form_redacted(self):
+        """Pass D: --push-key <low-entropy> redacts the value by flag-name allowlist.
+
+        Detect-secrets entropy/keyword heuristics do not recognize the custom
+        "push-key" name. The known-sensitive flag allowlist catches it
+        regardless of value shape.
+        """
+        args = ["--push-key", "foo123"]
+        result = redact_args(args)
+        assert result[0] == "--push-key"
+        assert is_secret_marker(result[1])
+        assert "foo123" not in result[1]
+
+    def test_redact_args_push_key_low_entropy_equals_form_redacted(self):
+        """Pass D: --push-key=<low-entropy> redacts the value half via flag-name allowlist."""
+        args = ["--push-key=foo123"]
+        result = redact_args(args)
+        flag, sep, value = result[0].partition("=")
+        assert (flag, sep) == ("--push-key", "=")
+        assert is_secret_marker(value)
+        assert "foo123" not in result[0]
+
+    def test_redact_args_x_client_id_header_low_entropy_redacted(self):
+        """Pass D: x-client-id:<low-entropy> token is redacted by header-name allowlist."""
+        args = ["--control-server-H", "x-client-id:foo123"]
+        result = redact_args(args)
+        assert result[0] == "--control-server-H"
+        assert is_secret_marker(result[1])
+        assert "foo123" not in result[1]
+        assert "x-client-id" not in result[1]
+
+    def test_redact_args_authorization_header_low_entropy_redacted(self):
+        """Pass D: authorization:<low-entropy> redacts via header-name allowlist."""
+        args = ["--control-server-H", "Authorization:Bearer-foo"]
+        result = redact_args(args)
+        assert result[0] == "--control-server-H"
+        assert is_secret_marker(result[1])
+        assert "Bearer-foo" not in result[1]
+
+    def test_redact_args_unrelated_header_low_entropy_preserved(self):
+        """Pass D does not over-redact: headers not on the allowlist stay verbatim when value has no secret signal."""
+        args = ["--control-server-H", "Accept:application/json"]
+        assert redact_args(args) == ["--control-server-H", "Accept:application/json"]
+
+    def test_redact_args_sensitive_flag_marker_name(self):
+        """Pass D uses a distinct marker so the source of redaction is traceable in logs."""
+        args = ["--push-key", "foo123"]
+        result = redact_args(args)
+        assert result[1] == "**REDACTED_SECRET_SENSITIVEFLAGNAME**"
+
 
 def test_redact_remote_url_query_and_headers():
     """

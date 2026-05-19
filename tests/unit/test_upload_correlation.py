@@ -1,7 +1,7 @@
 from uuid import uuid4
 
 import pytest
-from aiohttp import web
+from aiohttp import test_utils, web
 
 from agent_scan.runtime_config import RuntimeConfig, set_runtime_config
 from agent_scan.upload import upload
@@ -18,10 +18,11 @@ class _RecordingServer:
         app.router.add_post("/upload", self._handle)
         self.runner = web.AppRunner(app)
         await self.runner.setup()
-        site = web.TCPSite(self.runner, "127.0.0.1", 0)
+        sock = test_utils.get_unused_port_socket("127.0.0.1")
+        host, port = sock.getsockname()[:2]
+        site = web.SockSite(self.runner, sock)
         await site.start()
-        socket = site._server.sockets[0]
-        self.url = f"http://127.0.0.1:{socket.getsockname()[1]}/upload"
+        self.url = f"http://{host}:{port}/upload"
         return self
 
     async def __aexit__(self, exc_type, exc, tb):

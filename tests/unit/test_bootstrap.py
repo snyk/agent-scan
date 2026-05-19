@@ -6,7 +6,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from aiohttp import web
+from aiohttp import test_utils, web
 
 from agent_scan import bootstrap as bootstrap_module
 from agent_scan.bootstrap import bootstrap_first_control_server
@@ -28,10 +28,11 @@ class _BootstrapServer:
         app.router.add_post("/{tail:.*}", self._handle)
         self.runner = web.AppRunner(app)
         await self.runner.setup()
-        site = web.TCPSite(self.runner, "127.0.0.1", 0)
+        sock = test_utils.get_unused_port_socket("127.0.0.1")
+        host, port = sock.getsockname()[:2]
+        site = web.SockSite(self.runner, sock)
         await site.start()
-        socket = site._server.sockets[0]
-        self.url = f"http://127.0.0.1:{socket.getsockname()[1]}"
+        self.url = f"http://{host}:{port}"
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
@@ -160,7 +161,9 @@ async def test_multiple_control_servers_only_posts_to_first_and_warns(caplog):
 @pytest.mark.asyncio
 async def test_runtime_config_dict_round_trips():
     scan_event_id = uuid4()
-    async with _BootstrapServer([(200, {"scan_event_id": str(scan_event_id), "runtime_config": {"a": 1}}, 0)]) as server:
+    async with _BootstrapServer(
+        [(200, {"scan_event_id": str(scan_event_id), "runtime_config": {"a": 1}}, 0)]
+    ) as server:
         cfg = await bootstrap_first_control_server([_control_server(server.url)], "scan", None, "machine-1", [], False)
 
     assert cfg.source == "bootstrap"
@@ -377,12 +380,8 @@ async def test_concurrent_bootstrap_calls_do_not_interleave():
         _BootstrapServer([(200, {"scan_event_id": str(event_id_b), "runtime_config": config_b}, 0.05)]) as server_b,
     ):
         cfg_a, cfg_b = await asyncio.gather(
-            bootstrap_first_control_server(
-                [_control_server(server_a.url)], "scan", None, "machine-a", [], False
-            ),
-            bootstrap_first_control_server(
-                [_control_server(server_b.url)], "scan", None, "machine-b", [], False
-            ),
+            bootstrap_first_control_server([_control_server(server_a.url)], "scan", None, "machine-a", [], False),
+            bootstrap_first_control_server([_control_server(server_b.url)], "scan", None, "machine-b", [], False),
         )
 
     # Each result must be coherent: scan_event_id and config from the same server,

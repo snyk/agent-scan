@@ -46,7 +46,7 @@ def _client_bootstrap_url(control_server_url: str) -> str | None:
     if not path.endswith("/mcp-scan/push"):
         return None
     path = f"{path.rsplit('/', 1)[0]}/client-bootstrap"
-    return urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, ""))
+    return urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, parsed.fragment))
 
 
 # [REVIEW-COMMENT]
@@ -136,9 +136,7 @@ async def _build_request(
         paths=PathsInfo(
             cwd=os.getcwd(),
             current_home_dir=str(Path.home()),
-            home_directories=[
-                HomeDirectoryEntry(path=str(path), username=username) for path, username in home_dirs
-            ],
+            home_directories=[HomeDirectoryEntry(path=str(path), username=username) for path, username in home_dirs],
             home_directories_truncated=home_dirs_truncated,
             executable=sys.executable,
         ),
