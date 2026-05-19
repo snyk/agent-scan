@@ -1,10 +1,14 @@
 import contextlib
+import getpass
 import glob
 import logging
 import os
+import platform
 import shutil
+import subprocess
 import sys
 import tempfile
+from functools import cache
 from pathlib import Path
 from typing import Any
 
@@ -13,8 +17,29 @@ from rapidfuzz.distance import Levenshtein
 from agent_scan.models import ControlServer, StdioServer
 
 
+# [REVIEW-COMMENT]
+# Shared identity helpers live in utils so bootstrap metadata and upload user
+# info use the same hostname/environment sources.
+# [/REVIEW-COMMENT]
 def get_environment() -> str | None:
     return os.getenv("AGENT_SCAN_ENVIRONMENT", os.getenv("MCP_SCAN_ENVIRONMENT"))
+
+
+def get_hostname() -> str:
+    ci_hostname = os.getenv("AGENT_SCAN_CI_HOSTNAME")
+    if get_environment() == "ci" and ci_hostname:
+        return ci_hostname
+    try:
+        return platform.node() or "unknown"
+    except Exception:
+        return "unknown"
+
+
+def get_username() -> str:
+    try:
+        return getpass.getuser()
+    except Exception:
+        return "unknown"
 
 
 def ensure_unicode_console() -> None:
@@ -145,6 +170,10 @@ def suppress_stdout():
 
 
 def get_push_key(control_servers: list[ControlServer] | list[dict[str, Any]]) -> str | None:
+    # [REVIEW-COMMENT]
+    # Treat x-client-id as an HTTP header name when detecting MDM/push-key
+    # mode: matching is case-insensitive while preserving the configured value.
+    # [/REVIEW-COMMENT]
     parsed_control_servers: list[ControlServer] = []
     for control_server in control_servers:
         if isinstance(control_server, dict):
@@ -159,6 +188,162 @@ def get_push_key(control_servers: list[ControlServer] | list[dict[str, Any]]) ->
             parsed_control_servers.append(control_server)
     for control_server in parsed_control_servers:
         for header in control_server.headers:
-            if "x-client-id" in header:
+            if "x-client-id" in header.lower():
                 return control_server.headers[header]
     return None
+
+
+# [REVIEW-COMMENT]
+# Relocated readable-home enumeration into utils so bootstrap payloads and scan
+# discovery share one permission-aware implementation across Linux, macOS,
+# Windows, and WSL.
+# [/REVIEW-COMMENT]
+@cache
+def get_readable_home_directories(all_users: bool = False) -> list[tuple[Path, str]]:
+    """
+    Retrieve a list of all human user home directories on the machine
+    that the current process actually has permission to read and traverse.
+    Logs the access status for each found directory.
+
+    Returns a list of (home_directory_path, username) tuples.
+    """
+    if not all_users:
+        return [(Path.home(), getpass.getuser())]
+
+    system = platform.system()
+    home_dirs: dict[Path, str] = {}
+
+    if system in ("Linux", "Darwin"):
+        import pwd
+
+        # macOS usually starts human UIDs at 500, Linux at 1000
+        uid_threshold = 500 if system == "Darwin" else 1000
+
+        for user in pwd.getpwall():
+            if user.pw_uid >= uid_threshold and user.pw_name != "nobody":
+                dir_path = Path(user.pw_dir)
+
+                if dir_path.is_dir():
+                    # Check for Read (R_OK) and Traverse/Execute (X_OK) permissions
+                    if os.access(dir_path, os.R_OK | os.X_OK):
+                        logger.info(f"Found user '{user.pw_name}' at {dir_path} -> Access: GRANTED")
+                        home_dirs[dir_path] = user.pw_name
+                    else:
+                        logger.info(f"Found user '{user.pw_name}' at {dir_path} -> Access: DENIED")
+
+    elif system == "Windows":
+        try:
+            cmd = [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "Get-CimInstance Win32_UserProfile | Where-Object { $_.Special -eq $false } | Select-Object -ExpandProperty LocalPath",
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+
+            for line in result.stdout.splitlines():
+                clean_path = line.strip()
+                if clean_path:
+                    dir_path = Path(clean_path)
+                    if dir_path.is_dir():
+                        # Windows primarily relies on R_OK for basic directory readability
+                        if os.access(dir_path, os.R_OK):
+                            username = dir_path.name
+                            logger.info(f"Found profile at {dir_path} -> Access: GRANTED")
+                            home_dirs[dir_path] = username
+                        else:
+                            logger.info(f"Found profile at {dir_path} -> Access: DENIED")
+
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            logger.error(f"Failed to fetch Windows profiles: {e}")
+
+        for wsl_home, wsl_user in get_wsl_home_directories():
+            if wsl_home in home_dirs:
+                continue
+            home_dirs[wsl_home] = wsl_user
+
+    else:
+        raise NotImplementedError(f"Unsupported OS: {system}")
+
+    return list(home_dirs.items())
+
+
+def _list_wsl_distros() -> list[str]:
+    """
+    Return the list of installed, non-hidden WSL distro names (e.g. "Ubuntu-24.04").
+    Returns an empty list if WSL is not installed or the call fails.
+    """
+    try:
+        # `wsl.exe -l -q` emits one distro name per line in UTF-16LE.
+        proc = subprocess.run(
+            ["wsl.exe", "--list", "--quiet"],
+            capture_output=True,
+            check=True,
+            timeout=10,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
+        logger.info(f"WSL not available or failed to list distros: {e}")
+        return []
+
+    raw = proc.stdout
+    # wsl.exe output is UTF-16LE on most Windows builds; fall back to utf-8.
+    for encoding in ("utf-16-le", "utf-16", "utf-8"):
+        try:
+            text = raw.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        return []
+
+    distros: list[str] = []
+    for line in text.splitlines():
+        name = line.strip().replace("\x00", "")
+        if name:
+            distros.append(name)
+    return distros
+
+
+def get_wsl_home_directories() -> list[tuple[Path, str]]:
+    """
+    Enumerate human home directories that live inside WSL distros, exposed to
+    Windows via the `\\\\wsl.localhost\\<Distro>\\home\\<user>` UNC share.
+
+    Only runs on Windows; returns an empty list otherwise. Silently returns []
+    if WSL is not installed, no distros are registered, or the filesystem is
+    not reachable (e.g. the distro cannot be started).
+    """
+    if platform.system() != "Windows":
+        return []
+
+    results: dict[Path, str] = {}
+    for distro in _list_wsl_distros():
+        # Prefer the modern \wsl.localhost alias; fall back to \wsl$ which is
+        # what older Windows builds expose.
+        for prefix in (r"\\wsl.localhost", r"\\wsl$"):
+            distro_home = Path(f"{prefix}\\{distro}\\home")
+            try:
+                if not distro_home.is_dir():
+                    continue
+                user_dirs = list(distro_home.iterdir())
+            except OSError as e:
+                logger.info(f"WSL home unreachable for {distro} via {prefix}: {e}")
+                continue
+
+            for user_dir in user_dirs:
+                try:
+                    if not user_dir.is_dir():
+                        continue
+                    if not os.access(user_dir, os.R_OK | os.X_OK):
+                        logger.info(f"WSL home {user_dir} -> Access: DENIED")
+                        continue
+                except OSError as e:
+                    logger.info(f"WSL home {user_dir} not inspectable: {e}")
+                    continue
+
+                logger.info(f"Found WSL user '{user_dir.name}' in distro '{distro}' -> Access: GRANTED")
+                results[user_dir] = user_dir.name
+            # Found a working prefix for this distro; no need to try the alias.
+            break
+
+    return list(results.items())

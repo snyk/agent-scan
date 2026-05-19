@@ -22,9 +22,9 @@ from agent_scan.models import (
 )
 from agent_scan.redact import redact_scan_result
 from agent_scan.upload import upload
-from agent_scan.utils import get_push_key
+from agent_scan.utils import get_push_key, get_readable_home_directories
 from agent_scan.verify_api import analyze_machine
-from agent_scan.well_known_clients import get_readable_home_directories, get_well_known_clients
+from agent_scan.well_known_clients import get_well_known_clients
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +89,11 @@ async def discover_clients_to_inspect(
             else:
                 logger.info(f"Client {client.name} does not exist on this machine. {client.client_exists_paths}")
 
+    # [REVIEW-COMMENT]
+    # Limit uploaded username context to accounts where an agent was actually
+    # detected, falling back narrowly so control-server pushes avoid disclosing
+    # unrelated readable home directories.
+    # [/REVIEW-COMMENT]
     # Only report usernames where an agent was detected in their home directory.
     # When no usernames were associated with detected agents:
     #   - Discovery mode with --scan-all-users: fall back to all readable usernames.
@@ -178,6 +183,10 @@ async def inspect_analyze_push_pipeline(
         skip_ssl_verify=analyze_args.skip_ssl_verify,
         scan_context=scan_context,
     )
+    # [REVIEW-COMMENT]
+    # Push each analyzed result set to every configured control server. The
+    # upload layer adds bootstrap correlation headers from runtime config.
+    # [/REVIEW-COMMENT]
     # push
     for control_server in push_args.control_servers:
         await upload(
