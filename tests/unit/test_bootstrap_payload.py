@@ -110,9 +110,13 @@ async def test_argv_flags_are_redacted(monkeypatch):
         "get_readable_home_directories",
         lambda all_users=False: [(Path("/home/alice"), "alice")],
     )
-    # High-entropy hex placeholders (not real AWS/GitHub formats) — they
-    # exercise the high-entropy detector in redact_args while avoiding any
-    # token shape that secret scanners would false-positive on this test file.
+    # Mixed-case alphanumeric placeholders. Pure lowercase-hex literals
+    # of this length match upstream secret-scanner heuristics for legacy
+    # GitHub PATs and trigger false positives on the PR scan; mixing in
+    # uppercase letters breaks that shape while keeping the entropy high
+    # enough for detect-secrets' HighEntropyStringsPlugin. Redaction here
+    # is actually driven by Pass D (sensitive flag/header name) regardless
+    # of value shape, so any non-empty distinct values would work.
     push_key_value = "Hk9mPq2vNwBzRtY7Lc4hJfDsAe6u"
     client_id_value = "Vp3WbZxMrTcLqYn8XfJgAk5Bs7Hu"
     argv = [
@@ -147,6 +151,8 @@ async def test_control_server_header_value_is_redacted_as_single_token(monkeypat
         "get_readable_home_directories",
         lambda all_users=False: [(Path("/home/alice"), "alice")],
     )
+    # Mixed-case alphanumeric — same reasoning as test_argv_flags_are_redacted
+    # above: lowercase-hex literals trigger upstream PAT scanners on PRs.
     client_id_value = "Vp3WbZxMrTcLqYn8XfJgAk5Bs7Hu"
     header_token = f"x-client-id:{client_id_value}"
     argv = ["--control-server-H", header_token]
