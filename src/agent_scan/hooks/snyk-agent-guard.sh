@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 #
 # Thin-client hook handler for forwarding agent hook events to Evo Agent Guard.
-# Supports both Claude Code and Cursor via the --client argument.
+# Supports Claude Code, Cursor, and Codex via the --client argument.
 #
 # Usage:
 #   PUSH_KEY='...' REMOTE_HOOKS_BASE_URL='...' bash snyk-agent-guard.sh --client claude-code
 #   PUSH_KEY='...' REMOTE_HOOKS_BASE_URL='...' bash snyk-agent-guard.sh --client cursor
+#   PUSH_KEY='...' REMOTE_HOOKS_BASE_URL='...' bash snyk-agent-guard.sh --client codex
 #
 # Reads a JSON payload from stdin and POSTs it (base64-encoded) to the Agent Guard endpoint.
 #
@@ -99,7 +100,11 @@ hook_main() {
       endpoint="/hidden/agent-monitor/hooks/cursor"
       user_agent="snyk/snyk-agent-guard.sh Agent Scan v${AGENT_SCAN_VERSION}"
       ;;
-    *) die "Unknown client: ${client}. Expected claude-code or cursor." ;;
+    codex)
+      endpoint="/hidden/agent-monitor/hooks/codex"
+      user_agent="snyk/snyk-agent-guard.sh Agent Scan v${AGENT_SCAN_VERSION}"
+      ;;
+    *) die "Unknown client: ${client}. Expected claude-code, cursor, or codex." ;;
   esac
 
   local url="${REMOTE_HOOKS_BASE_URL}${endpoint}?version=${VERSION}"

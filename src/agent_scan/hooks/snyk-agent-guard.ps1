@@ -1,6 +1,6 @@
 #
 # Thin-client hook handler for forwarding agent hook events to Evo Agent Guard.
-# Supports both Claude Code and Cursor via the -Client argument.
+# Supports Claude Code, Cursor, and Codex via the -Client argument.
 #
 # Usage:
 #   powershell -File snyk-agent-guard.ps1 -Client claude-code -PushKey '...' -RemoteUrl 'https://...'
@@ -11,7 +11,7 @@
 #
 param(
     [Parameter(Mandatory=$true)]
-    [ValidateSet("claude-code","cursor")]
+    [ValidateSet("claude-code","cursor","codex")]
     [string]$Client,
 
     [Parameter(Mandatory=$false)]
@@ -52,6 +52,9 @@ switch ($Client) {
     }
     "cursor" {
         $endpoint = "/hidden/agent-monitor/hooks/cursor"
+    }
+    "codex" {
+        $endpoint = "/hidden/agent-monitor/hooks/codex"
     }
 }
 

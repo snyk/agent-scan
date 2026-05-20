@@ -363,14 +363,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
-            f"  {program_name}                     # Scan all known MCP configs\n"
+            f"  {program_name}                      # Scan all known MCP configs\n"
             f"  {program_name} ~/custom/config.json # Scan a specific config file\n"
-            f"  {program_name} inspect             # Just inspect tools without verification\n"
-            f"  {program_name} --no-skills         # Scan only mcp servers, skip skills.\n"
-            f"  {program_name} --verbose           # Enable detailed logging output\n"
-            f"  {program_name} --print-errors      # Show error details and tracebacks\n"
-            f"  {program_name} --json              # Output results in JSON format\n"
-            f"  {program_name} --ci                # With --ci, exit with a non-zero code when there are analysis findings or runtime failures\n\n"
+            f"  {program_name} inspect              # Just inspect tools without verification\n"
+            f"  {program_name} --no-skills          # Scan only mcp servers, skip skills.\n"
+            f"  {program_name} --verbose            # Enable detailed logging output\n"
+            f"  {program_name} --print-errors       # Show error details and tracebacks\n"
+            f"  {program_name} --json               # Output results in JSON format\n"
+            f"  {program_name} --ci                 # With --ci, exit with a non-zero code when there are analysis findings or runtime failures\n\n"
             f"  # Multiple control servers with individual options:\n"
             f'  {program_name} --control-server https://server1.com --control-server-H "Auth: token1" \\\n'
             f"    --control-identifier user@example.com \\\n"
@@ -431,7 +431,7 @@ def main():
     guard_parser = subparsers.add_parser(
         "guard",
         help="Install, uninstall, or check status of Agent Guard hooks",
-        description="Manage Agent Guard hooks for Claude Code and Cursor.",
+        description="Manage Agent Guard hooks for Claude Code, Cursor, and Codex.",
     )
     guard_subparsers = guard_parser.add_subparsers(
         dest="guard_command",
@@ -446,7 +446,7 @@ def main():
     )
     guard_install_parser.add_argument(
         "client",
-        choices=["claude", "cursor"],
+        choices=["claude", "cursor", "codex"],
         help="Client to install hooks for",
     )
     guard_install_parser.add_argument(
@@ -487,7 +487,7 @@ def main():
     )
     guard_uninstall_parser.add_argument(
         "client",
-        choices=["claude", "cursor"],
+        choices=["claude", "cursor", "codex"],
         help="Client to uninstall hooks from",
     )
     guard_uninstall_parser.add_argument(
