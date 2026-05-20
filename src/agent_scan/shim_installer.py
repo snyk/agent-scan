@@ -121,6 +121,11 @@ async def install_shim_into_config(config_path: str) -> list[str]:
         if name not in stdio_names:
             continue
         if _is_shimmed_raw(server):
+            if server.get("command") == shim_path:
+                continue
+            # Stale shim path — update command in place, args already wrapped
+            server["command"] = shim_path
+            shimmed.append(name)
             continue
 
         old_command = server.get("command", "")
