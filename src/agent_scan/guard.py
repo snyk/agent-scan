@@ -1,4 +1,4 @@
-"""Agent Guard hook management for Claude Code and Cursor."""
+"""Agent Guard hook management for Claude Code, Cursor, and Codex."""
 
 from __future__ import annotations
 
@@ -34,17 +34,23 @@ _PERMISSION_DENIED = "__permission_denied__"
 
 CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 CURSOR_HOOKS_PATH = Path.home() / ".cursor" / "hooks.json"
+CODEX_HOOKS_PATH = Path.home() / ".codex" / "hooks.json"
 
 # Managed (MDM / admin-deployed) config paths — OS-specific
+# Codex managed hooks use a requirements.toml file at a system location
+# (see https://developers.openai.com/codex/hooks#managed-hooks-from-requirementstoml).
 if sys.platform == "darwin":
     CLAUDE_MANAGED_SETTINGS_PATH = Path("/Library/Application Support/ClaudeCode/managed-settings.json")
     CURSOR_MANAGED_HOOKS_PATH = Path("/Library/Application Support/Cursor/hooks.json")
+    CODEX_MANAGED_HOOKS_PATH = Path("/etc/codex/requirements.toml")
 elif sys.platform == "win32":
     CLAUDE_MANAGED_SETTINGS_PATH = Path("C:/Program Files/ClaudeCode/managed-settings.json")
     CURSOR_MANAGED_HOOKS_PATH = Path("C:/ProgramData/Cursor/hooks.json")
+    CODEX_MANAGED_HOOKS_PATH = Path("C:/ProgramData/OpenAI/Codex/requirements.toml")
 else:  # Linux and others
     CLAUDE_MANAGED_SETTINGS_PATH = Path("/etc/claude-code/managed-settings.json")
     CURSOR_MANAGED_HOOKS_PATH = Path("/etc/cursor/hooks.json")
+    CODEX_MANAGED_HOOKS_PATH = Path("/etc/codex/requirements.toml")
 
 CLAUDE_HOOK_EVENTS = [
     "PreToolUse",
@@ -58,6 +64,15 @@ CLAUDE_HOOK_EVENTS = [
     "SubagentStop",
 ]
 CLAUDE_EVENTS_WITH_MATCHER = {"PreToolUse", "PostToolUse", "PostToolUseFailure"}
+
+CODEX_HOOK_EVENTS = [
+    "PreToolUse",
+    "PermissionRequest",
+    "PostToolUse",
+    "UserPromptSubmit",
+    "Stop",
+    "SessionStart",
+]
 
 CURSOR_HOOK_EVENTS = [
     "beforeSubmitPrompt",
@@ -207,7 +222,7 @@ def _run_install(args) -> None:
             sys.exit(1)
         rich.print(f"[green]\u2713[/green]  Push key minted  [yellow]{_mask_key(push_key)}[/yellow]")
 
-    hook_client = "claude-code" if client == "claude" else "cursor"
+    hook_client = _hook_client_name(client)
     minted = not headless  # True if we minted the key in this run
     config_path = _config_path(client, getattr(args, "file", None), managed=managed)
 
@@ -260,6 +275,11 @@ def _install_hooks(
         config_changed = _install_claude(command, config_path)
     elif client == "cursor":
         config_changed = _install_cursor(command, config_path)
+    elif client == "codex":
+        if _is_codex_requirements_toml(config_path):
+            config_changed = _install_codex_managed(command, config_path, dest_path)
+        else:
+            config_changed = _install_codex(command, config_path)
 
     if script_updated or config_changed or minted:
         rich.print(f"[green]\u2713[/green]  {scope.title()} hooks installed for [bold]{label}[/bold]")
@@ -324,6 +344,139 @@ def _install_cursor(command: str, path: Path) -> bool:
     return True
 
 
+def _install_codex(command: str, path: Path) -> bool:
+    """Install Codex hooks. Returns True if the file was changed.
+
+    Codex uses the same hooks.json shape as Claude Code: each event maps to a
+    list of matcher groups, each containing a list of command hooks.
+    """
+    data = _read_json_or_empty(path)
+    hooks = data.get("hooks", {})
+
+    preserved = _count_non_agent_scan_claude(hooks)
+    hooks = _filter_claude_hooks(hooks)
+
+    # Codex matches every event when "matcher" is omitted, so we don't set it.
+    for event in CODEX_HOOK_EVENTS:
+        entry = {"type": "command", "command": command}
+        existing = hooks.get(event, [])
+        existing.append({"hooks": [entry]})
+        hooks[event] = existing
+
+    data["hooks"] = hooks
+
+    if not _write_json_if_changed(path, data):
+        return False
+    note = _preserved_note(preserved)
+    rich.print(f"[green]✓[/green]  Written [dim]{path}[/dim]{note}")
+    return True
+
+
+def _is_codex_requirements_toml(path: Path) -> bool:
+    return path.suffix.lower() == ".toml"
+
+
+def _codex_managed_dirs(config_path: Path) -> tuple[str, str]:
+    """Return (managed_dir, windows_managed_dir) values to embed in requirements.toml.
+
+    The current platform's value is derived from the config_path so the script
+    location stays consistent with where _copy_hook_script writes it. The
+    other-platform value uses the canonical Codex system path.
+    """
+    hooks_dir = (config_path.parent / "hooks").as_posix()
+    if IS_WINDOWS:
+        windows_managed_dir = str(config_path.parent / "hooks")
+        managed_dir = "/etc/codex/hooks"
+        return managed_dir, windows_managed_dir
+    managed_dir = hooks_dir
+    windows_managed_dir = r"C:\ProgramData\OpenAI\Codex\hooks"
+    return managed_dir, windows_managed_dir
+
+
+def _render_codex_requirements_toml(command: str, config_path: Path) -> str:
+    """Generate the requirements.toml content for managed Codex hooks."""
+    managed_dir, windows_managed_dir = _codex_managed_dirs(config_path)
+    lines = [
+        "[features]",
+        "hooks = true",
+        "",
+        "[hooks]",
+        f'managed_dir = "{managed_dir}"',
+        f"windows_managed_dir = '{windows_managed_dir}'",
+        "",
+    ]
+    escaped = command.replace("\\", "\\\\").replace('"', '\\"')
+    for event in CODEX_HOOK_EVENTS:
+        lines.append(f"[[hooks.{event}]]")
+        lines.append(f"[[hooks.{event}.hooks]]")
+        lines.append('type = "command"')
+        lines.append(f'command = "{escaped}"')
+        lines.append("")
+    return "\n".join(lines).rstrip("\n") + "\n"
+
+
+def _install_codex_managed(command: str, path: Path, script_path: Path) -> bool:
+    """Write Codex managed hooks as requirements.toml. Returns True if changed."""
+    new_content = _render_codex_requirements_toml(command, path)
+    if path.exists() and path.read_text() == new_content:
+        return False
+    if path.exists():
+        _backup_file(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(new_content)
+    rich.print(f"[green]✓[/green]  Written [dim]{path}[/dim]")
+    return True
+
+
+def _parse_codex_requirements_toml(text: str) -> tuple[list[str], str | None]:
+    """Extract Snyk Agent Guard events and the first matching command from requirements.toml.
+
+    Returns (events, command). Only scans hook command lines containing the
+    agent-guard detection marker.
+    """
+    events: list[str] = []
+    found_cmd: str | None = None
+    current_event: str | None = None
+    header_re = re.compile(r"^\[\[hooks\.([A-Za-z]+)(?:\.hooks)?\]\]\s*$")
+    command_re = re.compile(r'^command\s*=\s*"((?:[^"\\]|\\.)*)"\s*$')
+    for raw in text.splitlines():
+        line = raw.strip()
+        m = header_re.match(line)
+        if m:
+            current_event = m.group(1)
+            continue
+        m = command_re.match(line)
+        if m and current_event:
+            cmd = m.group(1).encode("utf-8").decode("unicode_escape")
+            if _is_agent_scan_command(cmd) and current_event not in events:
+                events.append(current_event)
+                if found_cmd is None:
+                    found_cmd = cmd
+    return events, found_cmd
+
+
+def _detect_codex_managed_install(path: Path) -> dict | None:
+    text = path.read_text()
+    events, found_cmd = _parse_codex_requirements_toml(text)
+    if not events or found_cmd is None:
+        return None
+    return _parse_command_info(found_cmd, events)
+
+
+def _uninstall_codex_managed(path: Path) -> None:
+    if not path.exists():
+        rich.print("[dim]No requirements.toml found. Nothing to uninstall.[/dim]")
+        return
+    text = path.read_text()
+    events, _ = _parse_codex_requirements_toml(text)
+    if not events:
+        rich.print("[dim]No Agent Guard hooks found.[/dim]")
+        return
+    _backup_file(path)
+    path.unlink()
+    rich.print(f"[green]✓[/green]  Removed {len(events)} Agent Guard hook(s) (deleted [dim]{path}[/dim])")
+
+
 # ---------------------------------------------------------------------------
 # Uninstall
 # ---------------------------------------------------------------------------
@@ -341,13 +494,23 @@ def _run_uninstall(args) -> None:
     rich.print()
 
     # Detect the installed command to extract push key + tenant for revocation
-    info = _detect_claude_install(config_path) if client == "claude" else _detect_cursor_install(config_path)
+    if client == "claude":
+        info = _detect_claude_install(config_path)
+    elif client == "cursor":
+        info = _detect_cursor_install(config_path)
+    else:  # codex
+        info = _detect_codex_install(config_path)
 
     # Remove hooks from config
     if client == "claude":
         _uninstall_claude(config_path)
     elif client == "cursor":
         _uninstall_cursor(config_path)
+    elif client == "codex":
+        if _is_codex_requirements_toml(config_path):
+            _uninstall_codex_managed(config_path)
+        else:
+            _uninstall_codex(config_path)
 
     # Remove hook script
     _remove_hook_script(client, config_path)
@@ -404,6 +567,33 @@ def _uninstall_claude(path: Path) -> None:
     rich.print(f"[green]\u2713[/green]  Removed {removed} Agent Guard hook(s){_preserved_note(total_after)}")
 
 
+def _uninstall_codex(path: Path) -> None:
+    """Codex uses the Claude-shaped hooks.json, so reuse the Claude filter."""
+    if not path.exists():
+        rich.print("[dim]No hooks.json found. Nothing to uninstall.[/dim]")
+        return
+
+    data = _read_json_or_empty(path)
+    hooks = data.get("hooks", {})
+
+    total_before = sum(len(groups) for groups in hooks.values())
+    filtered = _filter_claude_hooks(hooks)
+    total_after = sum(len(groups) for groups in filtered.values())
+
+    removed = total_before - total_after
+    if removed == 0:
+        rich.print("[dim]No Agent Guard hooks found.[/dim]")
+        return
+
+    _backup_file(path)
+    if filtered:
+        data["hooks"] = filtered
+    else:
+        data.pop("hooks", None)
+    _write_json(path, data)
+    rich.print(f"[green]✓[/green]  Removed {removed} Agent Guard hook(s){_preserved_note(total_after)}")
+
+
 def _uninstall_cursor(path: Path) -> None:
     if not path.exists():
         rich.print("[dim]No hooks.json found. Nothing to uninstall.[/dim]")
@@ -438,6 +628,8 @@ def _run_status() -> None:
     rich.print()
     _print_client_status("Cursor", CURSOR_HOOKS_PATH, _detect_cursor_install())
     rich.print()
+    _print_client_status("Codex", CODEX_HOOKS_PATH, _detect_codex_install())
+    rich.print()
 
     rich.print("[bold]Managed hooks:[/bold]")
     claude_managed_info: dict | str | None
@@ -453,6 +645,13 @@ def _run_status() -> None:
     except PermissionError:
         cursor_managed_info = _PERMISSION_DENIED
     _print_client_status("Cursor", CURSOR_MANAGED_HOOKS_PATH, cursor_managed_info)
+    rich.print()
+    codex_managed_info: dict | str | None
+    try:
+        codex_managed_info = _detect_codex_install(CODEX_MANAGED_HOOKS_PATH)
+    except PermissionError:
+        codex_managed_info = _PERMISSION_DENIED
+    _print_client_status("Codex", CODEX_MANAGED_HOOKS_PATH, codex_managed_info)
     rich.print()
 
     rich.print("[dim]# interactive flow (user-level)[/dim]")
@@ -513,6 +712,33 @@ def _detect_claude_install(path: Path = CLAUDE_SETTINGS_PATH) -> dict | None:
     return _parse_command_info(found_cmd, events)
 
 
+def _detect_codex_install(path: Path = CODEX_HOOKS_PATH) -> dict | None:
+    if not path.exists():
+        return None
+    if _is_codex_requirements_toml(path):
+        return _detect_codex_managed_install(path)
+    data = _read_json_or_empty(path)
+    hooks = data.get("hooks", {})
+
+    events = []
+    found_cmd = None
+    for event in CODEX_HOOK_EVENTS:
+        for group in hooks.get(event, []):
+            for h in group.get("hooks", []):
+                if _is_agent_scan_command(h.get("command", "")):
+                    events.append(event)
+                    if found_cmd is None:
+                        found_cmd = h["command"]
+                    break
+            else:
+                continue
+            break
+
+    if not events or found_cmd is None:
+        return None
+    return _parse_command_info(found_cmd, events)
+
+
 def _detect_cursor_install(path: Path = CURSOR_HOOKS_PATH) -> dict | None:
     if not path.exists():
         return None
@@ -543,7 +769,7 @@ def _send_test_event(push_key: str, url: str, hook_client: str, script_path: Pat
     """Send a test hooksConfigured event by invoking the hook script. Returns True on success."""
     import subprocess
 
-    if hook_client == "claude-code":
+    if hook_client == "claude-code" or hook_client == "codex":
         payload = '{"hook_event_name":"hooksConfigured","session_id":"hooks-setup"}'
     else:
         payload = '{"hook_event_name":"hooksConfigured","conversation_id":"hooks-setup"}'
@@ -689,8 +915,17 @@ def _extract_env_from_cmd(cmd: str, key: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+_CLIENT_LABELS = {"claude": "Claude Code", "cursor": "Cursor", "codex": "Codex"}
+_HOOK_CLIENT_NAMES = {"claude": "claude-code", "cursor": "cursor", "codex": "codex"}
+
+
 def _client_label(client: str) -> str:
-    return "Claude Code" if client == "claude" else "Cursor"
+    return _CLIENT_LABELS.get(client, client)
+
+
+def _hook_client_name(client: str) -> str:
+    """Endpoint slug used on the agent-monitor side (and --client in the hook script)."""
+    return _HOOK_CLIENT_NAMES.get(client, client)
 
 
 def _config_path(client: str, override: str | None = None, managed: bool = False) -> Path:
@@ -698,8 +933,16 @@ def _config_path(client: str, override: str | None = None, managed: bool = False
     if override:
         return Path(override)
     if managed:
-        return CLAUDE_MANAGED_SETTINGS_PATH if client == "claude" else CURSOR_MANAGED_HOOKS_PATH
-    return CLAUDE_SETTINGS_PATH if client == "claude" else CURSOR_HOOKS_PATH
+        if client == "claude":
+            return CLAUDE_MANAGED_SETTINGS_PATH
+        if client == "cursor":
+            return CURSOR_MANAGED_HOOKS_PATH
+        return CODEX_MANAGED_HOOKS_PATH
+    if client == "claude":
+        return CLAUDE_SETTINGS_PATH
+    if client == "cursor":
+        return CURSOR_HOOKS_PATH
+    return CODEX_HOOKS_PATH
 
 
 def _preflight_writable(config_path: Path) -> None:

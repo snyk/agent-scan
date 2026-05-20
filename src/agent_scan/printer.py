@@ -94,12 +94,20 @@ def format_servers_line(
     severity_levels: list[Literal["critical", "high", "medium", "low"]] = ["critical", "high", "medium", "low"]
     if severities is not None and len([s for s in severities if s != "info"]) > 0:
         severity_summary: list[str] = []
+        total_findings = 0
+        single_severity: Literal["critical", "high", "medium", "low"] | None = None
         for k in severity_levels:
             count = severities.count(k)
             if count == 0:
                 continue
+            total_findings += count
+            single_severity = k
             severity_summary.append(f"{SEVERITY_COLOR_MAP[k]}{count} {k}{SEVERITY_COLOR_MAP[k].replace('[', '[/')}")
-        text += f" ({', '.join(severity_summary)})"
+        if total_findings == 1 and single_severity is not None:
+            color = SEVERITY_COLOR_MAP[single_severity]
+            text += f" {color}1 {single_severity} finding{color.replace('[', '[/')}"
+        else:
+            text += f" {total_findings} findings ({', '.join(severity_summary)})"
 
     if issues:
         text += format_issues(issues, new_line=True)
@@ -151,18 +159,23 @@ def get_max_severity(
 
 
 def format_issue(issue: Issue) -> str:
-    issue_str = rf"● \[{issue.code} {get_severity(issue)}]: "
+    severity = get_severity(issue)
+    color_open = SEVERITY_COLOR_MAP[severity]
+    color_close = color_open.replace("[", "[/")
+
+    prefix = rf"● \[{issue.code} {severity}]:"
 
     if issue.code in ["W015", "W016", "W017", "W018"] and issue.extra_data is not None and "reason" in issue.extra_data:
-        issue_str += f"{issue.message} Reason: {issue.extra_data['reason']}"
+        body = f"{issue.message} Reason: {issue.extra_data['reason']}"
     elif issue.code == "W001" and issue.extra_data is not None and "words" in issue.extra_data:
         words = ",".join([f'"{w}"' for w in issue.extra_data["words"]])
-        issue_str += f"Found the word{'s' if len(issue.extra_data['words']) > 1 else ''} {words} in the tool description. It is a common word used in prompt injection attacks."
+        body = f"Found the word{'s' if len(issue.extra_data['words']) > 1 else ''} {words} in the tool description. It is a common word used in prompt injection attacks."
     else:
-        issue_str += f"{issue.message}"
-    return (
-        SEVERITY_COLOR_MAP[get_severity(issue)] + issue_str + SEVERITY_COLOR_MAP[get_severity(issue)].replace("[", "[/")
-    )
+        body = issue.message
+
+    # Only color the severity prefix; keep the message body in the default
+    # color so long descriptions remain readable.
+    return f"{color_open}{prefix}{color_close} {body}"
 
 
 def format_issues(issues: list[Issue], new_line: bool = False) -> str:
@@ -197,17 +210,15 @@ def format_entity_line(
 ) -> Text:
     include_description = len(issues) > 0
 
-    # right-pad & truncate name
+    # right-pad name
     name = entity.name
     if not full_description:
         max_name_length = MAX_ENTITY_NAME_LENGTH_SKILL if is_skill else MAX_ENTITY_NAME_LENGTH
-        if len(name) > max_name_length:
-            name = name[: (max_name_length - 3)] + "..."
-        name = name + " " * (max_name_length - len(name))
+        name = name + " " * max(0, max_name_length - len(name))
 
-    # right-pad type
+    # right-pad type (with at least one trailing space so it never abuts the name)
     type_str = format_entity_type(entity, is_skill)
-    type_str = type_str + " " * (len("instruction") - len(type_str))
+    type_str = type_str + " " * (len("instruction") + 1 - len(type_str))
     # prompt     / instruction
     # tool       / script
     # resouce    / asset
@@ -246,9 +257,7 @@ def format_global_issue(result: ScanPathResult, issue: Issue, show_all: bool = F
 
     def _format_tool_name(server_name: str, tool_name: str, value: float) -> str:
         tool_string = f"{server_name}/{tool_name}"
-        if len(tool_string) > MAX_ENTITY_NAME_TOXIC_FLOW_LENGTH:
-            tool_string = tool_string[: (MAX_ENTITY_NAME_TOXIC_FLOW_LENGTH - 3)] + "..."
-        tool_string = tool_string + " " * (MAX_ENTITY_NAME_TOXIC_FLOW_LENGTH - len(tool_string))
+        tool_string = tool_string + " " * max(0, MAX_ENTITY_NAME_TOXIC_FLOW_LENGTH - len(tool_string))
         if value <= 1.5:
             severity = "[yellow]Low[/yellow]"
         elif value <= 2.5:

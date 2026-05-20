@@ -21,6 +21,9 @@ from agent_scan.guard import (
     CLAUDE_HOOK_EVENTS,
     CLAUDE_MANAGED_SETTINGS_PATH,
     CLAUDE_SETTINGS_PATH,
+    CODEX_HOOK_EVENTS,
+    CODEX_HOOKS_PATH,
+    CODEX_MANAGED_HOOKS_PATH,
     CURSOR_HOOK_EVENTS,
     CURSOR_HOOKS_PATH,
     CURSOR_MANAGED_HOOKS_PATH,
@@ -29,12 +32,14 @@ from agent_scan.guard import (
     _compact_events,
     _config_path,
     _detect_claude_install,
+    _detect_codex_install,
     _detect_cursor_install,
     _ensure_guard_enabled_for_tenant,
     _extract_env_from_cmd,
     _filter_claude_hooks,
     _filter_cursor_hooks,
     _install_claude,
+    _install_codex,
     _install_cursor,
     _is_agent_scan_command,
     _mask_key,
@@ -44,6 +49,7 @@ from agent_scan.guard import (
     _run_install,
     _shell_quote,
     _uninstall_claude,
+    _uninstall_codex,
     _uninstall_cursor,
 )
 from agent_scan.pushkeys import GuardEnabledAccessDeniedError
@@ -1057,11 +1063,17 @@ class TestConfigPath:
     def test_cursor_user_default(self):
         assert _config_path("cursor") == CURSOR_HOOKS_PATH
 
+    def test_codex_user_default(self):
+        assert _config_path("codex") == CODEX_HOOKS_PATH
+
     def test_claude_managed(self):
         assert _config_path("claude", managed=True) == CLAUDE_MANAGED_SETTINGS_PATH
 
     def test_cursor_managed(self):
         assert _config_path("cursor", managed=True) == CURSOR_MANAGED_HOOKS_PATH
+
+    def test_codex_managed(self):
+        assert _config_path("codex", managed=True) == CODEX_MANAGED_HOOKS_PATH
 
     def test_file_override_takes_precedence_over_managed(self):
         override = "/custom/path/settings.json"
@@ -1079,11 +1091,17 @@ class TestManagedPathConstants:
     def test_cursor_managed_path_is_absolute(self):
         assert CURSOR_MANAGED_HOOKS_PATH.is_absolute()
 
+    def test_codex_managed_path_is_absolute(self):
+        assert CODEX_MANAGED_HOOKS_PATH.is_absolute()
+
     def test_claude_managed_filename(self):
         assert CLAUDE_MANAGED_SETTINGS_PATH.name == "managed-settings.json"
 
     def test_cursor_managed_filename(self):
         assert CURSOR_MANAGED_HOOKS_PATH.name == "hooks.json"
+
+    def test_codex_managed_filename(self):
+        assert CODEX_MANAGED_HOOKS_PATH.name == "requirements.toml"
 
     @pytest.mark.skipif(sys.platform != "darwin", reason="macOS-specific paths")
     def test_macos_claude_managed_path(self):
@@ -1110,6 +1128,15 @@ class TestManagedPathConstants:
     def test_windows_cursor_managed_path(self):
         assert "Cursor" in str(CURSOR_MANAGED_HOOKS_PATH)
         assert "hooks.json" in str(CURSOR_MANAGED_HOOKS_PATH)
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="Unix-specific path")
+    def test_unix_codex_managed_path(self):
+        assert str(CODEX_MANAGED_HOOKS_PATH) == "/etc/codex/requirements.toml"
+
+    @pytest.mark.skipif(sys.platform != "win32", reason="Windows-specific paths")
+    def test_windows_codex_managed_path(self):
+        assert "Codex" in str(CODEX_MANAGED_HOOKS_PATH)
+        assert "requirements.toml" in str(CODEX_MANAGED_HOOKS_PATH)
 
 
 class TestManagedInstallClaude:
@@ -1297,6 +1324,227 @@ def _get_script_path(name: str) -> Path:
 IS_WINDOWS = sys.platform == "win32"
 
 
+# ===================================================================
+# Codex: install / uninstall / detect
+# ===================================================================
+
+
+CODEX_AGENT_SCAN_CMD = (
+    "PUSH_KEY='pk-codex' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' "
+    "TENANT_ID='tid-1' bash '/home/u/.codex/hooks/snyk-agent-guard.sh' --client codex"
+)
+
+
+class TestInstallCodex:
+    def test_creates_file_when_missing(self, tmp_path):
+        path = tmp_path / "hooks.json"
+        _install_codex(CODEX_AGENT_SCAN_CMD, path)
+
+        data = json.loads(path.read_text())
+        hooks = data["hooks"]
+        assert set(hooks.keys()) == set(CODEX_HOOK_EVENTS)
+        for event in CODEX_HOOK_EVENTS:
+            groups = hooks[event]
+            assert len(groups) == 1
+            assert groups[0]["hooks"][0]["command"] == CODEX_AGENT_SCAN_CMD
+            # No matcher field — omitting matches every occurrence per Codex docs.
+            assert "matcher" not in groups[0]
+
+    def test_preserves_other_hooks(self, tmp_path):
+        path = tmp_path / "hooks.json"
+        _write(
+            path,
+            {
+                "hooks": {
+                    "PreToolUse": [_claude_group(OTHER_CMD)],
+                    "Stop": [_claude_group(OTHER_CMD)],
+                }
+            },
+        )
+        _install_codex(CODEX_AGENT_SCAN_CMD, path)
+
+        data = json.loads(path.read_text())
+        groups = data["hooks"]["PreToolUse"]
+        assert len(groups) == 2
+        assert groups[0]["hooks"][0]["command"] == OTHER_CMD
+        assert groups[1]["hooks"][0]["command"] == CODEX_AGENT_SCAN_CMD
+
+    def test_replaces_old_agent_scan_hooks(self, tmp_path):
+        path = tmp_path / "hooks.json"
+        old_cmd = CODEX_AGENT_SCAN_CMD.replace("pk-codex", "pk-old")
+        _write(path, {"hooks": {"PreToolUse": [_claude_group(old_cmd)], "Stop": [_claude_group(old_cmd)]}})
+        new_cmd = CODEX_AGENT_SCAN_CMD.replace("pk-codex", "pk-new")
+        _install_codex(new_cmd, path)
+
+        data = json.loads(path.read_text())
+        for event in CODEX_HOOK_EVENTS:
+            groups = data["hooks"][event]
+            assert len(groups) == 1
+            assert groups[0]["hooks"][0]["command"] == new_cmd
+
+    def test_idempotent_no_rewrite(self, tmp_path):
+        path = tmp_path / "hooks.json"
+        _install_codex(CODEX_AGENT_SCAN_CMD, path)
+        mtime1 = path.stat().st_mtime_ns
+        _install_codex(CODEX_AGENT_SCAN_CMD, path)
+        assert path.stat().st_mtime_ns == mtime1
+
+
+class TestUninstallCodex:
+    def test_missing_file(self, tmp_path):
+        _uninstall_codex(tmp_path / "hooks.json")  # should not raise
+
+    def test_removes_only_agent_scan(self, tmp_path):
+        path = tmp_path / "hooks.json"
+        _write(
+            path,
+            {
+                "hooks": {
+                    "PreToolUse": [_claude_group(OTHER_CMD), _claude_group(CODEX_AGENT_SCAN_CMD)],
+                    "Stop": [_claude_group(CODEX_AGENT_SCAN_CMD)],
+                }
+            },
+        )
+        _uninstall_codex(path)
+
+        data = json.loads(path.read_text())
+        assert len(data["hooks"]["PreToolUse"]) == 1
+        assert data["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == OTHER_CMD
+        assert "Stop" not in data["hooks"]
+
+    def test_removes_hooks_key_when_empty(self, tmp_path):
+        path = tmp_path / "hooks.json"
+        _write(path, {"hooks": {"PreToolUse": [_claude_group(CODEX_AGENT_SCAN_CMD)]}})
+        _uninstall_codex(path)
+
+        data = json.loads(path.read_text())
+        assert "hooks" not in data
+
+    def test_full_install_then_uninstall(self, tmp_path):
+        path = tmp_path / "hooks.json"
+        _write(path, {"unrelated": True})
+        _install_codex(CODEX_AGENT_SCAN_CMD, path)
+        _uninstall_codex(path)
+
+        data = json.loads(path.read_text())
+        assert "hooks" not in data
+        assert data["unrelated"] is True
+
+
+class TestDetectCodex:
+    def test_missing_file(self, tmp_path):
+        assert _detect_codex_install(tmp_path / "nope.json") is None
+
+    def test_no_hooks_key(self, tmp_path):
+        path = tmp_path / "hooks.json"
+        _write(path, {"other": 1})
+        assert _detect_codex_install(path) is None
+
+    def test_no_agent_scan_hooks(self, tmp_path):
+        path = tmp_path / "hooks.json"
+        _write(path, {"hooks": {"PreToolUse": [_claude_group(OTHER_CMD)]}})
+        assert _detect_codex_install(path) is None
+
+    def test_detects_after_install(self, tmp_path):
+        path = tmp_path / "hooks.json"
+        _install_codex(CODEX_AGENT_SCAN_CMD, path)
+
+        info = _detect_codex_install(path)
+        assert info is not None
+        assert info["auth_type"] == "pushkey"
+        assert info["auth_value"] == "pk-codex"
+        assert info["tenant_id"] == "tid-1"
+        assert info["host"] == "api.snyk.io"
+        assert set(info["events"]) == set(CODEX_HOOK_EVENTS)
+
+
+# ===================================================================
+# Codex managed: requirements.toml install / uninstall / detect
+# ===================================================================
+
+
+class TestCodexManagedRequirementsToml:
+    def _import_managed_helpers(self):
+        from agent_scan.guard import (
+            _detect_codex_managed_install,
+            _install_codex_managed,
+            _render_codex_requirements_toml,
+            _uninstall_codex_managed,
+        )
+
+        return (
+            _install_codex_managed,
+            _uninstall_codex_managed,
+            _detect_codex_managed_install,
+            _render_codex_requirements_toml,
+        )
+
+    def test_render_contains_features_and_all_events(self, tmp_path):
+        _, _, _, render = self._import_managed_helpers()
+        path = tmp_path / "requirements.toml"
+        content = render(CODEX_AGENT_SCAN_CMD, path)
+        assert "[features]" in content
+        assert "hooks = true" in content
+        assert "[hooks]" in content
+        assert "managed_dir" in content
+        assert "windows_managed_dir" in content
+        for event in CODEX_HOOK_EVENTS:
+            assert f"[[hooks.{event}]]" in content
+            assert f"[[hooks.{event}.hooks]]" in content
+
+    def test_install_writes_toml(self, tmp_path):
+        install, _, _, _ = self._import_managed_helpers()
+        path = tmp_path / "requirements.toml"
+        script = tmp_path / "hooks" / "snyk-agent-guard.sh"
+        changed = install(CODEX_AGENT_SCAN_CMD, path, script)
+        assert changed
+        text = path.read_text()
+        assert "PUSH_KEY" in text
+        assert CODEX_AGENT_SCAN_CMD in text
+
+    def test_install_idempotent(self, tmp_path):
+        install, _, _, _ = self._import_managed_helpers()
+        path = tmp_path / "requirements.toml"
+        script = tmp_path / "hooks" / "snyk-agent-guard.sh"
+        install(CODEX_AGENT_SCAN_CMD, path, script)
+        assert install(CODEX_AGENT_SCAN_CMD, path, script) is False
+
+    def test_detect_after_install(self, tmp_path):
+        install, _, detect, _ = self._import_managed_helpers()
+        path = tmp_path / "requirements.toml"
+        script = tmp_path / "hooks" / "snyk-agent-guard.sh"
+        install(CODEX_AGENT_SCAN_CMD, path, script)
+
+        info = detect(path)
+        assert info is not None
+        assert info["auth_value"] == "pk-codex"
+        assert info["tenant_id"] == "tid-1"
+        assert set(info["events"]) == set(CODEX_HOOK_EVENTS)
+
+    def test_detect_dispatches_via_extension(self, tmp_path):
+        install, _, _, _ = self._import_managed_helpers()
+        path = tmp_path / "requirements.toml"
+        script = tmp_path / "hooks" / "snyk-agent-guard.sh"
+        install(CODEX_AGENT_SCAN_CMD, path, script)
+
+        info = _detect_codex_install(path)
+        assert info is not None
+        assert info["auth_value"] == "pk-codex"
+
+    def test_uninstall_removes_file(self, tmp_path):
+        install, uninstall, _, _ = self._import_managed_helpers()
+        path = tmp_path / "requirements.toml"
+        script = tmp_path / "hooks" / "snyk-agent-guard.sh"
+        install(CODEX_AGENT_SCAN_CMD, path, script)
+        assert path.exists()
+        uninstall(path)
+        assert not path.exists()
+
+    def test_uninstall_missing_file_is_noop(self, tmp_path):
+        _, uninstall, _, _ = self._import_managed_helpers()
+        uninstall(tmp_path / "requirements.toml")  # should not raise
+
+
 @pytest.mark.skipif(IS_WINDOWS, reason="bash script; skipped on Windows")
 class TestBashHookScript:
     """Integration: invoke the real .sh script against a local HTTP server."""
@@ -1348,6 +1596,24 @@ class TestBashHookScript:
         )
         assert result.returncode == 0, result.stderr
         assert "/hidden/agent-monitor/hooks/cursor" in _HookHandler.last_request["path"]
+
+    def test_codex_endpoint(self, hook_server):
+        script = _get_script_path("snyk-agent-guard.sh")
+        payload = '{"hook_event_name":"hooksConfigured","session_id":"s1"}'
+        result = subprocess.run(
+            ["bash", str(script), "--client", "codex"],
+            input=payload,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={
+                "PATH": "/usr/bin:/bin:/usr/local/bin",
+                "PUSH_KEY": "test-pk-codex",
+                "REMOTE_HOOKS_BASE_URL": hook_server,
+            },
+        )
+        assert result.returncode == 0, result.stderr
+        assert "/hidden/agent-monitor/hooks/codex" in _HookHandler.last_request["path"]
 
     def test_missing_push_key_fails(self, hook_server):
         script = _get_script_path("snyk-agent-guard.sh")
