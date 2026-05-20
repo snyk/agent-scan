@@ -487,6 +487,49 @@ async def test_glob_no_matches_still_works():
 
 
 @pytest.mark.asyncio
+async def test_glob_respects_max_depth():
+    """Matches beyond max_glob_depth should be excluded."""
+    tmp = tempfile.mkdtemp()
+    try:
+        home = Path(tmp) / "user"
+        (home / ".fake-client").mkdir(parents=True)
+
+        cache = home / ".fake-client" / "plugins" / "cache"
+
+        # Shallow plugin (depth 3 below cache/): should be found
+        shallow = cache / "marketplace" / "shallow-plugin" / "v1"
+        shallow.mkdir(parents=True)
+        (shallow / ".mcp.json").write_text('{"shallow-srv": {"command": "node", "args": ["s.js"]}}')
+
+        # Deep plugin (depth 7 below cache/): should be excluded
+        deep = cache / "a" / "b" / "c" / "d" / "e" / "f" / "deep-plugin"
+        deep.mkdir(parents=True)
+        (deep / ".mcp.json").write_text('{"deep-srv": {"command": "node", "args": ["d.js"]}}')
+
+        candidate = CandidateClient(
+            name="fake-client",
+            client_exists_paths=["~/.fake-client"],
+            mcp_config_paths=[],
+            skills_dir_paths=[],
+            mcp_config_globs=["~/.fake-client/plugins/cache/**/.mcp.json"],
+            max_glob_depth=6,
+        )
+
+        ctis = await get_mcp_config_per_client(candidate, [(home, "user")])
+        assert len(ctis) == 1
+
+        all_server_names = []
+        for v in ctis[0].mcp_configs.values():
+            if isinstance(v, list):
+                all_server_names.extend(name for name, _ in v)
+
+        assert "shallow-srv" in all_server_names
+        assert "deep-srv" not in all_server_names
+    finally:
+        shutil.rmtree(tmp)
+
+
+@pytest.mark.asyncio
 async def test_inspect_pipeline_discovery_mode_without_all_users_falls_back_to_current_user():
     """Without --paths and without --scan-all-users, when no agents are detected, only the current user should be reported."""
     tmp = tempfile.mkdtemp()
