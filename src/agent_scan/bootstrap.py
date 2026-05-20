@@ -221,11 +221,15 @@ async def bootstrap_first_control_server(
                     headers=headers,
                     timeout=timeout,
                 ) as response:
-                    if response.status == 200:
+                    # Accept any 2xx as success. The control server returns
+                    # 201 for a freshly created bootstrap event today; widening
+                    # to the whole 2xx range avoids brittleness if it ever
+                    # switches to 200 (rerun-of-same-payload semantics) or 202.
+                    if 200 <= response.status < 300:
                         data = await response.json(content_type=None)
                         response_model = ClientBootstrapResponse.model_validate(data)
                         return RuntimeConfig(
-                            scan_event_id=response_model.scan_event_id,
+                            bootstrap_event_id=response_model.bootstrap_event_id,
                             config=response_model.runtime_config,
                             source="bootstrap",
                         )

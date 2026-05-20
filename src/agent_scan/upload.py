@@ -84,8 +84,8 @@ async def upload(
                 # eventual scan results.
                 # [/REVIEW-COMMENT]
                 runtime_config = get_runtime_config()
-                if runtime_config.scan_event_id is not None:
-                    headers["X-Scan-Event-ID"] = str(runtime_config.scan_event_id)
+                if runtime_config.bootstrap_event_id is not None:
+                    headers["X-Bootstrap-Event-Id"] = str(runtime_config.bootstrap_event_id)
 
                 async with session.post(
                     control_server,

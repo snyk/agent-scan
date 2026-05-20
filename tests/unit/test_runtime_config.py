@@ -9,14 +9,14 @@ from agent_scan.runtime_config import RuntimeConfig, get_runtime_config, reset_r
 def test_get_runtime_config_returns_default_before_set():
     cfg = get_runtime_config()
 
-    assert cfg.scan_event_id is None
+    assert cfg.bootstrap_event_id is None
     assert cfg.config == {}
     assert cfg.source == "default"
 
 
 def test_set_runtime_config_round_trips():
-    scan_event_id = uuid4()
-    expected = RuntimeConfig(scan_event_id=scan_event_id, config={"feature": True}, source="bootstrap")
+    bootstrap_event_id = uuid4()
+    expected = RuntimeConfig(bootstrap_event_id=bootstrap_event_id, config={"feature": True}, source="bootstrap")
 
     set_runtime_config(expected)
 
@@ -24,7 +24,7 @@ def test_set_runtime_config_round_trips():
 
 
 def test_reset_runtime_config_clears_singleton():
-    set_runtime_config(RuntimeConfig(scan_event_id=uuid4(), source="bootstrap"))
+    set_runtime_config(RuntimeConfig(bootstrap_event_id=uuid4(), source="bootstrap"))
 
     reset_runtime_config()
 
@@ -37,21 +37,21 @@ def test_reset_runtime_config_clears_singleton():
 # or stops firing, one of these tests will fail depending on collection
 # order — making the regression loud rather than silent.
 def test_autouse_fixture_isolates_mutated_state_first():
-    set_runtime_config(RuntimeConfig(scan_event_id=uuid4(), source="bootstrap"))
+    set_runtime_config(RuntimeConfig(bootstrap_event_id=uuid4(), source="bootstrap"))
 
     assert get_runtime_config().source == "bootstrap"
 
 
 def test_autouse_fixture_isolates_mutated_state_second():
     assert get_runtime_config().source == "default"
-    assert get_runtime_config().scan_event_id is None
+    assert get_runtime_config().bootstrap_event_id is None
 
 
 def test_runtime_config_field_assignment_is_blocked():
     """Reassigning a field on a RuntimeConfig must raise — the model is frozen."""
     cfg = RuntimeConfig()
     with pytest.raises(ValidationError):
-        cfg.scan_event_id = uuid4()
+        cfg.bootstrap_event_id = uuid4()
 
 
 def test_mutating_returned_config_dict_does_not_affect_singleton():

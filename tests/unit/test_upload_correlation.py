@@ -35,21 +35,21 @@ class _RecordingServer:
 
 
 @pytest.mark.asyncio
-async def test_upload_includes_scan_event_id_after_successful_bootstrap():
-    scan_event_id = uuid4()
-    set_runtime_config(RuntimeConfig(scan_event_id=scan_event_id, source="bootstrap"))
+async def test_upload_includes_bootstrap_event_id_after_successful_bootstrap():
+    bootstrap_event_id = uuid4()
+    set_runtime_config(RuntimeConfig(bootstrap_event_id=bootstrap_event_id, source="bootstrap"))
 
     async with _RecordingServer() as server:
         await upload([], server.url, identifier="machine-1", additional_headers={"x-client-id": str(uuid4())})
 
-    assert server.headers[0]["X-Scan-Event-ID"] == str(scan_event_id)
+    assert server.headers[0]["X-Bootstrap-Event-Id"] == str(bootstrap_event_id)
 
 
 @pytest.mark.asyncio
-async def test_upload_omits_scan_event_id_after_default_runtime_config():
+async def test_upload_omits_bootstrap_event_id_after_default_runtime_config():
     set_runtime_config(RuntimeConfig())
 
     async with _RecordingServer() as server:
         await upload([], server.url, identifier="machine-1", additional_headers={"x-client-id": str(uuid4())})
 
-    assert "X-Scan-Event-ID" not in server.headers[0]
+    assert "X-Bootstrap-Event-Id" not in server.headers[0]

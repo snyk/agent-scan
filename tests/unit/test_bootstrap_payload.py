@@ -199,7 +199,6 @@ def test_wsl_detection_defaults_false(monkeypatch):
     assert bootstrap_module._detect_wsl() is False
 
 
-
 @pytest.mark.asyncio
 async def test_payload_excludes_schema_version_and_scanned_usernames(monkeypatch):
     monkeypatch.setattr(

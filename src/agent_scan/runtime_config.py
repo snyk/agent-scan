@@ -5,12 +5,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class RuntimeConfig(BaseModel):
-    # frozen=True blocks field reassignment (`cfg.scan_event_id = ...`); the
+    # frozen=True blocks field reassignment (`cfg.bootstrap_event_id = ...`); the
     # `config` dict is still a mutable object, so the accessors below take a
     # deep copy on store and on read to keep the singleton fully owned.
     model_config = ConfigDict(frozen=True)
 
-    scan_event_id: UUID | None = None
+    bootstrap_event_id: UUID | None = None
     # TODO: plumbing only — populated from ClientBootstrapResponse.runtime_config
     # but not yet read by any client code. See the TODO on
     # ClientBootstrapResponse.runtime_config in agent_scan/models.py for the

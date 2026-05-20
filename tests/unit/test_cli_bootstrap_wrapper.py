@@ -51,7 +51,7 @@ class _CountingServer:
 
     async def _handle(self, request: web.Request) -> web.Response:
         self.requests.append(request.path)
-        return web.json_response({"scan_event_id": str(uuid4()), "runtime_config": {}})
+        return web.json_response({"bootstrap_event_id": str(uuid4()), "runtime_config": {}})
 
 
 @pytest.mark.asyncio
@@ -127,7 +127,7 @@ async def test_bootstrap_runtime_config_with_no_bootstrap_makes_zero_http_calls(
         # Runtime config is left at defaults when bootstrap is skipped.
         cfg = get_runtime_config()
         assert cfg.source == "default"
-        assert cfg.scan_event_id is None
+        assert cfg.bootstrap_event_id is None
 
 
 @pytest.mark.asyncio
@@ -178,11 +178,11 @@ async def test_bootstrap_runtime_config_stores_helper_result_in_runtime_config()
     """The wrapper must call `set_runtime_config` with whatever the helper returns.
 
     Without this, the bootstrap response would be discarded and uploads
-    would never carry the `X-Scan-Event-ID` correlation header.
+    would never carry the `X-Bootstrap-Event-Id` correlation header.
     """
     expected_event_id = uuid4()
     fake_helper = AsyncMock(
-        return_value=RuntimeConfig(scan_event_id=expected_event_id, source="bootstrap"),
+        return_value=RuntimeConfig(bootstrap_event_id=expected_event_id, source="bootstrap"),
     )
     args = Namespace(
         control_servers=[_control_server("http://example/mcp-scan/push")],
@@ -193,5 +193,5 @@ async def test_bootstrap_runtime_config_stores_helper_result_in_runtime_config()
         await cli.bootstrap_runtime_config(args, command="scan")
 
     cfg = get_runtime_config()
-    assert cfg.scan_event_id == expected_event_id
+    assert cfg.bootstrap_event_id == expected_event_id
     assert cfg.source == "bootstrap"
