@@ -162,13 +162,13 @@ async def test_non_canonical_url_skips_bootstrap(caplog):
         )
         with caplog.at_level(logging.WARNING, logger="agent_scan.bootstrap"):
             cfg = await bootstrap_first_control_server(
-            [cs],
-            command="scan",
-            subcommand=None,
-            control_identifier="machine-1",
-            argv=[],
-            no_bootstrap=False,
-        )
+                [cs],
+                command="scan",
+                subcommand=None,
+                control_identifier="machine-1",
+                argv=[],
+                no_bootstrap=False,
+            )
 
     assert cfg.source == "default"
     assert server.requests == []
