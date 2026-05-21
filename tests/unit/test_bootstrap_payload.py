@@ -39,8 +39,11 @@ async def test_home_directories_match_helper_and_are_capped(monkeypatch):
     payload = await bootstrap_module._build_request("scan", None, None, [], scan_all_users=True)
     paths = payload.model_dump()["paths"]
 
+    # str(Path(...)) keeps native separators (backslashes on Windows), and the
+    # payload stringifies via the same transform — so we mirror it here rather
+    # than hard-coding POSIX literals that fail on Windows runners.
     assert len(paths["home_directories"]) == 1000
-    assert paths["home_directories"][0] == {"path": "/home/user-0", "username": "user-0"}
+    assert paths["home_directories"][0] == {"path": str(Path("/home/user-0")), "username": "user-0"}
     assert paths["home_directories_truncated"] is True
 
 
@@ -64,7 +67,9 @@ async def test_home_enumeration_defaults_to_current_user_only(monkeypatch):
     paths = payload.model_dump()["paths"]
 
     assert captured_kwargs["all_users"] is False
-    assert paths["home_directories"] == [{"path": "/home/me", "username": "me"}]
+    # See note above: stringify via Path() to keep the assertion portable
+    # between POSIX and Windows runners.
+    assert paths["home_directories"] == [{"path": str(Path("/home/me")), "username": "me"}]
 
 
 @pytest.mark.asyncio
