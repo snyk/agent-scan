@@ -165,10 +165,36 @@ def _detect_keyword(prev_normalized: str, curr_raw: str) -> str | None:
     return None
 
 
+_HEADER_TOKEN_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]*$")
+
+# Flag names whose value is *always* a credential, regardless of shape or
+# entropy. Names are stored in the same normalized form produced during
+# tokenization (leading dashes stripped, internal dashes -> underscores)
+# so a user typing --push-key, --push_key, or -push-key all match.
+# Note: --control-server-H is NOT in this list because its value is a
+# `name:value` header pair where only some header names carry secrets;
+# `_SENSITIVE_HEADER_NAMES` handles those cases by header name instead.
+_SENSITIVE_FLAG_NAMES = frozenset(
+    {
+        "push_key",
+    }
+)
+
+# Header names whose value is always a credential when seen as the
+# `name:value` half of a positional token (e.g. via --control-server-H).
+# Stored lowercase; matching is case-insensitive on the name side.
+_SENSITIVE_HEADER_NAMES = frozenset(
+    {
+        "x-client-id",
+        "authorization",
+    }
+)
+
+
 def redact_args(args: list[str]) -> list[str]:
     """Redact secret-bearing values in CLI argument tokens.
 
-    Detection runs in three passes against a tokenized view of ``args``
+    Detection runs in four passes against a tokenized view of ``args``
     (each ``--flag=value`` arg yields two tokens; everything else
     yields one):
 
@@ -178,12 +204,28 @@ def redact_args(args: list[str]) -> list[str]:
     3. KeywordDetector via a sliding window of 2: for each adjacent
        ``(prev, curr)`` pair, build a synthetic ``prev="curr"`` line
        and ask the keyword plugin whether ``prev`` is in its denylist.
+    4. Header-shape detection: for a bare positional token of the form
+       ``name:value`` where ``name`` looks like an HTTP header name,
+       split on the first colon and rerun format/entropy/keyword
+       detection against the value half (with ``name`` as the keyword
+       context). This catches secrets passed as a single argv token
+       (e.g. ``--control-server-H x-client-id:<hex>``), which Pass A
+       tends to miss because the header-name prefix dilutes the
+       entropy score and Pass B has no separate ``prev`` token to pair
+       the value with.
+    5. Known-sensitive flag/header name allowlist: redact the value of
+       any flag listed in ``_SENSITIVE_FLAG_NAMES`` and any
+       ``name:value`` token whose ``name`` is in
+       ``_SENSITIVE_HEADER_NAMES``. This catches low-entropy
+       credentials (e.g. ``--push-key foo123`` or
+       ``--control-server-H x-client-id:short``) that the
+       entropy/keyword/header passes cannot detect on shape alone.
 
-    Pass order is format -> entropy -> keyword; the most-specific
-    detector wins (Pass B is skipped when Pass A already marked the
-    token). Pass B is also skipped when ``curr`` looks like another
-    CLI flag (starts with ``-``), so ``["--password", "--api-key"]``
-    does not redact the second flag.
+    Pass order is format -> entropy -> keyword -> header -> name; the
+    most-specific detector wins (later passes skip tokens an earlier
+    pass already marked). Pass B is also skipped when ``curr`` looks
+    like another CLI flag (starts with ``-``), so ``["--password",
+    "--api-key"]`` does not redact the second flag.
 
     The flag half of a ``--flag=value`` arg is never replaced; only
     the value half (or a bare positional) can be redacted.
@@ -228,6 +270,47 @@ def redact_args(args: list[str]) -> list[str]:
         triggering_plugin = _detect_keyword(prev[3], curr[2])
         if triggering_plugin is not None:
             marks[t_idx] = triggering_plugin
+
+    # Pass C: header-shape detection on intra-token "name:value" pairs.
+    for t_idx, (_, _, raw, _) in enumerate(tokens):
+        if marks[t_idx] is not None:
+            continue
+        if raw.startswith("-"):
+            continue
+        name, sep, value = raw.partition(":")
+        if not sep or not value or not _HEADER_TOKEN_RE.match(name):
+            continue
+        triggering_plugin = _detect_secret(value)
+        if triggering_plugin is None:
+            normalized_name = name.replace("-", "_")
+            triggering_plugin = _detect_keyword(normalized_name, value)
+        if triggering_plugin is not None:
+            marks[t_idx] = triggering_plugin
+
+    # Pass D: known-sensitive flag/header name allowlist.
+    # Catches low-entropy credentials that the detect-secrets heuristics
+    # cannot identify on shape alone, by matching on the flag/header name
+    # we already know carries a secret.
+    for t_idx, (_arg_idx, slot, raw, _normalized) in enumerate(tokens):
+        if marks[t_idx] is not None:
+            continue
+        # Case 1: value half of --flag=value where flag is sensitive.
+        if slot == 1:
+            flag_normalized = tokens[t_idx - 1][3]
+            if flag_normalized in _SENSITIVE_FLAG_NAMES:
+                marks[t_idx] = "SensitiveFlagName"
+                continue
+        # Case 2: bare token following a sensitive --flag (space-separated).
+        if slot == 0 and not raw.startswith("-") and t_idx > 0:
+            prev = tokens[t_idx - 1]
+            if prev[1] == 0 and prev[2].startswith("-") and prev[3] in _SENSITIVE_FLAG_NAMES:
+                marks[t_idx] = "SensitiveFlagName"
+                continue
+        # Case 3: name:value token where name is a sensitive header.
+        if slot == 0 and not raw.startswith("-"):
+            name, sep, value = raw.partition(":")
+            if sep and value and name.lower() in _SENSITIVE_HEADER_NAMES:
+                marks[t_idx] = "SensitiveHeaderName"
 
     # Reassemble.
     out = list(args)

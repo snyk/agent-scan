@@ -156,6 +156,62 @@ class TestRedactArgs:
         assert is_secret_marker(result[0])
         assert FAKE_API_KEY not in result[0]
 
+    def test_redact_args_header_token_high_entropy_value_redacted(self):
+        """An HTTP-header-shaped token "name:value" with a high-entropy value is fully redacted."""
+        header_token = f"x-client-id:{FAKE_API_KEY}"
+        args = ["--control-server-H", header_token]
+        result = redact_args(args)
+        assert result[0] == "--control-server-H"
+        assert is_secret_marker(result[1])
+        # Neither the header name nor the value half may leak through.
+        assert "x-client-id" not in result[1]
+        assert FAKE_API_KEY not in result[1]
+
+    def test_redact_args_header_token_keyword_match_redacted(self):
+        """A "name:value" token whose name is a known secret keyword is redacted even at low entropy."""
+        args = ["--header", "api-key:hello-world"]
+        result = redact_args(args)
+        assert result[0] == "--header"
+        assert is_secret_marker(result[1])
+        assert "api-key" not in result[1]
+        assert "hello-world" not in result[1]
+
+    def test_redact_args_header_token_innocuous_value_preserved(self):
+        """A "name:value" token with no secret signal is preserved verbatim."""
+        args = ["--header", "Accept:application/json"]
+        assert redact_args(args) == ["--header", "Accept:application/json"]
+
+    def test_redact_args_url_with_port_preserved(self):
+        """URLs containing ':' (e.g. host:port) are not mistaken for header tokens."""
+        args = ["--server", "http://example.com:8080/path"]
+        assert redact_args(args) == ["--server", "http://example.com:8080/path"]
+
+    def test_redact_args_single_char_header_name_high_entropy_value_redacted(self):
+        """Pass C accepts single-char HTTP header names (e.g. RFC-valid `X:value`).
+
+        Prior regex required ≥2 chars on the name half, silently skipping
+        Pass C for tokens like "X:<secret>". Widening to ≥1 char closes
+        that gap; the value-side detectors still gate the actual redaction.
+        """
+        header_token = f"X:{FAKE_API_KEY}"
+        args = ["--control-server-H", header_token]
+        result = redact_args(args)
+        assert result[0] == "--control-server-H"
+        assert is_secret_marker(result[1])
+        assert FAKE_API_KEY not in result[1]
+        # The header name itself is part of the redacted token, never leaked.
+        assert "X:" not in result[1]
+
+    def test_redact_args_single_char_header_name_innocuous_value_preserved(self):
+        """Widening the header-name regex must not cause over-redaction.
+
+        A single-char name with a non-secret value is still preserved
+        verbatim, because Pass C only marks a token when the value half
+        triggers an independent secret detector.
+        """
+        args = ["--control-server-H", "X:application/json"]
+        assert redact_args(args) == ["--control-server-H", "X:application/json"]
+
     def test_redact_args_mixed_realistic(self):
         """Realistic mix: package name, boolean flag, low-entropy flag value, high-entropy flag value."""
         args = ["-y", "some-server", "--port", "3000", "--api-key", FAKE_API_KEY, f"--token={FAKE_API_KEY}"]
@@ -271,6 +327,56 @@ class TestRedactArgs:
         """
         args = ["--password", "--debug"]
         assert redact_args(args) == ["--password", "--debug"]
+
+    def test_redact_args_push_key_low_entropy_space_form_redacted(self):
+        """Pass D: --push-key <low-entropy> redacts the value by flag-name allowlist.
+
+        Detect-secrets entropy/keyword heuristics do not recognize the custom
+        "push-key" name. The known-sensitive flag allowlist catches it
+        regardless of value shape.
+        """
+        args = ["--push-key", "foo123"]
+        result = redact_args(args)
+        assert result[0] == "--push-key"
+        assert is_secret_marker(result[1])
+        assert "foo123" not in result[1]
+
+    def test_redact_args_push_key_low_entropy_equals_form_redacted(self):
+        """Pass D: --push-key=<low-entropy> redacts the value half via flag-name allowlist."""
+        args = ["--push-key=foo123"]
+        result = redact_args(args)
+        flag, sep, value = result[0].partition("=")
+        assert (flag, sep) == ("--push-key", "=")
+        assert is_secret_marker(value)
+        assert "foo123" not in result[0]
+
+    def test_redact_args_x_client_id_header_low_entropy_redacted(self):
+        """Pass D: x-client-id:<low-entropy> token is redacted by header-name allowlist."""
+        args = ["--control-server-H", "x-client-id:foo123"]
+        result = redact_args(args)
+        assert result[0] == "--control-server-H"
+        assert is_secret_marker(result[1])
+        assert "foo123" not in result[1]
+        assert "x-client-id" not in result[1]
+
+    def test_redact_args_authorization_header_low_entropy_redacted(self):
+        """Pass D: authorization:<low-entropy> redacts via header-name allowlist."""
+        args = ["--control-server-H", "Authorization:Bearer-foo"]
+        result = redact_args(args)
+        assert result[0] == "--control-server-H"
+        assert is_secret_marker(result[1])
+        assert "Bearer-foo" not in result[1]
+
+    def test_redact_args_unrelated_header_low_entropy_preserved(self):
+        """Pass D does not over-redact: headers not on the allowlist stay verbatim when value has no secret signal."""
+        args = ["--control-server-H", "Accept:application/json"]
+        assert redact_args(args) == ["--control-server-H", "Accept:application/json"]
+
+    def test_redact_args_sensitive_flag_marker_name(self):
+        """Pass D uses a distinct marker so the source of redaction is traceable in logs."""
+        args = ["--push-key", "foo123"]
+        result = redact_args(args)
+        assert result[1] == "**REDACTED_SECRET_SENSITIVEFLAGNAME**"
 
 
 def test_redact_remote_url_query_and_headers():

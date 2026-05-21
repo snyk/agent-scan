@@ -3,6 +3,7 @@ import os
 import re
 from itertools import chain
 from typing import Annotated, Any, Literal, TypeAlias
+from uuid import UUID
 
 from lark import Lark
 from mcp.client.auth import TokenStorage
@@ -433,6 +434,88 @@ class ScanPathResultsCreate(BaseModel):
     scan_path_results: list[ScanPathResult]
     scan_user_info: ScanUserInfo
     scan_metadata: dict[str, Any] | None = None
+
+
+# WARNING: These models must stay in sync with backend/models/base.py in
+# invariant-platform. There is NO automated enforcement -- if one side
+# changes without the other, bootstrap will silently degrade to defaults
+# (the Pydantic validation on the client side will reject the response).
+# When modifying these models, search invariant-platform for the matching
+# class names and update both sides in a coordinated PR.
+class HomeDirectoryEntry(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    path: str
+    username: str
+
+
+class ClientInfo(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    name: str
+    version: str
+    command: Literal["scan", "inspect", "evo", "guard"]
+    subcommand: str | None = None
+    control_identifier: str | None = None
+    argv_flags: list[str] = Field(default_factory=list)
+
+
+class HostInfo(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    os: str
+    os_release: str
+    os_version: str
+    arch: str
+    processor: str
+    hostname: str
+    current_username: str
+    is_ci: bool
+    is_wsl: bool
+    is_container: bool
+    shell: str | None = None
+    term: str | None = None
+    locale: str | None = None
+    timezone: str | None = None
+    # Best-effort versions of language runtimes / tooling on the host
+    # (python, node, npx, uvx, docker, ...). Each value is a verbatim
+    # first line of `<tool> --version` output, or None when the tool
+    # isn't installed / probing failed. Open shape so a newer agent can
+    # report additional tools (pipx, bun, deno) without a schema change
+    # on the server side.
+    runtimes: dict[str, str | None] = Field(default_factory=dict)
+
+
+class PathsInfo(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    cwd: str
+    current_home_dir: str
+    home_directories: list[HomeDirectoryEntry]
+    home_directories_truncated: bool
+    executable: str
+
+
+class ClientBootstrapRequest(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    client: ClientInfo
+    host: HostInfo
+    paths: PathsInfo
+
+
+class ClientBootstrapResponse(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    bootstrap_event_id: UUID
+    # TODO: plumbing only — the bootstrap response carries a free-form
+    # runtime_config dict that the client currently stores on
+    # RuntimeConfig.config but does not yet read. Future work will consume
+    # specific keys (feature flags, scan limits, etc.) on the client side;
+    # until then this field is intentionally parsed-and-stashed so the
+    # control server can begin emitting it without a coordinated client
+    # release. See follow-up tracked alongside the bootstrap rollout.
+    runtime_config: dict[str, Any] = Field(default_factory=dict)
 
 
 class TokenAndClientInfo(BaseModel):

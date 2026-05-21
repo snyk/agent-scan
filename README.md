@@ -152,6 +152,18 @@ Agent Scan validates the components, both with local checks and by invoking the 
 
 Agent Scan does not store or log any usage data, i.e. the contents and results of your MCP tool calls.
 
+#### Control Server Bootstrap
+
+When `--control-server` is configured, Agent Scan sends a startup bootstrap request to the first configured control server before doing any other work. This applies to every command that accepts `--control-server` — `scan`, `inspect`, and `evo` — including the read-only `inspect` command that performs no other network egress on its own. The `guard` command does not bootstrap. If more than one `--control-server` is configured, only the first one receives the bootstrap; the rest receive the eventual scan-result push only.
+
+The request contains an allowlisted host/process fingerprint: Agent Scan version and command, redacted CLI arguments, OS and Python details, hostname, current username, CI/WSL/container flags, shell, terminal, locale, timezone, current working directory, current home directory, executable path, and readable home directories capped at 1000 entries. It does not include `schema_version` or scanned usernames.
+
+Home-directory enumeration mirrors the scan itself: by default the payload only reports the current user's home directory. Passing `--scan-all-users` opts in to enumerating every readable human home directory on the machine (and, on Windows, WSL profile directories) — exactly the set the scan would touch — for inclusion in the bootstrap payload.
+
+Bootstrap failures never abort the command. Timeouts, network errors, HTTP errors, and malformed responses fall back to defaults. The HTTP call uses a 3-second per-attempt timeout and retries up to three times on transient failures (5xx, 408, 429), with a linear backoff of 0s, 1s, and 2s between attempts — so on a flaky network a command can wait up to ~12 seconds at startup (3s + 1s + 3s + 2s + 3s) before falling through to the no-bootstrap path. Definitive 4xx responses and malformed payloads do not retry. Home-directory enumeration may take noticeably longer on Windows with `--scan-all-users` because it can query Windows profiles and WSL homes; the HTTP timeout only applies after the payload has been assembled. Use `--no-bootstrap` to disable this startup request on any command.
+
+> **Snyk-managed control server required.** Bootstrap is only sent when the configured `--control-server` URL ends in `/mcp-scan/push` — the canonical Snyk-managed endpoint. Self-hosted or custom control-server deployments whose URLs do not match this shape will skip the bootstrap call (a warning is logged) and uploads will not include the `X-Bootstrap-Event-Id` correlation header. Self-hosted deployments should pass `--no-bootstrap` to suppress the warning and make the opt-out explicit.
+
 ## CLI Parameters
 
 Agent Scan provides the following commands:
@@ -170,6 +182,7 @@ These options are available for all commands:
 --verbose              Enable detailed logging output
 --print-errors         Show error details and tracebacks
 --json                 Output results in JSON format instead of rich text
+--no-bootstrap         Disable the startup bootstrap call to the control server
 ```
 
 ### Commands
@@ -199,6 +212,8 @@ Options:
 #### inspect
 
 Print descriptions of tools, prompts, and resources without verification.
+
+When invoked with `--control-server`, `inspect` also sends a one-shot startup bootstrap to that server before reading any config files — see [Control Server Bootstrap](#control-server-bootstrap). Use `--no-bootstrap` to skip it.
 
 ```
 snyk-agent-scan inspect [CONFIG_FILE...]

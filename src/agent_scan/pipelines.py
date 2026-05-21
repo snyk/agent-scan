@@ -22,9 +22,9 @@ from agent_scan.models import (
 )
 from agent_scan.redact import redact_scan_result
 from agent_scan.upload import upload
-from agent_scan.utils import get_push_key
+from agent_scan.utils import get_push_key, get_readable_home_directories
 from agent_scan.verify_api import analyze_machine
-from agent_scan.well_known_clients import get_readable_home_directories, get_well_known_clients
+from agent_scan.well_known_clients import get_well_known_clients
 
 logger = logging.getLogger(__name__)
 

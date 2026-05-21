@@ -1,36 +1,17 @@
 import asyncio
-import getpass
 import logging
-import os
-import platform
 
 import aiohttp
 import rich
 
 from agent_scan.models import ScanPathResult, ScanPathResultsCreate, ScanUserInfo
 from agent_scan.redact import redact_scan_result
-from agent_scan.utils import get_environment
+from agent_scan.runtime_config import get_runtime_config
+from agent_scan.utils import get_hostname, get_username
 from agent_scan.verify_api import setup_aiohttp_debug_logging, setup_tcp_connector
 from agent_scan.well_known_clients import get_client_from_path
 
 logger = logging.getLogger(__name__)
-
-
-def get_hostname() -> str:
-    ci_hostname = os.getenv("AGENT_SCAN_CI_HOSTNAME")
-    if get_environment() == "ci" and ci_hostname:
-        return ci_hostname
-    try:
-        return platform.node() or "unknown"
-    except Exception:
-        return "unknown"
-
-
-def get_username() -> str:
-    try:
-        return getpass.getuser()
-    except Exception:
-        return "unknown"
 
 
 async def upload(
@@ -97,6 +78,9 @@ async def upload(
             ) as session:
                 headers = {"Content-Type": "application/json"}
                 headers.update(additional_headers)
+                runtime_config = get_runtime_config()
+                if runtime_config.bootstrap_event_id is not None:
+                    headers["X-Bootstrap-Event-Id"] = str(runtime_config.bootstrap_event_id)
 
                 async with session.post(
                     control_server,
