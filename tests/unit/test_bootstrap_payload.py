@@ -35,10 +35,53 @@ async def test_payload_includes_required_fields(monkeypatch):
     assert data["client"]["control_identifier"] == "machine-1"
     assert data["host"]["hostname"]
     assert data["host"]["current_username"]
-    assert data["host"]["python_version"]
+    # Python details now live under `runtimes` (open dict) instead of fixed
+    # python_version/python_implementation fields. Since the agent IS running
+    # under Python, these two keys are always populated regardless of what
+    # the external-tool probes return.
+    assert data["host"]["runtimes"]["python"]
+    assert data["host"]["runtimes"]["python_impl"]
     assert data["paths"]["cwd"]
     assert data["paths"]["current_home_dir"]
     assert data["paths"]["executable"]
+
+
+@pytest.mark.asyncio
+async def test_payload_runtimes_includes_probed_tools(monkeypatch):
+    # `runtimes` merges python details (from platform.*) with the subprocess
+    # probes for node/npx/uvx/docker. This test pins the merge contract: the
+    # probed dict's entries land verbatim under their keys, and python is
+    # *not* overridable by the probe layer (the probe layer doesn't return
+    # a "python" entry, so a malicious or buggy override is structurally
+    # impossible).
+    monkeypatch.setattr(
+        bootstrap_module,
+        "get_readable_home_directories",
+        lambda all_users=False: [(Path("/home/alice"), "alice")],
+    )
+
+    async def fake_probes():
+        return {
+            "node": "v20.10.0",
+            "npx": "10.2.3",
+            "uvx": "0.4.18",
+            "docker": None,
+        }
+
+    monkeypatch.setattr(bootstrap_module, "get_tool_versions", fake_probes)
+
+    payload = await bootstrap_module._build_request("scan", None, None, [])
+    runtimes = payload.model_dump()["host"]["runtimes"]
+
+    assert runtimes["node"] == "v20.10.0"
+    assert runtimes["npx"] == "10.2.3"
+    assert runtimes["uvx"] == "0.4.18"
+    # `None` means "we probed and the tool isn't installed" — it must be
+    # preserved as an explicit null in the payload, not dropped.
+    assert runtimes["docker"] is None
+    # python_version / python_impl come from platform.* and are always set.
+    assert runtimes["python"]
+    assert runtimes["python_impl"]
 
 
 @pytest.mark.asyncio

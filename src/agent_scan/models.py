@@ -473,8 +473,6 @@ class HostInfo(BaseModel):
     os_version: str
     arch: str
     processor: str
-    python_version: str
-    python_implementation: str
     hostname: str
     current_username: str
     is_ci: bool
@@ -484,6 +482,13 @@ class HostInfo(BaseModel):
     term: str | None = None
     locale: str | None = None
     timezone: str | None = None
+    # Best-effort versions of language runtimes / tooling on the host
+    # (python, python_impl, node, npx, uvx, docker, ...). Each value is
+    # a verbatim first line of `<tool> --version` output, or None when
+    # the tool isn't installed / probing failed. Open shape so a newer
+    # agent can report additional tools (pipx, bun, deno) without a
+    # schema change on the server side.
+    runtimes: dict[str, str | None] = Field(default_factory=dict)
 
 
 class PathsInfo(BaseModel):

@@ -1,3 +1,4 @@
+import asyncio
 import contextlib
 import getpass
 import glob
@@ -8,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -39,6 +41,75 @@ def get_username() -> str:
         return getpass.getuser()
     except Exception:
         return "unknown"
+
+
+# Per-tool wall-clock cap. The bootstrap handshake is best-effort and runs
+# before any HTTP retry, so a hung `docker --version` (e.g. Docker Desktop
+# starting on macOS) must not stall scan startup. Two seconds is enough for
+# every probe we care about on a healthy host; anything slower is treated
+# as "not installed."
+_TOOL_VERSION_PROBE_TIMEOUT = 2.0
+# Tools we expect to find on developer machines but cannot probe via the
+# stdlib alone (unlike python_version / python_implementation, which come
+# from `platform`). Order is preserved in the returned dict for stable
+# serialization of the bootstrap payload.
+_DEFAULT_PROBED_TOOLS: tuple[str, ...] = ("node", "npx", "uvx", "docker")
+
+
+def _probe_tool_version(command: str) -> str | None:
+    """Run `<command> --version` and return the first non-empty output line.
+
+    Returns None when the binary is missing, the call times out, exits
+    non-zero, or otherwise fails. Never raises — the caller folds the
+    result straight into telemetry, so any exception here would break
+    the bootstrap payload build and cascade into a failed handshake.
+
+    Output channel choice is intentionally lenient: `node --version`
+    writes to stdout, `docker --version` writes to stdout, but some
+    third-party tools (and old npm versions) write to stderr. We prefer
+    stdout and fall back to stderr so the most common case is correct
+    without specializing per tool.
+    """
+    try:
+        result = subprocess.run(
+            [command, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=_TOOL_VERSION_PROBE_TIMEOUT,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    output = (result.stdout or result.stderr or "").strip()
+    if not output:
+        return None
+    return output.splitlines()[0].strip() or None
+
+
+async def get_tool_versions(
+    tools: Iterable[str] = _DEFAULT_PROBED_TOOLS,
+) -> dict[str, str | None]:
+    """Probe versions of external tools in parallel.
+
+    Always returns a dict with one entry per requested tool. Missing /
+    unprobeable tools map to None — distinct from absent keys, which
+    signal "we didn't ask about this tool at all." Probes are offloaded
+    to threads via asyncio.to_thread so the slowest one bounds total
+    wall-clock time, not the sum.
+
+    Python itself is NOT probed via subprocess: it's already available
+    via `platform.python_version()` and `platform.python_implementation()`
+    from the running interpreter, and shelling out to whatever `python`
+    is on PATH could resolve to a different interpreter than the one
+    executing agent-scan, producing a misleading version string.
+    """
+    tool_list = list(tools)
+    results = await asyncio.gather(
+        *(asyncio.to_thread(_probe_tool_version, t) for t in tool_list)
+    )
+    return dict(zip(tool_list, results, strict=True))
 
 
 def ensure_unicode_console() -> None:
