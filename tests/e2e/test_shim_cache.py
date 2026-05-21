@@ -240,6 +240,52 @@ class TestShimCacheE2E:
         assert "add" in tools
         assert "subtract" in tools
 
+    @pytest.mark.parametrize("agent_scan_cmd", ["uv"], indirect=True)
+    def test_removed_server_cache_not_used(self, agent_scan_cmd):
+        """Cache for a removed server should not appear in scan results."""
+        # Populate cache for both servers
+        asyncio.run(_run_server_through_shim("uv", ["run", "python", MATH_SERVER_PATH]))
+        asyncio.run(_run_server_through_shim("uv", ["run", "python", WEATHER_SERVER_PATH]))
+
+        # Config only has Weather — Math was removed
+        config = {
+            "mcpServers": {
+                "Weather": {
+                    "command": "uv",
+                    "args": ["run", "python", WEATHER_SERVER_PATH],
+                }
+            }
+        }
+        with TempFile(mode="w", suffix=".json") as f:
+            json.dump(config, f)
+            f.flush()
+            result = subprocess.run(
+                [
+                    *agent_scan_cmd,
+                    "inspect",
+                    "--json",
+                    "--dangerously-run-mcp-servers",
+                    "--use-shim-cache",
+                    f.name,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+        assert result.returncode == 0, f"Inspect failed: {result.stderr}"
+        output = json.loads(result.stdout)
+        entry = next(iter(output.values()))
+        assert entry["error"] is None
+
+        assert len(entry["servers"]) == 1
+        assert entry["servers"][0]["name"] == "Weather"
+        weather_tools = {t["name"] for t in entry["servers"][0]["signature"]["tools"]}
+        assert "weather" in weather_tools
+        # Math should not appear anywhere in the results
+        server_names = {s["name"] for s in entry["servers"]}
+        assert "Math" not in server_names
+
 
 class TestShimRepairE2E:
     @pytest.mark.parametrize("agent_scan_cmd", ["uv"], indirect=True)
