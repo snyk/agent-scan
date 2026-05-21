@@ -252,8 +252,11 @@ async def bootstrap_first_control_server(
     # failure modes (network errors, validation errors, payload build errors),
     # but anything outside those families — e.g. an OSError from connector
     # setup, a bug in a third-party lib, an AttributeError — would otherwise
-    # propagate. We catch BaseException-minus-(KeyboardInterrupt, SystemExit)
-    # so Ctrl-C and explicit exits still kill the command as the user expects.
+    # propagate. We catch Exception (not BaseException) so KeyboardInterrupt,
+    # SystemExit, and asyncio.CancelledError all keep their default propagation
+    # semantics: Ctrl-C and explicit exits still kill the command, and a
+    # gather()-sibling cancel can unwind this task instead of being turned
+    # into a silent default-RuntimeConfig return.
     try:
         return await _bootstrap_first_control_server_impl(
             control_servers,
@@ -267,9 +270,7 @@ async def bootstrap_first_control_server(
             timeout_seconds=timeout_seconds,
             max_attempts=max_attempts,
         )
-    except (KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException as exc:
+    except Exception as exc:
         logger.warning("Client bootstrap crashed; using defaults: %s", exc)
         return RuntimeConfig()
 

@@ -637,9 +637,11 @@ async def bootstrap_runtime_config(
     # runtime config for downstream upload correlation.
     # [/REVIEW-COMMENT]
     # Belt-and-suspenders: bootstrap_first_control_server already swallows all
-    # non-KeyboardInterrupt/SystemExit exceptions, but a future refactor or a
-    # bug in set_runtime_config must not abort the scan. KeyboardInterrupt and
-    # SystemExit still propagate so Ctrl-C / sys.exit() work as expected.
+    # Exception subclasses, but a future refactor or a bug in
+    # set_runtime_config must not abort the scan. Catching Exception (not
+    # BaseException) keeps KeyboardInterrupt, SystemExit, and
+    # asyncio.CancelledError propagating with their default semantics, so
+    # Ctrl-C / sys.exit() / structured cancellation all still work.
     try:
         control_servers: list[ControlServer] = getattr(args, "control_servers", []) or []
         runtime_config = await bootstrap_first_control_server(
@@ -653,9 +655,7 @@ async def bootstrap_runtime_config(
             skip_ssl_verify=getattr(args, "skip_ssl_verify", False),
         )
         set_runtime_config(runtime_config)
-    except (KeyboardInterrupt, SystemExit):
-        raise
-    except BaseException as exc:
+    except Exception as exc:
         logging.getLogger(__name__).warning("Client bootstrap wrapper crashed; using defaults: %s", exc)
         set_runtime_config(RuntimeConfig())
 

@@ -771,6 +771,36 @@ async def test_outer_guard_lets_system_exit_propagate(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_outer_guard_lets_cancelled_error_propagate(monkeypatch):
+    """asyncio.CancelledError during bootstrap must propagate so structured
+    concurrency stays intact.
+
+    Since Python 3.8, asyncio.CancelledError inherits from BaseException
+    (not Exception). A bare `except BaseException` would silently swallow
+    a sibling-triggered cancellation in a `gather()` and return a default
+    RuntimeConfig instead of unwinding — breaking the caller's contract
+    that "this task is no longer needed, stop now." Mirrors the
+    KeyboardInterrupt/SystemExit propagation tests above.
+    """
+
+    def cancel_connector(**_kwargs):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(bootstrap_module, "setup_tcp_connector", cancel_connector)
+
+    async with _BootstrapServer() as server:
+        with pytest.raises(asyncio.CancelledError):
+            await bootstrap_first_control_server(
+                [_control_server(server.url)],
+                command="scan",
+                subcommand=None,
+                control_identifier="machine-1",
+                argv=[],
+                no_bootstrap=False,
+            )
+
+
+@pytest.mark.asyncio
 async def test_skip_ssl_verify_is_forwarded_to_tcp_connector(monkeypatch):
     """If the user disables SSL verification on the CLI, bootstrap must use the
     same setting as the eventual push — otherwise on a host with a self-signed

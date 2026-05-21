@@ -238,6 +238,33 @@ async def test_bootstrap_runtime_config_lets_keyboard_interrupt_propagate():
 
 
 @pytest.mark.asyncio
+async def test_bootstrap_runtime_config_lets_cancelled_error_propagate():
+    """asyncio.CancelledError raised inside the helper must propagate, not be
+    swallowed by the wrapper.
+
+    asyncio.CancelledError inherits from BaseException (Py 3.8+), so a bare
+    `except BaseException` would silently turn a structured-cancellation
+    signal into a default RuntimeConfig — the surrounding event loop would
+    then think the task completed normally and skip the cancellation it had
+    asked for. Pinning re-raise behavior keeps `gather()` and timeout cancels
+    correct even when bootstrap is the first thing to notice the cancel.
+    """
+    import asyncio
+
+    async def cancel(*args, **kwargs):
+        raise asyncio.CancelledError()
+
+    args = Namespace(
+        control_servers=[_control_server("http://example/mcp-scan/push")],
+        no_bootstrap=False,
+    )
+
+    with patch("agent_scan.cli.bootstrap_first_control_server", side_effect=cancel):
+        with pytest.raises(asyncio.CancelledError):
+            await cli.bootstrap_runtime_config(args, command="scan")
+
+
+@pytest.mark.asyncio
 async def test_bootstrap_runtime_config_forwards_skip_ssl_verify():
     """args.skip_ssl_verify must reach bootstrap_first_control_server unchanged.
 
