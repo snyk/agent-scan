@@ -35,6 +35,7 @@ class InspectArgs(BaseModel):
     paths: list[str]
     all_users: bool = False
     scan_skills: bool = False
+    use_shim_cache: bool = False
 
 
 class AnalyzeArgs(BaseModel):
@@ -131,6 +132,7 @@ async def inspect_pipeline(
             inspect_args.scan_skills,
             stream_stderr=stream_stderr,
             declined_servers=declined_servers,
+            use_shim_cache=inspect_args.use_shim_cache,
         )
         scan_path_results.append(inspected_client_to_scan_path_result(inspected_client))
     return scan_path_results, scanned_usernames or []

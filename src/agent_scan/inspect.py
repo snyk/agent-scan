@@ -28,6 +28,7 @@ from agent_scan.models import (
     UnknownMCPConfig,
     UserDeclinedError,
 )
+from agent_scan.shim_installer import SHIM_MARKER, get_signature_for_server, repair_broken_shim
 from agent_scan.signed_binary import check_server_signature
 from agent_scan.skill_client import inspect_skill, inspect_skills_dir
 from agent_scan.traffic_capture import TrafficCapture
@@ -195,6 +196,7 @@ async def inspect_extension(
     *,
     config_path: str | None = None,
     stream_stderr: bool = False,
+    use_shim_cache: bool = False,
 ) -> InspectedExtensions:
     """
     Scan an extension (MCP server or skill) and return a InspectedExtensions object.
@@ -205,6 +207,19 @@ async def inspect_extension(
     """
     traffic_capture = TrafficCapture()
     if isinstance(config, StdioServer):
+        if SHIM_MARKER in config.command and not Path(config.command).exists():
+            if config_path:
+                await repair_broken_shim(config_path)
+            logger.info("Repairing broken shim for %s (command %s not found)", name, config.command)
+            args = config.args
+            config = config.model_copy(update={"command": args[0], "args": args[1:]})
+
+        if use_shim_cache:
+            cached_signature = get_signature_for_server(config)
+            if cached_signature is not None:
+                logger.info("Using cached shim signature for %s", name)
+                return InspectedExtensions(name=name, config=config, signature_or_error=cached_signature)
+
         try:
             signature, _ = await check_server(
                 config,
@@ -296,6 +311,7 @@ async def inspect_client(
     *,
     stream_stderr: bool = False,
     declined_servers: set[tuple[str, str]] | None = None,
+    use_shim_cache: bool = False,
 ) -> InspectedClient:
     """
     Scan a client (Cursor, VSCode, etc.) and return a InspectedClient object.
@@ -334,6 +350,7 @@ async def inspect_client(
                 find_relevant_token(tokens, name),
                 config_path=mcp_config_path,
                 stream_stderr=stream_stderr,
+                use_shim_cache=use_shim_cache,
             )
             extensions_for_mcp_config.append(extension)
         extensions[mcp_config_path] = extensions_for_mcp_config

@@ -35,7 +35,13 @@ from agent_scan.pipelines import (
     inspect_pipeline,
 )
 from agent_scan.printer import print_scan_result
-from agent_scan.runtime_config import RuntimeConfig, set_runtime_config
+from agent_scan.runtime_config import RuntimeConfig, get_runtime_config, set_runtime_config
+from agent_scan.shim_installer import (
+    RUNTIME_CONFIG_SHIM_FLAG,
+    install_shim_into_config,
+    read_signatures,
+    uninstall_shim_from_config,
+)
 from agent_scan.utils import ensure_unicode_console, get_hostname, get_push_key, parse_headers, suppress_stdout
 from agent_scan.version import version_info
 
@@ -276,6 +282,12 @@ def add_server_arguments(parser):
         action="store_true",
         help=("Skip the interactive consent prompt and start every stdio MCP server listed in the scanned configs."),
     )
+    server_group.add_argument(
+        "--use-shim-cache",
+        default=False,
+        action="store_true",
+        help="Use cached signatures from the stdio shim instead of starting MCP servers.",
+    )
 
 
 def add_control_server_arguments(parser):
@@ -366,6 +378,71 @@ def enforce_consent_requirements(args) -> None:
             file=sys.stderr,
         )
         sys.exit(2)
+
+
+async def run_shim(args) -> None:
+    shim_command = getattr(args, "shim_command", None)
+
+    if shim_command == "read":
+        results = read_signatures()
+        if not results:
+            rich.print("No shim log files found in /tmp.")
+            return
+        for h, capture in results.items():
+            parts = []
+            if capture.metadata:
+                info = capture.metadata.get("serverInfo", {})
+                parts.append(f"{info.get('name', '?')} v{info.get('version', '?')}")
+            if capture.tools:
+                names = [t.get("name", "?") for t in capture.tools]
+                parts.append(f"{len(capture.tools)} tools: {', '.join(names)}")
+            if capture.prompts:
+                names = [p.get("name", "?") for p in capture.prompts]
+                parts.append(f"{len(capture.prompts)} prompts: {', '.join(names)}")
+            if capture.resources:
+                names = [r.get("name", r.get("uri", "?")) for r in capture.resources]
+                parts.append(f"{len(capture.resources)} resources: {', '.join(names)}")
+            if capture.resource_templates:
+                names = [t.get("name", t.get("uriTemplate", "?")) for t in capture.resource_templates]
+                parts.append(f"{len(capture.resource_templates)} templates: {', '.join(names)}")
+            if parts:
+                rich.print(f"[bold]\\[{h}][/bold] " + " | ".join(parts))
+            else:
+                rich.print(f"[dim]\\[{h}] (empty — no data captured yet)[/dim]")
+        return
+
+    # install / uninstall need config paths — use explicit files or discover.
+    files = getattr(args, "files", [])
+    if files:
+        config_paths = files
+    else:
+        inspect_args = InspectArgs(timeout=10, tokens=[], paths=[], all_users=False, scan_skills=False)
+        clients_to_inspect, _, _ = await discover_clients_to_inspect(inspect_args)
+        config_paths = []
+        for cti in clients_to_inspect:
+            config_paths.extend(cti.mcp_configs.keys())
+        config_paths = list(dict.fromkeys(config_paths))
+
+    if not config_paths:
+        rich.print("[yellow]No MCP config files found.[/yellow]")
+        return
+
+    if shim_command == "install":
+        for path in config_paths:
+            shimmed = await install_shim_into_config(path)
+            if shimmed:
+                rich.print(f"[green]{path}[/green]: shimmed {', '.join(shimmed)}")
+            else:
+                rich.print(f"[dim]{path}[/dim]: nothing to shim")
+    elif shim_command == "uninstall":
+        for path in config_paths:
+            unshimmed = await uninstall_shim_from_config(path)
+            if unshimmed:
+                rich.print(f"[green]{path}[/green]: unshimmed {', '.join(unshimmed)}")
+            else:
+                rich.print(f"[dim]{path}[/dim]: nothing to unshim")
+    else:
+        rich.print("[bold red]Usage: agent-scan shim {install|uninstall|read}[/bold red]")
 
 
 def main():
@@ -519,6 +596,47 @@ def main():
         help="Uninstall hooks from the managed (admin/MDM) config path instead of the user-level path",
     )
 
+    # SHIM command
+    shim_parser = subparsers.add_parser(
+        "shim",
+        help="Install, uninstall, or read the MCP stdio capture shim",
+        description="Manage the stdio shim that captures tool signatures from MCP servers.",
+    )
+    shim_subparsers = shim_parser.add_subparsers(
+        dest="shim_command",
+        title="Shim commands",
+        metavar="SHIM_COMMAND",
+    )
+
+    shim_install_parser = shim_subparsers.add_parser(
+        "install",
+        help="Install the shim into discovered MCP configs",
+    )
+    shim_install_parser.add_argument(
+        "files",
+        nargs="*",
+        default=[],
+        help="Config file(s) to shim. If not provided, all discovered configs are shimmed.",
+        metavar="CONFIG_FILE",
+    )
+
+    shim_uninstall_parser = shim_subparsers.add_parser(
+        "uninstall",
+        help="Remove the shim from discovered MCP configs",
+    )
+    shim_uninstall_parser.add_argument(
+        "files",
+        nargs="*",
+        default=[],
+        help="Config file(s) to unshim. If not provided, all discovered configs are unshimmed.",
+        metavar="CONFIG_FILE",
+    )
+
+    shim_subparsers.add_parser(
+        "read",
+        help="Read captured tool signatures from shim log files",
+    )
+
     # Parse arguments (default to 'scan' if no command provided)
     if (len(sys.argv) == 1 or sys.argv[1] not in subparsers.choices) and (
         not (len(sys.argv) == 2 and sys.argv[1] == "--help")
@@ -562,6 +680,9 @@ def main():
         from agent_scan.guard import run_guard
 
         sys.exit(run_guard(args))
+    elif args.command == "shim":
+        asyncio.run(run_shim(args))
+        sys.exit(0)
 
     else:
         # This shouldn't happen due to argparse's handling
@@ -671,12 +792,43 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[Scan
         with open(args.mcp_oauth_tokens_path) as f:
             tokens = TokenAndClientInfoList.model_validate_json(f.read()).root
 
+    use_shim_cache: bool = hasattr(args, "use_shim_cache") and args.use_shim_cache
+
+    # Apply shim policy based on the bootstrap runtime config: install the
+    # shim when the control server sets the flag, uninstall otherwise.
+    # Always runs — if bootstrap failed or wasn't configured, the flag is
+    # absent and shims are cleaned up.
+    runtime_cfg = get_runtime_config()
+    shim_enabled = bool(runtime_cfg.config.get(RUNTIME_CONFIG_SHIM_FLAG))
+    discovery_args = InspectArgs(
+        timeout=server_timeout,
+        tokens=[],
+        paths=files or [],
+        all_users=scan_all_users,
+        scan_skills=False,
+    )
+    pre_clients, _, _ = await discover_clients_to_inspect(discovery_args)
+    config_paths: list[str] = []
+    for cti in pre_clients:
+        config_paths.extend(cti.mcp_configs.keys())
+    config_paths = list(dict.fromkeys(config_paths))
+
+    # Apply the shim to the configs if it is enabled
+    for path in config_paths:
+        if shim_enabled:
+            await install_shim_into_config(path)
+        else:
+            await uninstall_shim_from_config(path)
+    if shim_enabled:
+        use_shim_cache = True
+
     inspect_args = InspectArgs(
         timeout=server_timeout,
         tokens=tokens,
         paths=files,
         all_users=scan_all_users,
         scan_skills=scan_skills,
+        use_shim_cache=use_shim_cache,
     )
 
     # Resolve the MCP server IO flag and the consent flag.
