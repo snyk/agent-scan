@@ -49,11 +49,13 @@ def get_username() -> str:
 # every probe we care about on a healthy host; anything slower is treated
 # as "not installed."
 _TOOL_VERSION_PROBE_TIMEOUT = 2.0
-# Tools we expect to find on developer machines but cannot probe via the
-# stdlib alone (unlike python_version / python_implementation, which come
-# from `platform`). Order is preserved in the returned dict for stable
-# serialization of the bootstrap payload.
-_DEFAULT_PROBED_TOOLS: tuple[str, ...] = ("node", "npx", "uvx", "docker")
+# Tools we expect to find on developer machines. Order is preserved in the
+# returned dict for stable serialization of the bootstrap payload. `python`
+# is probed via `python --version` like every other entry — note that this
+# may resolve to a different interpreter than the one running agent-scan
+# if multiple Pythons are on PATH; that's accepted in exchange for treating
+# every runtime uniformly.
+_DEFAULT_PROBED_TOOLS: tuple[str, ...] = ("python", "node", "npx", "uvx", "docker")
 
 
 def _probe_tool_version(command: str) -> str | None:
@@ -98,17 +100,9 @@ async def get_tool_versions(
     signal "we didn't ask about this tool at all." Probes are offloaded
     to threads via asyncio.to_thread so the slowest one bounds total
     wall-clock time, not the sum.
-
-    Python itself is NOT probed via subprocess: it's already available
-    via `platform.python_version()` and `platform.python_implementation()`
-    from the running interpreter, and shelling out to whatever `python`
-    is on PATH could resolve to a different interpreter than the one
-    executing agent-scan, producing a misleading version string.
     """
     tool_list = list(tools)
-    results = await asyncio.gather(
-        *(asyncio.to_thread(_probe_tool_version, t) for t in tool_list)
-    )
+    results = await asyncio.gather(*(asyncio.to_thread(_probe_tool_version, t) for t in tool_list))
     return dict(zip(tool_list, results, strict=True))
 
 

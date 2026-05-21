@@ -67,6 +67,7 @@ def _detect_wsl() -> bool:
     try:
         return bool(os.environ.get("WSL_DISTRO_NAME")) or "microsoft" in platform.release().lower()
     except Exception:
+        logger.warning("WSL detection failed; reporting is_wsl=False", exc_info=True)
         return False
 
 
@@ -157,6 +158,7 @@ def _get_timezone() -> str | None:
         tzinfo = now.tzinfo
         return str(tzinfo) if tzinfo is not None else None
     except Exception:
+        logger.warning("Timezone detection failed; payload field will be null", exc_info=True)
         return None
 
 
@@ -184,23 +186,13 @@ async def _build_request(
     # Run the two slow signals (home enumeration + external tool probes)
     # concurrently. Both are subprocess/IO bound and independent, so total
     # wall time is bounded by whichever is slower rather than their sum.
-    home_dirs_raw, probed_runtimes = await asyncio.gather(
+    home_dirs_raw, runtimes = await asyncio.gather(
         asyncio.to_thread(get_readable_home_directories, all_users=scan_all_users),
         get_tool_versions(),
     )
     home_dirs_sorted = sorted(home_dirs_raw, key=lambda item: str(item[0]))
     home_dirs_truncated = len(home_dirs_sorted) > _HOME_DIRECTORIES_LIMIT
     home_dirs = home_dirs_sorted[:_HOME_DIRECTORIES_LIMIT]
-
-    # Python details come from the running interpreter, not a subprocess —
-    # shelling out to whichever `python` is on PATH could pick up a
-    # different interpreter than the one running agent-scan and produce
-    # a misleading version string.
-    runtimes: dict[str, str | None] = {
-        "python": platform.python_version(),
-        "python_impl": platform.python_implementation(),
-        **probed_runtimes,
-    }
 
     return ClientBootstrapRequest(
         client=ClientInfo(
