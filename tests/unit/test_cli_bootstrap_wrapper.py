@@ -195,3 +195,43 @@ async def test_bootstrap_runtime_config_stores_helper_result_in_runtime_config()
     cfg = get_runtime_config()
     assert cfg.bootstrap_event_id == expected_event_id
     assert cfg.source == "bootstrap"
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_runtime_config_outer_guard_catches_unexpected_exception():
+    """If the helper itself raises (defeating its own inner guard via some
+    future regression), the wrapper must still leave the runtime config at
+    defaults rather than aborting the scan."""
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("inner guard was bypassed somehow")
+
+    args = Namespace(
+        control_servers=[_control_server("http://example/mcp-scan/push")],
+        no_bootstrap=False,
+    )
+
+    with patch("agent_scan.cli.bootstrap_first_control_server", side_effect=boom):
+        # Must not raise — the wrapper catches BaseException-minus-(KI, SE).
+        await cli.bootstrap_runtime_config(args, command="scan")
+
+    cfg = get_runtime_config()
+    assert cfg.source == "default"
+    assert cfg.bootstrap_event_id is None
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_runtime_config_lets_keyboard_interrupt_propagate():
+    """Ctrl-C during the helper must still kill the command."""
+
+    async def interrupt(*args, **kwargs):
+        raise KeyboardInterrupt()
+
+    args = Namespace(
+        control_servers=[_control_server("http://example/mcp-scan/push")],
+        no_bootstrap=False,
+    )
+
+    with patch("agent_scan.cli.bootstrap_first_control_server", side_effect=interrupt):
+        with pytest.raises(KeyboardInterrupt):
+            await cli.bootstrap_runtime_config(args, command="scan")

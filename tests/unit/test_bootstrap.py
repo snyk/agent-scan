@@ -77,7 +77,14 @@ def _mock_home_dirs(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_no_control_servers_returns_default():
-    cfg = await bootstrap_first_control_server([], "scan", None, None, [], False)
+    cfg = await bootstrap_first_control_server(
+        [],
+        command="scan",
+        subcommand=None,
+        control_identifier=None,
+        argv=[],
+        no_bootstrap=False,
+    )
 
     assert cfg.source == "default"
     assert cfg.bootstrap_event_id is None
@@ -86,7 +93,14 @@ async def test_no_control_servers_returns_default():
 @pytest.mark.asyncio
 async def test_no_bootstrap_flag_returns_default_without_http():
     async with _BootstrapServer() as server:
-        cfg = await bootstrap_first_control_server([_control_server(server.url)], "scan", None, "machine-1", [], True)
+        cfg = await bootstrap_first_control_server(
+            [_control_server(server.url)],
+            command="scan",
+            subcommand=None,
+            control_identifier="machine-1",
+            argv=[],
+            no_bootstrap=True,
+        )
 
     assert cfg.source == "default"
     assert server.requests == []
@@ -98,7 +112,14 @@ async def test_single_control_server_posts_to_bootstrap_endpoint():
     async with _BootstrapServer(
         [(200, {"bootstrap_event_id": str(bootstrap_event_id), "runtime_config": {}}, 0)]
     ) as server:
-        cfg = await bootstrap_first_control_server([_control_server(server.url)], "scan", None, "machine-1", [], False)
+        cfg = await bootstrap_first_control_server(
+            [_control_server(server.url)],
+            command="scan",
+            subcommand=None,
+            control_identifier="machine-1",
+            argv=[],
+            no_bootstrap=False,
+        )
 
     assert cfg.source == "bootstrap"
     assert cfg.bootstrap_event_id == bootstrap_event_id
@@ -117,7 +138,14 @@ async def test_any_2xx_response_is_accepted(status):
     async with _BootstrapServer(
         [(status, {"bootstrap_event_id": str(bootstrap_event_id), "runtime_config": {}}, 0)]
     ) as server:
-        cfg = await bootstrap_first_control_server([_control_server(server.url)], "scan", None, "machine-1", [], False)
+        cfg = await bootstrap_first_control_server(
+            [_control_server(server.url)],
+            command="scan",
+            subcommand=None,
+            control_identifier="machine-1",
+            argv=[],
+            no_bootstrap=False,
+        )
 
     assert cfg.source == "bootstrap"
     assert cfg.bootstrap_event_id == bootstrap_event_id
@@ -133,7 +161,14 @@ async def test_non_canonical_url_skips_bootstrap(caplog):
             identifier="machine-1",
         )
         with caplog.at_level(logging.WARNING, logger="agent_scan.bootstrap"):
-            cfg = await bootstrap_first_control_server([cs], "scan", None, "machine-1", [], False)
+            cfg = await bootstrap_first_control_server(
+            [cs],
+            command="scan",
+            subcommand=None,
+            control_identifier="machine-1",
+            argv=[],
+            no_bootstrap=False,
+        )
 
     assert cfg.source == "default"
     assert server.requests == []
@@ -145,11 +180,11 @@ async def test_push_url_is_rewritten_to_sibling_bootstrap_endpoint():
     async with _BootstrapServer() as server:
         await bootstrap_first_control_server(
             [_control_server(f"{server.url}/hidden/mcp-scan/push?version=2025-08-28")],
-            "scan",
-            None,
-            "machine-1",
-            [],
-            False,
+            command="scan",
+            subcommand=None,
+            control_identifier="machine-1",
+            argv=[],
+            no_bootstrap=False,
         )
 
     assert server.requests[0]["path"] == "/hidden/mcp-scan/client-bootstrap"
@@ -168,11 +203,11 @@ async def test_multiple_control_servers_only_posts_to_first_and_warns(caplog):
         ):
             cfg = await bootstrap_first_control_server(
                 [_control_server(first.url), _control_server(second.url)],
-                "scan",
-                None,
-                "machine-1",
-                [],
-                False,
+                command="scan",
+                subcommand=None,
+                control_identifier="machine-1",
+                argv=[],
+                no_bootstrap=False,
             )
 
     assert cfg.bootstrap_event_id == bootstrap_event_id
@@ -187,7 +222,14 @@ async def test_runtime_config_dict_round_trips():
     async with _BootstrapServer(
         [(200, {"bootstrap_event_id": str(bootstrap_event_id), "runtime_config": {"a": 1}}, 0)]
     ) as server:
-        cfg = await bootstrap_first_control_server([_control_server(server.url)], "scan", None, "machine-1", [], False)
+        cfg = await bootstrap_first_control_server(
+            [_control_server(server.url)],
+            command="scan",
+            subcommand=None,
+            control_identifier="machine-1",
+            argv=[],
+            no_bootstrap=False,
+        )
 
     assert cfg.source == "bootstrap"
     assert cfg.config == {"a": 1}
@@ -203,7 +245,14 @@ async def test_500_once_then_200_succeeds(monkeypatch):
             (200, {"bootstrap_event_id": str(bootstrap_event_id), "runtime_config": {}}, 0),
         ]
     ) as server:
-        cfg = await bootstrap_first_control_server([_control_server(server.url)], "scan", None, "machine-1", [], False)
+        cfg = await bootstrap_first_control_server(
+            [_control_server(server.url)],
+            command="scan",
+            subcommand=None,
+            control_identifier="machine-1",
+            argv=[],
+            no_bootstrap=False,
+        )
 
     assert cfg.bootstrap_event_id == bootstrap_event_id
     assert len(server.requests) == 2
@@ -213,7 +262,14 @@ async def test_500_once_then_200_succeeds(monkeypatch):
 @pytest.mark.parametrize("status", [400, 401, 404])
 async def test_definitive_4xx_does_not_retry(status):
     async with _BootstrapServer([(status, {"error": "no"}, 0)]) as server:
-        cfg = await bootstrap_first_control_server([_control_server(server.url)], "scan", None, "machine-1", [], False)
+        cfg = await bootstrap_first_control_server(
+            [_control_server(server.url)],
+            command="scan",
+            subcommand=None,
+            control_identifier="machine-1",
+            argv=[],
+            no_bootstrap=False,
+        )
 
     assert cfg.source == "default"
     assert len(server.requests) == 1
@@ -230,7 +286,14 @@ async def test_retryable_4xx_retries(monkeypatch, status):
             (200, {"bootstrap_event_id": str(bootstrap_event_id), "runtime_config": {}}, 0),
         ]
     ) as server:
-        cfg = await bootstrap_first_control_server([_control_server(server.url)], "scan", None, "machine-1", [], False)
+        cfg = await bootstrap_first_control_server(
+            [_control_server(server.url)],
+            command="scan",
+            subcommand=None,
+            control_identifier="machine-1",
+            argv=[],
+            no_bootstrap=False,
+        )
 
     assert cfg.bootstrap_event_id == bootstrap_event_id
     assert len(server.requests) == 2
@@ -241,7 +304,13 @@ async def test_timeout_retries_three_times(monkeypatch):
     monkeypatch.setattr(bootstrap_module.asyncio, "sleep", lambda delay: REAL_ASYNCIO_SLEEP(0))
     async with _BootstrapServer([(200, {"bootstrap_event_id": str(uuid4()), "runtime_config": {}}, 0.1)]) as server:
         cfg = await bootstrap_first_control_server(
-            [_control_server(server.url)], "scan", None, "machine-1", [], False, timeout_seconds=0.02
+            [_control_server(server.url)],
+            command="scan",
+            subcommand=None,
+            control_identifier="machine-1",
+            argv=[],
+            no_bootstrap=False,
+            timeout_seconds=0.02,
         )
 
     assert cfg.source == "default"
@@ -251,7 +320,14 @@ async def test_timeout_retries_three_times(monkeypatch):
 @pytest.mark.asyncio
 async def test_malformed_json_returns_default_without_retry():
     async with _BootstrapServer([(200, "not-json", 0)]) as server:
-        cfg = await bootstrap_first_control_server([_control_server(server.url)], "scan", None, "machine-1", [], False)
+        cfg = await bootstrap_first_control_server(
+            [_control_server(server.url)],
+            command="scan",
+            subcommand=None,
+            control_identifier="machine-1",
+            argv=[],
+            no_bootstrap=False,
+        )
 
     assert cfg.source == "default"
     assert len(server.requests) == 1
@@ -260,7 +336,14 @@ async def test_malformed_json_returns_default_without_retry():
 @pytest.mark.asyncio
 async def test_response_missing_bootstrap_event_id_returns_default():
     async with _BootstrapServer([(200, {"runtime_config": {}}, 0)]) as server:
-        cfg = await bootstrap_first_control_server([_control_server(server.url)], "scan", None, "machine-1", [], False)
+        cfg = await bootstrap_first_control_server(
+            [_control_server(server.url)],
+            command="scan",
+            subcommand=None,
+            control_identifier="machine-1",
+            argv=[],
+            no_bootstrap=False,
+        )
 
     assert cfg.source == "default"
     assert len(server.requests) == 1
@@ -278,7 +361,13 @@ async def test_slow_home_enumeration_is_outside_http_timeout(monkeypatch):
         [(200, {"bootstrap_event_id": str(bootstrap_event_id), "runtime_config": {}}, 0)]
     ) as server:
         cfg = await bootstrap_first_control_server(
-            [_control_server(server.url)], "scan", None, "machine-1", [], False, timeout_seconds=0.5
+            [_control_server(server.url)],
+            command="scan",
+            subcommand=None,
+            control_identifier="machine-1",
+            argv=[],
+            no_bootstrap=False,
+            timeout_seconds=0.5,
         )
 
     assert cfg.bootstrap_event_id == bootstrap_event_id
@@ -291,7 +380,14 @@ async def test_home_enumeration_failure_returns_default(monkeypatch):
 
     monkeypatch.setattr(bootstrap_module, "get_readable_home_directories", fail_home_dirs)
     async with _BootstrapServer() as server:
-        cfg = await bootstrap_first_control_server([_control_server(server.url)], "scan", None, "machine-1", [], False)
+        cfg = await bootstrap_first_control_server(
+            [_control_server(server.url)],
+            command="scan",
+            subcommand=None,
+            control_identifier="machine-1",
+            argv=[],
+            no_bootstrap=False,
+        )
 
     assert cfg.source == "default"
     assert server.requests == []
@@ -305,7 +401,14 @@ async def test_home_directories_are_capped_at_1000(monkeypatch):
         lambda all_users=False: [(Path(f"/home/user-{i}"), f"user-{i}") for i in range(1500)],
     )
     async with _BootstrapServer() as server:
-        cfg = await bootstrap_first_control_server([_control_server(server.url)], "scan", None, "machine-1", [], False)
+        cfg = await bootstrap_first_control_server(
+            [_control_server(server.url)],
+            command="scan",
+            subcommand=None,
+            control_identifier="machine-1",
+            argv=[],
+            no_bootstrap=False,
+        )
 
     assert cfg.source == "bootstrap"
     paths = server.requests[0]["body"]["paths"]
@@ -324,7 +427,14 @@ async def test_home_directory_enumeration_uses_to_thread(monkeypatch):
 
     monkeypatch.setattr(bootstrap_module.asyncio, "to_thread", fake_to_thread)
     async with _BootstrapServer() as server:
-        cfg = await bootstrap_first_control_server([_control_server(server.url)], "scan", None, "machine-1", [], False)
+        cfg = await bootstrap_first_control_server(
+            [_control_server(server.url)],
+            command="scan",
+            subcommand=None,
+            control_identifier="machine-1",
+            argv=[],
+            no_bootstrap=False,
+        )
 
     assert cfg.source == "bootstrap"
     assert called is True
@@ -343,7 +453,14 @@ async def test_control_server_headers_forwarded_to_bootstrap_request():
             },
             identifier="machine-1",
         )
-        await bootstrap_first_control_server([cs], "scan", None, "machine-1", [], False)
+        await bootstrap_first_control_server(
+            [cs],
+            command="scan",
+            subcommand=None,
+            control_identifier="machine-1",
+            argv=[],
+            no_bootstrap=False,
+        )
 
     assert len(server.requests) == 1
     sent_headers = server.requests[0]["headers"]
@@ -389,7 +506,14 @@ async def test_cli_parsed_headers_reach_bootstrap_post_intact():
             headers=parsed,
             identifier="machine-1",
         )
-        await bootstrap_first_control_server([cs], "scan", None, "machine-1", [], False)
+        await bootstrap_first_control_server(
+            [cs],
+            command="scan",
+            subcommand=None,
+            control_identifier="machine-1",
+            argv=[],
+            no_bootstrap=False,
+        )
 
     sent = server.requests[0]["headers"]
     assert sent["x-client-id"] == "client-abc"
@@ -411,7 +535,14 @@ async def test_caller_supplied_content_type_header_is_not_overwritten():
             headers={"x-client-id": "client-abc", "Content-Type": "application/vnd.snyk+json"},
             identifier="machine-1",
         )
-        await bootstrap_first_control_server([cs], "scan", None, "machine-1", [], False)
+        await bootstrap_first_control_server(
+            [cs],
+            command="scan",
+            subcommand=None,
+            control_identifier="machine-1",
+            argv=[],
+            no_bootstrap=False,
+        )
 
     assert server.requests[0]["headers"]["Content-Type"] == "application/vnd.snyk+json"
 
@@ -425,7 +556,12 @@ async def test_bootstrap_runtime_config_payload_reaches_singleton():
         [(200, {"bootstrap_event_id": str(bootstrap_event_id), "runtime_config": server_config}, 0)]
     ) as server:
         result = await bootstrap_first_control_server(
-            [_control_server(server.url)], "scan", None, "machine-1", [], False
+            [_control_server(server.url)],
+            command="scan",
+            subcommand=None,
+            control_identifier="machine-1",
+            argv=[],
+            no_bootstrap=False,
         )
 
     # The helper returns a RuntimeConfig holding the response's runtime_config.
@@ -457,8 +593,22 @@ async def test_concurrent_bootstrap_calls_do_not_interleave():
         ) as server_b,
     ):
         cfg_a, cfg_b = await asyncio.gather(
-            bootstrap_first_control_server([_control_server(server_a.url)], "scan", None, "machine-a", [], False),
-            bootstrap_first_control_server([_control_server(server_b.url)], "scan", None, "machine-b", [], False),
+            bootstrap_first_control_server(
+                [_control_server(server_a.url)],
+                command="scan",
+                subcommand=None,
+                control_identifier="machine-a",
+                argv=[],
+                no_bootstrap=False,
+            ),
+            bootstrap_first_control_server(
+                [_control_server(server_b.url)],
+                command="scan",
+                subcommand=None,
+                control_identifier="machine-b",
+                argv=[],
+                no_bootstrap=False,
+            ),
         )
 
     # Each result must be coherent: bootstrap_event_id and config from the same server,
@@ -485,3 +635,103 @@ async def test_concurrent_bootstrap_calls_do_not_interleave():
     # copy on get prevents the second write from rewriting earlier readers.
     assert snapshot_a.bootstrap_event_id == event_id_a
     assert snapshot_a.config == config_a
+
+
+# Outer safety-net tests: anything weird that escapes the inner retry loop
+# (OSError from connector setup, AttributeError from a bad lib, an unrelated
+# Exception subclass) must be caught and turned into a default RuntimeConfig.
+# Without this guard, a scan would crash on startup rather than fall back.
+@pytest.mark.asyncio
+async def test_outer_guard_catches_oserror_from_connector(monkeypatch, caplog):
+    def boom_connector():
+        raise OSError("too many open files")
+
+    monkeypatch.setattr(bootstrap_module, "setup_tcp_connector", boom_connector)
+
+    async with _BootstrapServer() as server:
+        with caplog.at_level(logging.WARNING, logger="agent_scan.bootstrap"):
+            cfg = await bootstrap_first_control_server(
+                [_control_server(server.url)],
+                command="scan",
+                subcommand=None,
+                control_identifier="machine-1",
+                argv=[],
+                no_bootstrap=False,
+            )
+
+    assert cfg.source == "default"
+    assert cfg.bootstrap_event_id is None
+    assert "crashed" in caplog.text or "failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_outer_guard_catches_unexpected_exception_type(monkeypatch, caplog):
+    """An exception class outside the inner handler's (TimeoutError, ClientError,
+    ValidationError, ValueError, TypeError) families must NOT propagate."""
+
+    class WeirdLibraryError(Exception):
+        pass
+
+    def boom_connector():
+        raise WeirdLibraryError("library invariant violated")
+
+    monkeypatch.setattr(bootstrap_module, "setup_tcp_connector", boom_connector)
+
+    async with _BootstrapServer() as server:
+        with caplog.at_level(logging.WARNING, logger="agent_scan.bootstrap"):
+            cfg = await bootstrap_first_control_server(
+                [_control_server(server.url)],
+                command="scan",
+                subcommand=None,
+                control_identifier="machine-1",
+                argv=[],
+                no_bootstrap=False,
+            )
+
+    assert cfg.source == "default"
+
+
+@pytest.mark.asyncio
+async def test_outer_guard_lets_keyboard_interrupt_propagate(monkeypatch):
+    """Ctrl-C during bootstrap must kill the command, not silently fall through.
+
+    The outer guard intentionally re-raises KeyboardInterrupt and SystemExit
+    so the user's exit signal still works.
+    """
+
+    def interrupt_connector():
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr(bootstrap_module, "setup_tcp_connector", interrupt_connector)
+
+    async with _BootstrapServer() as server:
+        with pytest.raises(KeyboardInterrupt):
+            await bootstrap_first_control_server(
+                [_control_server(server.url)],
+                command="scan",
+                subcommand=None,
+                control_identifier="machine-1",
+                argv=[],
+                no_bootstrap=False,
+            )
+
+
+@pytest.mark.asyncio
+async def test_outer_guard_lets_system_exit_propagate(monkeypatch):
+    """sys.exit() during bootstrap must propagate so explicit exits still work."""
+
+    def exit_connector():
+        raise SystemExit(1)
+
+    monkeypatch.setattr(bootstrap_module, "setup_tcp_connector", exit_connector)
+
+    async with _BootstrapServer() as server:
+        with pytest.raises(SystemExit):
+            await bootstrap_first_control_server(
+                [_control_server(server.url)],
+                command="scan",
+                subcommand=None,
+                control_identifier="machine-1",
+                argv=[],
+                no_bootstrap=False,
+            )

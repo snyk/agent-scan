@@ -35,7 +35,7 @@ from agent_scan.pipelines import (
     inspect_pipeline,
 )
 from agent_scan.printer import print_scan_result
-from agent_scan.runtime_config import set_runtime_config
+from agent_scan.runtime_config import RuntimeConfig, set_runtime_config
 from agent_scan.utils import ensure_unicode_console, get_hostname, get_push_key, parse_headers, suppress_stdout
 from agent_scan.version import version_info
 
@@ -638,17 +638,27 @@ async def bootstrap_runtime_config(
     # Wire CLI commands to the shared bootstrap helper and store the resulting
     # runtime config for downstream upload correlation.
     # [/REVIEW-COMMENT]
-    control_servers: list[ControlServer] = getattr(args, "control_servers", []) or []
-    runtime_config = await bootstrap_first_control_server(
-        control_servers=control_servers,
-        command=command,
-        subcommand=subcommand,
-        control_identifier=control_servers[0].identifier if control_servers else None,
-        argv=sys.argv[1:],
-        no_bootstrap=getattr(args, "no_bootstrap", False),
-        scan_all_users=getattr(args, "scan_all_users", False),
-    )
-    set_runtime_config(runtime_config)
+    # Belt-and-suspenders: bootstrap_first_control_server already swallows all
+    # non-KeyboardInterrupt/SystemExit exceptions, but a future refactor or a
+    # bug in set_runtime_config must not abort the scan. KeyboardInterrupt and
+    # SystemExit still propagate so Ctrl-C / sys.exit() work as expected.
+    try:
+        control_servers: list[ControlServer] = getattr(args, "control_servers", []) or []
+        runtime_config = await bootstrap_first_control_server(
+            control_servers=control_servers,
+            command=command,
+            subcommand=subcommand,
+            control_identifier=control_servers[0].identifier if control_servers else None,
+            argv=sys.argv[1:],
+            no_bootstrap=getattr(args, "no_bootstrap", False),
+            scan_all_users=getattr(args, "scan_all_users", False),
+        )
+        set_runtime_config(runtime_config)
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException as exc:
+        logging.getLogger(__name__).warning("Client bootstrap wrapper crashed; using defaults: %s", exc)
+        set_runtime_config(RuntimeConfig())
 
 
 async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[ScanPathResult]:

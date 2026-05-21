@@ -6,6 +6,7 @@ import logging
 import os
 import platform
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Literal
@@ -69,13 +70,20 @@ def _detect_wsl() -> bool:
 
 
 def _detect_container() -> bool:
+    # Marker files: /.dockerenv is Docker; /run/.containerenv is Podman (and
+    # other OCI runtimes that follow the systemd-nspawn convention). Checking
+    # both covers rootless Podman, which does not create /.dockerenv.
     try:
-        if Path("/.dockerenv").exists():
+        if Path("/.dockerenv").exists() or Path("/run/.containerenv").exists():
             return True
         cgroup = Path("/proc/1/cgroup").read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return False
-    return "container=" in cgroup or "docker" in cgroup or "kubepods" in cgroup
+    # cgroup hints catch container runtimes that don't drop a marker file —
+    # "container=" is set by systemd-nspawn/LXC, "docker"/"kubepods" by
+    # Docker and Kubernetes, "libpod"/"podman" by Podman (rootful and
+    # rootless alike on cgroup v1).
+    return any(token in cgroup for token in ("container=", "docker", "kubepods", "libpod", "podman"))
 
 
 def _get_locale() -> str | None:
@@ -85,9 +93,67 @@ def _get_locale() -> str | None:
         return None
 
 
-def _get_timezone() -> str | None:
+def _is_iana_timezone(name: str) -> bool:
+    # An IANA zone is one the stdlib `zoneinfo` database can load. This
+    # filters out POSIX TZ strings like "CET-1CEST,M3.5.0,M10.5.0/3" which
+    # textually contain "/" but are not IANA names.
     try:
-        tzinfo = datetime.now().astimezone().tzinfo
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+    except ImportError:
+        # Pre-3.9 fallback: accept anything that looks like Area/Location
+        # without POSIX-rule punctuation.
+        return "/" in name and "," not in name and not name.startswith(":")
+    try:
+        ZoneInfo(name)
+        return True
+    except (ZoneInfoNotFoundError, ValueError):
+        return False
+
+
+def _get_timezone() -> str | None:
+    # Prefer a stable IANA name (e.g. "Europe/Berlin") so the backend can
+    # compare values across hosts. Fall back through several sources because
+    # no single one is reliable everywhere:
+    #   1. $TZ if it loads as an IANA zone (set explicitly by the user/env).
+    #   2. /etc/timezone (Debian/Ubuntu) — one line, IANA name.
+    #   3. The symlink target of /etc/localtime (most modern Linux, macOS) —
+    #      resolves to .../zoneinfo/<Area>/<Location>.
+    #   4. time.tzname + UTC offset (e.g. "CET (UTC+01:00)") — a labelled
+    #      offset; less stable than IANA but still meaningful to humans.
+    #   5. str(tzinfo) as a last resort (often just an offset like "UTC+02:00").
+    try:
+        tz_env = os.environ.get("TZ", "").strip().lstrip(":")
+        if tz_env and _is_iana_timezone(tz_env):
+            return tz_env
+
+        try:
+            etc_timezone = Path("/etc/timezone").read_text(encoding="utf-8").strip()
+            if etc_timezone and _is_iana_timezone(etc_timezone):
+                return etc_timezone
+        except OSError:
+            pass
+
+        try:
+            localtime = Path("/etc/localtime").resolve()
+            parts = localtime.parts
+            if "zoneinfo" in parts:
+                zoneinfo_idx = parts.index("zoneinfo")
+                iana = "/".join(parts[zoneinfo_idx + 1 :])
+                if iana and _is_iana_timezone(iana):
+                    return iana
+        except OSError:
+            pass
+
+        now = datetime.now().astimezone()
+        offset = now.strftime("%z")  # e.g. "+0200" or "" if naive
+        if offset:
+            offset_label = f"UTC{offset[:3]}:{offset[3:]}" if len(offset) == 5 else f"UTC{offset}"
+            tz_label = time.tzname[time.daylight and bool(now.dst())] if time.tzname else ""
+            if tz_label:
+                return f"{tz_label} ({offset_label})"
+            return offset_label
+
+        tzinfo = now.tzinfo
         return str(tzinfo) if tzinfo is not None else None
     except Exception:
         return None
@@ -160,6 +226,7 @@ def _should_retry(status: int) -> bool:
 
 async def bootstrap_first_control_server(
     control_servers: list[ControlServer],
+    *,
     command: Literal["scan", "inspect", "evo", "guard"],
     subcommand: str | None,
     control_identifier: str | None,
@@ -168,6 +235,44 @@ async def bootstrap_first_control_server(
     scan_all_users: bool = False,
     timeout_seconds: float = 3.0,
     max_attempts: int = 3,
+) -> RuntimeConfig:
+    # Outer safety net: bootstrap is documented as best-effort and must never
+    # abort the command. The inner implementation already handles expected
+    # failure modes (network errors, validation errors, payload build errors),
+    # but anything outside those families — e.g. an OSError from connector
+    # setup, a bug in a third-party lib, an AttributeError — would otherwise
+    # propagate. We catch BaseException-minus-(KeyboardInterrupt, SystemExit)
+    # so Ctrl-C and explicit exits still kill the command as the user expects.
+    try:
+        return await _bootstrap_first_control_server_impl(
+            control_servers,
+            command=command,
+            subcommand=subcommand,
+            control_identifier=control_identifier,
+            argv=argv,
+            no_bootstrap=no_bootstrap,
+            scan_all_users=scan_all_users,
+            timeout_seconds=timeout_seconds,
+            max_attempts=max_attempts,
+        )
+    except (KeyboardInterrupt, SystemExit):
+        raise
+    except BaseException as exc:
+        logger.warning("Client bootstrap crashed; using defaults: %s", exc)
+        return RuntimeConfig()
+
+
+async def _bootstrap_first_control_server_impl(
+    control_servers: list[ControlServer],
+    *,
+    command: Literal["scan", "inspect", "evo", "guard"],
+    subcommand: str | None,
+    control_identifier: str | None,
+    argv: list[str],
+    no_bootstrap: bool,
+    scan_all_users: bool,
+    timeout_seconds: float,
+    max_attempts: int,
 ) -> RuntimeConfig:
     # [REVIEW-COMMENT]
     # Bootstrap is best-effort and targets only the first control server so a

@@ -198,11 +198,128 @@ def test_container_detection_defaults_false_on_permission_error(monkeypatch):
     assert bootstrap_module._detect_container() is False
 
 
+def test_container_detection_podman_marker_file(monkeypatch):
+    """Podman drops /run/.containerenv (not /.dockerenv); rootless Podman in
+    particular has no /.dockerenv, so this marker is the only signal until
+    we fall through to cgroup inspection."""
+    monkeypatch.setattr(Path, "exists", lambda self: str(self) == "/run/.containerenv")
+
+    assert bootstrap_module._detect_container() is True
+
+
+def test_container_detection_podman_cgroup_token(monkeypatch):
+    """Rootless Podman on a host without /run/.containerenv (e.g. user-namespaced
+    runs) is still detectable via the 'libpod' / 'podman' tokens in the cgroup."""
+    monkeypatch.setattr(Path, "exists", lambda self: False)
+    monkeypatch.setattr(
+        Path,
+        "read_text",
+        lambda self, **kwargs: "0::/user.slice/user-1000.slice/user@1000.service/user.slice/libpod-abc.scope",
+    )
+
+    assert bootstrap_module._detect_container() is True
+
+
+def test_container_detection_no_signals_returns_false(monkeypatch):
+    """A bare-metal host with no marker files and a plain cgroup must report False."""
+    monkeypatch.setattr(Path, "exists", lambda self: False)
+    monkeypatch.setattr(
+        Path,
+        "read_text",
+        lambda self, **kwargs: "0::/user.slice/user-1000.slice/session-1.scope",
+    )
+
+    assert bootstrap_module._detect_container() is False
+
+
 def test_wsl_detection_defaults_false(monkeypatch):
     monkeypatch.delenv("WSL_DISTRO_NAME", raising=False)
     monkeypatch.setattr(bootstrap_module.platform, "release", lambda: "6.8.0-generic")
 
     assert bootstrap_module._detect_wsl() is False
+
+
+def test_timezone_prefers_tz_env_iana_name(monkeypatch):
+    """An IANA $TZ value (e.g. 'Europe/Berlin') is returned verbatim — it's the
+    most explicit signal a user can give us, and it's stable across hosts."""
+    monkeypatch.setenv("TZ", "Europe/Berlin")
+
+    assert bootstrap_module._get_timezone() == "Europe/Berlin"
+
+
+def test_timezone_ignores_non_iana_tz_env(monkeypatch):
+    """A legacy/POSIX $TZ value (e.g. 'CET-1CEST,M3.5.0,M10.5.0/3') is not IANA
+    and must not be returned; we fall through to the next source."""
+    monkeypatch.setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3")
+    # Disable /etc/timezone and /etc/localtime so the fallback chain is observable.
+    monkeypatch.setattr(bootstrap_module.Path, "read_text", lambda self, **k: (_ for _ in ()).throw(OSError()))
+    monkeypatch.setattr(bootstrap_module.Path, "resolve", lambda self, **k: bootstrap_module.Path("/etc/localtime"))
+
+    result = bootstrap_module._get_timezone()
+
+    # Whatever we fall through to, it must not be the raw POSIX TZ string.
+    assert result != "CET-1CEST,M3.5.0,M10.5.0/3"
+
+
+def test_timezone_reads_etc_timezone_when_tz_env_absent(monkeypatch):
+    """Debian/Ubuntu canonical source: /etc/timezone holds the IANA name."""
+    monkeypatch.delenv("TZ", raising=False)
+
+    real_read_text = bootstrap_module.Path.read_text
+
+    def fake_read_text(self, *args, **kwargs):
+        if str(self) == "/etc/timezone":
+            return "America/Los_Angeles\n"
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(bootstrap_module.Path, "read_text", fake_read_text)
+
+    assert bootstrap_module._get_timezone() == "America/Los_Angeles"
+
+
+def test_timezone_falls_back_to_localtime_symlink(monkeypatch):
+    """macOS and most modern Linux: /etc/localtime is a symlink into the
+    zoneinfo tree; the IANA name follows 'zoneinfo/' in the resolved path."""
+    monkeypatch.delenv("TZ", raising=False)
+    monkeypatch.setattr(
+        bootstrap_module.Path,
+        "read_text",
+        lambda self, **k: (_ for _ in ()).throw(OSError()),
+    )
+
+    real_resolve = bootstrap_module.Path.resolve
+
+    def fake_resolve(self, *args, **kwargs):
+        if str(self) == "/etc/localtime":
+            return bootstrap_module.Path("/var/db/timezone/zoneinfo/Asia/Tokyo")
+        return real_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(bootstrap_module.Path, "resolve", fake_resolve)
+
+    assert bootstrap_module._get_timezone() == "Asia/Tokyo"
+
+
+def test_timezone_returns_a_value_when_all_iana_sources_fail(monkeypatch):
+    """When no IANA source is available, the function must still return *something*
+    (offset label, tzname, or None) — never raise. The caller persists this
+    verbatim, so a hard failure here would leak into the payload as a 500."""
+    monkeypatch.delenv("TZ", raising=False)
+    monkeypatch.setattr(
+        bootstrap_module.Path,
+        "read_text",
+        lambda self, **k: (_ for _ in ()).throw(OSError()),
+    )
+    monkeypatch.setattr(
+        bootstrap_module.Path,
+        "resolve",
+        lambda self, **k: bootstrap_module.Path("/etc/localtime"),
+    )
+
+    # The actual returned value depends on the host's tzinfo, but the function
+    # must complete without raising and produce a non-empty string (or None on
+    # a TZ-less host, which would also be acceptable).
+    result = bootstrap_module._get_timezone()
+    assert result is None or isinstance(result, str)
 
 
 @pytest.mark.asyncio

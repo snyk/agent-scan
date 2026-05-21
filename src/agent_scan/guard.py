@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import shutil
@@ -111,20 +112,31 @@ def run_guard(args) -> int:
     # bootstrap before install/uninstall/status work and seeds the same runtime
     # config used by push correlation.
     # [/REVIEW-COMMENT]
+    # Belt-and-suspenders: bootstrap_first_control_server already swallows all
+    # non-KeyboardInterrupt/SystemExit exceptions, but a future refactor or a
+    # crash in asyncio.run / set_runtime_config must not abort `guard`.
+    # KeyboardInterrupt and SystemExit still propagate so Ctrl-C / sys.exit()
+    # work as expected.
     if control_servers and not no_bootstrap:
-        set_runtime_config(
-            asyncio.run(
-                bootstrap_first_control_server(
-                    control_servers=control_servers,
-                    command="guard",
-                    subcommand=getattr(args, "guard_command", None),
-                    control_identifier=control_servers[0].identifier,
-                    argv=sys.argv[1:],
-                    no_bootstrap=no_bootstrap,
-                    scan_all_users=getattr(args, "scan_all_users", False),
+        try:
+            set_runtime_config(
+                asyncio.run(
+                    bootstrap_first_control_server(
+                        control_servers=control_servers,
+                        command="guard",
+                        subcommand=getattr(args, "guard_command", None),
+                        control_identifier=control_servers[0].identifier,
+                        argv=sys.argv[1:],
+                        no_bootstrap=no_bootstrap,
+                        scan_all_users=getattr(args, "scan_all_users", False),
+                    )
                 )
             )
-        )
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as exc:
+            logging.getLogger(__name__).warning("Client bootstrap wrapper crashed; using defaults: %s", exc)
+            set_runtime_config(RuntimeConfig())
     else:
         set_runtime_config(RuntimeConfig())
     try:
