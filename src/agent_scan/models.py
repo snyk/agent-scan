@@ -436,11 +436,6 @@ class ScanPathResultsCreate(BaseModel):
     scan_metadata: dict[str, Any] | None = None
 
 
-# [REVIEW-COMMENT]
-# Added client-bootstrap payload models for agent-scan. They intentionally
-# ignore extra fields so the client and control server can roll forward safely
-# while still validating the bootstrap_event_id needed for upload correlation.
-# [/REVIEW-COMMENT]
 # WARNING: These models must stay in sync with backend/models/base.py in
 # invariant-platform. There is NO automated enforcement -- if one side
 # changes without the other, bootstrap will silently degrade to defaults

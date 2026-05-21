@@ -233,10 +233,6 @@ def add_common_arguments(parser):
 
 
 def add_bootstrap_argument(parser):
-    # [REVIEW-COMMENT]
-    # Centralize the opt-out flag so scan, inspect, evo, and guard all expose
-    # the same way to disable best-effort control-server startup bootstrap.
-    # [/REVIEW-COMMENT]
     parser.add_argument(
         "--no-bootstrap",
         default=False,
@@ -611,11 +607,6 @@ async def evo(args):
             headers=parse_headers([f"x-client-id:{client_id}"]),
         )
     ]
-    # [REVIEW-COMMENT]
-    # Evo creates its push control server after minting the temporary client ID,
-    # so bootstrap must run here rather than at command entry to obtain a scan
-    # event ID for the same destination that receives the later push.
-    # [/REVIEW-COMMENT]
     await bootstrap_runtime_config(args, command="evo")
     await run_scan(args, mode="scan")
 
@@ -632,10 +623,6 @@ async def bootstrap_runtime_config(
     command: Literal["scan", "inspect", "evo", "guard"],
     subcommand: str | None = None,
 ) -> None:
-    # [REVIEW-COMMENT]
-    # Wire CLI commands to the shared bootstrap helper and store the resulting
-    # runtime config for downstream upload correlation.
-    # [/REVIEW-COMMENT]
     # Belt-and-suspenders: bootstrap_first_control_server already swallows all
     # Exception subclasses, but a future refactor or a bug in
     # set_runtime_config must not abort the scan. Catching Exception (not
@@ -813,10 +800,6 @@ def _handle_ci_exit(result: list[ScanPathResult], json_output: bool, ignore_code
 
 
 async def print_scan_inspect(mode="scan", args=None):
-    # [REVIEW-COMMENT]
-    # Run bootstrap before scan/inspect discovery so startup metadata is sent
-    # once per invocation and uploads can later include the returned event ID.
-    # [/REVIEW-COMMENT]
     await bootstrap_runtime_config(args, command="inspect" if mode == "inspect" else "scan")
 
     json_output: bool = hasattr(args, "json") and args.json

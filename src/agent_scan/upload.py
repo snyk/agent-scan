@@ -78,11 +78,6 @@ async def upload(
             ) as session:
                 headers = {"Content-Type": "application/json"}
                 headers.update(additional_headers)
-                # [REVIEW-COMMENT]
-                # Propagate the successful bootstrap event ID on every push so
-                # the control server can correlate startup metadata with the
-                # eventual scan results.
-                # [/REVIEW-COMMENT]
                 runtime_config = get_runtime_config()
                 if runtime_config.bootstrap_event_id is not None:
                     headers["X-Bootstrap-Event-Id"] = str(runtime_config.bootstrap_event_id)

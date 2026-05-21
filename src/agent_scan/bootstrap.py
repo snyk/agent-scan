@@ -59,10 +59,6 @@ def _client_bootstrap_url(control_server_url: str) -> str | None:
     return urlunsplit((parsed.scheme, parsed.netloc, path, parsed.query, parsed.fragment))
 
 
-# [REVIEW-COMMENT]
-# Collect host-environment signals defensively: these fields improve backend
-# context, but failures must never block a scan from falling back to defaults.
-# [/REVIEW-COMMENT]
 def _detect_wsl() -> bool:
     try:
         return bool(os.environ.get("WSL_DISTRO_NAME")) or "microsoft" in platform.release().lower()
@@ -169,11 +165,6 @@ async def _build_request(
     argv: list[str],
     scan_all_users: bool = False,
 ) -> ClientBootstrapRequest:
-    # [REVIEW-COMMENT]
-    # Build the privacy-reviewed startup payload once before the HTTP retry
-    # loop. Home-directory enumeration can be slow, so it is offloaded to a
-    # thread and is intentionally outside the per-request network timeout.
-    # [/REVIEW-COMMENT]
     # Security review allowlist: this payload sends client metadata, host OS
     # details, hostname/current username, CI/WSL/container booleans, shell/term,
     # locale/timezone, cwd/home/executable paths, readable home directories capped
@@ -288,11 +279,6 @@ async def _bootstrap_first_control_server_impl(
     timeout_seconds: float,
     max_attempts: int,
 ) -> RuntimeConfig:
-    # [REVIEW-COMMENT]
-    # Bootstrap is best-effort and targets only the first control server so a
-    # startup correlation ID can be obtained without duplicating side effects
-    # across multiple push destinations.
-    # [/REVIEW-COMMENT]
     if not control_servers or no_bootstrap:
         return RuntimeConfig()
 

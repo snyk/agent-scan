@@ -18,10 +18,6 @@ from rapidfuzz.distance import Levenshtein
 from agent_scan.models import ControlServer, StdioServer
 
 
-# [REVIEW-COMMENT]
-# Shared identity helpers live in utils so bootstrap metadata and upload user
-# info use the same hostname/environment sources.
-# [/REVIEW-COMMENT]
 def get_environment() -> str | None:
     return os.getenv("AGENT_SCAN_ENVIRONMENT", os.getenv("MCP_SCAN_ENVIRONMENT"))
 
@@ -242,10 +238,6 @@ def suppress_stdout():
 
 
 def get_push_key(control_servers: list[ControlServer] | list[dict[str, Any]]) -> str | None:
-    # [REVIEW-COMMENT]
-    # Treat x-client-id as an HTTP header name when detecting MDM/push-key
-    # mode: matching is case-insensitive while preserving the configured value.
-    # [/REVIEW-COMMENT]
     parsed_control_servers: list[ControlServer] = []
     for control_server in control_servers:
         if isinstance(control_server, dict):
@@ -265,11 +257,6 @@ def get_push_key(control_servers: list[ControlServer] | list[dict[str, Any]]) ->
     return None
 
 
-# [REVIEW-COMMENT]
-# Relocated readable-home enumeration into utils so bootstrap payloads and scan
-# discovery share one permission-aware implementation across Linux, macOS,
-# Windows, and WSL.
-# [/REVIEW-COMMENT]
 def get_readable_home_directories(all_users: bool = False) -> list[tuple[Path, str]]:
     """
     Retrieve a list of all human user home directories on the machine
