@@ -21,7 +21,6 @@ from agent_scan.pushkeys import (
     mint_push_key,
     revoke_push_key,
 )
-from agent_scan.utils import get_hostname
 
 IS_WINDOWS = sys.platform == "win32"
 
@@ -124,6 +123,8 @@ def run_guard(args) -> int:
 
 
 def _get_machine_description(client: str) -> str:
+    from agent_scan.upload import get_hostname
+
     hostname = get_hostname()
     label = _client_label(client)
     return f"agent-guard ({hostname}) {label}"
