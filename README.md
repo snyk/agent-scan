@@ -154,7 +154,7 @@ Agent Scan does not store or log any usage data, i.e. the contents and results o
 
 #### Control Server Bootstrap
 
-When `--control-server` is configured, Agent Scan sends a startup bootstrap request to the first configured control server before doing any other work. This applies to every command that accepts `--control-server` — `scan`, `inspect`, `evo`, and `guard` — including read-only commands like `inspect` and `guard status` that perform no other network egress on their own. If more than one `--control-server` is configured, only the first one receives the bootstrap; the rest receive the eventual scan-result push only.
+When `--control-server` is configured, Agent Scan sends a startup bootstrap request to the first configured control server before doing any other work. This applies to every command that accepts `--control-server` — `scan`, `inspect`, and `evo` — including the read-only `inspect` command that performs no other network egress on its own. The `guard` command does not bootstrap. If more than one `--control-server` is configured, only the first one receives the bootstrap; the rest receive the eventual scan-result push only.
 
 The request contains an allowlisted host/process fingerprint: Agent Scan version and command, redacted CLI arguments, OS and Python details, hostname, current username, CI/WSL/container flags, shell, terminal, locale, timezone, current working directory, current home directory, executable path, and readable home directories capped at 1000 entries. It does not include `schema_version` or scanned usernames.
 

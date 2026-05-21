@@ -94,7 +94,7 @@ async def test_bootstrap_runtime_config_passes_no_bootstrap_false_when_flag_unse
 async def test_bootstrap_runtime_config_defaults_no_bootstrap_to_false_when_attr_missing():
     """`getattr(args, 'no_bootstrap', False)` defends against subparsers that did not register the flag.
 
-    `guard` and `inspect` register the flag via `add_bootstrap_argument`, but
+    `scan` and `inspect` register the flag via `add_bootstrap_argument`, but
     a future subcommand could forget. The wrapper must not crash; it must
     default to running bootstrap, matching the documented opt-out semantics.
     """

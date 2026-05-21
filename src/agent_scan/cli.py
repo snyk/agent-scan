@@ -453,8 +453,6 @@ def main():
         help="Install, uninstall, or check status of Agent Guard hooks",
         description="Manage Agent Guard hooks for Claude Code, Cursor, and Codex.",
     )
-    add_bootstrap_argument(guard_parser)
-    add_control_server_arguments(guard_parser)
     guard_subparsers = guard_parser.add_subparsers(
         dest="guard_command",
         title="Guard commands",
