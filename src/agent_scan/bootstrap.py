@@ -148,7 +148,7 @@ def _get_timezone() -> str | None:
         offset = now.strftime("%z")  # e.g. "+0200" or "" if naive
         if offset:
             offset_label = f"UTC{offset[:3]}:{offset[3:]}" if len(offset) == 5 else f"UTC{offset}"
-            tz_label = time.tzname[time.daylight and bool(now.dst())] if time.tzname else ""
+            tz_label = time.tzname[bool(now.dst())] if time.tzname else ""
             if tz_label:
                 return f"{tz_label} ({offset_label})"
             return offset_label
