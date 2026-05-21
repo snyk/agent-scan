@@ -243,6 +243,7 @@ async def bootstrap_first_control_server(
     argv: list[str],
     no_bootstrap: bool,
     scan_all_users: bool = False,
+    skip_ssl_verify: bool = False,
     timeout_seconds: float = 3.0,
     max_attempts: int = 3,
 ) -> RuntimeConfig:
@@ -262,6 +263,7 @@ async def bootstrap_first_control_server(
             argv=argv,
             no_bootstrap=no_bootstrap,
             scan_all_users=scan_all_users,
+            skip_ssl_verify=skip_ssl_verify,
             timeout_seconds=timeout_seconds,
             max_attempts=max_attempts,
         )
@@ -281,6 +283,7 @@ async def _bootstrap_first_control_server_impl(
     argv: list[str],
     no_bootstrap: bool,
     scan_all_users: bool,
+    skip_ssl_verify: bool,
     timeout_seconds: float,
     max_attempts: int,
 ) -> RuntimeConfig:
@@ -327,7 +330,7 @@ async def _bootstrap_first_control_server_impl(
 
         try:
             async with aiohttp.ClientSession(
-                connector=setup_tcp_connector(),
+                connector=setup_tcp_connector(skip_ssl_verify=skip_ssl_verify),
                 trust_env=True,
             ) as session:
                 async with session.post(
@@ -349,8 +352,14 @@ async def _bootstrap_first_control_server_impl(
                             source="bootstrap",
                         )
 
-                    error_text = await response.text()
-                    last_error = f"HTTP {response.status}: {error_text}"
+                    # Do NOT read or log response.text(): on a non-2xx the
+                    # server body may carry internal error detail (stack
+                    # snippets, query fragments, IDs) that we must not leak
+                    # into client-side logs. Status code is enough for the
+                    # client's purposes — retry decisions are status-based,
+                    # and operators investigating a failure should look at
+                    # the server-side logs keyed by the request's tenant.
+                    last_error = f"HTTP {response.status}"
                     if not _should_retry(response.status) or attempt == max_attempts - 1:
                         break
         except (TimeoutError, asyncio.TimeoutError, aiohttp.ClientError) as exc:

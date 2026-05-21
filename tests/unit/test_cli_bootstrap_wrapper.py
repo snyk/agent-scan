@@ -235,3 +235,45 @@ async def test_bootstrap_runtime_config_lets_keyboard_interrupt_propagate():
     with patch("agent_scan.cli.bootstrap_first_control_server", side_effect=interrupt):
         with pytest.raises(KeyboardInterrupt):
             await cli.bootstrap_runtime_config(args, command="scan")
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_runtime_config_forwards_skip_ssl_verify():
+    """args.skip_ssl_verify must reach bootstrap_first_control_server unchanged.
+
+    Without this, bootstrap uses a verifying TCPConnector while the subsequent
+    upload uses a non-verifying one — so on hosts with self-signed control
+    server certs the upload succeeds but bootstrap silently fails its TLS
+    handshake, stripping the X-Bootstrap-Event-Id correlation off every push.
+    """
+    fake_helper = AsyncMock(return_value=RuntimeConfig())
+    args = Namespace(
+        control_servers=[_control_server("http://example/mcp-scan/push")],
+        no_bootstrap=False,
+        skip_ssl_verify=True,
+    )
+
+    with patch("agent_scan.cli.bootstrap_first_control_server", fake_helper):
+        await cli.bootstrap_runtime_config(args, command="scan")
+
+    assert fake_helper.call_args.kwargs["skip_ssl_verify"] is True
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_runtime_config_defaults_skip_ssl_verify_to_false_when_attr_missing():
+    """Subparsers that omit --skip-ssl-verify must not crash the wrapper.
+
+    Default is False so bootstrap stays verifying when the flag was never
+    registered on the parser — matching the safe default everywhere else.
+    """
+    fake_helper = AsyncMock(return_value=RuntimeConfig())
+    args = Namespace(
+        control_servers=[_control_server("http://example/mcp-scan/push")],
+        no_bootstrap=False,
+    )
+    # Deliberately no `skip_ssl_verify` attribute on args.
+
+    with patch("agent_scan.cli.bootstrap_first_control_server", fake_helper):
+        await cli.bootstrap_runtime_config(args, command="scan")
+
+    assert fake_helper.call_args.kwargs["skip_ssl_verify"] is False

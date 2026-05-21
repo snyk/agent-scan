@@ -11,6 +11,7 @@ from agent_scan.models import CommandParsingError, rebalance_command_args
 from agent_scan.utils import (
     _probe_tool_version,
     calculate_distance,
+    get_readable_home_directories,
     get_relative_path,
     get_tool_versions,
     suppress_stdout,
@@ -275,3 +276,71 @@ async def test_get_tool_versions_runs_probes_concurrently(monkeypatch):
     result = await driver()
     assert set(result) == {"a", "b", "c"}
     assert started.is_set(), "probes did not run concurrently"
+
+
+class TestGetReadableHomeDirectoriesWindowsTimeout:
+    """`Get-CimInstance Win32_UserProfile` can hang indefinitely when WMI is
+    stuck (corrupted repository, unresponsive WinMgmt service, slow domain
+    controller). Without a timeout, both scan discovery and bootstrap payload
+    build block before any network timeout could fire — and bootstrap is
+    documented as best-effort, so a hung profile query would defeat that.
+
+    These tests pin the timeout contract: the function returns rather than
+    raising, WSL enumeration still proceeds (so a hung CIM query doesn't
+    erase the WSL half of the result), and the failure is logged.
+    """
+
+    def test_windows_profile_query_timeout_does_not_hang(self, monkeypatch, caplog):
+        from pathlib import Path
+
+        monkeypatch.setattr(utils_module.platform, "system", lambda: "Windows")
+
+        def fake_run(cmd, **kwargs):
+            assert "timeout" in kwargs, "PowerShell CIM call must be invoked with a timeout to prevent indefinite hang"
+            raise subprocess.TimeoutExpired(cmd, timeout=kwargs["timeout"])
+
+        monkeypatch.setattr(utils_module.subprocess, "run", fake_run)
+        monkeypatch.setattr(
+            utils_module,
+            "get_wsl_home_directories",
+            lambda: [(Path(r"\\wsl.localhost\Ubuntu\home\alice"), "alice")],
+        )
+
+        import logging
+
+        with caplog.at_level(logging.WARNING, logger="agent_scan.utils"):
+            result = get_readable_home_directories(all_users=True)
+
+        # WSL enumeration still runs even when CIM times out — the two
+        # signal sources are independent, so a stuck WMI must not erase
+        # the WSL half.
+        assert any("wsl.localhost" in str(p).lower() for p, _ in result), (
+            f"expected WSL home preserved when CIM times out; got {result}"
+        )
+        # Operator-facing warning surfaces the hang in logs so misconfigured
+        # WMI is debuggable.
+        assert "timed out" in caplog.text.lower(), f"expected timeout warning in logs; got {caplog.text!r}"
+
+    def test_windows_profile_query_called_with_timeout_kwarg(self, monkeypatch):
+        """Pin the timeout kwarg on the actual subprocess.run call — guards
+        against a refactor that drops the kwarg while keeping the except
+        TimeoutExpired branch (which would silently never fire)."""
+
+        monkeypatch.setattr(utils_module.platform, "system", lambda: "Windows")
+
+        captured: dict = {}
+
+        def fake_run(cmd, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr(utils_module.subprocess, "run", fake_run)
+        monkeypatch.setattr(utils_module, "get_wsl_home_directories", lambda: [])
+
+        get_readable_home_directories(all_users=True)
+
+        assert "timeout" in captured, (
+            f"subprocess.run for Win32_UserProfile must be invoked with a timeout; got kwargs={captured}"
+        )
+        assert isinstance(captured["timeout"], int | float)
+        assert captured["timeout"] > 0

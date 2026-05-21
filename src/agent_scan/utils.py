@@ -57,6 +57,14 @@ _TOOL_VERSION_PROBE_TIMEOUT = 2.0
 # every runtime uniformly.
 _DEFAULT_PROBED_TOOLS: tuple[str, ...] = ("python", "node", "npx", "uvx", "docker")
 
+# Wall-clock cap for the `Get-CimInstance Win32_UserProfile` query that
+# enumerates Windows user profiles under --scan-all-users. WMI/CIM is known
+# to hang when the local repository is corrupted, the WinMgmt service is
+# unresponsive, or a domain controller round-trip stalls; 10s is generous
+# enough for healthy hosts (typical query is <500ms) while still preventing
+# scan startup and bootstrap payload build from blocking indefinitely.
+_WINDOWS_PROFILE_QUERY_TIMEOUT = 10.0
+
 
 def _probe_tool_version(command: str) -> str | None:
     """Run `<command> --version` and return the first non-empty output line.
@@ -302,7 +310,20 @@ def get_readable_home_directories(all_users: bool = False) -> list[tuple[Path, s
                 "-Command",
                 "Get-CimInstance Win32_UserProfile | Where-Object { $_.Special -eq $false } | Select-Object -ExpandProperty LocalPath",
             ]
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            # Cap the CIM query at 10s. Win32_UserProfile via WMI/CIM can hang
+            # indefinitely when the WMI repository is corrupted, the WinMgmt
+            # service is unresponsive, or a domain controller round-trip
+            # stalls. Without this cap, both scan discovery and the bootstrap
+            # payload build block before any network timeout could fire.
+            # On timeout we fall through to WSL enumeration and return an
+            # empty Windows profile set rather than aborting the scan.
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=_WINDOWS_PROFILE_QUERY_TIMEOUT,
+            )
 
             for line in result.stdout.splitlines():
                 clean_path = line.strip()
@@ -319,6 +340,13 @@ def get_readable_home_directories(all_users: bool = False) -> list[tuple[Path, s
 
         except (subprocess.CalledProcessError, FileNotFoundError) as e:
             logger.error(f"Failed to fetch Windows profiles: {e}")
+        except subprocess.TimeoutExpired as e:
+            logger.warning(
+                "Windows profile query timed out after %ss; reporting no Win32 profiles "
+                "(WSL enumeration still proceeds). Likely cause: WMI/CIM is slow or stuck.",
+                _WINDOWS_PROFILE_QUERY_TIMEOUT,
+            )
+            logger.debug("Win32_UserProfile timeout detail: %s", e)
 
         for wsl_home, wsl_user in get_wsl_home_directories():
             if wsl_home in home_dirs:

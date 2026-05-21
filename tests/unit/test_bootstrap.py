@@ -276,6 +276,39 @@ async def test_definitive_4xx_does_not_retry(status):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 500])
+async def test_non_2xx_response_body_is_not_logged(monkeypatch, caplog, status):
+    """On a non-2xx the server body may carry internal detail (stack snippets,
+    query fragments, IDs). We must NOT pull `response.text()` into the client
+    logs. The bootstrap log line carries only the HTTP status code; debugging
+    the actual failure happens on the server side, keyed by tenant.
+
+    This guards against a regression that re-introduces the body for
+    "debuggability" — it's a privacy/leakage contract, not a logging style.
+    """
+    monkeypatch.setattr(bootstrap_module.asyncio, "sleep", lambda delay: REAL_ASYNCIO_SLEEP(0))
+    secret_body = 'DETAIL: relation "push_keys" violates RLS policy SECRET-INTERNAL-XYZ'
+    async with _BootstrapServer([(status, secret_body, 0)]) as server:
+        with caplog.at_level(logging.WARNING, logger="agent_scan.bootstrap"):
+            cfg = await bootstrap_first_control_server(
+                [_control_server(server.url)],
+                command="scan",
+                subcommand=None,
+                control_identifier="machine-1",
+                argv=[],
+                no_bootstrap=False,
+            )
+
+    assert cfg.source == "default"
+    assert "SECRET-INTERNAL-XYZ" not in caplog.text, f"server response body leaked into client log: {caplog.text!r}"
+    assert 'relation "push_keys"' not in caplog.text
+    # Status code itself IS allowed in logs — it drives retry logic and isn't
+    # a leak channel. Pin its presence so a future overcorrection doesn't
+    # strip it too.
+    assert f"HTTP {status}" in caplog.text
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("status", [408, 429])
 async def test_retryable_4xx_retries(monkeypatch, status):
     bootstrap_event_id = uuid4()
@@ -643,7 +676,7 @@ async def test_concurrent_bootstrap_calls_do_not_interleave():
 # Without this guard, a scan would crash on startup rather than fall back.
 @pytest.mark.asyncio
 async def test_outer_guard_catches_oserror_from_connector(monkeypatch, caplog):
-    def boom_connector():
+    def boom_connector(**_kwargs):
         raise OSError("too many open files")
 
     monkeypatch.setattr(bootstrap_module, "setup_tcp_connector", boom_connector)
@@ -672,7 +705,7 @@ async def test_outer_guard_catches_unexpected_exception_type(monkeypatch, caplog
     class WeirdLibraryError(Exception):
         pass
 
-    def boom_connector():
+    def boom_connector(**_kwargs):
         raise WeirdLibraryError("library invariant violated")
 
     monkeypatch.setattr(bootstrap_module, "setup_tcp_connector", boom_connector)
@@ -699,7 +732,7 @@ async def test_outer_guard_lets_keyboard_interrupt_propagate(monkeypatch):
     so the user's exit signal still works.
     """
 
-    def interrupt_connector():
+    def interrupt_connector(**_kwargs):
         raise KeyboardInterrupt()
 
     monkeypatch.setattr(bootstrap_module, "setup_tcp_connector", interrupt_connector)
@@ -720,7 +753,7 @@ async def test_outer_guard_lets_keyboard_interrupt_propagate(monkeypatch):
 async def test_outer_guard_lets_system_exit_propagate(monkeypatch):
     """sys.exit() during bootstrap must propagate so explicit exits still work."""
 
-    def exit_connector():
+    def exit_connector(**_kwargs):
         raise SystemExit(1)
 
     monkeypatch.setattr(bootstrap_module, "setup_tcp_connector", exit_connector)
@@ -735,3 +768,62 @@ async def test_outer_guard_lets_system_exit_propagate(monkeypatch):
                 argv=[],
                 no_bootstrap=False,
             )
+
+
+@pytest.mark.asyncio
+async def test_skip_ssl_verify_is_forwarded_to_tcp_connector(monkeypatch):
+    """If the user disables SSL verification on the CLI, bootstrap must use the
+    same setting as the eventual push — otherwise on a host with a self-signed
+    control-server cert, the upload succeeds (because `--skip-ssl-verify` is
+    plumbed through `upload()`) but the bootstrap silently fails its TLS
+    handshake, defaulting `RuntimeConfig` and stripping the X-Bootstrap-Event-Id
+    correlation from every push for the run.
+    """
+    captured_kwargs: dict = {}
+    real_connector_factory = bootstrap_module.setup_tcp_connector
+
+    def fake_connector(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return real_connector_factory(**kwargs)
+
+    monkeypatch.setattr(bootstrap_module, "setup_tcp_connector", fake_connector)
+
+    async with _BootstrapServer() as server:
+        await bootstrap_first_control_server(
+            [_control_server(server.url)],
+            command="scan",
+            subcommand=None,
+            control_identifier="machine-1",
+            argv=[],
+            no_bootstrap=False,
+            skip_ssl_verify=True,
+        )
+
+    assert captured_kwargs.get("skip_ssl_verify") is True, (
+        f"expected skip_ssl_verify=True to reach setup_tcp_connector; got kwargs={captured_kwargs}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_skip_ssl_verify_defaults_false_when_unset(monkeypatch):
+    """Default path: callers that don't pass skip_ssl_verify must get a verifying connector."""
+    captured_kwargs: dict = {}
+    real_connector_factory = bootstrap_module.setup_tcp_connector
+
+    def fake_connector(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        return real_connector_factory(**kwargs)
+
+    monkeypatch.setattr(bootstrap_module, "setup_tcp_connector", fake_connector)
+
+    async with _BootstrapServer() as server:
+        await bootstrap_first_control_server(
+            [_control_server(server.url)],
+            command="scan",
+            subcommand=None,
+            control_identifier="machine-1",
+            argv=[],
+            no_bootstrap=False,
+        )
+
+    assert captured_kwargs.get("skip_ssl_verify") is False
