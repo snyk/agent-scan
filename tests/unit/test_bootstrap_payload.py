@@ -1,8 +1,21 @@
+import sys
 from pathlib import Path
 
 import pytest
 
 from agent_scan import bootstrap as bootstrap_module
+
+# Several tests in this module mock POSIX-only filesystem signals
+# (/.dockerenv, /run/.containerenv, /etc/timezone, /etc/localtime) by
+# string-matching against str(Path(...)). On Windows that string contains
+# backslashes and the monkeypatch matchers never fire. zoneinfo also
+# requires the `tzdata` package on Windows, which is not a runtime dep.
+# The functions under test still behave correctly on Windows; the
+# Linux-shaped scenarios just cannot be simulated there.
+_posix_only = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="mocks POSIX-only paths / zoneinfo behavior not available on Windows",
+)
 
 
 @pytest.mark.asyncio
@@ -203,6 +216,7 @@ def test_container_detection_defaults_false_on_permission_error(monkeypatch):
     assert bootstrap_module._detect_container() is False
 
 
+@_posix_only
 def test_container_detection_podman_marker_file(monkeypatch):
     """Podman drops /run/.containerenv (not /.dockerenv); rootless Podman in
     particular has no /.dockerenv, so this marker is the only signal until
@@ -244,6 +258,7 @@ def test_wsl_detection_defaults_false(monkeypatch):
     assert bootstrap_module._detect_wsl() is False
 
 
+@_posix_only
 def test_timezone_prefers_tz_env_iana_name(monkeypatch):
     """An IANA $TZ value (e.g. 'Europe/Berlin') is returned verbatim — it's the
     most explicit signal a user can give us, and it's stable across hosts."""
@@ -266,6 +281,7 @@ def test_timezone_ignores_non_iana_tz_env(monkeypatch):
     assert result != "CET-1CEST,M3.5.0,M10.5.0/3"
 
 
+@_posix_only
 def test_timezone_reads_etc_timezone_when_tz_env_absent(monkeypatch):
     """Debian/Ubuntu canonical source: /etc/timezone holds the IANA name."""
     monkeypatch.delenv("TZ", raising=False)
@@ -282,6 +298,7 @@ def test_timezone_reads_etc_timezone_when_tz_env_absent(monkeypatch):
     assert bootstrap_module._get_timezone() == "America/Los_Angeles"
 
 
+@_posix_only
 def test_timezone_falls_back_to_localtime_symlink(monkeypatch):
     """macOS and most modern Linux: /etc/localtime is a symlink into the
     zoneinfo tree; the IANA name follows 'zoneinfo/' in the resolved path."""
