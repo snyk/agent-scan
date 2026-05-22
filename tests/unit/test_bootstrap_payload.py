@@ -62,6 +62,17 @@ async def test_payload_runtimes_passes_through_probed_tools_verbatim(monkeypatch
             "npx": "10.2.3",
             "uvx": "0.4.18",
             "docker": None,
+            # Shell-side deps of the stdio-local-proxy shim. bash/shasum/grep
+            # support `--version` on both GNU and BSD; cut/mktemp/tee accept
+            # it on GNU but not on BSD — the BSD-None case is exercised here
+            # via `mktemp` so the payload contract for the shim deps stays
+            # pinned alongside the original runtimes set.
+            "bash": "GNU bash, version 5.2.15",
+            "shasum": "shasum (perl) version 6.04",
+            "cut": "cut (GNU coreutils) 9.4",
+            "mktemp": None,
+            "tee": "tee (GNU coreutils) 9.4",
+            "grep": "grep (GNU grep) 3.11",
         }
 
     monkeypatch.setattr(bootstrap_module, "get_tool_versions", fake_probes)
@@ -76,6 +87,14 @@ async def test_payload_runtimes_passes_through_probed_tools_verbatim(monkeypatch
     # `None` means "we probed and the tool isn't installed" — it must be
     # preserved as an explicit null in the payload, not dropped.
     assert runtimes["docker"] is None
+    # Shim deps: each is reported verbatim, including the BSD-None case
+    # for mktemp (where `--version` is unsupported on BSD/macOS).
+    assert runtimes["bash"] == "GNU bash, version 5.2.15"
+    assert runtimes["shasum"] == "shasum (perl) version 6.04"
+    assert runtimes["cut"] == "cut (GNU coreutils) 9.4"
+    assert runtimes["mktemp"] is None
+    assert runtimes["tee"] == "tee (GNU coreutils) 9.4"
+    assert runtimes["grep"] == "grep (GNU grep) 3.11"
 
 
 @pytest.mark.asyncio

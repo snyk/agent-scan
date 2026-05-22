@@ -51,7 +51,27 @@ _TOOL_VERSION_PROBE_TIMEOUT = 2.0
 # may resolve to a different interpreter than the one running agent-scan
 # if multiple Pythons are on PATH; that's accepted in exchange for treating
 # every runtime uniformly.
-_DEFAULT_PROBED_TOOLS: tuple[str, ...] = ("python", "node", "npx", "uvx", "docker")
+_DEFAULT_PROBED_TOOLS: tuple[str, ...] = (
+    "python",
+    "node",
+    "npx",
+    "uvx",
+    "docker",
+    # Shell-side dependencies of snyk_mcp_stdio_local_proxy.sh. The shim
+    # is bash-only (uses process substitution `>(...)`) and shells out to
+    # shasum/cut/mktemp/tee/grep. Probing them here lets the server gate
+    # the stdio-local-proxy runtime flag on hosts that actually have the
+    # toolchain — and surface missing pieces in telemetry. Note: on BSD
+    # (macOS) `cut`, `mktemp`, and `tee` reject `--version`, so probes
+    # for those will be None there; that's the existing
+    # "probe-didn't-work" signal, not "tool is missing".
+    "bash",
+    "shasum",
+    "cut",
+    "mktemp",
+    "tee",
+    "grep",
+)
 
 # Wall-clock cap for the `Get-CimInstance Win32_UserProfile` query that
 # enumerates Windows user profiles under --scan-all-users. WMI/CIM is known
