@@ -59,17 +59,11 @@ _DEFAULT_PROBED_TOOLS: tuple[str, ...] = (
     "docker",
     # Shell-side dependencies of snyk_mcp_stdio_local_proxy.sh. The shim
     # is bash-only (uses process substitution `>(...)`) and shells out to
-    # shasum/cut/mktemp/tee/grep. Probing them here lets the server gate
-    # the stdio-local-proxy runtime flag on hosts that actually have the
-    # toolchain — and surface missing pieces in telemetry. Note: on BSD
-    # (macOS) `cut`, `mktemp`, and `tee` reject `--version`, so probes
-    # for those will be None there; that's the existing
-    # "probe-didn't-work" signal, not "tool is missing".
+    # shasum/grep. Probing them here lets the server gate the
+    # stdio-local-proxy runtime flag on hosts that actually have the
+    # toolchain — and surface missing pieces in telemetry.
     "bash",
     "shasum",
-    "cut",
-    "mktemp",
-    "tee",
     "grep",
 )
 
