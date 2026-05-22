@@ -6,10 +6,16 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from agent_scan.inspect import get_mcp_config_per_client
+from agent_scan.inspect import get_mcp_config_per_client, inspect_client
 from agent_scan.mcp_client import scan_mcp_config_file
-from agent_scan.models import CandidateClient, ClientToInspect
+from agent_scan.models import (
+    CandidateClient,
+    ClientToInspect,
+    SkippedByRuntimeConfigError,
+    StdioServer,
+)
 from agent_scan.pipelines import InspectArgs, inspect_pipeline
+from agent_scan.runtime_config import RuntimeConfig, set_runtime_config
 
 TEST_CANDIDATE_CLIENT = CandidateClient(
     name="test-client",
@@ -589,3 +595,79 @@ async def test_inspect_pipeline_discovery_mode_without_all_users_falls_back_to_c
         assert scanned_usernames == [getpass.getuser()]
     finally:
         shutil.rmtree(tmp)
+
+
+@pytest.mark.asyncio
+async def test_inspect_client_skips_server_per_runtime_config_without_starting_subprocess():
+    """When runtime_config.skip_servers matches, inspect_extension must not run.
+
+    This is the load-bearing guarantee: the *whole point* of skipping is to
+    avoid starting the subprocess (and, by extension, avoid the consent
+    prompt, the env var passthrough, the network egress, etc.). If we
+    only labelled the result without preventing the call, the skip would
+    be a lie.
+    """
+    set_runtime_config(RuntimeConfig(config={"skip_servers": ["entra-mcp-proxy"]}, source="bootstrap"))
+
+    skipped = StdioServer(
+        command="uvx",
+        args=[
+            "--from",
+            "git+ssh://github.eagleview.com/infrastructure/entra-mcp-proxy.git",
+            "entra-mcp-proxy",
+        ],
+    )
+    kept = StdioServer(command="echo", args=["hello"])
+
+    client = ClientToInspect(
+        name="test",
+        client_path="/some/path",
+        mcp_configs={"/cfg.json": [("entra-mcp-proxy", skipped), ("other", kept)]},
+        skills_dirs={},
+    )
+
+    with patch("agent_scan.inspect.inspect_extension", new_callable=AsyncMock) as mock_inspect_extension:
+        # Returning a sentinel that satisfies InspectedExtensions shape isn't
+        # required for the kept server because we only assert call counts/args
+        # here; the test fails the moment inspect_extension is invoked for the
+        # skipped server (which is the regression we care about).
+        mock_inspect_extension.side_effect = AssertionError(
+            "inspect_extension must not be called when runtime_config skips the server"
+        )
+
+        # Make the kept-server call a no-op success so we can finish the loop
+        # without exercising the real MCP subprocess machinery.
+        async def fake_inspect(name, server, *args, **kwargs):
+            if name == "other":
+                from mcp.types import Implementation, InitializeResult
+
+                from agent_scan.models import InspectedExtensions, ServerSignature
+
+                return InspectedExtensions(
+                    name=name,
+                    config=server,
+                    signature_or_error=ServerSignature(
+                        metadata=InitializeResult(
+                            protocolVersion="2024-11-05",
+                            capabilities={},
+                            serverInfo=Implementation(name="x", version="1"),
+                        ),
+                    ),
+                )
+            raise AssertionError(f"inspect_extension must not be called for skipped server {name!r}")
+
+        mock_inspect_extension.side_effect = fake_inspect
+
+        result = await inspect_client(client, timeout=10, tokens=[], scan_skills=False)
+
+    extensions = result.extensions["/cfg.json"]
+    assert len(extensions) == 2
+
+    skipped_ext = next(e for e in extensions if e.name == "entra-mcp-proxy")
+    assert isinstance(skipped_ext.signature_or_error, SkippedByRuntimeConfigError)
+    assert skipped_ext.signature_or_error.is_failure is True
+    assert "entra-mcp-proxy" in (skipped_ext.signature_or_error.message or "")
+
+    # Sanity: the non-skipped server did go through inspect_extension exactly once.
+    call_names = [call.args[0] for call in mock_inspect_extension.call_args_list]
+    assert call_names == ["other"]

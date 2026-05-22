@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -89,3 +90,115 @@ def test_get_runtime_config_returns_independent_instances():
 
     assert first == second
     assert first.config is not second.config
+
+
+class _StdioLike:
+    """Minimal duck-type stand-in for StdioServer in matcher tests.
+
+    Using a structural stand-in (rather than the real StdioServer) keeps
+    these tests honest about what matched_skip_needle actually reads:
+    only ``command`` and ``args``. If the matcher is ever changed to peek
+    at additional attributes, these tests will not silently start passing
+    for the wrong reason.
+    """
+
+    def __init__(self, command: str | None = None, args: list[str] | None = None):
+        self.command = command
+        self.args = args or []
+
+
+class _RemoteLike:
+    def __init__(self, url: str | None = None):
+        self.url = url
+
+
+def test_matched_skip_needle_returns_none_when_skip_servers_missing():
+    cfg = RuntimeConfig(config={})
+
+    assert cfg.matched_skip_needle("entra-mcp-proxy", _StdioLike("uvx", ["entra-mcp-proxy"])) is None
+
+
+def test_matched_skip_needle_returns_none_when_skip_servers_empty():
+    cfg = RuntimeConfig(config={"skip_servers": []})
+
+    assert cfg.matched_skip_needle("entra-mcp-proxy", _StdioLike("uvx", ["entra-mcp-proxy"])) is None
+
+
+def test_matched_skip_needle_returns_none_when_skip_servers_wrong_type():
+    """A non-list ``skip_servers`` must not raise — degrade to no-match."""
+    cfg = RuntimeConfig(config={"skip_servers": "entra-mcp-proxy"})
+
+    assert cfg.matched_skip_needle("entra-mcp-proxy", _StdioLike("uvx", ["entra-mcp-proxy"])) is None
+
+
+def test_matched_skip_needle_matches_on_server_name():
+    cfg = RuntimeConfig(config={"skip_servers": ["entra-mcp-proxy"]})
+
+    assert cfg.matched_skip_needle("entra-mcp-proxy", _StdioLike("uvx", [])) == "entra-mcp-proxy"
+
+
+def test_matched_skip_needle_matches_on_command():
+    cfg = RuntimeConfig(config={"skip_servers": ["my-binary"]})
+
+    assert cfg.matched_skip_needle("anon", _StdioLike("/usr/local/bin/my-binary", [])) == "my-binary"
+
+
+def test_matched_skip_needle_matches_on_args_substring():
+    """The EagleView shape: name carries no useful identifier, the match
+    must come from the args (here the git repo URL fragment)."""
+    cfg = RuntimeConfig(config={"skip_servers": ["entra-mcp-proxy"]})
+    server = _StdioLike(
+        "uvx",
+        [
+            "--from",
+            "git+ssh://github.eagleview.com/infrastructure/entra-mcp-proxy.git",
+            "entra-mcp-proxy",
+        ],
+    )
+
+    assert cfg.matched_skip_needle("anon", server) == "entra-mcp-proxy"
+
+
+def test_matched_skip_needle_matches_remote_url():
+    cfg = RuntimeConfig(config={"skip_servers": ["internal.example.com"]})
+    server = _RemoteLike(url="https://internal.example.com/mcp")
+
+    assert cfg.matched_skip_needle("remote", server) == "internal.example.com"
+
+
+def test_matched_skip_needle_ignores_empty_and_non_string_needles():
+    """Empty strings would substring-match everything; non-strings would crash.
+    Both must be silently filtered, not surface as runtime errors."""
+    cfg = RuntimeConfig(config={"skip_servers": ["", None, 42, "good"]})
+    server = _StdioLike("uvx", ["good"])
+
+    assert cfg.matched_skip_needle("anon", server) == "good"
+
+
+def test_matched_skip_needle_returns_none_when_no_needle_matches():
+    cfg = RuntimeConfig(config={"skip_servers": ["nothing-matches"]})
+
+    assert cfg.matched_skip_needle("entra", _StdioLike("uvx", ["other"])) is None
+
+
+def test_matched_skip_needle_does_not_read_env():
+    """Env values can carry secrets and may legitimately contain skip needles
+    (e.g. a redacted marker, a token name). They must not influence routing."""
+    cfg = RuntimeConfig(config={"skip_servers": ["secret-value"]})
+
+    server = SimpleNamespace(
+        command="uvx",
+        args=["safe-server"],
+        env={"TOKEN": "secret-value"},
+    )
+
+    assert cfg.matched_skip_needle("safe-server", server) is None
+
+
+def test_matched_skip_needle_returns_first_match_when_multiple_could_match():
+    """Document the ordering guarantee: needles are checked in declared order.
+    Callers log the returned needle, so a stable answer matters for triage."""
+    cfg = RuntimeConfig(config={"skip_servers": ["uvx", "entra"]})
+    server = _StdioLike("uvx", ["entra-mcp-proxy"])
+
+    assert cfg.matched_skip_needle("anon", server) == "uvx"

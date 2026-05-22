@@ -11,12 +11,34 @@ class RuntimeConfig(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     bootstrap_event_id: UUID | None = None
-    # TODO: plumbing only — populated from ClientBootstrapResponse.runtime_config
-    # but not yet read by any client code. See the TODO on
-    # ClientBootstrapResponse.runtime_config in agent_scan/models.py for the
-    # follow-up that will start consuming specific keys.
+    # Server-delivered runtime config. Known keys consumed today:
+    #   - "skip_servers": list[str] — see `matched_skip_needle` below.
     config: dict[str, Any] = Field(default_factory=dict)
     source: Literal["bootstrap", "default"] = "default"
+
+    def matched_skip_needle(self, server_name: str, server: Any) -> str | None:
+        """Return the matched skip needle if server should be skipped.
+
+        Substring match against a haystack built from the server's name and
+        its connection details (command + args for stdio, url for remote).
+        """
+        needles = self.config.get("skip_servers")
+        if not isinstance(needles, list) or not needles:
+            return None
+        parts: list[str] = [server_name]
+        cmd = getattr(server, "command", None)
+        if cmd:
+            parts.append(cmd)
+        args = getattr(server, "args", None) or []
+        parts.extend(str(a) for a in args)
+        url = getattr(server, "url", None)
+        if url:
+            parts.append(url)
+        haystack = " ".join(parts)
+        return next(
+            (n for n in needles if isinstance(n, str) and n and n in haystack),
+            None,
+        )
 
 
 _runtime_config: RuntimeConfig | None = None

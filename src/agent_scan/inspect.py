@@ -22,12 +22,14 @@ from agent_scan.models import (
     ServerStartupError,
     SkillScannError,
     SkillServer,
+    SkippedByRuntimeConfigError,
     StdioServer,
     TokenAndClientInfo,
     UnknownConfigFormat,
     UnknownMCPConfig,
     UserDeclinedError,
 )
+from agent_scan.runtime_config import get_runtime_config
 from agent_scan.signed_binary import check_server_signature
 from agent_scan.skill_client import inspect_skill, inspect_skills_dir
 from agent_scan.traffic_capture import TrafficCapture
@@ -314,7 +316,9 @@ async def inspect_client(
             extensions[mcp_config_path] = mcp_configs
             continue
         extensions_for_mcp_config: list[InspectedExtensions] = []
+        runtime_cfg = get_runtime_config()
         for name, server in mcp_configs:
+            # Skip servers that the user declined during the consent flow.
             if (mcp_config_path, name) in declined:
                 extensions_for_mcp_config.append(
                     InspectedExtensions(
@@ -323,6 +327,28 @@ async def inspect_client(
                         signature_or_error=UserDeclinedError(
                             message="Skipped by user consent (stdio server was not started)",
                             is_failure=True,
+                        ),
+                    )
+                )
+                continue
+            # Bootstrap runtime config skips short-circuit before inspect_extension so we
+            # never start the subprocess / open the connection.
+            needle = runtime_cfg.matched_skip_needle(name, server)
+            if needle is not None:
+                logger.info(
+                    "Skipping MCP server per bootstrap runtime_config.skip_servers",
+                    extra={
+                        "server_name": name,
+                        "mcp_config_path": mcp_config_path,
+                        "matched_needle": needle,
+                    },
+                )
+                extensions_for_mcp_config.append(
+                    InspectedExtensions(
+                        name=name,
+                        config=server,
+                        signature_or_error=SkippedByRuntimeConfigError(
+                            message=f"Skipped by bootstrap runtime_config.skip_servers (matched: {needle!r})",
                         ),
                     )
                 )
