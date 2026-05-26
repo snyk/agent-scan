@@ -5,7 +5,6 @@ import locale as locale_module
 import logging
 import os
 import platform
-import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -20,9 +19,7 @@ from agent_scan.models import (
     ClientBootstrapResponse,
     ClientInfo,
     ControlServer,
-    HomeDirectoryEntry,
     HostInfo,
-    PathsInfo,
 )
 from agent_scan.redact import redact_args
 from agent_scan.runtime_config import RuntimeConfig
@@ -181,9 +178,6 @@ async def _build_request(
         asyncio.to_thread(get_readable_home_directories, all_users=scan_all_users),
         get_tool_versions(),
     )
-    home_dirs_sorted = sorted(home_dirs_raw, key=lambda item: str(item[0]))
-    home_dirs_truncated = len(home_dirs_sorted) > _HOME_DIRECTORIES_LIMIT
-    home_dirs = home_dirs_sorted[:_HOME_DIRECTORIES_LIMIT]
 
     return ClientBootstrapRequest(
         client=ClientInfo(
@@ -205,18 +199,11 @@ async def _build_request(
             is_ci=(get_environment() or "").lower() == "ci",
             is_wsl=_detect_wsl(),
             is_container=_detect_container(),
-            shell=os.environ.get("SHELL"),
+            shell="",
             term=os.environ.get("TERM"),
             locale=_get_locale(),
             timezone=_get_timezone(),
             runtimes=runtimes,
-        ),
-        paths=PathsInfo(
-            cwd=os.getcwd(),
-            current_home_dir=str(Path.home()),
-            home_directories=[HomeDirectoryEntry(path=str(path), username=username) for path, username in home_dirs],
-            home_directories_truncated=home_dirs_truncated,
-            executable=sys.executable,
         ),
     )
 
