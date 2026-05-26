@@ -7,13 +7,14 @@ skills directories. The legacy `inspect.get_mcp_config_per_client()` path
 remains the fallback for agents that don't have a subclass yet.
 """
 
+import json
 import logging
 import traceback
 from abc import ABC, abstractmethod
 from pathlib import Path
 
-from agent_scan.mcp_client import scan_mcp_config_file
 from agent_scan.models import (
+    ClaudeConfigFile,
     ClientToInspect,
     CouldNotParseMCPConfig,
     FileNotFoundConfig,
@@ -21,7 +22,6 @@ from agent_scan.models import (
     SkillServer,
     StdioServer,
     UnknownConfigFormat,
-    UnknownMCPConfig,
 )
 from agent_scan.signed_binary import check_server_signature
 from agent_scan.skill_client import inspect_skills_dir
@@ -88,11 +88,28 @@ class AgentDiscoverer(ABC):
 
 
 class ClaudeCodeDiscoverer(AgentDiscoverer):
+    """Claude Code discovery: ``~/.claude.json`` + ``~/.claude/skills/`` + per-project scopes.
+
+    The public ``discover_mcp_servers`` / ``discover_skills`` methods orchestrate six
+    private helpers split by scope:
+
+    * ``_discover_global_folders`` / ``_discover_project_folders`` enumerate where to look.
+    * ``_discover_global_mcp_servers`` reads the top-level ``mcpServers`` key in
+      ``~/.claude.json``; ``_discover_project_mcp_servers`` reads each
+      ``projects.<path>.mcpServers`` block.
+    * ``_discover_global_skill`` reads ``~/.claude/skills``;
+      ``_discover_project_skills`` reads ``<project>/.claude/skills`` for every
+      project listed in ``~/.claude.json``.
+    """
+
     name = "claude code"
 
     _install_path = "~/.claude"
     _mcp_config_path = "~/.claude.json"
-    _skills_dir_path = "~/.claude/skills"
+    _skills_subdir = "skills"
+    _project_dotclaude_subdir = ".claude"
+
+    # --- public (override AgentDiscoverer abstracts) ---
 
     def client_exists(self, home_directory: Path | None) -> str | None:
         path = expand_path(Path(self._install_path), home_directory)
@@ -104,41 +121,138 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         return None
 
     async def discover_mcp_servers(self, home_directory: Path | None) -> McpConfigsResult:
-        mcp_configs: McpConfigsResult = {}
-        mcp_config_path = expand_path(Path(self._mcp_config_path), home_directory)
-        if not mcp_config_path.exists():
-            return mcp_configs
-        try:
-            mcp_config = await scan_mcp_config_file(str(mcp_config_path))
-            if isinstance(mcp_config, UnknownMCPConfig):
-                mcp_configs[mcp_config_path.as_posix()] = UnknownConfigFormat(
-                    message=f"Unknown MCP config: {mcp_config_path.as_posix()}",
-                    is_failure=False,
-                )
-                return mcp_configs
+        result: McpConfigsResult = {}
+        result.update(await self._discover_global_mcp_servers(home_directory))
+        result.update(await self._discover_project_mcp_servers(home_directory))
+        return result
 
-            server_configs_by_name = mcp_config.get_servers()
-            for server_config in server_configs_by_name.values():
-                if isinstance(server_config, StdioServer):
-                    server_config = check_server_signature(server_config)
-            mcp_configs[mcp_config_path.as_posix()] = [
-                (server_name, server) for server_name, server in server_configs_by_name.items()
-            ]
+    def discover_skills(self, home_directory: Path | None) -> SkillsDirsResult:
+        result: SkillsDirsResult = {}
+        result.update(self._discover_global_skill(home_directory))
+        result.update(self._discover_project_skills(home_directory))
+        return result
+
+    # --- private: folder enumeration ---
+
+    def _discover_global_folders(self, home_directory: Path | None) -> list[Path]:
+        """Folders that hold user-global Claude Code state (currently just ``~/.claude``)."""
+        return [expand_path(Path(self._install_path), home_directory)]
+
+    def _discover_project_folders(self, home_directory: Path | None) -> list[Path]:
+        """Project root paths recorded under ``projects`` in ``~/.claude.json``."""
+        data = self._load_config_raw(home_directory)
+        if not isinstance(data, dict):
+            return []
+        projects = data.get("projects")
+        if not isinstance(projects, dict):
+            return []
+        return [Path(p) for p in projects if isinstance(p, str)]
+
+    # --- private: MCP discovery ---
+
+    async def _discover_global_mcp_servers(self, home_directory: Path | None) -> McpConfigsResult:
+        """Parse top-level ``mcpServers`` from ``~/.claude.json`` — the user-global scope."""
+        config_path = expand_path(Path(self._mcp_config_path), home_directory)
+        if not config_path.exists():
+            return {}
+        data = self._load_config_raw(home_directory)
+        if isinstance(data, CouldNotParseMCPConfig):
+            return {config_path.as_posix(): data}
+        if not isinstance(data, dict):
+            return {}
+        top = data.get("mcpServers")
+        if not isinstance(top, dict) or not top:
+            return {}
+        entries = self._validate_servers(top, source=f"global mcpServers in {config_path.as_posix()}")
+        if isinstance(entries, CouldNotParseMCPConfig):
+            return {config_path.as_posix(): entries}
+        return {config_path.as_posix(): entries}
+
+    async def _discover_project_mcp_servers(self, home_directory: Path | None) -> McpConfigsResult:
+        """Parse ``projects.<path>.mcpServers`` from ``~/.claude.json`` — per-project scope.
+
+        Each project contributes one entry keyed by its absolute project path.
+        """
+        config_path = expand_path(Path(self._mcp_config_path), home_directory)
+        if not config_path.exists():
+            return {}
+        data = self._load_config_raw(home_directory)
+        if isinstance(data, CouldNotParseMCPConfig):
+            return {config_path.as_posix(): data}
+        if not isinstance(data, dict):
+            return {}
+        projects = data.get("projects")
+        if not isinstance(projects, dict):
+            return {}
+
+        result: McpConfigsResult = {}
+        for project_path, project_config in projects.items():
+            if not isinstance(project_path, str) or not isinstance(project_config, dict):
+                continue
+            project_mcp = project_config.get("mcpServers")
+            if not isinstance(project_mcp, dict) or not project_mcp:
+                continue
+            entries = self._validate_servers(
+                project_mcp, source=f"projects.{project_path}.mcpServers in {config_path.as_posix()}"
+            )
+            result[project_path] = entries
+        return result
+
+    # --- private: skills discovery ---
+
+    def _discover_global_skill(self, home_directory: Path | None) -> SkillsDirsResult:
+        """Scan ``~/.claude/skills`` for user-global skills."""
+        skills_dir = expand_path(Path(self._install_path), home_directory) / self._skills_subdir
+        if not skills_dir.exists():
+            return {}
+        return {skills_dir.as_posix(): inspect_skills_dir(str(skills_dir))}
+
+    def _discover_project_skills(self, home_directory: Path | None) -> SkillsDirsResult:
+        """For each project, scan ``<project>/.claude/skills`` if present."""
+        result: SkillsDirsResult = {}
+        for project_path in self._discover_project_folders(home_directory):
+            skills_dir = project_path / self._project_dotclaude_subdir / self._skills_subdir
+            if skills_dir.exists():
+                result[skills_dir.as_posix()] = inspect_skills_dir(str(skills_dir))
+        return result
+
+    # --- internal helpers ---
+
+    def _load_config_raw(self, home_directory: Path | None) -> dict | CouldNotParseMCPConfig | None:
+        """Read and JSON-decode ``~/.claude.json``. Returns ``None`` if missing,
+        a dict on success, or a ``CouldNotParseMCPConfig`` on malformed JSON.
+        """
+        config_path = expand_path(Path(self._mcp_config_path), home_directory)
+        if not config_path.exists():
+            return None
+        try:
+            return json.loads(config_path.read_text(encoding="utf-8"))
         except Exception as e:
-            logger.exception("Error parsing MCP config file %s: %s", mcp_config_path.as_posix(), e)
-            mcp_configs[mcp_config_path.as_posix()] = CouldNotParseMCPConfig(
-                message=f"could not parse file {mcp_config_path.as_posix()}",
+            logger.exception("Error reading %s: %s", config_path.as_posix(), e)
+            return CouldNotParseMCPConfig(
+                message=f"could not parse file {config_path.as_posix()}",
                 traceback=traceback.format_exc(),
                 is_failure=True,
             )
-        return mcp_configs
 
-    def discover_skills(self, home_directory: Path | None) -> SkillsDirsResult:
-        skills_dirs: SkillsDirsResult = {}
-        skills_dir_path = expand_path(Path(self._skills_dir_path), home_directory)
-        if skills_dir_path.exists():
-            skills_dirs[skills_dir_path.as_posix()] = inspect_skills_dir(str(skills_dir_path))
-        return skills_dirs
+    def _validate_servers(
+        self, raw: dict, source: str
+    ) -> list[tuple[str, StdioServer | RemoteServer]] | CouldNotParseMCPConfig:
+        """Validate a raw ``mcpServers`` mapping into typed Stdio/Remote server entries."""
+        try:
+            validated = ClaudeConfigFile(mcpServers=raw)
+        except Exception as e:
+            logger.exception("Invalid %s: %s", source, e)
+            return CouldNotParseMCPConfig(
+                message=f"could not parse {source}",
+                traceback=traceback.format_exc(),
+                is_failure=True,
+            )
+        servers = validated.get_servers()
+        for server_config in servers.values():
+            if isinstance(server_config, StdioServer):
+                server_config = check_server_signature(server_config)
+        return [(name, server) for name, server in servers.items()]
 
 
 _DISCOVERERS: dict[str, type[AgentDiscoverer]] = {
