@@ -46,6 +46,10 @@ class AgentDiscoverer(ABC):
     canonical agent name used in ``well_known_clients``; this is enforced in
     ``__init_subclass__``.
 
+    A discoverer is bound to a single user's ``home_directory`` at construction;
+    the multi-user (`--scan-all-users`) loop in ``pipelines`` constructs one
+    discoverer per home directory.
+
     Note: this abstraction intentionally does NOT consult the corresponding
     ``CandidateClient`` row's ``mcp_config_globs`` / ``skills_dir_globs``
     fields. Subclasses encode their layout directly. If a future agent
@@ -55,30 +59,33 @@ class AgentDiscoverer(ABC):
 
     name: str = ""
 
+    def __init__(self, home_directory: Path | None) -> None:
+        self.home_directory = home_directory
+
     def __init_subclass__(cls, **kwargs: object) -> None:
         super().__init_subclass__(**kwargs)
         if not cls.name:
             raise TypeError(f"{cls.__name__} must set a non-empty 'name' class attribute")
 
     @abstractmethod
-    def client_exists(self, home_directory: Path | None) -> str | None:
+    def client_exists(self) -> str | None:
         """Return the resolved install path if the agent is present, else None."""
 
     @abstractmethod
-    async def discover_mcp_servers(self, home_directory: Path | None) -> McpConfigsResult:
+    async def discover_mcp_servers(self) -> McpConfigsResult:
         """Parse the agent's MCP config file(s) and return them keyed by absolute path."""
 
     @abstractmethod
-    def discover_skills(self, home_directory: Path | None) -> SkillsDirsResult:
+    def discover_skills(self) -> SkillsDirsResult:
         """List the agent's skills, keyed by absolute skills-dir path."""
 
-    async def discover(self, home_directory: Path | None) -> ClientToInspect | None:
+    async def discover(self) -> ClientToInspect | None:
         """Assemble a ClientToInspect, or None when the agent isn't installed."""
-        client_path = self.client_exists(home_directory)
+        client_path = self.client_exists()
         if client_path is None:
             return None
-        mcp_configs = await self.discover_mcp_servers(home_directory)
-        skills_dirs = self.discover_skills(home_directory)
+        mcp_configs = await self.discover_mcp_servers()
+        skills_dirs = self.discover_skills()
         return ClientToInspect(
             name=self.name,
             client_path=client_path,
@@ -111,8 +118,8 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
 
     # --- public (override AgentDiscoverer abstracts) ---
 
-    def client_exists(self, home_directory: Path | None) -> str | None:
-        path = expand_path(Path(self._install_path), home_directory)
+    def client_exists(self) -> str | None:
+        path = expand_path(Path(self._install_path), self.home_directory)
         try:
             if path.exists():
                 return path.as_posix()
@@ -120,27 +127,27 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
             logger.warning("Permission error for path %s", path.as_posix())
         return None
 
-    async def discover_mcp_servers(self, home_directory: Path | None) -> McpConfigsResult:
+    async def discover_mcp_servers(self) -> McpConfigsResult:
         result: McpConfigsResult = {}
-        result.update(await self._discover_global_mcp_servers(home_directory))
-        result.update(await self._discover_project_mcp_servers(home_directory))
+        result.update(await self._discover_global_mcp_servers())
+        result.update(await self._discover_project_mcp_servers())
         return result
 
-    def discover_skills(self, home_directory: Path | None) -> SkillsDirsResult:
+    def discover_skills(self) -> SkillsDirsResult:
         result: SkillsDirsResult = {}
-        result.update(self._discover_global_skill(home_directory))
-        result.update(self._discover_project_skills(home_directory))
+        result.update(self._discover_global_skill())
+        result.update(self._discover_project_skills())
         return result
 
     # --- private: folder enumeration ---
 
-    def _discover_global_folders(self, home_directory: Path | None) -> list[Path]:
+    def _discover_global_folders(self) -> list[Path]:
         """Folders that hold user-global Claude Code state (currently just ``~/.claude``)."""
-        return [expand_path(Path(self._install_path), home_directory)]
+        return [expand_path(Path(self._install_path), self.home_directory)]
 
-    def _discover_project_folders(self, home_directory: Path | None) -> list[Path]:
+    def _discover_project_folders(self) -> list[Path]:
         """Project root paths recorded under ``projects`` in ``~/.claude.json``."""
-        data = self._load_config_raw(home_directory)
+        data = self._load_config_raw()
         if not isinstance(data, dict):
             return []
         projects = data.get("projects")
@@ -150,12 +157,12 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
 
     # --- private: MCP discovery ---
 
-    async def _discover_global_mcp_servers(self, home_directory: Path | None) -> McpConfigsResult:
+    async def _discover_global_mcp_servers(self) -> McpConfigsResult:
         """Parse top-level ``mcpServers`` from ``~/.claude.json`` — the user-global scope."""
-        config_path = expand_path(Path(self._mcp_config_path), home_directory)
+        config_path = expand_path(Path(self._mcp_config_path), self.home_directory)
         if not config_path.exists():
             return {}
-        data = self._load_config_raw(home_directory)
+        data = self._load_config_raw()
         if isinstance(data, CouldNotParseMCPConfig):
             return {config_path.as_posix(): data}
         if not isinstance(data, dict):
@@ -168,15 +175,15 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
             return {config_path.as_posix(): entries}
         return {config_path.as_posix(): entries}
 
-    async def _discover_project_mcp_servers(self, home_directory: Path | None) -> McpConfigsResult:
+    async def _discover_project_mcp_servers(self) -> McpConfigsResult:
         """Parse ``projects.<path>.mcpServers`` from ``~/.claude.json`` — per-project scope.
 
         Each project contributes one entry keyed by its absolute project path.
         """
-        config_path = expand_path(Path(self._mcp_config_path), home_directory)
+        config_path = expand_path(Path(self._mcp_config_path), self.home_directory)
         if not config_path.exists():
             return {}
-        data = self._load_config_raw(home_directory)
+        data = self._load_config_raw()
         if isinstance(data, CouldNotParseMCPConfig):
             return {config_path.as_posix(): data}
         if not isinstance(data, dict):
@@ -200,17 +207,17 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
 
     # --- private: skills discovery ---
 
-    def _discover_global_skill(self, home_directory: Path | None) -> SkillsDirsResult:
+    def _discover_global_skill(self) -> SkillsDirsResult:
         """Scan ``~/.claude/skills`` for user-global skills."""
-        skills_dir = expand_path(Path(self._install_path), home_directory) / self._skills_subdir
+        skills_dir = expand_path(Path(self._install_path), self.home_directory) / self._skills_subdir
         if not skills_dir.exists():
             return {}
         return {skills_dir.as_posix(): inspect_skills_dir(str(skills_dir))}
 
-    def _discover_project_skills(self, home_directory: Path | None) -> SkillsDirsResult:
+    def _discover_project_skills(self) -> SkillsDirsResult:
         """For each project, scan ``<project>/.claude/skills`` if present."""
         result: SkillsDirsResult = {}
-        for project_path in self._discover_project_folders(home_directory):
+        for project_path in self._discover_project_folders():
             skills_dir = project_path / self._project_dotclaude_subdir / self._skills_subdir
             if skills_dir.exists():
                 result[skills_dir.as_posix()] = inspect_skills_dir(str(skills_dir))
@@ -218,11 +225,11 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
 
     # --- internal helpers ---
 
-    def _load_config_raw(self, home_directory: Path | None) -> dict | CouldNotParseMCPConfig | None:
+    def _load_config_raw(self) -> dict | CouldNotParseMCPConfig | None:
         """Read and JSON-decode ``~/.claude.json``. Returns ``None`` if missing,
         a dict on success, or a ``CouldNotParseMCPConfig`` on malformed JSON.
         """
-        config_path = expand_path(Path(self._mcp_config_path), home_directory)
+        config_path = expand_path(Path(self._mcp_config_path), self.home_directory)
         if not config_path.exists():
             return None
         try:
@@ -260,9 +267,15 @@ _DISCOVERERS: dict[str, type[AgentDiscoverer]] = {
 }
 
 
-def get_discoverer(name: str) -> AgentDiscoverer:
-    """Return a discoverer for the agent name, or raise NotImplementedError."""
+def get_discoverer_class(name: str) -> type[AgentDiscoverer]:
+    """Return the discoverer class for an agent name, or raise NotImplementedError.
+
+    Callers instantiate the class with the target ``home_directory``. Looking
+    up the class (rather than a constructed instance) lets one well-known
+    client be scanned across multiple home directories without re-checking
+    NotImplementedError per user.
+    """
     cls = _DISCOVERERS.get(name)
     if cls is None:
         raise NotImplementedError(f"No AgentDiscoverer implemented for agent {name!r}")
-    return cls()
+    return cls

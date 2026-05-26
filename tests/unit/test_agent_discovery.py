@@ -19,8 +19,7 @@ def test_claude_code_discoverer_detects_installation(tmp_path):
 
     (tmp_path / ".claude").mkdir()
 
-    discoverer = ClaudeCodeDiscoverer()
-    result = discoverer.client_exists(tmp_path)
+    result = ClaudeCodeDiscoverer(tmp_path).client_exists()
 
     assert result is not None
     assert result.endswith("/.claude")
@@ -29,8 +28,7 @@ def test_claude_code_discoverer_detects_installation(tmp_path):
 def test_claude_code_discoverer_returns_none_when_absent(tmp_path):
     from agent_scan.agent_discovery import ClaudeCodeDiscoverer
 
-    discoverer = ClaudeCodeDiscoverer()
-    result = discoverer.client_exists(tmp_path)
+    result = ClaudeCodeDiscoverer(tmp_path).client_exists()
 
     assert result is None
 
@@ -45,8 +43,7 @@ async def test_claude_code_discoverer_parses_mcp_servers(tmp_path):
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude.json").write_text('{"mcpServers": {"my-server": {"command": "echo", "args": ["hi"]}}}')
 
-    discoverer = ClaudeCodeDiscoverer()
-    mcp_configs = await discoverer.discover_mcp_servers(tmp_path)
+    mcp_configs = await ClaudeCodeDiscoverer(tmp_path).discover_mcp_servers()
 
     assert len(mcp_configs) == 1
     config_path = next(iter(mcp_configs))
@@ -68,8 +65,7 @@ async def test_claude_code_discoverer_returns_empty_when_json_has_no_mcp_fields(
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude.json").write_text('{"unrelated": "data"}')
 
-    discoverer = ClaudeCodeDiscoverer()
-    mcp_configs = await discoverer.discover_mcp_servers(tmp_path)
+    mcp_configs = await ClaudeCodeDiscoverer(tmp_path).discover_mcp_servers()
 
     assert mcp_configs == {}
 
@@ -82,8 +78,7 @@ async def test_claude_code_discoverer_records_could_not_parse_on_invalid_json(tm
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude.json").write_text("{not valid json")
 
-    discoverer = ClaudeCodeDiscoverer()
-    mcp_configs = await discoverer.discover_mcp_servers(tmp_path)
+    mcp_configs = await ClaudeCodeDiscoverer(tmp_path).discover_mcp_servers()
 
     assert len(mcp_configs) == 1
     entry = next(iter(mcp_configs.values()))
@@ -99,8 +94,7 @@ async def test_claude_code_discoverer_returns_empty_when_mcp_config_missing(tmp_
     (tmp_path / ".claude").mkdir()
     # no ~/.claude.json on disk
 
-    discoverer = ClaudeCodeDiscoverer()
-    mcp_configs = await discoverer.discover_mcp_servers(tmp_path)
+    mcp_configs = await ClaudeCodeDiscoverer(tmp_path).discover_mcp_servers()
 
     # Missing config files are silently skipped (matches legacy behavior when
     # create_file_not_found_error=False).
@@ -119,8 +113,7 @@ def test_claude_code_discoverer_parses_skills(tmp_path):
     my_skill.mkdir()
     (my_skill / "SKILL.md").write_text("---\nname: my-skill\ndescription: A test skill\n---\n\nBody.\n")
 
-    discoverer = ClaudeCodeDiscoverer()
-    skills_dirs = discoverer.discover_skills(tmp_path)
+    skills_dirs = ClaudeCodeDiscoverer(tmp_path).discover_skills()
 
     assert len(skills_dirs) == 1
     dir_path = next(iter(skills_dirs))
@@ -139,8 +132,7 @@ def test_claude_code_discoverer_skills_returns_empty_when_dir_missing(tmp_path):
     (tmp_path / ".claude").mkdir()
     # no ~/.claude/skills on disk
 
-    discoverer = ClaudeCodeDiscoverer()
-    skills_dirs = discoverer.discover_skills(tmp_path)
+    skills_dirs = ClaudeCodeDiscoverer(tmp_path).discover_skills()
 
     assert skills_dirs == {}
 
@@ -151,7 +143,7 @@ def test_claude_code_discoverer_skills_returns_empty_when_dir_missing(tmp_path):
 def test_claude_code_discoverer_global_folders_returns_claude_dir(tmp_path):
     from agent_scan.agent_discovery import ClaudeCodeDiscoverer
 
-    folders = ClaudeCodeDiscoverer()._discover_global_folders(tmp_path)
+    folders = ClaudeCodeDiscoverer(tmp_path)._discover_global_folders()
 
     assert len(folders) == 1
     assert folders[0].as_posix().endswith("/.claude")
@@ -165,7 +157,7 @@ def test_claude_code_discoverer_project_folders_lists_project_paths(tmp_path):
         '{"projects": {"/Users/alice/repo-a": {"mcpServers": {}}, "/Users/alice/repo-b": {"mcpServers": {}}}}'
     )
 
-    folders = ClaudeCodeDiscoverer()._discover_project_folders(tmp_path)
+    folders = ClaudeCodeDiscoverer(tmp_path)._discover_project_folders()
 
     folder_strs = {f.as_posix() for f in folders}
     assert folder_strs == {"/Users/alice/repo-a", "/Users/alice/repo-b"}
@@ -177,7 +169,7 @@ def test_claude_code_discoverer_project_folders_empty_when_no_projects_key(tmp_p
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude.json").write_text('{"mcpServers": {}}')
 
-    folders = ClaudeCodeDiscoverer()._discover_project_folders(tmp_path)
+    folders = ClaudeCodeDiscoverer(tmp_path)._discover_project_folders()
 
     assert folders == []
 
@@ -185,7 +177,7 @@ def test_claude_code_discoverer_project_folders_empty_when_no_projects_key(tmp_p
 def test_claude_code_discoverer_project_folders_empty_when_config_missing(tmp_path):
     from agent_scan.agent_discovery import ClaudeCodeDiscoverer
 
-    folders = ClaudeCodeDiscoverer()._discover_project_folders(tmp_path)
+    folders = ClaudeCodeDiscoverer(tmp_path)._discover_project_folders()
 
     assert folders == []
 
@@ -206,7 +198,7 @@ async def test_claude_code_discoverer_parses_project_mcp_servers(tmp_path):
         "}}"
     )
 
-    mcp_configs = await ClaudeCodeDiscoverer()._discover_project_mcp_servers(tmp_path)
+    mcp_configs = await ClaudeCodeDiscoverer(tmp_path)._discover_project_mcp_servers()
 
     assert set(mcp_configs) == {"/work/repo-a", "/work/repo-b"}
     entries_a = mcp_configs["/work/repo-a"]
@@ -230,7 +222,7 @@ async def test_claude_code_discoverer_project_mcp_servers_skips_projects_without
         "}}"
     )
 
-    mcp_configs = await ClaudeCodeDiscoverer()._discover_project_mcp_servers(tmp_path)
+    mcp_configs = await ClaudeCodeDiscoverer(tmp_path)._discover_project_mcp_servers()
 
     assert set(mcp_configs) == {"/work/with-servers"}
 
@@ -246,11 +238,10 @@ async def test_claude_code_discoverer_discover_mcp_servers_combines_global_and_p
         '"projects": {"/work/repo": {"mcpServers": {"proj-srv": {"command": "p"}}}}}'
     )
 
-    mcp_configs = await ClaudeCodeDiscoverer().discover_mcp_servers(tmp_path)
+    mcp_configs = await ClaudeCodeDiscoverer(tmp_path).discover_mcp_servers()
 
     # Two keys: one for the global file path, one for the project path.
     assert len(mcp_configs) == 2
-    # Find the global entry by key suffix
     global_keys = [k for k in mcp_configs if k.endswith("/.claude.json")]
     project_keys = [k for k in mcp_configs if k == "/work/repo"]
     assert len(global_keys) == 1 and len(project_keys) == 1
@@ -275,7 +266,7 @@ def test_claude_code_discoverer_project_skills_scans_per_project_dotclaude(tmp_p
     )
     (tmp_path / ".claude.json").write_text(f'{{"projects": {{"{project_root.as_posix()}": {{"mcpServers": {{}}}}}}}}')
 
-    skills_dirs = ClaudeCodeDiscoverer()._discover_project_skills(tmp_path)
+    skills_dirs = ClaudeCodeDiscoverer(tmp_path)._discover_project_skills()
 
     assert len(skills_dirs) == 1
     key = next(iter(skills_dirs))
@@ -294,7 +285,7 @@ def test_claude_code_discoverer_project_skills_skips_missing_project_folders(tmp
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude.json").write_text('{"projects": {"/nonexistent/path/that/wont/be/here": {"mcpServers": {}}}}')
 
-    skills_dirs = ClaudeCodeDiscoverer()._discover_project_skills(tmp_path)
+    skills_dirs = ClaudeCodeDiscoverer(tmp_path)._discover_project_skills()
 
     assert skills_dirs == {}
 
@@ -314,7 +305,7 @@ def test_claude_code_discoverer_discover_skills_combines_global_and_project(tmp_
     )
     (tmp_path / ".claude.json").write_text(f'{{"projects": {{"{project_root.as_posix()}": {{"mcpServers": {{}}}}}}}}')
 
-    skills_dirs = ClaudeCodeDiscoverer().discover_skills(tmp_path)
+    skills_dirs = ClaudeCodeDiscoverer(tmp_path).discover_skills()
 
     assert len(skills_dirs) == 2  # one global, one project
 
@@ -332,8 +323,7 @@ async def test_claude_code_discoverer_discover_assembles_client_to_inspect(tmp_p
     my_skill.mkdir(parents=True)
     (my_skill / "SKILL.md").write_text("---\nname: demo\ndescription: Demo skill\n---\n\nBody.\n")
 
-    discoverer = ClaudeCodeDiscoverer()
-    cti = await discoverer.discover(tmp_path)
+    cti = await ClaudeCodeDiscoverer(tmp_path).discover()
 
     assert cti is not None
     assert isinstance(cti, ClientToInspect)
@@ -347,8 +337,7 @@ async def test_claude_code_discoverer_discover_assembles_client_to_inspect(tmp_p
 async def test_claude_code_discoverer_discover_returns_none_when_not_installed(tmp_path):
     from agent_scan.agent_discovery import ClaudeCodeDiscoverer
 
-    discoverer = ClaudeCodeDiscoverer()
-    cti = await discoverer.discover(tmp_path)
+    cti = await ClaudeCodeDiscoverer(tmp_path).discover()
 
     assert cti is None
 
@@ -363,35 +352,35 @@ def test_agent_discoverer_subclass_without_name_raises():
     with pytest.raises(TypeError, match="must set a non-empty 'name'"):
 
         class BrokenDiscoverer(AgentDiscoverer):
-            def client_exists(self, home_directory):
+            def client_exists(self):
                 return None
 
-            async def discover_mcp_servers(self, home_directory):
+            async def discover_mcp_servers(self):
                 return {}
 
-            def discover_skills(self, home_directory):
+            def discover_skills(self):
                 return {}
 
 
-# --- get_discoverer factory ---
+# --- get_discoverer_class factory ---
 
 
-def test_get_discoverer_returns_claude_code_discoverer():
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer, get_discoverer
+def test_get_discoverer_class_returns_claude_code_class():
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer, get_discoverer_class
 
-    discoverer = get_discoverer("claude code")
-    assert isinstance(discoverer, ClaudeCodeDiscoverer)
+    cls = get_discoverer_class("claude code")
+    assert cls is ClaudeCodeDiscoverer
 
 
 @pytest.mark.parametrize(
     "agent_name",
     ["cursor", "vscode", "windsurf", "claude", "codex", "gemini cli", "amp", "kiro"],
 )
-def test_get_discoverer_raises_not_implemented_for_unregistered_agent(agent_name):
-    from agent_scan.agent_discovery import get_discoverer
+def test_get_discoverer_class_raises_not_implemented_for_unregistered_agent(agent_name):
+    from agent_scan.agent_discovery import get_discoverer_class
 
     with pytest.raises(NotImplementedError):
-        get_discoverer(agent_name)
+        get_discoverer_class(agent_name)
 
 
 # --- Pipeline dispatch: ABC for Claude Code, legacy for everything else ---
@@ -399,7 +388,7 @@ def test_get_discoverer_raises_not_implemented_for_unregistered_agent(agent_name
 
 @pytest.mark.asyncio
 async def test_discover_clients_to_inspect_uses_abc_for_claude_code(tmp_path):
-    """Claude Code should be discovered via ClaudeCodeDiscoverer.discover, not the legacy path."""
+    """Claude Code should be discovered via ClaudeCodeDiscoverer, not the legacy path."""
     from agent_scan.models import CandidateClient
     from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
 
@@ -428,6 +417,42 @@ async def test_discover_clients_to_inspect_uses_abc_for_claude_code(tmp_path):
     assert len(ctis) == 1
     assert ctis[0].name == "claude code"
     assert ctis[0].username == "alice"
+
+
+@pytest.mark.asyncio
+async def test_discover_clients_to_inspect_iterates_all_home_dirs_for_claude_code(tmp_path):
+    """With multiple home dirs, the dispatcher constructs one discoverer per user."""
+    from agent_scan.models import CandidateClient
+    from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
+
+    alice_home = tmp_path / "alice"
+    bob_home = tmp_path / "bob"
+    (alice_home / ".claude").mkdir(parents=True)
+    (alice_home / ".claude.json").write_text('{"mcpServers": {}}')
+    (bob_home / ".claude").mkdir(parents=True)
+    (bob_home / ".claude.json").write_text('{"mcpServers": {}}')
+
+    candidate = CandidateClient(
+        name="claude code",
+        client_exists_paths=["~/.claude"],
+        mcp_config_paths=["~/.claude.json"],
+        skills_dir_paths=["~/.claude/skills"],
+    )
+
+    with (
+        patch(
+            "agent_scan.pipelines.get_readable_home_directories",
+            return_value=[(alice_home, "alice"), (bob_home, "bob")],
+        ),
+        patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
+    ):
+        args = InspectArgs(timeout=10, tokens=[], paths=[], all_users=True)
+        ctis, _, _ = await discover_clients_to_inspect(args)
+
+    usernames = sorted(cti.username for cti in ctis)
+    assert usernames == ["alice", "bob"]
+    for cti in ctis:
+        assert cti.name == "claude code"
 
 
 @pytest.mark.asyncio
