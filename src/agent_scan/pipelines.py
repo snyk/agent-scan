@@ -5,6 +5,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
+from agent_scan.agent_discovery import get_discoverer
 from agent_scan.direct_scanner import direct_scan_to_server_config, is_direct_scan
 from agent_scan.inspect import (
     get_mcp_config_per_client,
@@ -83,7 +84,18 @@ async def discover_clients_to_inspect(
                 )
     else:
         for client in get_well_known_clients():
-            ctis = await get_mcp_config_per_client(client, home_dirs_with_users)
+            try:
+                discoverer = get_discoverer(client.name)
+            except NotImplementedError:
+                # Legacy path — unchanged for every agent without a discoverer subclass.
+                ctis = await get_mcp_config_per_client(client, home_dirs_with_users)
+            else:
+                ctis = []
+                for home_directory, username in home_dirs_with_users:
+                    cti = await discoverer.discover(home_directory)
+                    if cti is not None:
+                        cti.username = username
+                        ctis.append(cti)
             if ctis:
                 clients_to_inspect.extend(ctis)
             else:
