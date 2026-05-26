@@ -32,10 +32,7 @@ logger = logging.getLogger(__name__)
 
 McpConfigsResult = dict[
     str,
-    list[tuple[str, StdioServer | RemoteServer]]
-    | FileNotFoundConfig
-    | UnknownConfigFormat
-    | CouldNotParseMCPConfig,
+    list[tuple[str, StdioServer | RemoteServer]] | FileNotFoundConfig | UnknownConfigFormat | CouldNotParseMCPConfig,
 ]
 SkillsDirsResult = dict[str, list[tuple[str, SkillServer]] | FileNotFoundConfig]
 
@@ -45,10 +42,23 @@ class AgentDiscoverer(ABC):
 
     Concrete subclasses encapsulate one agent's filesystem layout: where the
     install lives, which JSON file(s) hold its MCP servers, and which directory
-    holds its skills.
+    holds its skills. Subclasses MUST set the ``name`` class attribute to the
+    canonical agent name used in ``well_known_clients``; this is enforced in
+    ``__init_subclass__``.
+
+    Note: this abstraction intentionally does NOT consult the corresponding
+    ``CandidateClient`` row's ``mcp_config_globs`` / ``skills_dir_globs``
+    fields. Subclasses encode their layout directly. If a future agent
+    genuinely needs glob-based discovery, override ``discover_mcp_servers`` /
+    ``discover_skills`` to handle it explicitly.
     """
 
-    name: str
+    name: str = ""
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        super().__init_subclass__(**kwargs)
+        if not cls.name:
+            raise TypeError(f"{cls.__name__} must set a non-empty 'name' class attribute")
 
     @abstractmethod
     def client_exists(self, home_directory: Path | None) -> str | None:

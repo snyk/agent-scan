@@ -1,16 +1,16 @@
 """Tests for the per-agent discovery ABC (agent_discovery module)."""
 
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from agent_scan.models import (
     ClientToInspect,
+    CouldNotParseMCPConfig,
     SkillServer,
     StdioServer,
+    UnknownConfigFormat,
 )
-
 
 # --- ClaudeCodeDiscoverer: client_exists ---
 
@@ -44,9 +44,7 @@ async def test_claude_code_discoverer_parses_mcp_servers(tmp_path):
     from agent_scan.agent_discovery import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
-    (tmp_path / ".claude.json").write_text(
-        '{"mcpServers": {"my-server": {"command": "echo", "args": ["hi"]}}}'
-    )
+    (tmp_path / ".claude.json").write_text('{"mcpServers": {"my-server": {"command": "echo", "args": ["hi"]}}}')
 
     discoverer = ClaudeCodeDiscoverer()
     mcp_configs = await discoverer.discover_mcp_servers(tmp_path)
@@ -61,6 +59,44 @@ async def test_claude_code_discoverer_parses_mcp_servers(tmp_path):
     assert name == "my-server"
     assert isinstance(server, StdioServer)
     assert server.command == "echo"
+
+
+@pytest.mark.asyncio
+async def test_claude_code_discoverer_marks_unknown_config_format(tmp_path):
+    """Valid JSON that doesn't match any known MCP schema becomes UnknownConfigFormat."""
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    (tmp_path / ".claude").mkdir()
+    # Has an `mcp` field but in a shape no specific model accepts —
+    # scan_mcp_config_file returns UnknownMCPConfig, which the discoverer
+    # converts to UnknownConfigFormat.
+    (tmp_path / ".claude.json").write_text('{"mcp": {"foo": "bar"}}')
+
+    discoverer = ClaudeCodeDiscoverer()
+    mcp_configs = await discoverer.discover_mcp_servers(tmp_path)
+
+    assert len(mcp_configs) == 1
+    entry = next(iter(mcp_configs.values()))
+    assert isinstance(entry, UnknownConfigFormat)
+    assert entry.is_failure is False
+
+
+@pytest.mark.asyncio
+async def test_claude_code_discoverer_records_could_not_parse_on_invalid_json(tmp_path):
+    """Malformed JSON in ~/.claude.json becomes CouldNotParseMCPConfig with traceback."""
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude.json").write_text("{not valid json")
+
+    discoverer = ClaudeCodeDiscoverer()
+    mcp_configs = await discoverer.discover_mcp_servers(tmp_path)
+
+    assert len(mcp_configs) == 1
+    entry = next(iter(mcp_configs.values()))
+    assert isinstance(entry, CouldNotParseMCPConfig)
+    assert entry.is_failure is True
+    assert entry.traceback
 
 
 @pytest.mark.asyncio
@@ -88,9 +124,7 @@ def test_claude_code_discoverer_parses_skills(tmp_path):
     skills_dir.mkdir(parents=True)
     my_skill = skills_dir / "my-skill"
     my_skill.mkdir()
-    (my_skill / "SKILL.md").write_text(
-        "---\nname: my-skill\ndescription: A test skill\n---\n\nBody.\n"
-    )
+    (my_skill / "SKILL.md").write_text("---\nname: my-skill\ndescription: A test skill\n---\n\nBody.\n")
 
     discoverer = ClaudeCodeDiscoverer()
     skills_dirs = discoverer.discover_skills(tmp_path)
@@ -126,14 +160,10 @@ async def test_claude_code_discoverer_discover_assembles_client_to_inspect(tmp_p
     from agent_scan.agent_discovery import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
-    (tmp_path / ".claude.json").write_text(
-        '{"mcpServers": {"toy": {"command": "echo", "args": []}}}'
-    )
+    (tmp_path / ".claude.json").write_text('{"mcpServers": {"toy": {"command": "echo", "args": []}}}')
     my_skill = tmp_path / ".claude" / "skills" / "demo"
     my_skill.mkdir(parents=True)
-    (my_skill / "SKILL.md").write_text(
-        "---\nname: demo\ndescription: Demo skill\n---\n\nBody.\n"
-    )
+    (my_skill / "SKILL.md").write_text("---\nname: demo\ndescription: Demo skill\n---\n\nBody.\n")
 
     discoverer = ClaudeCodeDiscoverer()
     cti = await discoverer.discover(tmp_path)
@@ -154,6 +184,26 @@ async def test_claude_code_discoverer_discover_returns_none_when_not_installed(t
     cti = await discoverer.discover(tmp_path)
 
     assert cti is None
+
+
+# --- ABC enforcement ---
+
+
+def test_agent_discoverer_subclass_without_name_raises():
+    """A subclass that forgets to set 'name' must fail at class-definition time."""
+    from agent_scan.agent_discovery import AgentDiscoverer
+
+    with pytest.raises(TypeError, match="must set a non-empty 'name'"):
+
+        class BrokenDiscoverer(AgentDiscoverer):
+            def client_exists(self, home_directory):
+                return None
+
+            async def discover_mcp_servers(self, home_directory):
+                return {}
+
+            def discover_skills(self, home_directory):
+                return {}
 
 
 # --- get_discoverer factory ---
