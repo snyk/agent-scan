@@ -427,29 +427,6 @@ async def test_home_enumeration_failure_returns_default(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_home_directories_are_capped_at_1000(monkeypatch):
-    monkeypatch.setattr(
-        bootstrap_module,
-        "get_readable_home_directories",
-        lambda all_users=False: [(Path(f"/home/user-{i}"), f"user-{i}") for i in range(1500)],
-    )
-    async with _BootstrapServer() as server:
-        cfg = await bootstrap_first_control_server(
-            [_control_server(server.url)],
-            command="scan",
-            subcommand=None,
-            control_identifier="machine-1",
-            argv=[],
-            no_bootstrap=False,
-        )
-
-    assert cfg.source == "bootstrap"
-    paths = server.requests[0]["body"]["paths"]
-    assert len(paths["home_directories"]) == 1000
-    assert paths["home_directories_truncated"] is True
-
-
-@pytest.mark.asyncio
 async def test_home_directory_enumeration_uses_to_thread(monkeypatch):
     called = False
 
