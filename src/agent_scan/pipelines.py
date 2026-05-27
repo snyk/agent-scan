@@ -152,6 +152,11 @@ async def inspect_pipeline(
         )
     scan_path_results: list[ScanPathResult] = list(precomputed_scan_path_results or [])
 
+    # Shared across all clients in this run so an identical server config that
+    # appears in more than one client (same `github` server in Cursor + Claude
+    # Code, or the same project ``.mcp.json`` referenced via multiple paths) is
+    # inspected once and its signature reused for every other occurrence.
+    signature_cache: dict = {}
     for client_to_inspect in clients_to_inspect:
         inspected_client = await inspect_client(
             client_to_inspect,
@@ -160,6 +165,7 @@ async def inspect_pipeline(
             inspect_args.scan_skills,
             stream_stderr=stream_stderr,
             declined_servers=declined_servers,
+            signature_cache=signature_cache,
         )
         scan_path_results.append(inspected_client_to_scan_path_result(inspected_client))
     return scan_path_results, scanned_usernames or []

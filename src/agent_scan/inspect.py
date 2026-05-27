@@ -189,6 +189,23 @@ def find_relevant_token(tokens: list[TokenAndClientInfo], name: str) -> TokenAnd
     return None
 
 
+def _server_dedup_key(config: StdioServer | RemoteServer | SkillServer) -> tuple | None:
+    """Return a hashable key identifying the server config for inspection-cache dedup.
+
+    Two configs that produce the same key are assumed to launch the same
+    underlying server and yield the same signature, so the second occurrence
+    can reuse the first one's ``signature_or_error``. Returns ``None`` for
+    config kinds we do not dedup (skills are cheap local reads).
+    """
+    if isinstance(config, StdioServer):
+        env = tuple(sorted((config.env or {}).items()))
+        return ("stdio", config.command, tuple(config.args), env)
+    if isinstance(config, RemoteServer):
+        headers = tuple(sorted(config.headers.items()))
+        return ("remote", config.url, config.type, headers)
+    return None
+
+
 async def inspect_extension(
     name: str,
     config: StdioServer | RemoteServer | SkillServer,
@@ -298,6 +315,7 @@ async def inspect_client(
     *,
     stream_stderr: bool = False,
     declined_servers: set[tuple[str, str]] | None = None,
+    signature_cache: dict | None = None,
 ) -> InspectedClient:
     """
     Scan a client (Cursor, VSCode, etc.) and return a InspectedClient object.
@@ -305,6 +323,12 @@ async def inspect_client(
     declined_servers is an optional set of (mcp_config_path, server_name)
     pairs the user declined during the consent flow. Declined stdio servers are
     not started. They are recorded as errors with category user_declined.
+
+    signature_cache, if provided, dedupes inspections of identical server
+    configs across multiple calls: the first occurrence runs through
+    ``inspect_extension`` and stores its ``signature_or_error`` keyed by
+    ``_server_dedup_key(server)``; later occurrences reuse the cached value
+    without re-launching the server.
     """
     declined = declined_servers or set()
     extensions: dict[
@@ -353,6 +377,20 @@ async def inspect_client(
                     )
                 )
                 continue
+            dedup_key = _server_dedup_key(server) if signature_cache is not None else None
+            if signature_cache is not None and dedup_key is not None and dedup_key in signature_cache:
+                logger.debug(
+                    "Reusing cached signature for MCP server",
+                    extra={"server_name": name, "mcp_config_path": mcp_config_path},
+                )
+                extensions_for_mcp_config.append(
+                    InspectedExtensions(
+                        name=name,
+                        config=server,
+                        signature_or_error=signature_cache[dedup_key],
+                    )
+                )
+                continue
             extension = await inspect_extension(
                 name,
                 server,
@@ -361,6 +399,8 @@ async def inspect_client(
                 config_path=mcp_config_path,
                 stream_stderr=stream_stderr,
             )
+            if signature_cache is not None and dedup_key is not None:
+                signature_cache[dedup_key] = extension.signature_or_error
             extensions_for_mcp_config.append(extension)
         extensions[mcp_config_path] = extensions_for_mcp_config
 
