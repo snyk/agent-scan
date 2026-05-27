@@ -817,13 +817,7 @@ def test_claude_code_discoverer_plugin_mcp_servers_scans_both_cache_and_repos(tm
 # --- ClaudeCodeDiscoverer: end-to-end discover() ---
 
 
-def test_claude_code_discoverer_discover_groups_by_parent_folder(tmp_path):
-    """discover() emits one CTI per unique parent folder of the discovered paths.
-
-    With ~/.claude.json (parent = tmp_path) and ~/.claude/skills (parent = ~/.claude),
-    we expect two CTIs — one bucketed under tmp_path holding the mcp config and one
-    under ~/.claude holding the skills dir.
-    """
+def test_claude_code_discoverer_discover_assembles_client_to_inspect(tmp_path):
     from agent_scan.agent_discovery import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
@@ -832,64 +826,22 @@ def test_claude_code_discoverer_discover_groups_by_parent_folder(tmp_path):
     my_skill.mkdir(parents=True)
     (my_skill / "SKILL.md").write_text("---\nname: demo\ndescription: Demo skill\n---\n\nBody.\n")
 
-    ctis = ClaudeCodeDiscoverer(tmp_path).discover()
+    cti = ClaudeCodeDiscoverer(tmp_path).discover()
 
-    assert isinstance(ctis, list)
-    assert all(isinstance(cti, ClientToInspect) for cti in ctis)
-    assert all(cti.name == "claude code" for cti in ctis)
-
-    by_path = {cti.client_path: cti for cti in ctis}
-    home_cti = by_path[tmp_path.as_posix()]
-    install_cti = by_path[(tmp_path / ".claude").as_posix()]
-
-    assert list(home_cti.mcp_configs) == [(tmp_path / ".claude.json").as_posix()]
-    assert home_cti.skills_dirs == {}
-
-    assert install_cti.mcp_configs == {}
-    assert list(install_cti.skills_dirs) == [(tmp_path / ".claude" / "skills").as_posix()]
+    assert cti is not None
+    assert isinstance(cti, ClientToInspect)
+    assert cti.name == "claude code"
+    assert cti.client_path.endswith("/.claude")
+    assert len(cti.mcp_configs) == 1
+    assert len(cti.skills_dirs) == 1
 
 
-def test_claude_code_discoverer_discover_pairs_mcp_and_skills_under_same_parent(tmp_path):
-    """When .mcp.json and skills/ share the SAME parent (plugin layout), they land in one CTI."""
+def test_claude_code_discoverer_discover_returns_none_when_not_installed(tmp_path):
     from agent_scan.agent_discovery import ClaudeCodeDiscoverer
 
-    plugin = tmp_path / ".claude" / "plugins" / "cache" / "my-plugin"
-    plugin.mkdir(parents=True)
-    (plugin / ".mcp.json").write_text('{"plugin-srv": {"command": "p"}}')
-    skill = plugin / "skills" / "demo"
-    skill.mkdir(parents=True)
-    (skill / "SKILL.md").write_text("---\nname: demo\ndescription: d\n---\n\nB.\n")
+    cti = ClaudeCodeDiscoverer(tmp_path).discover()
 
-    ctis = ClaudeCodeDiscoverer(tmp_path).discover()
-
-    plugin_ctis = [c for c in ctis if c.client_path == plugin.as_posix()]
-    assert len(plugin_ctis) == 1
-    cti = plugin_ctis[0]
-    assert list(cti.mcp_configs) == [(plugin / ".mcp.json").as_posix()]
-    assert list(cti.skills_dirs) == [(plugin / "skills").as_posix()]
-
-
-def test_claude_code_discoverer_discover_emits_install_path_cti_when_empty(tmp_path):
-    """Agent is installed but nothing discovered — still emit one CTI keyed at install path."""
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
-
-    (tmp_path / ".claude").mkdir()
-
-    ctis = ClaudeCodeDiscoverer(tmp_path).discover()
-
-    assert len(ctis) == 1
-    assert ctis[0].name == "claude code"
-    assert ctis[0].client_path == (tmp_path / ".claude").as_posix()
-    assert ctis[0].mcp_configs == {}
-    assert ctis[0].skills_dirs == {}
-
-
-def test_claude_code_discoverer_discover_returns_empty_list_when_not_installed(tmp_path):
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
-
-    ctis = ClaudeCodeDiscoverer(tmp_path).discover()
-
-    assert ctis == []
+    assert cti is None
 
 
 # --- ABC enforcement ---
@@ -981,13 +933,8 @@ async def test_discover_clients_to_inspect_runs_legacy_for_claude_code(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_discover_clients_to_inspect_legacy_and_abc_emit_separate_ctis_by_client_path(tmp_path):
-    """Legacy and ABC emit CTIs with distinct client_paths; both survive as separate entries.
-
-    Match is now by (name, username, client_path): legacy CTI's client_path is the
-    install root (~/.claude), while ABC's project-scope CTI is bucketed under the
-    project's parent folder (/work for /work/repo). Distinct client_paths → distinct CTIs.
-    """
+async def test_discover_clients_to_inspect_merges_abc_into_legacy_cti_keeping_both_keys(tmp_path):
+    """One CTI per (name, username); legacy and ABC keys for the same server both survive."""
     from agent_scan.models import CandidateClient
     from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
 
@@ -1012,14 +959,21 @@ async def test_discover_clients_to_inspect_legacy_and_abc_emit_separate_ctis_by_
         ctis, _, _ = await discover_clients_to_inspect(args)
 
     claude_ctis = [c for c in ctis if c.name == "claude code" and c.username == "alice"]
-    legacy_cti = next(c for c in claude_ctis if c.client_path == (tmp_path / ".claude").as_posix())
-    abc_cti = next(c for c in claude_ctis if c.client_path == "/work")
+    assert len(claude_ctis) == 1
+    merged = claude_ctis[0]
 
-    legacy_key = next(k for k in legacy_cti.mcp_configs if k.endswith("/.claude.json"))
-    legacy_entries = legacy_cti.mcp_configs[legacy_key]
-    abc_entries = abc_cti.mcp_configs["/work/repo"]
+    keys = list(merged.mcp_configs)
+    legacy_key = next(k for k in keys if k.endswith("/.claude.json"))
+    abc_key = next(k for k in keys if k == "/work/repo")
+
+    legacy_entries = merged.mcp_configs[legacy_key]
+    abc_entries = merged.mcp_configs[abc_key]
     assert isinstance(legacy_entries, list)
     assert isinstance(abc_entries, list)
+    # Without by-name dedup, "srv" is preserved in both phases' keys. Each represents
+    # a distinct discovery source (legacy flattens projects.* into ~/.claude.json;
+    # ABC reports it under the project path) and downstream scanning treats each
+    # (key, name) pair on its own merits.
     assert [name for name, _ in legacy_entries] == ["srv"]
     assert [name for name, _ in abc_entries] == ["srv"]
     assert all(isinstance(s, StdioServer) for _, s in abc_entries)
@@ -1062,12 +1016,11 @@ async def test_discover_clients_to_inspect_preserves_same_named_server_across_pr
         ctis, _, _ = await discover_clients_to_inspect(args)
 
     claude_ctis = [c for c in ctis if c.name == "claude code"]
-    # /work/repo-a and /work/repo-b share parent /work, so ABC emits one CTI for both
-    # (alongside legacy's install-path CTI).
-    work_cti = next(c for c in claude_ctis if c.client_path == "/work")
+    assert len(claude_ctis) == 1
+    cti = claude_ctis[0]
 
-    repo_a = work_cti.mcp_configs["/work/repo-a"]
-    repo_b = work_cti.mcp_configs["/work/repo-b"]
+    repo_a = cti.mcp_configs["/work/repo-a"]
+    repo_b = cti.mcp_configs["/work/repo-b"]
     assert isinstance(repo_a, list)
     assert isinstance(repo_b, list)
     assert [name for name, _ in repo_a] == ["github"]
@@ -1107,25 +1060,15 @@ async def test_discover_clients_to_inspect_keeps_legacy_key_when_abc_adds_nothin
         ctis, _, _ = await discover_clients_to_inspect(args)
 
     claude_ctis = [c for c in ctis if c.name == "claude code"]
-    # Legacy emits one CTI at install root with ~/.claude.json. ABC's discover() finds
-    # no global mcp servers and no projects, so it emits a single empty CTI at the
-    # install path, which merges with legacy's CTI (same client_path).
     assert len(claude_ctis) == 1
     keys = list(claude_ctis[0].mcp_configs)
+    # Only legacy keys present (no project keys from ABC to dedup against).
     assert keys == [k for k in keys if k.endswith("/.claude.json")]
 
 
 @pytest.mark.asyncio
-async def test_discover_clients_to_inspect_legacy_and_abc_partition_by_client_path(tmp_path):
-    """Legacy + ABC results stay in distinct CTIs partitioned by client_path.
-
-    Legacy emits ONE CTI at the install root with both top-level and flattened-project
-    servers under ~/.claude.json. ABC emits separate CTIs grouped by parent folder of
-    each discovered config path:
-
-      * tmp_path (parent of ~/.claude.json) — top-level mcpServers
-      * /work    (parent of /work/repo)     — project's mcpServers
-    """
+async def test_discover_clients_to_inspect_abc_wins_on_same_key_collision(tmp_path):
+    """Both paths produce a ~/.claude.json key; ABC's value wins via dict-union merge."""
     from agent_scan.models import CandidateClient
     from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
 
@@ -1153,27 +1096,18 @@ async def test_discover_clients_to_inspect_legacy_and_abc_partition_by_client_pa
         ctis, _, _ = await discover_clients_to_inspect(args)
 
     claude_ctis = [c for c in ctis if c.name == "claude code"]
-    by_path = {c.client_path: c for c in claude_ctis}
+    assert len(claude_ctis) == 1
+    merged = claude_ctis[0]
 
-    legacy = by_path[(tmp_path / ".claude").as_posix()]
-    abc_global = by_path[tmp_path.as_posix()]
-    abc_project = by_path["/work"]
-
-    legacy_key = next(k for k in legacy.mcp_configs if k.endswith("/.claude.json"))
-    legacy_entries = legacy.mcp_configs[legacy_key]
-    assert isinstance(legacy_entries, list)
-    # ClaudeCodeConfigFile (legacy parser's first match for files with `projects`)
-    # only flattens project servers; top-level `mcpServers` is dropped — picked up
-    # by ABC instead.
-    assert {name for name, _ in legacy_entries} == {"proj"}
-
-    abc_global_entries = abc_global.mcp_configs[(tmp_path / ".claude.json").as_posix()]
-    assert isinstance(abc_global_entries, list)
-    assert [name for name, _ in abc_global_entries] == ["top"]
-
-    abc_project_entries = abc_project.mcp_configs["/work/repo"]
-    assert isinstance(abc_project_entries, list)
-    assert [name for name, _ in abc_project_entries] == ["proj"]
+    legacy_key = next(k for k in merged.mcp_configs if k.endswith("/.claude.json"))
+    entries = merged.mcp_configs[legacy_key]
+    assert isinstance(entries, list)
+    # Legacy stored "proj" under .claude.json (its ClaudeCodeConfigFile flattening
+    # of projects.*). ABC stored "top" under .claude.json (top-level mcpServers).
+    # Dict-union merge picks ABC's value on the colliding key, so .claude.json now
+    # holds only "top"; "proj" lives under ABC's /work/repo key.
+    assert [name for name, _ in entries] == ["top"]
+    assert merged.mcp_configs["/work/repo"] == [("proj", merged.mcp_configs["/work/repo"][0][1])]
 
 
 @pytest.mark.asyncio

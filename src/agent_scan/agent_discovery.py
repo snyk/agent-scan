@@ -138,47 +138,19 @@ class AgentDiscoverer(ABC):
     def discover_skills(self) -> SkillsDirsResult:
         """List the agent's skills, keyed by absolute skills-dir path."""
 
-    def discover(self) -> list[ClientToInspect]:
-        """Assemble one ClientToInspect per parent folder of discovered paths.
-
-        Discovered ``mcp_configs`` and ``skills_dirs`` entries are bucketed by
-        ``Path(key).parent`` — each unique parent folder becomes one CTI whose
-        ``client_path`` is that parent. CTIs carry only the dict subset whose
-        keys share that parent, preserving the dict shape downstream code expects.
-
-        If the agent isn't installed, returns ``[]``. If the agent is installed
-        but discovery turned up nothing, returns a single CTI pinned at the
-        install path with empty dicts so downstream still records the agent.
-        """
+    def discover(self) -> ClientToInspect | None:
+        """Assemble a ClientToInspect, or None when the agent isn't installed."""
         client_path = self.client_exists()
         if client_path is None:
-            return []
+            return None
         mcp_configs = self.discover_mcp_servers()
         skills_dirs = self.discover_skills()
-
-        mcp_buckets: dict[str, McpConfigsResult] = {}
-        skills_buckets: dict[str, SkillsDirsResult] = {}
-        for key, value in mcp_configs.items():
-            parent = Path(key).parent.as_posix()
-            mcp_buckets.setdefault(parent, {})[key] = value
-        for key, value in skills_dirs.items():
-            parent = Path(key).parent.as_posix()
-            skills_buckets.setdefault(parent, {})[key] = value
-
-        parents = sorted(set(mcp_buckets) | set(skills_buckets))
-        if not parents:
-            return [
-                ClientToInspect(name=self.name, client_path=client_path, mcp_configs={}, skills_dirs={}),
-            ]
-        return [
-            ClientToInspect(
-                name=self.name,
-                client_path=parent,
-                mcp_configs=mcp_buckets.get(parent, {}),
-                skills_dirs=skills_buckets.get(parent, {}),
-            )
-            for parent in parents
-        ]
+        return ClientToInspect(
+            name=self.name,
+            client_path=client_path,
+            mcp_configs=mcp_configs,
+            skills_dirs=skills_dirs,
+        )
 
 
 class ClaudeCodeDiscoverer(AgentDiscoverer):
