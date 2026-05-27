@@ -115,6 +115,7 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
     _mcp_config_path = "~/.claude.json"
     _skills_subdir = "skills"
     _project_dotclaude_subdir = ".claude"
+    _plugin_cache_subdir = "plugins/cache"
 
     # --- public (override AgentDiscoverer abstracts) ---
 
@@ -131,12 +132,14 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         result: McpConfigsResult = {}
         result.update(await self._discover_global_mcp_servers())
         result.update(await self._discover_project_mcp_servers())
+        result.update(await self._discover_plugin_mcp_servers())
         return result
 
     def discover_skills(self) -> SkillsDirsResult:
         result: SkillsDirsResult = {}
         result.update(self._discover_global_skill())
         result.update(self._discover_project_skills())
+        result.update(self._discover_plugin_skills())
         return result
 
     # --- private: folder enumeration ---
@@ -258,6 +261,50 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         for path in self._project_paths_with_ancestors():
             skills_dir = path / self._project_dotclaude_subdir / self._skills_subdir
             if skills_dir.exists():
+                result[skills_dir.as_posix()] = inspect_skills_dir(str(skills_dir))
+        return result
+
+    # --- private: plugin discovery ---
+
+    def _plugin_cache_dir(self) -> Path:
+        return expand_path(Path(self._install_path), self.home_directory) / self._plugin_cache_subdir
+
+    async def _discover_plugin_mcp_servers(self) -> McpConfigsResult:
+        """Scan ``~/.claude/plugins/cache/**/.mcp.json``.
+
+        Plugin ``.mcp.json`` files use the flat ``{name: serverConfig}`` format
+        (no ``mcpServers`` wrapper). A top-level ``mcpServers`` key is also
+        tolerated for plugins that ship the wrapped format.
+        """
+        cache_dir = self._plugin_cache_dir()
+        if not cache_dir.exists():
+            return {}
+        result: McpConfigsResult = {}
+        for mcp_file in cache_dir.rglob(".mcp.json"):
+            if not mcp_file.is_file():
+                continue
+            file_data = self._load_json_file(mcp_file)
+            if file_data is None:
+                continue
+            if isinstance(file_data, CouldNotParseMCPConfig):
+                result[mcp_file.as_posix()] = file_data
+                continue
+            if not isinstance(file_data, dict) or not file_data:
+                continue
+            raw_servers = file_data.get("mcpServers") if "mcpServers" in file_data else file_data
+            if not isinstance(raw_servers, dict) or not raw_servers:
+                continue
+            result[mcp_file.as_posix()] = self._validate_servers(raw_servers, source=f"plugin {mcp_file.as_posix()}")
+        return result
+
+    def _discover_plugin_skills(self) -> SkillsDirsResult:
+        """Scan ``~/.claude/plugins/cache/**/skills/`` for plugin-bundled skills."""
+        cache_dir = self._plugin_cache_dir()
+        if not cache_dir.exists():
+            return {}
+        result: SkillsDirsResult = {}
+        for skills_dir in cache_dir.rglob("skills"):
+            if skills_dir.is_dir():
                 result[skills_dir.as_posix()] = inspect_skills_dir(str(skills_dir))
         return result
 

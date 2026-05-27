@@ -492,6 +492,116 @@ def test_claude_code_discoverer_discover_skills_combines_global_and_project(tmp_
     assert len(skills_dirs) == 2  # one global, one project
 
 
+# --- ClaudeCodeDiscoverer: plugin MCP + skills ---
+
+
+@pytest.mark.asyncio
+async def test_claude_code_discoverer_plugin_mcp_servers_parses_flat_format(tmp_path):
+    """Plugin .mcp.json files use the flat {name: serverConfig} format."""
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    plugin_dir = tmp_path / ".claude" / "plugins" / "cache" / "vendor" / "my-plugin" / "1.0.0"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / ".mcp.json").write_text('{"plugin-srv": {"command": "echo", "args": ["p"]}}')
+
+    mcp_configs = await ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
+
+    assert len(mcp_configs) == 1
+    key = next(iter(mcp_configs))
+    assert key.endswith("/1.0.0/.mcp.json")
+    entries = mcp_configs[key]
+    assert isinstance(entries, list) and len(entries) == 1
+    name, server = entries[0]
+    assert name == "plugin-srv"
+    assert isinstance(server, StdioServer)
+
+
+@pytest.mark.asyncio
+async def test_claude_code_discoverer_plugin_mcp_servers_empty_when_cache_missing(tmp_path):
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    (tmp_path / ".claude").mkdir()
+
+    mcp_configs = await ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
+
+    assert mcp_configs == {}
+
+
+@pytest.mark.asyncio
+async def test_claude_code_discoverer_plugin_mcp_records_could_not_parse(tmp_path):
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    plugin_dir = tmp_path / ".claude" / "plugins" / "cache" / "bad" / "plugin"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / ".mcp.json").write_text("{not valid json")
+
+    mcp_configs = await ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
+
+    assert len(mcp_configs) == 1
+    entry = next(iter(mcp_configs.values()))
+    assert isinstance(entry, CouldNotParseMCPConfig)
+    assert entry.is_failure is True
+
+
+def test_claude_code_discoverer_plugin_skills_scans_cache(tmp_path):
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    plugin_skill_dir = tmp_path / ".claude" / "plugins" / "cache" / "vendor" / "my-plugin" / "skills" / "plug-skill"
+    plugin_skill_dir.mkdir(parents=True)
+    (plugin_skill_dir / "SKILL.md").write_text("---\nname: plug-skill\ndescription: p\n---\n\nB.\n")
+
+    skills_dirs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_skills()
+
+    assert len(skills_dirs) == 1
+    key = next(iter(skills_dirs))
+    assert key.endswith("/my-plugin/skills")
+    entries = skills_dirs[key]
+    assert isinstance(entries, list) and len(entries) == 1
+    skill_name, skill = entries[0]
+    assert skill_name == "plug-skill"
+    assert isinstance(skill, SkillServer)
+
+
+def test_claude_code_discoverer_plugin_skills_empty_when_cache_missing(tmp_path):
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    (tmp_path / ".claude").mkdir()
+
+    skills_dirs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_skills()
+
+    assert skills_dirs == {}
+
+
+@pytest.mark.asyncio
+async def test_claude_code_discoverer_discover_mcp_includes_plugin_servers(tmp_path):
+    """Plugin MCP entries flow through public discover_mcp_servers."""
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    (tmp_path / ".claude").mkdir()
+    plugin_dir = tmp_path / ".claude" / "plugins" / "cache" / "v" / "p"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / ".mcp.json").write_text('{"plug": {"command": "x"}}')
+
+    mcp_configs = await ClaudeCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    plugin_keys = [k for k in mcp_configs if k.endswith("/p/.mcp.json")]
+    assert len(plugin_keys) == 1
+
+
+def test_claude_code_discoverer_discover_skills_includes_plugin_skills(tmp_path):
+    """Plugin skill dirs flow through public discover_skills."""
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    plugin_skill_dir = tmp_path / ".claude" / "plugins" / "cache" / "v" / "p" / "skills" / "ps"
+    plugin_skill_dir.mkdir(parents=True)
+    (plugin_skill_dir / "SKILL.md").write_text("---\nname: ps\ndescription: x\n---\n\nB.\n")
+
+    skills_dirs = ClaudeCodeDiscoverer(tmp_path).discover_skills()
+
+    plugin_keys = [k for k in skills_dirs if "/plugins/cache/" in k]
+    assert len(plugin_keys) == 1
+
+
 # --- ClaudeCodeDiscoverer: end-to-end discover() ---
 
 
