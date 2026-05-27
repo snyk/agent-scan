@@ -479,9 +479,7 @@ class TestGetReadableHomeDirectoriesPosix:
             ],
         )
         # Only alice's home is accessible.
-        monkeypatch.setattr(
-            utils_module.os, "access", lambda path, _mode: str(path) == str(alice_home)
-        )
+        monkeypatch.setattr(utils_module.os, "access", lambda path, _mode: str(path) == str(alice_home))
 
         result = get_readable_home_directories(all_users=True)
 
