@@ -538,6 +538,7 @@ class TestGetReadableHomeDirectoriesWindows:
     def test_single_user_when_all_users_false(self, monkeypatch):
         """Single-user mode on Windows must short-circuit before invoking the
         PowerShell CIM query — a hung WMI must never block the default path."""
+
         def boom(*_a, **_kw):
             raise AssertionError("subprocess.run must NOT be invoked when all_users=False")
 
@@ -641,9 +642,7 @@ class TestGetReadableHomeDirectoriesWindows:
         result = get_readable_home_directories(all_users=True)
 
         usernames = {u for _p, u in result}
-        assert usernames == {"alice", "wsl_alice"}, (
-            f"WSL homes must merge with Win32 profiles; got {usernames}"
-        )
+        assert usernames == {"alice", "wsl_alice"}, f"WSL homes must merge with Win32 profiles; got {usernames}"
 
     def test_all_users_wsl_does_not_overwrite_existing_win32_path(self, monkeypatch, tmp_path):
         """If WSL enumeration emits a path already covered by a Win32 profile,
@@ -687,6 +686,4 @@ class TestGetReadableHomeDirectoriesWindows:
         result = get_readable_home_directories(all_users=True)
 
         usernames = {u for _p, u in result}
-        assert usernames == {"wsl_alice"}, (
-            f"WSL homes must still surface when CIM query fails; got {usernames}"
-        )
+        assert usernames == {"wsl_alice"}, f"WSL homes must still surface when CIM query fails; got {usernames}"
