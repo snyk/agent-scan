@@ -95,28 +95,29 @@ async def discover_clients_to_inspect(
         for home_directory, username in home_dirs_with_users:
             for discoverer in find_discoverers(home_directory):
                 try:
-                    cti = discoverer.discover()
+                    ctis = discoverer.discover()
                 except Exception:
                     logger.exception("Discoverer %s.discover() raised; skipping", type(discoverer).__name__)
                     continue
-                if cti is None:
-                    continue
-                cti.username = username
-                existing = next(
-                    (c for c in clients_to_inspect if c.name == cti.name and c.username == cti.username),
-                    None,
-                )
-                if existing is None:
-                    clients_to_inspect.append(cti)
-                else:
-                    # Dict union: legacy keys first (insertion order), ABC keys appended.
-                    # ABC values win on key collision (e.g., both phases emit a server
-                    # under ``~/.claude.json``). Distinct keys from each phase coexist
-                    # — same-name servers under different keys are kept as separate
-                    # registrations (e.g., the same ``github`` server configured in
-                    # two projects must both reach the inspector).
-                    existing.mcp_configs = {**existing.mcp_configs, **cti.mcp_configs}
-                    existing.skills_dirs = {**existing.skills_dirs, **cti.skills_dirs}
+                for cti in ctis:
+                    cti.username = username
+                    existing = next(
+                        (
+                            c
+                            for c in clients_to_inspect
+                            if c.name == cti.name and c.username == cti.username and c.client_path == cti.client_path
+                        ),
+                        None,
+                    )
+                    if existing is None:
+                        clients_to_inspect.append(cti)
+                    else:
+                        # Same (name, username, client_path) — merge dict-union. ABC
+                        # values win on key collision; distinct keys from each phase
+                        # coexist (same-name servers under different keys both reach
+                        # the inspector).
+                        existing.mcp_configs = {**existing.mcp_configs, **cti.mcp_configs}
+                        existing.skills_dirs = {**existing.skills_dirs, **cti.skills_dirs}
 
     # Only report usernames where an agent was detected in their home directory.
     # When no usernames were associated with detected agents:
