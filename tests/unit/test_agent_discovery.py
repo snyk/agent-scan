@@ -182,6 +182,126 @@ def test_claude_code_discoverer_project_folders_empty_when_config_missing(tmp_pa
     assert folders == []
 
 
+# --- ClaudeCodeDiscoverer: _project_paths_with_ancestors ---
+
+
+def test_project_paths_with_ancestors_empty_when_no_projects(tmp_path):
+    """No projects listed in ~/.claude.json → empty list."""
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude.json").write_text('{"projects": {}}')
+
+    paths = ClaudeCodeDiscoverer(tmp_path)._project_paths_with_ancestors()
+
+    assert paths == []
+
+
+def test_project_paths_with_ancestors_walks_up_to_filesystem_root(tmp_path):
+    """A single project fans out into itself + every ancestor up to '/'."""
+    from pathlib import Path
+
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude.json").write_text('{"projects": {"/a/b/c/d": {"mcpServers": {}}}}')
+
+    paths = set(ClaudeCodeDiscoverer(tmp_path)._project_paths_with_ancestors())
+
+    assert Path("/a/b/c/d") in paths
+    assert Path("/a/b/c") in paths
+    assert Path("/a/b") in paths
+    assert Path("/a") in paths
+    assert Path("/") in paths
+
+
+def test_project_paths_with_ancestors_dedups_shared_ancestors(tmp_path):
+    """Two sibling projects sharing ancestors yield each ancestor only once."""
+    from pathlib import Path
+
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude.json").write_text(
+        '{"projects": {"/a/b/c/d": {"mcpServers": {}}, "/a/b/x/y": {"mcpServers": {}}}}'
+    )
+
+    paths = ClaudeCodeDiscoverer(tmp_path)._project_paths_with_ancestors()
+
+    assert len(paths) == len(set(paths))  # no duplicates
+    as_set = set(paths)
+    assert {
+        Path("/a/b/c/d"),
+        Path("/a/b/c"),
+        Path("/a/b/x/y"),
+        Path("/a/b/x"),
+        Path("/a/b"),
+        Path("/a"),
+        Path("/"),
+    } <= as_set
+
+
+def test_project_paths_with_ancestors_terminates_at_root(tmp_path):
+    """Walk terminates at filesystem root (no infinite loop)."""
+    from pathlib import Path
+
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude.json").write_text('{"projects": {"/": {"mcpServers": {}}}}')
+
+    paths = ClaudeCodeDiscoverer(tmp_path)._project_paths_with_ancestors()
+
+    assert paths == [Path("/")]
+
+
+# --- ClaudeCodeDiscoverer: skill discovery walks ancestors ---
+
+
+def test_claude_code_discoverer_project_skills_walks_ancestors(tmp_path):
+    """An ancestor of a project with a .claude/skills dir is also scanned."""
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    (tmp_path / ".claude").mkdir()
+    project_root = tmp_path / "work" / "repo"
+    project_root.mkdir(parents=True)
+    # skills live at the *parent* of the project root, not the project itself
+    ancestor_skills = tmp_path / "work" / ".claude" / "skills" / "ancestor-skill"
+    ancestor_skills.mkdir(parents=True)
+    (ancestor_skills / "SKILL.md").write_text(
+        "---\nname: ancestor-skill\ndescription: An ancestor skill\n---\n\nBody.\n"
+    )
+    (tmp_path / ".claude.json").write_text(f'{{"projects": {{"{project_root.as_posix()}": {{"mcpServers": {{}}}}}}}}')
+
+    skills_dirs = ClaudeCodeDiscoverer(tmp_path)._discover_project_skills()
+
+    keys = list(skills_dirs)
+    assert any(k.endswith("/work/.claude/skills") for k in keys)
+
+
+def test_claude_code_discoverer_project_skills_dedups_shared_ancestor_skills(tmp_path):
+    """Two sibling projects whose shared ancestor has skills produce a single entry."""
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    (tmp_path / ".claude").mkdir()
+    repo_a = tmp_path / "work" / "repo-a"
+    repo_b = tmp_path / "work" / "repo-b"
+    repo_a.mkdir(parents=True)
+    repo_b.mkdir(parents=True)
+    shared_skill = tmp_path / "work" / ".claude" / "skills" / "shared"
+    shared_skill.mkdir(parents=True)
+    (shared_skill / "SKILL.md").write_text("---\nname: shared\ndescription: s\n---\n\nB.\n")
+    (tmp_path / ".claude.json").write_text(
+        f'{{"projects": {{"{repo_a.as_posix()}": {{"mcpServers": {{}}}}, '
+        f'"{repo_b.as_posix()}": {{"mcpServers": {{}}}}}}}}'
+    )
+
+    skills_dirs = ClaudeCodeDiscoverer(tmp_path)._discover_project_skills()
+
+    shared_keys = [k for k in skills_dirs if k.endswith("/work/.claude/skills")]
+    assert len(shared_keys) == 1
+
+
 # --- ClaudeCodeDiscoverer: project MCP servers ---
 
 
@@ -225,6 +345,68 @@ async def test_claude_code_discoverer_project_mcp_servers_skips_projects_without
     mcp_configs = await ClaudeCodeDiscoverer(tmp_path)._discover_project_mcp_servers()
 
     assert set(mcp_configs) == {"/work/with-servers"}
+
+
+@pytest.mark.asyncio
+async def test_claude_code_discoverer_project_mcp_servers_reads_dotmcp_file(tmp_path):
+    """A <project>/.mcp.json file is parsed as an additional MCP source for that project."""
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    (tmp_path / ".claude").mkdir()
+    project_root = tmp_path / "work" / "repo"
+    project_root.mkdir(parents=True)
+    (project_root / ".mcp.json").write_text('{"mcpServers": {"file-srv": {"command": "f"}}}')
+    (tmp_path / ".claude.json").write_text(f'{{"projects": {{"{project_root.as_posix()}": {{"mcpServers": {{}}}}}}}}')
+
+    mcp_configs = await ClaudeCodeDiscoverer(tmp_path)._discover_project_mcp_servers()
+
+    file_keys = [k for k in mcp_configs if k.endswith("/repo/.mcp.json")]
+    assert len(file_keys) == 1
+    entries = mcp_configs[file_keys[0]]
+    assert isinstance(entries, list) and len(entries) == 1
+    name, server = entries[0]
+    assert name == "file-srv"
+    assert isinstance(server, StdioServer)
+
+
+@pytest.mark.asyncio
+async def test_claude_code_discoverer_project_mcp_servers_reads_ancestor_dotmcp(tmp_path):
+    """A <ancestor>/.mcp.json is also discovered while walking up from a project."""
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    (tmp_path / ".claude").mkdir()
+    project_root = tmp_path / "work" / "repo"
+    project_root.mkdir(parents=True)
+    (tmp_path / "work" / ".mcp.json").write_text('{"mcpServers": {"anc-srv": {"command": "a"}}}')
+    (tmp_path / ".claude.json").write_text(f'{{"projects": {{"{project_root.as_posix()}": {{"mcpServers": {{}}}}}}}}')
+
+    mcp_configs = await ClaudeCodeDiscoverer(tmp_path)._discover_project_mcp_servers()
+
+    file_keys = [k for k in mcp_configs if k.endswith("/work/.mcp.json")]
+    assert len(file_keys) == 1
+    entries = mcp_configs[file_keys[0]]
+    assert isinstance(entries, list) and entries[0][0] == "anc-srv"
+
+
+@pytest.mark.asyncio
+async def test_claude_code_discoverer_project_mcp_servers_records_could_not_parse_for_dotmcp(tmp_path):
+    """A malformed <project>/.mcp.json becomes a CouldNotParseMCPConfig entry."""
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    (tmp_path / ".claude").mkdir()
+    project_root = tmp_path / "work" / "repo"
+    project_root.mkdir(parents=True)
+    (project_root / ".mcp.json").write_text("{not valid json")
+    (tmp_path / ".claude.json").write_text(f'{{"projects": {{"{project_root.as_posix()}": {{"mcpServers": {{}}}}}}}}')
+
+    mcp_configs = await ClaudeCodeDiscoverer(tmp_path)._discover_project_mcp_servers()
+
+    file_keys = [k for k in mcp_configs if k.endswith("/.mcp.json")]
+    assert len(file_keys) == 1
+    entry = mcp_configs[file_keys[0]]
+    assert isinstance(entry, CouldNotParseMCPConfig)
+    assert entry.is_failure is True
+    assert entry.traceback
 
 
 @pytest.mark.asyncio

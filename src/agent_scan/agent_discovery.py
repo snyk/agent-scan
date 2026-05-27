@@ -155,6 +155,28 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
             return []
         return [Path(p) for p in projects if isinstance(p, str)]
 
+    def _project_paths_with_ancestors(self) -> list[Path]:
+        """Project roots plus every ancestor up to filesystem root, deduplicated.
+
+        Walking up lets project-scope MCP and skills discovery pick up
+        ``.mcp.json`` or ``.claude/skills`` directories living in any
+        parent folder of a registered project (e.g. a monorepo root that
+        contains many project subdirectories).
+        """
+        seen: set[Path] = set()
+        result: list[Path] = []
+        for project_path in self._discover_project_folders():
+            cur = project_path
+            while True:
+                if cur not in seen:
+                    seen.add(cur)
+                    result.append(cur)
+                parent = cur.parent
+                if parent == cur:
+                    break
+                cur = parent
+        return result
+
     # --- private: MCP discovery ---
 
     async def _discover_global_mcp_servers(self) -> McpConfigsResult:
@@ -176,33 +198,49 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         return {config_path.as_posix(): entries}
 
     async def _discover_project_mcp_servers(self) -> McpConfigsResult:
-        """Parse ``projects.<path>.mcpServers`` from ``~/.claude.json`` — per-project scope.
+        """Per-project MCP discovery for each path in ``_project_paths_with_ancestors``.
 
-        Each project contributes one entry keyed by its absolute project path.
+        Two sources are checked at every path:
+
+        1. ``projects.<path>.mcpServers`` in ``~/.claude.json`` — keyed by the project path.
+        2. ``<path>/.mcp.json`` on disk — keyed by the absolute file path.
+
+        A malformed ``.mcp.json`` becomes a ``CouldNotParseMCPConfig`` entry.
         """
         config_path = expand_path(Path(self._mcp_config_path), self.home_directory)
-        if not config_path.exists():
-            return {}
         data = self._load_config_raw()
         if isinstance(data, CouldNotParseMCPConfig):
             return {config_path.as_posix(): data}
-        if not isinstance(data, dict):
-            return {}
-        projects = data.get("projects")
+        projects = data.get("projects") if isinstance(data, dict) else None
         if not isinstance(projects, dict):
-            return {}
+            projects = {}
 
         result: McpConfigsResult = {}
-        for project_path, project_config in projects.items():
-            if not isinstance(project_path, str) or not isinstance(project_config, dict):
+        for path in self._project_paths_with_ancestors():
+            key = path.as_posix()
+            project_config = projects.get(key)
+            if isinstance(project_config, dict):
+                project_mcp = project_config.get("mcpServers")
+                if isinstance(project_mcp, dict) and project_mcp:
+                    result[key] = self._validate_servers(
+                        project_mcp, source=f"projects.{key}.mcpServers in {config_path.as_posix()}"
+                    )
+
+            mcp_file = path / ".mcp.json"
+            file_data = self._load_json_file(mcp_file)
+            if file_data is None:
                 continue
-            project_mcp = project_config.get("mcpServers")
-            if not isinstance(project_mcp, dict) or not project_mcp:
+            if isinstance(file_data, CouldNotParseMCPConfig):
+                result[mcp_file.as_posix()] = file_data
                 continue
-            entries = self._validate_servers(
-                project_mcp, source=f"projects.{project_path}.mcpServers in {config_path.as_posix()}"
+            if not isinstance(file_data, dict):
+                continue
+            file_mcp = file_data.get("mcpServers")
+            if not isinstance(file_mcp, dict) or not file_mcp:
+                continue
+            result[mcp_file.as_posix()] = self._validate_servers(
+                file_mcp, source=f"mcpServers in {mcp_file.as_posix()}"
             )
-            result[project_path] = entries
         return result
 
     # --- private: skills discovery ---
@@ -215,10 +253,10 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         return {skills_dir.as_posix(): inspect_skills_dir(str(skills_dir))}
 
     def _discover_project_skills(self) -> SkillsDirsResult:
-        """For each project, scan ``<project>/.claude/skills`` if present."""
+        """For each project (and every ancestor up to root), scan ``<path>/.claude/skills`` if present."""
         result: SkillsDirsResult = {}
-        for project_path in self._discover_project_folders():
-            skills_dir = project_path / self._project_dotclaude_subdir / self._skills_subdir
+        for path in self._project_paths_with_ancestors():
+            skills_dir = path / self._project_dotclaude_subdir / self._skills_subdir
             if skills_dir.exists():
                 result[skills_dir.as_posix()] = inspect_skills_dir(str(skills_dir))
         return result
@@ -229,15 +267,20 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         """Read and JSON-decode ``~/.claude.json``. Returns ``None`` if missing,
         a dict on success, or a ``CouldNotParseMCPConfig`` on malformed JSON.
         """
-        config_path = expand_path(Path(self._mcp_config_path), self.home_directory)
-        if not config_path.exists():
+        return self._load_json_file(expand_path(Path(self._mcp_config_path), self.home_directory))
+
+    def _load_json_file(self, path: Path) -> dict | CouldNotParseMCPConfig | None:
+        """JSON-decode an arbitrary file. ``None`` if missing, parsed dict on success,
+        ``CouldNotParseMCPConfig`` on malformed JSON.
+        """
+        if not path.exists():
             return None
         try:
-            return json.loads(config_path.read_text(encoding="utf-8"))
+            return json.loads(path.read_text(encoding="utf-8"))
         except Exception as e:
-            logger.exception("Error reading %s: %s", config_path.as_posix(), e)
+            logger.exception("Error reading %s: %s", path.as_posix(), e)
             return CouldNotParseMCPConfig(
-                message=f"could not parse file {config_path.as_posix()}",
+                message=f"could not parse file {path.as_posix()}",
                 traceback=traceback.format_exc(),
                 is_failure=True,
             )
