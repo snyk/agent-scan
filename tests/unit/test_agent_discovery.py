@@ -857,7 +857,7 @@ def test_agent_discoverer_subclass_without_name_raises():
             def client_exists(self):
                 return None
 
-            async def discover_mcp_servers(self):
+            def discover_mcp_servers(self):
                 return {}
 
             def discover_skills(self):
@@ -1344,7 +1344,7 @@ def test_find_discoverers_skips_discoverer_that_raises_unexpected_exception(tmp_
         def client_exists(self):
             raise RuntimeError("boom")
 
-        async def discover_mcp_servers(self):
+        def discover_mcp_servers(self):
             return {}
 
         def discover_skills(self):

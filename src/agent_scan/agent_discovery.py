@@ -393,9 +393,9 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         can't read, and surfacing those as ``CouldNotParseMCPConfig`` would
         misclassify access-control denials as malformed-config errors.
         """
-        if not path.exists():
-            return None
         try:
+            if not path.exists():
+                return None
             content = path.read_text(encoding="utf-8")
             if content.strip() == "":
                 return {}
