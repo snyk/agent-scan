@@ -29,7 +29,7 @@ async def test_payload_includes_required_fields(monkeypatch):
     payload = await bootstrap_module._build_request("scan", None, "machine-1", ["--ci"])
     data = payload.model_dump()
 
-    assert set(data) == {"client", "host", "paths"}
+    assert set(data) == {"client", "host"}
     assert data["client"]["name"] == "agent-scan"
     assert data["client"]["command"] == "scan"
     assert data["client"]["control_identifier"] == "machine-1"
@@ -40,9 +40,6 @@ async def test_payload_includes_required_fields(monkeypatch):
     # present in the request even when the binary is missing on PATH (in
     # which case the value is None).
     assert "python" in data["host"]["runtimes"]
-    assert data["paths"]["cwd"]
-    assert data["paths"]["current_home_dir"]
-    assert data["paths"]["executable"]
 
 
 @pytest.mark.asyncio
@@ -95,68 +92,6 @@ async def test_payload_runtimes_passes_through_probed_tools_verbatim(monkeypatch
     assert runtimes["mktemp"] is None
     assert runtimes["tee"] == "tee (GNU coreutils) 9.4"
     assert runtimes["grep"] == "grep (GNU grep) 3.11"
-
-
-@pytest.mark.asyncio
-async def test_home_directories_match_helper_and_are_capped(monkeypatch):
-    monkeypatch.setattr(
-        bootstrap_module,
-        "get_readable_home_directories",
-        lambda all_users=False: [(Path(f"/home/user-{i}"), f"user-{i}") for i in range(1002)],
-    )
-
-    payload = await bootstrap_module._build_request("scan", None, None, [], scan_all_users=True)
-    paths = payload.model_dump()["paths"]
-
-    # str(Path(...)) keeps native separators (backslashes on Windows), and the
-    # payload stringifies via the same transform — so we mirror it here rather
-    # than hard-coding POSIX literals that fail on Windows runners.
-    assert len(paths["home_directories"]) == 1000
-    assert paths["home_directories"][0] == {"path": str(Path("/home/user-0")), "username": "user-0"}
-    assert paths["home_directories_truncated"] is True
-
-
-@pytest.mark.asyncio
-async def test_home_enumeration_defaults_to_current_user_only(monkeypatch):
-    """Without --scan-all-users, bootstrap must not enumerate every readable home dir.
-
-    The bootstrap payload's home_directories field is intended to mirror what the
-    scan itself touches — so a single-user scan should only report the current
-    user's home, never the full /home/* tree (or Windows profiles / WSL homes).
-    """
-    captured_kwargs: dict = {}
-
-    def fake_home_dirs(all_users=False):
-        captured_kwargs["all_users"] = all_users
-        return [(Path("/home/me"), "me")] if not all_users else [(Path(f"/home/u{i}"), f"u{i}") for i in range(50)]
-
-    monkeypatch.setattr(bootstrap_module, "get_readable_home_directories", fake_home_dirs)
-
-    payload = await bootstrap_module._build_request("scan", None, None, [])
-    paths = payload.model_dump()["paths"]
-
-    assert captured_kwargs["all_users"] is False
-    # See note above: stringify via Path() to keep the assertion portable
-    # between POSIX and Windows runners.
-    assert paths["home_directories"] == [{"path": str(Path("/home/me")), "username": "me"}]
-
-
-@pytest.mark.asyncio
-async def test_home_enumeration_opts_in_when_scan_all_users(monkeypatch):
-    """Passing scan_all_users=True must forward all_users=True to the helper."""
-    captured_kwargs: dict = {}
-
-    def fake_home_dirs(all_users=False):
-        captured_kwargs["all_users"] = all_users
-        return [(Path(f"/home/u{i}"), f"u{i}") for i in range(3)]
-
-    monkeypatch.setattr(bootstrap_module, "get_readable_home_directories", fake_home_dirs)
-
-    payload = await bootstrap_module._build_request("scan", None, None, [], scan_all_users=True)
-    paths = payload.model_dump()["paths"]
-
-    assert captured_kwargs["all_users"] is True
-    assert {entry["username"] for entry in paths["home_directories"]} == {"u0", "u1", "u2"}
 
 
 @pytest.mark.asyncio
@@ -413,3 +348,4 @@ async def test_payload_excludes_schema_version_and_scanned_usernames(monkeypatch
 
     assert "schema_version" not in data
     assert "scanned_usernames" not in data
+    assert "paths" not in data

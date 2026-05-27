@@ -528,7 +528,6 @@ class ClientBootstrapRequest(BaseModel):
 
     client: ClientInfo
     host: HostInfo
-    paths: PathsInfo
 
 
 class ClientBootstrapResponse(BaseModel):
