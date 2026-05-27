@@ -306,11 +306,13 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
     # --- private: skills discovery ---
 
     def _discover_global_skill(self) -> SkillsDirsResult:
-        """Scan ``~/.claude/skills`` for user-global skills."""
-        skills_dir = expand_path(Path(self._install_path), self.home_directory) / self._skills_subdir
-        if not skills_dir.exists():
-            return {}
-        return {skills_dir.as_posix(): inspect_skills_dir(str(skills_dir))}
+        """Scan ``<install>/skills`` under each user-global folder for skills."""
+        result: SkillsDirsResult = {}
+        for folder in self._discover_global_folders():
+            skills_dir = folder / self._skills_subdir
+            if skills_dir.exists():
+                result[skills_dir.as_posix()] = inspect_skills_dir(str(skills_dir))
+        return result
 
     def _discover_project_skills(self) -> SkillsDirsResult:
         """For each project (and every ancestor up to root), scan ``<path>/.claude/skills`` if present."""
@@ -326,8 +328,7 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
     def _plugin_base_dirs(self) -> list[Path]:
         """Roots where Claude Code stages installed plugins: ``cache/`` (hydrated)
         and ``repos/`` (git-cloned source). Both can host MCP servers and skills."""
-        install = expand_path(Path(self._install_path), self.home_directory)
-        return [install / sub for sub in self._plugin_subdirs]
+        return [folder / sub for folder in self._discover_global_folders() for sub in self._plugin_subdirs]
 
     def _discover_plugin_mcp_servers(self) -> McpConfigsResult:
         """Scan plugin ``.mcp.json`` files under every plugin base dir.
