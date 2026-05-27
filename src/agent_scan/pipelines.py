@@ -52,31 +52,6 @@ class PushArgs(BaseModel):
     version: str | None = None
 
 
-def _dedup_mcp_servers(cti: ClientToInspect) -> None:
-    """In ``mcp_configs``, keep each server name only under its latest-inserted key.
-
-    Preserves error-type entries (FileNotFoundConfig / UnknownConfigFormat /
-    CouldNotParseMCPConfig) untouched. Drops keys whose list was non-empty before
-    dedup but became empty after — those are stale legacy entries fully shadowed
-    by an ABC key. Keys that were already empty pre-dedup are left in place.
-    """
-    last_key: dict[str, str] = {}
-    for key, entries in cti.mcp_configs.items():
-        if isinstance(entries, list):
-            for name, _ in entries:
-                last_key[name] = key
-
-    for key in list(cti.mcp_configs.keys()):
-        entries = cti.mcp_configs[key]
-        if not isinstance(entries, list):
-            continue
-        deduped = [(n, s) for n, s in entries if last_key.get(n) == key]
-        if not deduped and entries:
-            del cti.mcp_configs[key]
-        else:
-            cti.mcp_configs[key] = deduped
-
-
 async def discover_clients_to_inspect(
     inspect_args: InspectArgs,
 ) -> tuple[list[ClientToInspect], list[ScanPathResult], list[str]]:
@@ -117,7 +92,6 @@ async def discover_clients_to_inspect(
                 logger.info(f"Client {client.name} does not exist on this machine. {client.client_exists_paths}")
 
         # Phase B — ABC path. Runs sequentially after Phase A and merges into its output.
-        abc_touched: list[ClientToInspect] = []
         for home_directory, username in home_dirs_with_users:
             for discoverer in find_discoverers(home_directory):
                 try:
@@ -134,18 +108,15 @@ async def discover_clients_to_inspect(
                 )
                 if existing is None:
                     clients_to_inspect.append(cti)
-                    abc_touched.append(cti)
                 else:
                     # Dict union: legacy keys first (insertion order), ABC keys appended.
-                    # ABC values WIN on key collision (silent override of any legacy entry
-                    # under the same key). Phase C dedup below favors latest-inserted key.
+                    # ABC values win on key collision (e.g., both phases emit a server
+                    # under ``~/.claude.json``). Distinct keys from each phase coexist
+                    # — same-name servers under different keys are kept as separate
+                    # registrations (e.g., the same ``github`` server configured in
+                    # two projects must both reach the inspector).
                     existing.mcp_configs = {**existing.mcp_configs, **cti.mcp_configs}
                     existing.skills_dirs = {**existing.skills_dirs, **cti.skills_dirs}
-                    abc_touched.append(existing)
-
-        # Phase C — server-name dedup on ABC-touched CTIs.
-        for cti in abc_touched:
-            _dedup_mcp_servers(cti)
 
     # Only report usernames where an agent was detected in their home directory.
     # When no usernames were associated with detected agents:

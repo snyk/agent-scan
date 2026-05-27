@@ -893,97 +893,6 @@ def test_find_discoverers_returns_empty_when_no_agents_installed(tmp_path):
     assert found == []
 
 
-# --- _dedup_mcp_servers (load-bearing helper) ---
-
-
-def test_dedup_mcp_servers_keeps_each_server_in_latest_inserted_key():
-    """Server names appearing in multiple keys are retained only under the latest one."""
-    from agent_scan.pipelines import _dedup_mcp_servers
-
-    srv1_a = StdioServer(command="a")
-    srv1_b = StdioServer(command="b")
-    srv2 = StdioServer(command="c")
-    cti = ClientToInspect(
-        name="claude code",
-        client_path="/home/alice/.claude",
-        mcp_configs={
-            "/home/alice/.claude.json": [("srv1", srv1_a), ("srv2", srv2)],
-            "/work/repo": [("srv1", srv1_b)],
-        },
-        skills_dirs={},
-    )
-
-    _dedup_mcp_servers(cti)
-
-    assert cti.mcp_configs["/home/alice/.claude.json"] == [("srv2", srv2)]
-    assert cti.mcp_configs["/work/repo"] == [("srv1", srv1_b)]
-
-
-def test_dedup_mcp_servers_preserves_error_type_entries():
-    """Error-type values (e.g., CouldNotParseMCPConfig) are not modified by dedup."""
-    from agent_scan.pipelines import _dedup_mcp_servers
-
-    err = CouldNotParseMCPConfig(message="boom", traceback="tb", is_failure=True)
-    srv = StdioServer(command="x")
-    cti = ClientToInspect(
-        name="claude code",
-        client_path="/home/alice/.claude",
-        mcp_configs={
-            "/home/alice/.claude.json": err,
-            "/work/repo": [("srv", srv)],
-        },
-        skills_dirs={},
-    )
-
-    _dedup_mcp_servers(cti)
-
-    assert cti.mcp_configs["/home/alice/.claude.json"] is err
-    assert cti.mcp_configs["/work/repo"] == [("srv", srv)]
-
-
-def test_dedup_mcp_servers_drops_key_emptied_by_dedup():
-    """A key whose every server was shadowed by a later key is removed entirely."""
-    from agent_scan.pipelines import _dedup_mcp_servers
-
-    srv_legacy = StdioServer(command="legacy")
-    srv_abc = StdioServer(command="abc")
-    cti = ClientToInspect(
-        name="claude code",
-        client_path="/home/alice/.claude",
-        mcp_configs={
-            "/home/alice/.claude.json": [("srv", srv_legacy)],
-            "/work/repo": [("srv", srv_abc)],
-        },
-        skills_dirs={},
-    )
-
-    _dedup_mcp_servers(cti)
-
-    assert "/home/alice/.claude.json" not in cti.mcp_configs
-    assert cti.mcp_configs["/work/repo"] == [("srv", srv_abc)]
-
-
-def test_dedup_mcp_servers_preserves_originally_empty_lists():
-    """A list that was already empty before dedup is left in place (no servers were lost)."""
-    from agent_scan.pipelines import _dedup_mcp_servers
-
-    srv = StdioServer(command="x")
-    cti = ClientToInspect(
-        name="claude code",
-        client_path="/home/alice/.claude",
-        mcp_configs={
-            "/home/alice/.claude.json": [],
-            "/work/repo": [("srv", srv)],
-        },
-        skills_dirs={},
-    )
-
-    _dedup_mcp_servers(cti)
-
-    assert cti.mcp_configs["/home/alice/.claude.json"] == []
-    assert cti.mcp_configs["/work/repo"] == [("srv", srv)]
-
-
 # --- Pipeline dispatch: legacy for all + ABC merge phase ---
 
 
@@ -1024,8 +933,8 @@ async def test_discover_clients_to_inspect_runs_legacy_for_claude_code(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_discover_clients_to_inspect_merges_abc_into_legacy_cti_and_dedups_servers(tmp_path):
-    """One CTI per (name, username); legacy + ABC keys both present; servers deduped to latest key."""
+async def test_discover_clients_to_inspect_merges_abc_into_legacy_cti_keeping_both_keys(tmp_path):
+    """One CTI per (name, username); legacy and ABC keys for the same server both survive."""
     from agent_scan.models import CandidateClient
     from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
 
@@ -1054,21 +963,78 @@ async def test_discover_clients_to_inspect_merges_abc_into_legacy_cti_and_dedups
     merged = claude_ctis[0]
 
     keys = list(merged.mcp_configs)
+    legacy_key = next(k for k in keys if k.endswith("/.claude.json"))
     abc_key = next(k for k in keys if k == "/work/repo")
-    # Legacy's ~/.claude.json key held only "srv", which dedup moved into the ABC
-    # per-project key. The now-empty legacy key is dropped (would otherwise display
-    # as "0 servers in ~/.claude.json").
-    assert not any(k.endswith("/.claude.json") for k in keys)
 
+    legacy_entries = merged.mcp_configs[legacy_key]
     abc_entries = merged.mcp_configs[abc_key]
+    assert isinstance(legacy_entries, list)
     assert isinstance(abc_entries, list)
-    # The single server "srv" survives only under the ABC's per-project key.
+    # Without by-name dedup, "srv" is preserved in both phases' keys. Each represents
+    # a distinct discovery source (legacy flattens projects.* into ~/.claude.json;
+    # ABC reports it under the project path) and downstream scanning treats each
+    # (key, name) pair on its own merits.
+    assert [name for name, _ in legacy_entries] == ["srv"]
     assert [name for name, _ in abc_entries] == ["srv"]
     assert all(isinstance(s, StdioServer) for _, s in abc_entries)
 
 
 @pytest.mark.asyncio
-async def test_discover_clients_to_inspect_dedup_keeps_global_only_servers_in_legacy_key(tmp_path):
+async def test_discover_clients_to_inspect_preserves_same_named_server_across_projects(tmp_path):
+    """Two projects each registering the same server name (different configs) both survive.
+
+    This is the canonical multi-project case (e.g. `github` configured per-repo with
+    different tokens). Treating same-name registrations as duplicates would silently
+    drop one project's config; we want each project's entry to reach the inspector.
+    """
+    from agent_scan.models import CandidateClient
+    from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
+
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude.json").write_text(
+        '{"projects": {'
+        '"/work/repo-a": {"mcpServers": {"github": {"command": "gh-mcp", "args": ["--token", "orgA"]}}},'
+        '"/work/repo-b": {"mcpServers": {"github": {"command": "gh-mcp", "args": ["--token", "orgB"]}}}'
+        "}}"
+    )
+
+    candidate = CandidateClient(
+        name="claude code",
+        client_exists_paths=["~/.claude"],
+        mcp_config_paths=["~/.claude.json"],
+        skills_dir_paths=["~/.claude/skills"],
+    )
+
+    with (
+        patch(
+            "agent_scan.pipelines.get_readable_home_directories",
+            return_value=[(tmp_path, "alice")],
+        ),
+        patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
+    ):
+        args = InspectArgs(timeout=10, tokens=[], paths=[])
+        ctis, _, _ = await discover_clients_to_inspect(args)
+
+    claude_ctis = [c for c in ctis if c.name == "claude code"]
+    assert len(claude_ctis) == 1
+    cti = claude_ctis[0]
+
+    repo_a = cti.mcp_configs["/work/repo-a"]
+    repo_b = cti.mcp_configs["/work/repo-b"]
+    assert isinstance(repo_a, list)
+    assert isinstance(repo_b, list)
+    assert [name for name, _ in repo_a] == ["github"]
+    assert [name for name, _ in repo_b] == ["github"]
+
+    ((_, a_server),) = repo_a
+    ((_, b_server),) = repo_b
+    assert isinstance(a_server, StdioServer) and isinstance(b_server, StdioServer)
+    assert a_server.args == ["--token", "orgA"]
+    assert b_server.args == ["--token", "orgB"]
+
+
+@pytest.mark.asyncio
+async def test_discover_clients_to_inspect_keeps_legacy_key_when_abc_adds_nothing(tmp_path):
     """When ABC produces no project entries, legacy's ~/.claude.json entry is untouched."""
     from agent_scan.models import CandidateClient
     from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
@@ -1102,7 +1068,7 @@ async def test_discover_clients_to_inspect_dedup_keeps_global_only_servers_in_le
 
 @pytest.mark.asyncio
 async def test_discover_clients_to_inspect_abc_wins_on_same_key_collision(tmp_path):
-    """Both paths produce a ~/.claude.json key; ABC's value wins after merge+dedup."""
+    """Both paths produce a ~/.claude.json key; ABC's value wins via dict-union merge."""
     from agent_scan.models import CandidateClient
     from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
 
@@ -1136,9 +1102,12 @@ async def test_discover_clients_to_inspect_abc_wins_on_same_key_collision(tmp_pa
     legacy_key = next(k for k in merged.mcp_configs if k.endswith("/.claude.json"))
     entries = merged.mcp_configs[legacy_key]
     assert isinstance(entries, list)
-    # After ABC's value overrides legacy under ~/.claude.json AND dedup moves "proj"
-    # into /work/repo, the legacy key retains only the global "top".
+    # Legacy stored "proj" under .claude.json (its ClaudeCodeConfigFile flattening
+    # of projects.*). ABC stored "top" under .claude.json (top-level mcpServers).
+    # Dict-union merge picks ABC's value on the colliding key, so .claude.json now
+    # holds only "top"; "proj" lives under ABC's /work/repo key.
     assert [name for name, _ in entries] == ["top"]
+    assert merged.mcp_configs["/work/repo"] == [("proj", merged.mcp_configs["/work/repo"][0][1])]
 
 
 @pytest.mark.asyncio
