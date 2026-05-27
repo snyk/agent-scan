@@ -326,9 +326,10 @@ async def inspect_client(
 
     signature_cache, if provided, dedupes inspections of identical server
     configs across multiple calls: the first occurrence runs through
-    ``inspect_extension`` and stores its ``signature_or_error`` keyed by
-    ``_server_dedup_key(server)``; later occurrences reuse the cached value
-    without re-launching the server.
+    ``inspect_extension`` and stores ``(resolved_config, signature_or_error)``
+    keyed by ``_server_dedup_key(server)``; later occurrences reuse both the
+    resolved config (e.g. a RemoteServer with type defaulted to "http") and
+    the cached result without re-launching the server.
     """
     declined = declined_servers or set()
     extensions: dict[
@@ -379,6 +380,7 @@ async def inspect_client(
                 continue
             dedup_key = _server_dedup_key(server) if signature_cache is not None else None
             if signature_cache is not None and dedup_key is not None and dedup_key in signature_cache:
+                cached_config, cached_result = signature_cache[dedup_key]
                 logger.debug(
                     "Reusing cached signature for MCP server",
                     extra={"server_name": name, "mcp_config_path": mcp_config_path},
@@ -386,8 +388,8 @@ async def inspect_client(
                 extensions_for_mcp_config.append(
                     InspectedExtensions(
                         name=name,
-                        config=server,
-                        signature_or_error=signature_cache[dedup_key],
+                        config=cached_config,
+                        signature_or_error=cached_result,
                     )
                 )
                 continue
@@ -400,7 +402,7 @@ async def inspect_client(
                 stream_stderr=stream_stderr,
             )
             if signature_cache is not None and dedup_key is not None:
-                signature_cache[dedup_key] = extension.signature_or_error
+                signature_cache[dedup_key] = (extension.config, extension.signature_or_error)
             extensions_for_mcp_config.append(extension)
         extensions[mcp_config_path] = extensions_for_mcp_config
 

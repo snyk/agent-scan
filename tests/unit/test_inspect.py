@@ -862,3 +862,37 @@ def test_server_dedup_key_stable_for_remote_with_reordered_headers():
     a = RemoteServer(url="https://x", type="http", headers={"A": "1", "B": "2"})
     b = RemoteServer(url="https://x", type="http", headers={"B": "2", "A": "1"})
     assert _server_dedup_key(a) == _server_dedup_key(b)
+
+
+@pytest.mark.asyncio
+async def test_inspect_client_cached_entry_mirrors_resolved_config():
+    """Cached occurrences should expose the same (post-`check_server`) config the first inspection produced.
+
+    `inspect_extension` may return a fixed_config (e.g. RemoteServer.type defaulted from None to "http").
+    The second hit reads the cached resolved config rather than the pre-fix loop variable.
+    """
+    from agent_scan.models import InspectedExtensions
+
+    a = RemoteServer(url="https://x", type=None, headers={})
+    b = RemoteServer(url="https://x", type=None, headers={})
+    client = ClientToInspect(
+        name="t",
+        client_path="/p",
+        mcp_configs={
+            "/a.json": [("s", a)],
+            "/b.json": [("s", b)],
+        },
+        skills_dirs={},
+    )
+    fixed = RemoteServer(url="https://x", type="http", headers={})
+    signature = _make_signature()
+
+    async def fake(name, server, *args, **kwargs):
+        return InspectedExtensions(name=name, config=fixed, signature_or_error=signature)
+
+    with patch("agent_scan.inspect.inspect_extension", new_callable=AsyncMock) as mock_ie:
+        mock_ie.side_effect = fake
+        result = await inspect_client(client, timeout=10, tokens=[], scan_skills=False, signature_cache={})
+
+    assert result.extensions["/a.json"][0].config.type == "http"
+    assert result.extensions["/b.json"][0].config.type == "http"
