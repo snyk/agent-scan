@@ -896,3 +896,33 @@ async def test_inspect_client_cached_entry_mirrors_resolved_config():
 
     assert result.extensions["/a.json"][0].config.type == "http"
     assert result.extensions["/b.json"][0].config.type == "http"
+
+
+@pytest.mark.asyncio
+async def test_inspect_client_cached_configs_are_independent_instances():
+    """Each occurrence's config must be its own instance so in-place mutation (redaction) on one doesn't bleed into the others."""
+    a = StdioServer(command="uvx", args=["s"], env={"TOKEN": "abc"})
+    b = StdioServer(command="uvx", args=["s"], env={"TOKEN": "abc"})
+    client = ClientToInspect(
+        name="t",
+        client_path="/p",
+        mcp_configs={
+            "/a.json": [("s", a)],
+            "/b.json": [("s", b)],
+        },
+        skills_dirs={},
+    )
+    signature = _make_signature()
+
+    with patch("agent_scan.inspect.inspect_extension", new_callable=AsyncMock) as mock_ie:
+        mock_ie.side_effect = _fake_inspect_extension_factory([], signature)
+        result = await inspect_client(client, timeout=10, tokens=[], scan_skills=False, signature_cache={})
+
+    first = result.extensions["/a.json"][0].config
+    second = result.extensions["/b.json"][0].config
+    assert first is not second
+    # Simulate downstream redaction mutating one in-place; the other must be unaffected.
+    assert isinstance(first, StdioServer)
+    first.env = {"TOKEN": "<REDACTED>"}
+    assert isinstance(second, StdioServer)
+    assert second.env == {"TOKEN": "abc"}

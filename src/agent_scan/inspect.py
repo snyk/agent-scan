@@ -385,10 +385,13 @@ async def inspect_client(
                     "Reusing cached signature for MCP server",
                     extra={"server_name": name, "mcp_config_path": mcp_config_path},
                 )
+                # Deep-copy so downstream in-place mutation (e.g. redact_server
+                # rewriting RemoteServer.headers/url or StdioServer.env/args)
+                # touches only this occurrence and never aliases siblings.
                 extensions_for_mcp_config.append(
                     InspectedExtensions(
                         name=name,
-                        config=cached_config,
+                        config=cached_config.model_copy(deep=True),
                         signature_or_error=cached_result,
                     )
                 )
