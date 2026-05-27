@@ -56,7 +56,9 @@ def _dedup_mcp_servers(cti: ClientToInspect) -> None:
     """In ``mcp_configs``, keep each server name only under its latest-inserted key.
 
     Preserves error-type entries (FileNotFoundConfig / UnknownConfigFormat /
-    CouldNotParseMCPConfig) untouched.
+    CouldNotParseMCPConfig) untouched. Drops keys whose list was non-empty before
+    dedup but became empty after — those are stale legacy entries fully shadowed
+    by an ABC key. Keys that were already empty pre-dedup are left in place.
     """
     last_key: dict[str, str] = {}
     for key, entries in cti.mcp_configs.items():
@@ -66,8 +68,13 @@ def _dedup_mcp_servers(cti: ClientToInspect) -> None:
 
     for key in list(cti.mcp_configs.keys()):
         entries = cti.mcp_configs[key]
-        if isinstance(entries, list):
-            cti.mcp_configs[key] = [(n, s) for n, s in entries if last_key.get(n) == key]
+        if not isinstance(entries, list):
+            continue
+        deduped = [(n, s) for n, s in entries if last_key.get(n) == key]
+        if not deduped and entries:
+            del cti.mcp_configs[key]
+        else:
+            cti.mcp_configs[key] = deduped
 
 
 async def discover_clients_to_inspect(
@@ -113,7 +120,11 @@ async def discover_clients_to_inspect(
         abc_touched: list[ClientToInspect] = []
         for home_directory, username in home_dirs_with_users:
             for discoverer in find_discoverers(home_directory):
-                cti = discoverer.discover()
+                try:
+                    cti = discoverer.discover()
+                except Exception:
+                    logger.exception("Discoverer %s.discover() raised; skipping", type(discoverer).__name__)
+                    continue
                 if cti is None:
                     continue
                 cti.username = username

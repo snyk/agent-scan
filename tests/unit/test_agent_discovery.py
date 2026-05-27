@@ -885,6 +885,49 @@ def test_dedup_mcp_servers_preserves_error_type_entries():
     assert cti.mcp_configs["/work/repo"] == [("srv", srv)]
 
 
+def test_dedup_mcp_servers_drops_key_emptied_by_dedup():
+    """A key whose every server was shadowed by a later key is removed entirely."""
+    from agent_scan.pipelines import _dedup_mcp_servers
+
+    srv_legacy = StdioServer(command="legacy")
+    srv_abc = StdioServer(command="abc")
+    cti = ClientToInspect(
+        name="claude code",
+        client_path="/home/alice/.claude",
+        mcp_configs={
+            "/home/alice/.claude.json": [("srv", srv_legacy)],
+            "/work/repo": [("srv", srv_abc)],
+        },
+        skills_dirs={},
+    )
+
+    _dedup_mcp_servers(cti)
+
+    assert "/home/alice/.claude.json" not in cti.mcp_configs
+    assert cti.mcp_configs["/work/repo"] == [("srv", srv_abc)]
+
+
+def test_dedup_mcp_servers_preserves_originally_empty_lists():
+    """A list that was already empty before dedup is left in place (no servers were lost)."""
+    from agent_scan.pipelines import _dedup_mcp_servers
+
+    srv = StdioServer(command="x")
+    cti = ClientToInspect(
+        name="claude code",
+        client_path="/home/alice/.claude",
+        mcp_configs={
+            "/home/alice/.claude.json": [],
+            "/work/repo": [("srv", srv)],
+        },
+        skills_dirs={},
+    )
+
+    _dedup_mcp_servers(cti)
+
+    assert cti.mcp_configs["/home/alice/.claude.json"] == []
+    assert cti.mcp_configs["/work/repo"] == [("srv", srv)]
+
+
 # --- Pipeline dispatch: legacy for all + ABC merge phase ---
 
 
@@ -955,18 +998,17 @@ async def test_discover_clients_to_inspect_merges_abc_into_legacy_cti_and_dedups
     merged = claude_ctis[0]
 
     keys = list(merged.mcp_configs)
-    legacy_key = next(k for k in keys if k.endswith("/.claude.json"))
     abc_key = next(k for k in keys if k == "/work/repo")
-    assert legacy_key and abc_key
+    # Legacy's ~/.claude.json key held only "srv", which dedup moved into the ABC
+    # per-project key. The now-empty legacy key is dropped (would otherwise display
+    # as "0 servers in ~/.claude.json").
+    assert not any(k.endswith("/.claude.json") for k in keys)
 
     abc_entries = merged.mcp_configs[abc_key]
-    legacy_entries = merged.mcp_configs[legacy_key]
     assert isinstance(abc_entries, list)
-    assert isinstance(legacy_entries, list)
     # The single server "srv" survives only under the ABC's per-project key.
     assert [name for name, _ in abc_entries] == ["srv"]
     assert all(isinstance(s, StdioServer) for _, s in abc_entries)
-    assert legacy_entries == []
 
 
 @pytest.mark.asyncio
@@ -1124,6 +1166,78 @@ def test_plugin_skills_respects_max_depth_cap(tmp_path):
     assert not any(k.endswith(f"/{too_deep_parent.name}/skills") for k in keys)
 
 
+def test_server_config_discriminator_keys_match_model_required_fields():
+    """_SERVER_CONFIG_DISCRIMINATOR_KEYS must stay in sync with the required
+    top-level fields of StdioServer + RemoteServer (including validation aliases).
+
+    The flat-vs-wrapped detector in ``_select_servers_payload`` relies on these
+    keys to tell a single server config apart from a server-name map. If a new
+    required field lands on either model (e.g. a new ``protocol`` discriminator)
+    and isn't added to the constant, the detector goes blind to that shape and
+    silently misreads adversarial inputs as wrapped maps.
+    """
+    from pydantic import AliasChoices
+
+    from agent_scan.agent_discovery import _SERVER_CONFIG_DISCRIMINATOR_KEYS
+    from agent_scan.models import RemoteServer, StdioServer
+
+    expected: set[str] = set()
+    for model in (StdioServer, RemoteServer):
+        for field_name, field in model.model_fields.items():
+            if not field.is_required():
+                continue
+            expected.add(field_name)
+            alias = field.validation_alias
+            if isinstance(alias, str):
+                expected.add(alias)
+            elif isinstance(alias, AliasChoices):
+                expected.update(c for c in alias.choices if isinstance(c, str))
+
+    assert expected == set(_SERVER_CONFIG_DISCRIMINATOR_KEYS), (
+        f"Required model fields {expected} drifted from "
+        f"_SERVER_CONFIG_DISCRIMINATOR_KEYS {set(_SERVER_CONFIG_DISCRIMINATOR_KEYS)}. "
+        "Update the constant in agent_discovery.py so the flat-vs-wrapped detector "
+        "still recognises every required server-config key."
+    )
+
+
+def test_plugin_walk_prunes_traversal_beyond_cap(tmp_path, monkeypatch):
+    """Traversal must be pruned at the depth cap, not just filtered post-hoc:
+    ``os.walk`` is invoked once per plugin base dir and `dirs` is mutated so the
+    walker never descends past the cap. We verify by spying on ``os.walk`` and
+    asserting it never yields a root past the prune boundary.
+    """
+    from pathlib import Path
+
+    import agent_scan.agent_discovery as ad
+
+    cache = tmp_path / ".claude" / "plugins" / "cache"
+    # Build a tree 3x deeper than the cap. If pruning didn't work, os.walk would
+    # yield roots at all those levels.
+    too_deep_dir = cache.joinpath(*[f"x{i}" for i in range(ad._MAX_PLUGIN_RGLOB_DEPTH * 3)])
+    too_deep_dir.mkdir(parents=True)
+
+    seen_depths: list[int] = []
+    real_walk = ad.os.walk
+
+    def spy_walk(p, *a, **k):
+        for root, dirs, files in real_walk(p, *a, **k):
+            try:
+                depth = len(Path(root).relative_to(p).parts)
+            except ValueError:
+                depth = 0
+            seen_depths.append(depth)
+            yield root, dirs, files
+
+    monkeypatch.setattr(ad.os, "walk", spy_walk)
+    list(ad._walk_under_depth(cache, ".mcp.json", ad._MAX_PLUGIN_RGLOB_DEPTH, want_file=True))
+
+    # Walker should never see a root whose depth would yield a path past the cap.
+    # Roots at depth (cap - 1) are the last to be visited; deeper roots are pruned.
+    assert seen_depths, "walk must run at least once"
+    assert max(seen_depths) <= ad._MAX_PLUGIN_RGLOB_DEPTH - 1
+
+
 # --- JSON5 parsing (comments + empty-file short-circuit) ---
 
 
@@ -1220,3 +1334,56 @@ def test_find_discoverers_skips_discoverer_that_raises_unexpected_exception(tmp_
 
     assert len(found) == 1
     assert isinstance(found[0], ClaudeCodeDiscoverer)
+
+
+@pytest.mark.asyncio
+async def test_discover_clients_to_inspect_skips_discoverer_whose_discover_raises(tmp_path):
+    """A discoverer whose discover() raises mid-pipeline must not abort the loop —
+    other discoverers' results (and the legacy CTI) still land in clients_to_inspect.
+    """
+    from agent_scan.agent_discovery import DISCOVERERS, AgentDiscoverer
+    from agent_scan.models import CandidateClient
+    from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
+
+    class ExplodingMidPipelineDiscoverer(AgentDiscoverer):
+        name = "exploding-mid"
+
+        def client_exists(self):
+            # Returns truthy so it gets into find_discoverers' return list,
+            # then blows up inside discover_mcp_servers.
+            return "/fake/path"
+
+        def discover_mcp_servers(self):
+            raise RuntimeError("boom from discover_mcp_servers")
+
+        def discover_skills(self):
+            return {}
+
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude.json").write_text('{"mcpServers": {}}')
+
+    candidate = CandidateClient(
+        name="claude code",
+        client_exists_paths=["~/.claude"],
+        mcp_config_paths=["~/.claude.json"],
+        skills_dir_paths=["~/.claude/skills"],
+    )
+
+    DISCOVERERS["exploding-mid"] = ExplodingMidPipelineDiscoverer
+    try:
+        with (
+            patch(
+                "agent_scan.pipelines.get_readable_home_directories",
+                return_value=[(tmp_path, "alice")],
+            ),
+            patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
+        ):
+            args = InspectArgs(timeout=10, tokens=[], paths=[])
+            ctis, _, _ = await discover_clients_to_inspect(args)
+    finally:
+        del DISCOVERERS["exploding-mid"]
+
+    # The exploding discoverer's CTI is dropped, but Claude Code's still lands.
+    names = {c.name for c in ctis}
+    assert "claude code" in names
+    assert "exploding-mid" not in names

@@ -8,8 +8,10 @@ remains the fallback for agents that don't have a subclass yet.
 """
 
 import logging
+import os
 import traceback
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
 from pathlib import Path
 
 import pyjson5
@@ -37,7 +39,7 @@ McpConfigsResult = dict[
 ]
 SkillsDirsResult = dict[str, list[tuple[str, SkillServer]] | FileNotFoundConfig]
 
-# Cap recursion into ``~/.claude/plugins/{cache,repos}`` to mirror the legacy
+# Cap traversal into ``~/.claude/plugins/{cache,repos}`` to mirror the legacy
 # glob-based discovery, which uses ``CandidateClient.max_glob_depth=6``. We pick
 # a slightly larger budget here because plugin install layouts vary.
 _MAX_PLUGIN_RGLOB_DEPTH = 10
@@ -45,6 +47,27 @@ _MAX_PLUGIN_RGLOB_DEPTH = 10
 # Top-level keys that only ever appear on a single server config (StdioServer.command,
 # RemoteServer.url/serverUrl). Used to disambiguate wrapped vs flat .mcp.json payloads.
 _SERVER_CONFIG_DISCRIMINATOR_KEYS = frozenset({"command", "url", "serverUrl"})
+
+
+def _walk_under_depth(base: Path, name: str, max_path_depth: int, *, want_file: bool) -> Iterator[Path]:
+    """Yield paths named ``name`` under ``base``, pruning traversal so each yielded
+    path's relative parts count is at most ``max_path_depth``.
+
+    Unlike ``Path.rglob`` + post-hoc filtering, traversal stops at the cap rather
+    than walking the full subtree first — so a pathologically deep plugin layout
+    cannot blow up the walk. When ``want_file`` is True, only file entries are
+    yielded; otherwise directory entries.
+    """
+    for root_str, dirs, files in os.walk(base):
+        root = Path(root_str)
+        dir_depth = len(root.relative_to(base).parts)
+        candidates = files if want_file else dirs
+        if name in candidates:
+            yield root / name
+        # The dir we're in is at depth `dir_depth`; an entry inside it sits at
+        # depth+1. Prune once depth+1 reaches the cap so we don't descend further.
+        if dir_depth + 1 >= max_path_depth:
+            dirs.clear()
 
 
 def _select_servers_payload(file_data: dict) -> dict:
@@ -107,12 +130,7 @@ class AgentDiscoverer(ABC):
 
     @abstractmethod
     def discover_mcp_servers(self) -> McpConfigsResult:
-        """Parse the agent's MCP config file(s) and return them keyed by absolute path.
-
-        Subclasses that need real async I/O (subprocess calls, HTTP probes) should
-        override as ``async def`` and have callers wrap with ``asyncio.run`` /
-        ``asyncio.to_thread`` at the dispatch site.
-        """
+        """Parse the agent's MCP config file(s) and return them keyed by absolute path."""
 
     @abstractmethod
     def discover_skills(self) -> SkillsDirsResult:
@@ -235,8 +253,6 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         if not isinstance(top, dict) or not top:
             return {}
         entries = self._validate_servers(top, source=f"global mcpServers in {config_path.as_posix()}")
-        if isinstance(entries, CouldNotParseMCPConfig):
-            return {config_path.as_posix(): entries}
         return {config_path.as_posix(): entries}
 
     def _discover_project_mcp_servers(self) -> McpConfigsResult:
@@ -322,9 +338,7 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         for base in self._plugin_base_dirs():
             if not base.exists():
                 continue
-            for mcp_file in base.rglob(".mcp.json"):
-                if len(mcp_file.relative_to(base).parts) > _MAX_PLUGIN_RGLOB_DEPTH:
-                    continue
+            for mcp_file in _walk_under_depth(base, ".mcp.json", _MAX_PLUGIN_RGLOB_DEPTH, want_file=True):
                 if not mcp_file.is_file():
                     continue
                 file_data = self._load_json_file(mcp_file)
@@ -349,9 +363,7 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         for base in self._plugin_base_dirs():
             if not base.exists():
                 continue
-            for skills_dir in base.rglob("skills"):
-                if len(skills_dir.relative_to(base).parts) > _MAX_PLUGIN_RGLOB_DEPTH:
-                    continue
+            for skills_dir in _walk_under_depth(base, "skills", _MAX_PLUGIN_RGLOB_DEPTH, want_file=False):
                 if skills_dir.is_dir():
                     result[skills_dir.as_posix()] = inspect_skills_dir(str(skills_dir))
         return result
