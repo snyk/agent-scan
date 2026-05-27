@@ -676,7 +676,7 @@ async def test_inspect_client_skips_server_per_runtime_config_without_starting_s
     assert call_names == ["other"]
 
 
-# --- signature cache dedup tests ---
+# --- inspection cache dedup tests ---
 
 
 def _make_signature(server_info_name: str = "x"):
@@ -725,7 +725,7 @@ async def test_inspect_client_dedup_same_stdio_config_under_two_paths():
     with patch("agent_scan.inspect.inspect_extension", new_callable=AsyncMock) as mock_ie:
         mock_ie.side_effect = _fake_inspect_extension_factory(calls, signature)
         cache: dict = {}
-        result = await inspect_client(client, timeout=10, tokens=[], scan_skills=False, signature_cache=cache)
+        result = await inspect_client(client, timeout=10, tokens=[], scan_skills=False, inspection_cache=cache)
 
     assert len(calls) == 1
     a_ext = result.extensions["/a/.mcp.json"][0]
@@ -787,7 +787,7 @@ async def test_inspect_client_does_not_dedup_when_env_differs():
 
     with patch("agent_scan.inspect.inspect_extension", new_callable=AsyncMock) as mock_ie:
         mock_ie.side_effect = _fake_inspect_extension_factory(calls, _make_signature())
-        await inspect_client(client, timeout=10, tokens=[], scan_skills=False, signature_cache={})
+        await inspect_client(client, timeout=10, tokens=[], scan_skills=False, inspection_cache={})
 
     assert len(calls) == 2
 
@@ -810,7 +810,7 @@ async def test_inspect_client_does_not_dedup_when_args_differ():
 
     with patch("agent_scan.inspect.inspect_extension", new_callable=AsyncMock) as mock_ie:
         mock_ie.side_effect = _fake_inspect_extension_factory(calls, _make_signature())
-        await inspect_client(client, timeout=10, tokens=[], scan_skills=False, signature_cache={})
+        await inspect_client(client, timeout=10, tokens=[], scan_skills=False, inspection_cache={})
 
     assert len(calls) == 2
 
@@ -837,7 +837,7 @@ async def test_inspect_client_caches_errors_too():
     calls: list[str] = []
     with patch("agent_scan.inspect.inspect_extension", new_callable=AsyncMock) as mock_ie:
         mock_ie.side_effect = _fake_inspect_extension_factory(calls, error)
-        result = await inspect_client(client, timeout=10, tokens=[], scan_skills=False, signature_cache={})
+        result = await inspect_client(client, timeout=10, tokens=[], scan_skills=False, inspection_cache={})
 
     assert len(calls) == 1
     a_ext = result.extensions["/a.json"][0]
@@ -894,7 +894,7 @@ async def test_inspect_client_cached_entry_mirrors_resolved_config():
 
     with patch("agent_scan.inspect.inspect_extension", new_callable=AsyncMock) as mock_ie:
         mock_ie.side_effect = fake
-        result = await inspect_client(client, timeout=10, tokens=[], scan_skills=False, signature_cache={})
+        result = await inspect_client(client, timeout=10, tokens=[], scan_skills=False, inspection_cache={})
 
     assert result.extensions["/a.json"][0].config.type == "http"
     assert result.extensions["/b.json"][0].config.type == "http"
@@ -918,7 +918,7 @@ async def test_inspect_client_cached_configs_are_independent_instances():
 
     with patch("agent_scan.inspect.inspect_extension", new_callable=AsyncMock) as mock_ie:
         mock_ie.side_effect = _fake_inspect_extension_factory([], signature)
-        result = await inspect_client(client, timeout=10, tokens=[], scan_skills=False, signature_cache={})
+        result = await inspect_client(client, timeout=10, tokens=[], scan_skills=False, inspection_cache={})
 
     first = result.extensions["/a.json"][0].config
     second = result.extensions["/b.json"][0].config
@@ -948,7 +948,7 @@ async def test_inspect_client_cached_signatures_are_independent_instances():
 
     with patch("agent_scan.inspect.inspect_extension", new_callable=AsyncMock) as mock_ie:
         mock_ie.side_effect = _fake_inspect_extension_factory([], signature)
-        result = await inspect_client(client, timeout=10, tokens=[], scan_skills=False, signature_cache={})
+        result = await inspect_client(client, timeout=10, tokens=[], scan_skills=False, inspection_cache={})
 
     first_sig = result.extensions["/a.json"][0].signature_or_error
     second_sig = result.extensions["/b.json"][0].signature_or_error

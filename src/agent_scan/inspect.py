@@ -38,7 +38,7 @@ from agent_scan.well_known_clients import expand_path
 
 logger = logging.getLogger(__name__)
 
-SignatureCache: TypeAlias = dict[
+InspectionCache: TypeAlias = dict[
     tuple,
     tuple[
         StdioServer | RemoteServer,
@@ -329,7 +329,7 @@ async def inspect_client(
     *,
     stream_stderr: bool = False,
     declined_servers: set[tuple[str, str]] | None = None,
-    signature_cache: SignatureCache | None = None,
+    inspection_cache: InspectionCache | None = None,
 ) -> InspectedClient:
     """
     Scan a client (Cursor, VSCode, etc.) and return a InspectedClient object.
@@ -338,7 +338,7 @@ async def inspect_client(
     pairs the user declined during the consent flow. Declined stdio servers are
     not started. They are recorded as errors with category user_declined.
 
-    signature_cache, if provided, dedupes inspections of identical server
+    inspection_cache, if provided, dedupes inspections of identical server
     configs across multiple calls: the first occurrence runs through
     ``inspect_extension`` and stores ``(resolved_config, signature_or_error)``
     keyed by ``_server_dedup_key(server)``; later occurrences reuse both the
@@ -392,9 +392,9 @@ async def inspect_client(
                     )
                 )
                 continue
-            dedup_key = _server_dedup_key(server) if signature_cache is not None else None
-            if signature_cache is not None and dedup_key is not None and dedup_key in signature_cache:
-                cached_config, cached_result = signature_cache[dedup_key]
+            dedup_key = _server_dedup_key(server) if inspection_cache is not None else None
+            if inspection_cache is not None and dedup_key is not None and dedup_key in inspection_cache:
+                cached_config, cached_result = inspection_cache[dedup_key]
                 logger.debug(
                     "Reusing cached signature for MCP server",
                     extra={"server_name": name, "mcp_config_path": mcp_config_path},
@@ -419,8 +419,8 @@ async def inspect_client(
                 config_path=mcp_config_path,
                 stream_stderr=stream_stderr,
             )
-            if signature_cache is not None and dedup_key is not None:
-                signature_cache[dedup_key] = (extension.config, extension.signature_or_error)
+            if inspection_cache is not None and dedup_key is not None:
+                inspection_cache[dedup_key] = (extension.config, extension.signature_or_error)
             extensions_for_mcp_config.append(extension)
         extensions[mcp_config_path] = extensions_for_mcp_config
 
