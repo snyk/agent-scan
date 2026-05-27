@@ -65,6 +65,7 @@ Agent Scan auto-discovers agents and their capabilities (MCP servers or skills) 
 | Gemini CLI | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | OpenClaw | ✗ | ✓ | ✗ | ✓ | ✗ | ✓ |
 | Amp | ✗ | ✓ | ✗ | ✓ | ✗ | ✓ |
+| Agents | ✗ | ✓ | ✗ | ✓ | ✗ | ✓ |
 | Kiro | ✓ | ✗ | ✓ | ✗ | ✓ | ✗ |
 | OpenCode | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
 | Antigravity | ✓ | ✗ | ✓ | ✗ | ✓ | ✗ |

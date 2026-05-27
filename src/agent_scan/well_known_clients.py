@@ -71,6 +71,12 @@ MACOS_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
         skills_dir_paths=["~/.config/agents/skills", ".amp/skills"],
     ),
     CandidateClient(
+        name="agents",
+        client_exists_paths=["~/.agents"],
+        mcp_config_paths=[],
+        skills_dir_paths=["~/.agents/skills"],
+    ),
+    CandidateClient(
         name="kiro",
         client_exists_paths=["~/.kiro"],
         mcp_config_paths=["~/.kiro/settings/mcp.json"],
@@ -159,6 +165,12 @@ LINUX_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
         client_exists_paths=["~/.config/agents", ".amp"],
         mcp_config_paths=[],
         skills_dir_paths=["~/.config/agents/skills", ".amp/skills"],
+    ),
+    CandidateClient(
+        name="agents",
+        client_exists_paths=["~/.agents"],
+        mcp_config_paths=[],
+        skills_dir_paths=["~/.agents/skills"],
     ),
     CandidateClient(
         name="kiro",
@@ -256,6 +268,12 @@ WINDOWS_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
         client_exists_paths=["~/.config/agents", ".amp"],
         mcp_config_paths=[],
         skills_dir_paths=["~/.config/agents/skills", ".amp/skills"],
+    ),
+    CandidateClient(
+        name="agents",
+        client_exists_paths=["~/.agents"],
+        mcp_config_paths=[],
+        skills_dir_paths=["~/.agents/skills"],
     ),
     CandidateClient(
         name="kiro",
