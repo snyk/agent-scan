@@ -380,12 +380,18 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         return self._load_json_file(expand_path(Path(self._mcp_config_path), self.home_directory))
 
     def _load_json_file(self, path: Path) -> dict | CouldNotParseMCPConfig | None:
-        """JSON-decode an arbitrary file. ``None`` if missing, parsed dict on success,
-        ``CouldNotParseMCPConfig`` on malformed JSON.
+        """JSON-decode an arbitrary file. ``None`` if missing or unreadable due to
+        permissions, parsed dict on success, ``CouldNotParseMCPConfig`` on
+        malformed JSON.
 
         Uses ``pyjson5`` to match the legacy ``mcp_client.scan_mcp_config_file``
         path, which tolerates ``//`` comments and trailing commas. An empty or
         whitespace-only file is treated as an empty config (also matching legacy).
+
+        ``PermissionError`` is treated like a missing file — under
+        ``--scan-all-users`` an unprivileged process routinely hits homes it
+        can't read, and surfacing those as ``CouldNotParseMCPConfig`` would
+        misclassify access-control denials as malformed-config errors.
         """
         if not path.exists():
             return None
@@ -394,6 +400,9 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
             if content.strip() == "":
                 return {}
             return pyjson5.loads(content)
+        except PermissionError:
+            logger.warning("Permission denied reading %s", path.as_posix())
+            return None
         except Exception as e:
             logger.exception("Error reading %s: %s", path.as_posix(), e)
             return CouldNotParseMCPConfig(

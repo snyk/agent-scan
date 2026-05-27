@@ -344,3 +344,172 @@ class TestGetReadableHomeDirectoriesWindowsTimeout:
         )
         assert isinstance(captured["timeout"], int | float)
         assert captured["timeout"] > 0
+
+
+class TestGetReadableHomeDirectoriesPosix:
+    """Cover the Linux/Darwin branch of ``get_readable_home_directories``.
+
+    The ``--scan-all-users`` flag depends on this enumeration returning every
+    accessible human-user home. The previous coverage was Windows-only, so
+    regressions in the POSIX path (e.g. wrong UID threshold, dropping the
+    ``nobody`` filter, skipping the ``os.access`` gate) would silently
+    degrade multi-user scans.
+    """
+
+    def _fake_pwd_entry(self, name, uid, home):
+        return SimpleNamespace(pw_name=name, pw_uid=uid, pw_dir=home)
+
+    def test_single_user_when_all_users_false(self, monkeypatch):
+        """Single-user mode is the default and must return exactly the current
+        process's home — never call into pwd enumeration."""
+
+        def boom():
+            raise AssertionError("pwd.getpwall() must NOT be consulted when all_users=False")
+
+        import pwd as pwd_module
+
+        monkeypatch.setattr(pwd_module, "getpwall", boom)
+
+        result = get_readable_home_directories(all_users=False)
+
+        assert len(result) == 1
+        home_path, username = result[0]
+        assert home_path == os.path.expanduser("~") or str(home_path) == os.path.expanduser("~")
+
+    def test_all_users_linux_enumerates_above_uid_threshold(self, monkeypatch, tmp_path):
+        """Linux uses UID >= 1000 as the human-user threshold. System accounts
+        (root=0, daemon=1, etc.) must be excluded."""
+        monkeypatch.setattr(utils_module.platform, "system", lambda: "Linux")
+
+        alice_home = tmp_path / "alice"
+        bob_home = tmp_path / "bob"
+        alice_home.mkdir()
+        bob_home.mkdir()
+
+        import pwd as pwd_module
+
+        monkeypatch.setattr(
+            pwd_module,
+            "getpwall",
+            lambda: [
+                self._fake_pwd_entry("root", 0, "/root"),
+                self._fake_pwd_entry("daemon", 1, "/usr/sbin"),
+                self._fake_pwd_entry("alice", 1000, str(alice_home)),
+                self._fake_pwd_entry("bob", 1001, str(bob_home)),
+            ],
+        )
+        monkeypatch.setattr(utils_module.os, "access", lambda *_a, **_k: True)
+
+        result = get_readable_home_directories(all_users=True)
+
+        usernames = {u for _p, u in result}
+        assert usernames == {"alice", "bob"}, f"system users must be filtered out; got {usernames}"
+
+    def test_all_users_darwin_uses_lower_uid_threshold(self, monkeypatch, tmp_path):
+        """macOS human UIDs start at 500, so a UID-501 user must be included
+        on Darwin but excluded on Linux (verified by the previous test)."""
+        monkeypatch.setattr(utils_module.platform, "system", lambda: "Darwin")
+
+        alice_home = tmp_path / "alice"
+        alice_home.mkdir()
+
+        import pwd as pwd_module
+
+        monkeypatch.setattr(
+            pwd_module,
+            "getpwall",
+            lambda: [
+                self._fake_pwd_entry("_some_macos_service", 200, "/var/empty"),
+                self._fake_pwd_entry("alice", 501, str(alice_home)),
+            ],
+        )
+        monkeypatch.setattr(utils_module.os, "access", lambda *_a, **_k: True)
+
+        result = get_readable_home_directories(all_users=True)
+
+        usernames = {u for _p, u in result}
+        assert usernames == {"alice"}, f"UID-200 must be filtered, UID-501 kept; got {usernames}"
+
+    def test_all_users_excludes_nobody(self, monkeypatch, tmp_path):
+        """The ``nobody`` account often has a high UID (macOS: -2 / 4294967294,
+        Linux distros: 65534) and must be filtered by name regardless of UID."""
+        monkeypatch.setattr(utils_module.platform, "system", lambda: "Linux")
+
+        alice_home = tmp_path / "alice"
+        nobody_home = tmp_path / "nobody"
+        alice_home.mkdir()
+        nobody_home.mkdir()
+
+        import pwd as pwd_module
+
+        monkeypatch.setattr(
+            pwd_module,
+            "getpwall",
+            lambda: [
+                self._fake_pwd_entry("nobody", 65534, str(nobody_home)),
+                self._fake_pwd_entry("alice", 1000, str(alice_home)),
+            ],
+        )
+        monkeypatch.setattr(utils_module.os, "access", lambda *_a, **_k: True)
+
+        result = get_readable_home_directories(all_users=True)
+
+        usernames = {u for _p, u in result}
+        assert usernames == {"alice"}, f"'nobody' must be filtered by name; got {usernames}"
+
+    def test_all_users_excludes_inaccessible_homes(self, monkeypatch, tmp_path):
+        """A user whose home fails ``os.access(R_OK | X_OK)`` must be dropped —
+        without this filter, an unprivileged ``--scan-all-users`` run would
+        attempt to read homes it cannot traverse and surface spurious errors."""
+        monkeypatch.setattr(utils_module.platform, "system", lambda: "Linux")
+
+        alice_home = tmp_path / "alice"
+        bob_home = tmp_path / "bob"
+        alice_home.mkdir()
+        bob_home.mkdir()
+
+        import pwd as pwd_module
+
+        monkeypatch.setattr(
+            pwd_module,
+            "getpwall",
+            lambda: [
+                self._fake_pwd_entry("alice", 1000, str(alice_home)),
+                self._fake_pwd_entry("bob", 1001, str(bob_home)),
+            ],
+        )
+        # Only alice's home is accessible.
+        monkeypatch.setattr(
+            utils_module.os, "access", lambda path, _mode: str(path) == str(alice_home)
+        )
+
+        result = get_readable_home_directories(all_users=True)
+
+        usernames = {u for _p, u in result}
+        assert usernames == {"alice"}, f"inaccessible home must be dropped; got {usernames}"
+
+    def test_all_users_excludes_missing_home_dirs(self, monkeypatch, tmp_path):
+        """A pwd entry whose ``pw_dir`` doesn't exist on disk must be dropped
+        (stale /etc/passwd entries, deprovisioned accounts)."""
+        monkeypatch.setattr(utils_module.platform, "system", lambda: "Linux")
+
+        alice_home = tmp_path / "alice"
+        alice_home.mkdir()
+        ghost_home = tmp_path / "ghost-never-created"  # not mkdir'd
+
+        import pwd as pwd_module
+
+        monkeypatch.setattr(
+            pwd_module,
+            "getpwall",
+            lambda: [
+                self._fake_pwd_entry("alice", 1000, str(alice_home)),
+                self._fake_pwd_entry("ghost", 1001, str(ghost_home)),
+            ],
+        )
+        monkeypatch.setattr(utils_module.os, "access", lambda *_a, **_k: True)
+
+        result = get_readable_home_directories(all_users=True)
+
+        usernames = {u for _p, u in result}
+        assert usernames == {"alice"}, f"non-existent home must be dropped; got {usernames}"

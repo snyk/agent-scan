@@ -1443,3 +1443,174 @@ async def test_discover_clients_to_inspect_skips_discoverer_whose_discover_raise
     names = {c.name for c in ctis}
     assert "claude code" in names
     assert "exploding-mid" not in names
+
+
+# --- _load_json_file permission handling ---
+
+
+def test_load_json_file_returns_none_on_permission_error(tmp_path, monkeypatch):
+    """A ``PermissionError`` during read must return ``None`` (missing-file
+    semantics), not a ``CouldNotParseMCPConfig`` entry.
+
+    Under ``--scan-all-users`` an unprivileged process routinely hits homes it
+    can't read; surfacing those as parse errors would misclassify access-control
+    denials as malformed configs.
+    """
+    from pathlib import Path
+
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude.json").write_text('{"mcpServers": {"srv": {"command": "echo"}}}')
+
+    real_read_text = Path.read_text
+
+    def fake_read_text(self, *args, **kwargs):
+        if self.name == ".claude.json":
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fake_read_text)
+
+    mcp_configs = ClaudeCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    # The unreadable file is silently skipped — no parse-error sentinel surfaces.
+    assert mcp_configs == {}
+
+
+def test_load_json_file_still_returns_could_not_parse_for_malformed_json(tmp_path):
+    """Regression guard: real parse failures still produce ``CouldNotParseMCPConfig``.
+    Splitting out the ``PermissionError`` branch must not weaken malformed-JSON handling.
+    """
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude.json").write_text("{not valid json")
+
+    mcp_configs = ClaudeCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert len(mcp_configs) == 1
+    entry = next(iter(mcp_configs.values()))
+    assert isinstance(entry, CouldNotParseMCPConfig)
+
+
+# --- Multi-user pipeline (--scan-all-users) end-to-end ---
+
+
+@pytest.mark.asyncio
+async def test_discover_clients_to_inspect_keeps_per_user_isolation_under_scan_all_users(tmp_path):
+    """End-to-end multi-home test for the ``(name, username)`` merge predicate.
+
+    Phase B looks up the existing CTI via
+    ``c.name == cti.name and c.username == cti.username`` (pipelines.py:131).
+    If the ``username`` half of that predicate ever regresses (e.g. someone
+    simplifies to ``c.name == cti.name``), bob's ABC discoverer would merge
+    into the *first* "claude code" CTI in insertion order — which is alice's —
+    contaminating alice's CTI with bob's servers and leaving bob's CTI without
+    its ABC-discovered project key.
+
+    The test gives each user a *distinct* server name and a *distinct* project
+    path so cross-contamination is trivially detectable.
+    """
+    from agent_scan.models import CandidateClient
+    from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
+
+    alice_home = tmp_path / "alice"
+    bob_home = tmp_path / "bob"
+    (alice_home / ".claude").mkdir(parents=True)
+    (bob_home / ".claude").mkdir(parents=True)
+    (alice_home / ".claude.json").write_text(
+        '{"projects": {"/alice/repo": {"mcpServers": {"alice-srv": {"command": "echo"}}}}}'
+    )
+    (bob_home / ".claude.json").write_text(
+        '{"projects": {"/bob/repo": {"mcpServers": {"bob-srv": {"command": "echo"}}}}}'
+    )
+
+    candidate = CandidateClient(
+        name="claude code",
+        client_exists_paths=["~/.claude"],
+        mcp_config_paths=["~/.claude.json"],
+        skills_dir_paths=["~/.claude/skills"],
+    )
+
+    with (
+        patch(
+            "agent_scan.pipelines.get_readable_home_directories",
+            return_value=[(alice_home, "alice"), (bob_home, "bob")],
+        ),
+        patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
+    ):
+        args = InspectArgs(timeout=10, tokens=[], paths=[], all_users=True)
+        ctis, _, _ = await discover_clients_to_inspect(args)
+
+    claude_ctis = [c for c in ctis if c.name == "claude code"]
+    by_user = {c.username: c for c in claude_ctis}
+    assert set(by_user) == {"alice", "bob"}, f"Expected one CTI per user, got {sorted(by_user)}"
+
+    def server_names(cti):
+        names = set()
+        for entries in cti.mcp_configs.values():
+            if isinstance(entries, list):
+                for name, _ in entries:
+                    names.add(name)
+        return names
+
+    alice_servers = server_names(by_user["alice"])
+    bob_servers = server_names(by_user["bob"])
+
+    # No cross-contamination: each user's CTI contains ONLY its own distinct server.
+    assert alice_servers == {"alice-srv"}, (
+        f"alice's CTI must contain only alice-srv (cross-contamination from bob "
+        f"indicates the username predicate regressed); got {alice_servers}"
+    )
+    assert bob_servers == {"bob-srv"}, (
+        f"bob's CTI must contain only bob-srv (cross-contamination from alice "
+        f"indicates the username predicate regressed); got {bob_servers}"
+    )
+
+    # Each user's CTI carries its own ABC-discovered project key. If the
+    # username predicate were dropped, bob's ABC would never reach bob's CTI
+    # and /bob/repo would be missing from bob_keys.
+    assert "/alice/repo" in by_user["alice"].mcp_configs
+    assert "/bob/repo" in by_user["bob"].mcp_configs
+    assert "/bob/repo" not in by_user["alice"].mcp_configs
+    assert "/alice/repo" not in by_user["bob"].mcp_configs
+
+
+@pytest.mark.asyncio
+async def test_discover_clients_to_inspect_propagates_all_users_flag_to_home_enumeration(tmp_path):
+    """The ``InspectArgs.all_users`` flag must reach
+    ``get_readable_home_directories`` unmodified.
+
+    Regression guard: if the pipeline ever drops the kwarg or hardcodes a
+    value, ``--scan-all-users`` would silently degrade to scanning only the
+    current user — every per-user assertion in the rest of the suite would
+    still pass (they all mock the home list directly), but real CLI runs
+    would skip every other user on the box.
+    """
+    from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
+
+    captured: dict = {}
+
+    def fake_home_enum(*, all_users):
+        captured.setdefault("calls", []).append(all_users)
+        return [(tmp_path, "alice")]
+
+    # all_users=True must reach the enumeration as True.
+    with (
+        patch("agent_scan.pipelines.get_readable_home_directories", side_effect=fake_home_enum),
+        patch("agent_scan.pipelines.get_well_known_clients", return_value=[]),
+    ):
+        await discover_clients_to_inspect(InspectArgs(timeout=10, tokens=[], paths=[], all_users=True))
+
+    # all_users=False (single-user default) must reach as False.
+    with (
+        patch("agent_scan.pipelines.get_readable_home_directories", side_effect=fake_home_enum),
+        patch("agent_scan.pipelines.get_well_known_clients", return_value=[]),
+    ):
+        await discover_clients_to_inspect(InspectArgs(timeout=10, tokens=[], paths=[], all_users=False))
+
+    assert captured["calls"] == [True, False], (
+        f"Pipeline must pass all_users through unchanged to get_readable_home_directories; "
+        f"got call sequence {captured['calls']}"
+    )
