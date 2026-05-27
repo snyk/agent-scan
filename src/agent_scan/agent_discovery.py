@@ -26,7 +26,7 @@ from agent_scan.models import (
 )
 from agent_scan.signed_binary import check_server_signature
 from agent_scan.skill_client import inspect_skills_dir
-from agent_scan.well_known_clients import expand_path
+from agent_scan.well_known_clients import CLAUDE_CODE_NAME, expand_path
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +41,34 @@ SkillsDirsResult = dict[str, list[tuple[str, SkillServer]] | FileNotFoundConfig]
 # glob-based discovery, which uses ``CandidateClient.max_glob_depth=6``. We pick
 # a slightly larger budget here because plugin install layouts vary.
 _MAX_PLUGIN_RGLOB_DEPTH = 10
+
+# Top-level keys that only ever appear on a single server config (StdioServer.command,
+# RemoteServer.url/serverUrl). Used to disambiguate wrapped vs flat .mcp.json payloads.
+_SERVER_CONFIG_DISCRIMINATOR_KEYS = frozenset({"command", "url", "serverUrl"})
+
+
+def _select_servers_payload(file_data: dict) -> dict:
+    """Pick the server-map payload from a ``.mcp.json`` file (plugin or project scope).
+
+    Files come in two shapes:
+
+    * Wrapped: ``{"mcpServers": {<name>: <server-config>, ...}}``
+    * Flat:    ``{<name>: <server-config>, ...}``
+
+    If ``file_data["mcpServers"]`` exists and looks like a *server map* (its value
+    is a dict, none of whose own top-level keys are server-config discriminators),
+    return it (wrapped). Otherwise return ``file_data`` itself (flat) — this
+    correctly handles the adversarial case of a flat-format file whose single
+    server happens to be literally named "mcpServers".
+
+    Note: only applied to plugin and per-project ``.mcp.json`` files. The global
+    ``~/.claude.json`` is machine-managed by Claude Code and never flat; its
+    parser short-circuits on a missing top-level ``mcpServers`` key.
+    """
+    candidate = file_data.get("mcpServers")
+    if isinstance(candidate, dict) and not (candidate.keys() & _SERVER_CONFIG_DISCRIMINATOR_KEYS):
+        return candidate
+    return file_data
 
 
 class AgentDiscoverer(ABC):
@@ -78,19 +106,24 @@ class AgentDiscoverer(ABC):
         """Return the resolved install path if the agent is present, else None."""
 
     @abstractmethod
-    async def discover_mcp_servers(self) -> McpConfigsResult:
-        """Parse the agent's MCP config file(s) and return them keyed by absolute path."""
+    def discover_mcp_servers(self) -> McpConfigsResult:
+        """Parse the agent's MCP config file(s) and return them keyed by absolute path.
+
+        Subclasses that need real async I/O (subprocess calls, HTTP probes) should
+        override as ``async def`` and have callers wrap with ``asyncio.run`` /
+        ``asyncio.to_thread`` at the dispatch site.
+        """
 
     @abstractmethod
     def discover_skills(self) -> SkillsDirsResult:
         """List the agent's skills, keyed by absolute skills-dir path."""
 
-    async def discover(self) -> ClientToInspect | None:
+    def discover(self) -> ClientToInspect | None:
         """Assemble a ClientToInspect, or None when the agent isn't installed."""
         client_path = self.client_exists()
         if client_path is None:
             return None
-        mcp_configs = await self.discover_mcp_servers()
+        mcp_configs = self.discover_mcp_servers()
         skills_dirs = self.discover_skills()
         return ClientToInspect(
             name=self.name,
@@ -115,7 +148,7 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
       project listed in ``~/.claude.json``.
     """
 
-    name = "claude code"
+    name = CLAUDE_CODE_NAME
 
     _install_path = "~/.claude"
     _mcp_config_path = "~/.claude.json"
@@ -134,11 +167,11 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
             logger.warning("Permission error for path %s", path.as_posix())
         return None
 
-    async def discover_mcp_servers(self) -> McpConfigsResult:
+    def discover_mcp_servers(self) -> McpConfigsResult:
         result: McpConfigsResult = {}
-        result.update(await self._discover_global_mcp_servers())
-        result.update(await self._discover_project_mcp_servers())
-        result.update(await self._discover_plugin_mcp_servers())
+        result.update(self._discover_global_mcp_servers())
+        result.update(self._discover_project_mcp_servers())
+        result.update(self._discover_plugin_mcp_servers())
         return result
 
     def discover_skills(self) -> SkillsDirsResult:
@@ -188,7 +221,7 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
 
     # --- private: MCP discovery ---
 
-    async def _discover_global_mcp_servers(self) -> McpConfigsResult:
+    def _discover_global_mcp_servers(self) -> McpConfigsResult:
         """Parse top-level ``mcpServers`` from ``~/.claude.json`` — the user-global scope."""
         config_path = expand_path(Path(self._mcp_config_path), self.home_directory)
         if not config_path.exists():
@@ -206,7 +239,7 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
             return {config_path.as_posix(): entries}
         return {config_path.as_posix(): entries}
 
-    async def _discover_project_mcp_servers(self) -> McpConfigsResult:
+    def _discover_project_mcp_servers(self) -> McpConfigsResult:
         """Per-project MCP discovery for each path in ``_project_paths_with_ancestors``.
 
         Two sources are checked at every path:
@@ -242,9 +275,9 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
             if isinstance(file_data, CouldNotParseMCPConfig):
                 result[mcp_file.as_posix()] = file_data
                 continue
-            if not isinstance(file_data, dict):
+            if not isinstance(file_data, dict) or not file_data:
                 continue
-            file_mcp = file_data.get("mcpServers")
+            file_mcp = _select_servers_payload(file_data)
             if not isinstance(file_mcp, dict) or not file_mcp:
                 continue
             result[mcp_file.as_posix()] = self._validate_servers(
@@ -278,7 +311,7 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         install = expand_path(Path(self._install_path), self.home_directory)
         return [install / sub for sub in self._plugin_subdirs]
 
-    async def _discover_plugin_mcp_servers(self) -> McpConfigsResult:
+    def _discover_plugin_mcp_servers(self) -> McpConfigsResult:
         """Scan plugin ``.mcp.json`` files under every plugin base dir.
 
         Plugin ``.mcp.json`` files use the flat ``{name: serverConfig}`` format
@@ -302,7 +335,7 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
                     continue
                 if not isinstance(file_data, dict) or not file_data:
                     continue
-                raw_servers = file_data.get("mcpServers") if "mcpServers" in file_data else file_data
+                raw_servers = _select_servers_payload(file_data)
                 if not isinstance(raw_servers, dict) or not raw_servers:
                     continue
                 result[mcp_file.as_posix()] = self._validate_servers(
@@ -383,7 +416,7 @@ def find_discoverers(home_directory: Path | None) -> list[AgentDiscoverer]:
     """Construct one instance per registered discoverer with the given home, and
     return only those whose ``client_exists()`` confirms the agent is installed.
     Each returned instance is home-bound; the caller just runs
-    ``await d.discover()`` on each.
+    ``d.discover()`` on each.
 
     A discoverer whose ``client_exists()`` raises is skipped (and logged) so a
     single buggy subclass cannot abort discovery for the whole machine.

@@ -9,6 +9,11 @@ from agent_scan.models import CandidateClient
 # Set up logger for this module
 logger = logging.getLogger(__name__)
 
+# Canonical agent name for Claude Code. Used as ``CandidateClient.name`` in the
+# per-OS lists below and as ``ClaudeCodeDiscoverer.name``; the Phase B merge in
+# ``pipelines.discover_clients_to_inspect`` relies on these matching exactly.
+CLAUDE_CODE_NAME = "claude code"
+
 
 MACOS_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
     CandidateClient(
@@ -40,7 +45,7 @@ MACOS_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
         skills_dir_paths=[],
     ),
     CandidateClient(
-        name="claude code",
+        name=CLAUDE_CODE_NAME,
         client_exists_paths=["~/.claude"],
         mcp_config_paths=["~/.claude.json"],
         skills_dir_paths=["~/.claude/skills"],
@@ -130,7 +135,7 @@ LINUX_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
         skills_dir_paths=["~/.copilot/skills"],
     ),
     CandidateClient(
-        name="claude code",
+        name=CLAUDE_CODE_NAME,
         client_exists_paths=["~/.claude"],
         mcp_config_paths=["~/.claude.json"],
         skills_dir_paths=["~/.claude/skills"],
@@ -227,7 +232,7 @@ WINDOWS_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
         skills_dir_paths=[],
     ),
     CandidateClient(
-        name="claude code",
+        name=CLAUDE_CODE_NAME,
         client_exists_paths=["~/.claude"],
         mcp_config_paths=["~/.claude.json"],
         skills_dir_paths=["~/.claude/skills"],

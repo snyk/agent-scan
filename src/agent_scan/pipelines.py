@@ -109,11 +109,11 @@ async def discover_clients_to_inspect(
             else:
                 logger.info(f"Client {client.name} does not exist on this machine. {client.client_exists_paths}")
 
-        # Phase B — ABC path. Runs in parallel and merges into Phase A's output.
+        # Phase B — ABC path. Runs sequentially after Phase A and merges into its output.
         abc_touched: list[ClientToInspect] = []
         for home_directory, username in home_dirs_with_users:
             for discoverer in find_discoverers(home_directory):
-                cti = await discoverer.discover()
+                cti = discoverer.discover()
                 if cti is None:
                     continue
                 cti.username = username

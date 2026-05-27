@@ -36,14 +36,13 @@ def test_claude_code_discoverer_returns_none_when_absent(tmp_path):
 # --- ClaudeCodeDiscoverer: discover_mcp_servers ---
 
 
-@pytest.mark.asyncio
-async def test_claude_code_discoverer_parses_mcp_servers(tmp_path):
+def test_claude_code_discoverer_parses_mcp_servers(tmp_path):
     from agent_scan.agent_discovery import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude.json").write_text('{"mcpServers": {"my-server": {"command": "echo", "args": ["hi"]}}}')
 
-    mcp_configs = await ClaudeCodeDiscoverer(tmp_path).discover_mcp_servers()
+    mcp_configs = ClaudeCodeDiscoverer(tmp_path).discover_mcp_servers()
 
     assert len(mcp_configs) == 1
     config_path = next(iter(mcp_configs))
@@ -57,28 +56,26 @@ async def test_claude_code_discoverer_parses_mcp_servers(tmp_path):
     assert server.command == "echo"
 
 
-@pytest.mark.asyncio
-async def test_claude_code_discoverer_returns_empty_when_json_has_no_mcp_fields(tmp_path):
+def test_claude_code_discoverer_returns_empty_when_json_has_no_mcp_fields(tmp_path):
     """JSON without top-level mcpServers and without projects returns no entries."""
     from agent_scan.agent_discovery import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude.json").write_text('{"unrelated": "data"}')
 
-    mcp_configs = await ClaudeCodeDiscoverer(tmp_path).discover_mcp_servers()
+    mcp_configs = ClaudeCodeDiscoverer(tmp_path).discover_mcp_servers()
 
     assert mcp_configs == {}
 
 
-@pytest.mark.asyncio
-async def test_claude_code_discoverer_records_could_not_parse_on_invalid_json(tmp_path):
+def test_claude_code_discoverer_records_could_not_parse_on_invalid_json(tmp_path):
     """Malformed JSON in ~/.claude.json becomes CouldNotParseMCPConfig with traceback."""
     from agent_scan.agent_discovery import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude.json").write_text("{not valid json")
 
-    mcp_configs = await ClaudeCodeDiscoverer(tmp_path).discover_mcp_servers()
+    mcp_configs = ClaudeCodeDiscoverer(tmp_path).discover_mcp_servers()
 
     assert len(mcp_configs) == 1
     entry = next(iter(mcp_configs.values()))
@@ -87,14 +84,13 @@ async def test_claude_code_discoverer_records_could_not_parse_on_invalid_json(tm
     assert entry.traceback
 
 
-@pytest.mark.asyncio
-async def test_claude_code_discoverer_returns_empty_when_mcp_config_missing(tmp_path):
+def test_claude_code_discoverer_returns_empty_when_mcp_config_missing(tmp_path):
     from agent_scan.agent_discovery import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
     # no ~/.claude.json on disk
 
-    mcp_configs = await ClaudeCodeDiscoverer(tmp_path).discover_mcp_servers()
+    mcp_configs = ClaudeCodeDiscoverer(tmp_path).discover_mcp_servers()
 
     # Missing config files are silently skipped (matches legacy behavior when
     # create_file_not_found_error=False).
@@ -305,8 +301,7 @@ def test_claude_code_discoverer_project_skills_dedups_shared_ancestor_skills(tmp
 # --- ClaudeCodeDiscoverer: project MCP servers ---
 
 
-@pytest.mark.asyncio
-async def test_claude_code_discoverer_parses_project_mcp_servers(tmp_path):
+def test_claude_code_discoverer_parses_project_mcp_servers(tmp_path):
     """Each project's mcpServers becomes its own entry keyed by the project path."""
     from agent_scan.agent_discovery import ClaudeCodeDiscoverer
 
@@ -318,7 +313,7 @@ async def test_claude_code_discoverer_parses_project_mcp_servers(tmp_path):
         "}}"
     )
 
-    mcp_configs = await ClaudeCodeDiscoverer(tmp_path)._discover_project_mcp_servers()
+    mcp_configs = ClaudeCodeDiscoverer(tmp_path)._discover_project_mcp_servers()
 
     assert set(mcp_configs) == {"/work/repo-a", "/work/repo-b"}
     entries_a = mcp_configs["/work/repo-a"]
@@ -328,8 +323,7 @@ async def test_claude_code_discoverer_parses_project_mcp_servers(tmp_path):
     assert isinstance(server_a, StdioServer)
 
 
-@pytest.mark.asyncio
-async def test_claude_code_discoverer_project_mcp_servers_skips_projects_without_mcp(tmp_path):
+def test_claude_code_discoverer_project_mcp_servers_skips_projects_without_mcp(tmp_path):
     """Projects with no mcpServers key (or empty) don't produce entries."""
     from agent_scan.agent_discovery import ClaudeCodeDiscoverer
 
@@ -342,13 +336,12 @@ async def test_claude_code_discoverer_project_mcp_servers_skips_projects_without
         "}}"
     )
 
-    mcp_configs = await ClaudeCodeDiscoverer(tmp_path)._discover_project_mcp_servers()
+    mcp_configs = ClaudeCodeDiscoverer(tmp_path)._discover_project_mcp_servers()
 
     assert set(mcp_configs) == {"/work/with-servers"}
 
 
-@pytest.mark.asyncio
-async def test_claude_code_discoverer_project_mcp_servers_reads_dotmcp_file(tmp_path):
+def test_claude_code_discoverer_project_mcp_servers_reads_dotmcp_file(tmp_path):
     """A <project>/.mcp.json file is parsed as an additional MCP source for that project."""
     from agent_scan.agent_discovery import ClaudeCodeDiscoverer
 
@@ -358,7 +351,7 @@ async def test_claude_code_discoverer_project_mcp_servers_reads_dotmcp_file(tmp_
     (project_root / ".mcp.json").write_text('{"mcpServers": {"file-srv": {"command": "f"}}}')
     (tmp_path / ".claude.json").write_text(f'{{"projects": {{"{project_root.as_posix()}": {{"mcpServers": {{}}}}}}}}')
 
-    mcp_configs = await ClaudeCodeDiscoverer(tmp_path)._discover_project_mcp_servers()
+    mcp_configs = ClaudeCodeDiscoverer(tmp_path)._discover_project_mcp_servers()
 
     file_keys = [k for k in mcp_configs if k.endswith("/repo/.mcp.json")]
     assert len(file_keys) == 1
@@ -369,8 +362,7 @@ async def test_claude_code_discoverer_project_mcp_servers_reads_dotmcp_file(tmp_
     assert isinstance(server, StdioServer)
 
 
-@pytest.mark.asyncio
-async def test_claude_code_discoverer_project_mcp_servers_reads_ancestor_dotmcp(tmp_path):
+def test_claude_code_discoverer_project_mcp_servers_reads_ancestor_dotmcp(tmp_path):
     """A <ancestor>/.mcp.json is also discovered while walking up from a project."""
     from agent_scan.agent_discovery import ClaudeCodeDiscoverer
 
@@ -380,7 +372,7 @@ async def test_claude_code_discoverer_project_mcp_servers_reads_ancestor_dotmcp(
     (tmp_path / "work" / ".mcp.json").write_text('{"mcpServers": {"anc-srv": {"command": "a"}}}')
     (tmp_path / ".claude.json").write_text(f'{{"projects": {{"{project_root.as_posix()}": {{"mcpServers": {{}}}}}}}}')
 
-    mcp_configs = await ClaudeCodeDiscoverer(tmp_path)._discover_project_mcp_servers()
+    mcp_configs = ClaudeCodeDiscoverer(tmp_path)._discover_project_mcp_servers()
 
     file_keys = [k for k in mcp_configs if k.endswith("/work/.mcp.json")]
     assert len(file_keys) == 1
@@ -388,8 +380,7 @@ async def test_claude_code_discoverer_project_mcp_servers_reads_ancestor_dotmcp(
     assert isinstance(entries, list) and entries[0][0] == "anc-srv"
 
 
-@pytest.mark.asyncio
-async def test_claude_code_discoverer_project_mcp_servers_records_could_not_parse_for_dotmcp(tmp_path):
+def test_claude_code_discoverer_project_mcp_servers_records_could_not_parse_for_dotmcp(tmp_path):
     """A malformed <project>/.mcp.json becomes a CouldNotParseMCPConfig entry."""
     from agent_scan.agent_discovery import ClaudeCodeDiscoverer
 
@@ -399,7 +390,7 @@ async def test_claude_code_discoverer_project_mcp_servers_records_could_not_pars
     (project_root / ".mcp.json").write_text("{not valid json")
     (tmp_path / ".claude.json").write_text(f'{{"projects": {{"{project_root.as_posix()}": {{"mcpServers": {{}}}}}}}}')
 
-    mcp_configs = await ClaudeCodeDiscoverer(tmp_path)._discover_project_mcp_servers()
+    mcp_configs = ClaudeCodeDiscoverer(tmp_path)._discover_project_mcp_servers()
 
     file_keys = [k for k in mcp_configs if k.endswith("/.mcp.json")]
     assert len(file_keys) == 1
@@ -409,8 +400,57 @@ async def test_claude_code_discoverer_project_mcp_servers_records_could_not_pars
     assert entry.traceback
 
 
-@pytest.mark.asyncio
-async def test_claude_code_discoverer_discover_mcp_servers_combines_global_and_project(tmp_path):
+def test_claude_code_discoverer_project_mcp_servers_reads_flat_format_dotmcp(tmp_path):
+    """A flat-format ``<project>/.mcp.json`` is also parsed via _select_servers_payload.
+
+    Previously a flat-format project file was silently dropped (no top-level
+    "mcpServers" key). The shared payload selector now recognises it.
+    """
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    (tmp_path / ".claude").mkdir()
+    project_root = tmp_path / "work" / "repo"
+    project_root.mkdir(parents=True)
+    (project_root / ".mcp.json").write_text('{"flat-srv": {"command": "echo", "args": ["f"]}}')
+    (tmp_path / ".claude.json").write_text(f'{{"projects": {{"{project_root.as_posix()}": {{"mcpServers": {{}}}}}}}}')
+
+    mcp_configs = ClaudeCodeDiscoverer(tmp_path)._discover_project_mcp_servers()
+
+    file_keys = [k for k in mcp_configs if k.endswith("/.mcp.json")]
+    assert len(file_keys) == 1
+    entries = mcp_configs[file_keys[0]]
+    assert isinstance(entries, list) and len(entries) == 1
+    name, server = entries[0]
+    assert name == "flat-srv"
+    assert isinstance(server, StdioServer)
+    assert server.command == "echo"
+
+
+def test_claude_code_discoverer_project_mcp_servers_flat_dotmcp_with_server_named_mcpServers(tmp_path):
+    """A flat-format ``<project>/.mcp.json`` whose single server is literally named
+    "mcpServers" is parsed as flat (not misread as a wrapped payload)."""
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    (tmp_path / ".claude").mkdir()
+    project_root = tmp_path / "work" / "repo"
+    project_root.mkdir(parents=True)
+    (project_root / ".mcp.json").write_text('{"mcpServers": {"command": "echo", "args": ["adv"]}}')
+    (tmp_path / ".claude.json").write_text(f'{{"projects": {{"{project_root.as_posix()}": {{"mcpServers": {{}}}}}}}}')
+
+    mcp_configs = ClaudeCodeDiscoverer(tmp_path)._discover_project_mcp_servers()
+
+    file_keys = [k for k in mcp_configs if k.endswith("/.mcp.json")]
+    assert len(file_keys) == 1
+    entries = mcp_configs[file_keys[0]]
+    assert isinstance(entries, list) and len(entries) == 1
+    name, server = entries[0]
+    assert name == "mcpServers"
+    assert isinstance(server, StdioServer)
+    assert server.command == "echo"
+    assert server.args == ["adv"]
+
+
+def test_claude_code_discoverer_discover_mcp_servers_combines_global_and_project(tmp_path):
     """The public discover_mcp_servers merges global + project results."""
     from agent_scan.agent_discovery import ClaudeCodeDiscoverer
 
@@ -420,7 +460,7 @@ async def test_claude_code_discoverer_discover_mcp_servers_combines_global_and_p
         '"projects": {"/work/repo": {"mcpServers": {"proj-srv": {"command": "p"}}}}}'
     )
 
-    mcp_configs = await ClaudeCodeDiscoverer(tmp_path).discover_mcp_servers()
+    mcp_configs = ClaudeCodeDiscoverer(tmp_path).discover_mcp_servers()
 
     # Two keys: one for the global file path, one for the project path.
     assert len(mcp_configs) == 2
@@ -495,8 +535,7 @@ def test_claude_code_discoverer_discover_skills_combines_global_and_project(tmp_
 # --- ClaudeCodeDiscoverer: plugin MCP + skills ---
 
 
-@pytest.mark.asyncio
-async def test_claude_code_discoverer_plugin_mcp_servers_parses_flat_format(tmp_path):
+def test_claude_code_discoverer_plugin_mcp_servers_parses_flat_format(tmp_path):
     """Plugin .mcp.json files use the flat {name: serverConfig} format."""
     from agent_scan.agent_discovery import ClaudeCodeDiscoverer
 
@@ -504,7 +543,7 @@ async def test_claude_code_discoverer_plugin_mcp_servers_parses_flat_format(tmp_
     plugin_dir.mkdir(parents=True)
     (plugin_dir / ".mcp.json").write_text('{"plugin-srv": {"command": "echo", "args": ["p"]}}')
 
-    mcp_configs = await ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
+    mcp_configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
 
     assert len(mcp_configs) == 1
     key = next(iter(mcp_configs))
@@ -516,26 +555,96 @@ async def test_claude_code_discoverer_plugin_mcp_servers_parses_flat_format(tmp_
     assert isinstance(server, StdioServer)
 
 
-@pytest.mark.asyncio
-async def test_claude_code_discoverer_plugin_mcp_servers_empty_when_cache_missing(tmp_path):
+def test_claude_code_discoverer_plugin_mcp_flat_format_with_server_named_mcpServers(tmp_path):
+    """Flat-format plugin where the single server is literally named "mcpServers".
+
+    The wrapper-vs-flat detector inspects the inner dict's keys: a wrapped
+    payload's value is a server *map* and won't contain server-config keys
+    (``command``/``url``/``serverUrl``), while a flat-format payload here has
+    ``command`` at the top level of the inner dict. We must take the flat
+    interpretation and produce a single server named "mcpServers".
+    """
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    plugin_dir = tmp_path / ".claude" / "plugins" / "cache" / "vendor" / "weird-plugin"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / ".mcp.json").write_text('{"mcpServers": {"command": "echo", "args": ["x"]}}')
+
+    mcp_configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
+
+    assert len(mcp_configs) == 1
+    entries = next(iter(mcp_configs.values()))
+    assert isinstance(entries, list) and len(entries) == 1
+    name, server = entries[0]
+    assert name == "mcpServers"
+    assert isinstance(server, StdioServer)
+    assert server.command == "echo"
+    assert server.args == ["x"]
+
+
+def test_claude_code_discoverer_plugin_mcp_wrapped_format_still_works(tmp_path):
+    """The wrapped format ``{"mcpServers": {<name>: <server-config>}}`` still parses
+    correctly — i.e., the detection didn't break the common case."""
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    plugin_dir = tmp_path / ".claude" / "plugins" / "cache" / "vendor" / "wrapped-plugin"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / ".mcp.json").write_text('{"mcpServers": {"real-srv": {"command": "echo", "args": ["w"]}}}')
+
+    mcp_configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
+
+    assert len(mcp_configs) == 1
+    entries = next(iter(mcp_configs.values()))
+    assert isinstance(entries, list) and len(entries) == 1
+    name, server = entries[0]
+    assert name == "real-srv"
+    assert isinstance(server, StdioServer)
+    assert server.command == "echo"
+
+
+def test_select_servers_payload_flat_remote_server_named_mcpServers():
+    """A flat-format payload with a single RemoteServer named "mcpServers"
+    (``url`` discriminator instead of ``command``) is also detected as flat."""
+    from agent_scan.agent_discovery import _select_servers_payload
+
+    file_data = {"mcpServers": {"url": "https://example.com/mcp", "type": "http"}}
+
+    payload = _select_servers_payload(file_data)
+
+    # Whole file returned (flat); the inner dict is the RemoteServer config.
+    assert payload is file_data
+
+
+def test_select_servers_payload_wrapped_when_inner_has_no_discriminators():
+    """When file_data["mcpServers"] has no server-config discriminator keys at its
+    top level, it's a server map → wrapped."""
+    from agent_scan.agent_discovery import _select_servers_payload
+
+    file_data = {"mcpServers": {"srv-a": {"command": "a"}, "srv-b": {"url": "https://b"}}}
+
+    payload = _select_servers_payload(file_data)
+
+    assert payload is file_data["mcpServers"]
+
+
+def test_claude_code_discoverer_plugin_mcp_servers_empty_when_cache_missing(tmp_path):
     from agent_scan.agent_discovery import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
 
-    mcp_configs = await ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
+    mcp_configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
 
     assert mcp_configs == {}
 
 
-@pytest.mark.asyncio
-async def test_claude_code_discoverer_plugin_mcp_records_could_not_parse(tmp_path):
+def test_claude_code_discoverer_plugin_mcp_records_could_not_parse(tmp_path):
     from agent_scan.agent_discovery import ClaudeCodeDiscoverer
 
     plugin_dir = tmp_path / ".claude" / "plugins" / "cache" / "bad" / "plugin"
     plugin_dir.mkdir(parents=True)
     (plugin_dir / ".mcp.json").write_text("{not valid json")
 
-    mcp_configs = await ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
+    mcp_configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
 
     assert len(mcp_configs) == 1
     entry = next(iter(mcp_configs.values()))
@@ -572,8 +681,7 @@ def test_claude_code_discoverer_plugin_skills_empty_when_cache_missing(tmp_path)
     assert skills_dirs == {}
 
 
-@pytest.mark.asyncio
-async def test_claude_code_discoverer_discover_mcp_includes_plugin_servers(tmp_path):
+def test_claude_code_discoverer_discover_mcp_includes_plugin_servers(tmp_path):
     """Plugin MCP entries flow through public discover_mcp_servers."""
     from agent_scan.agent_discovery import ClaudeCodeDiscoverer
 
@@ -582,7 +690,7 @@ async def test_claude_code_discoverer_discover_mcp_includes_plugin_servers(tmp_p
     plugin_dir.mkdir(parents=True)
     (plugin_dir / ".mcp.json").write_text('{"plug": {"command": "x"}}')
 
-    mcp_configs = await ClaudeCodeDiscoverer(tmp_path).discover_mcp_servers()
+    mcp_configs = ClaudeCodeDiscoverer(tmp_path).discover_mcp_servers()
 
     plugin_keys = [k for k in mcp_configs if k.endswith("/p/.mcp.json")]
     assert len(plugin_keys) == 1
@@ -602,8 +710,7 @@ def test_claude_code_discoverer_discover_skills_includes_plugin_skills(tmp_path)
     assert len(plugin_keys) == 1
 
 
-@pytest.mark.asyncio
-async def test_claude_code_discoverer_plugin_mcp_servers_scans_repos_dir(tmp_path):
+def test_claude_code_discoverer_plugin_mcp_servers_scans_repos_dir(tmp_path):
     """Plugins staged under ~/.claude/plugins/repos/**/ are also discovered."""
     from agent_scan.agent_discovery import ClaudeCodeDiscoverer
 
@@ -611,7 +718,7 @@ async def test_claude_code_discoverer_plugin_mcp_servers_scans_repos_dir(tmp_pat
     repo_plugin.mkdir(parents=True)
     (repo_plugin / ".mcp.json").write_text('{"repo-srv": {"command": "r"}}')
 
-    mcp_configs = await ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
+    mcp_configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
 
     repos_keys = [k for k in mcp_configs if "/plugins/repos/" in k]
     assert len(repos_keys) == 1
@@ -633,8 +740,7 @@ def test_claude_code_discoverer_plugin_skills_scans_repos_dir(tmp_path):
     assert len(repos_keys) == 1
 
 
-@pytest.mark.asyncio
-async def test_claude_code_discoverer_plugin_mcp_servers_scans_both_cache_and_repos(tmp_path):
+def test_claude_code_discoverer_plugin_mcp_servers_scans_both_cache_and_repos(tmp_path):
     """Both cache and repos contribute, keyed by their distinct file paths."""
     from agent_scan.agent_discovery import ClaudeCodeDiscoverer
 
@@ -646,7 +752,7 @@ async def test_claude_code_discoverer_plugin_mcp_servers_scans_both_cache_and_re
     repo_plugin.mkdir(parents=True)
     (repo_plugin / ".mcp.json").write_text('{"r-srv": {"command": "r"}}')
 
-    mcp_configs = await ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
+    mcp_configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
 
     assert any("/plugins/cache/" in k for k in mcp_configs)
     assert any("/plugins/repos/" in k for k in mcp_configs)
@@ -655,8 +761,7 @@ async def test_claude_code_discoverer_plugin_mcp_servers_scans_both_cache_and_re
 # --- ClaudeCodeDiscoverer: end-to-end discover() ---
 
 
-@pytest.mark.asyncio
-async def test_claude_code_discoverer_discover_assembles_client_to_inspect(tmp_path):
+def test_claude_code_discoverer_discover_assembles_client_to_inspect(tmp_path):
     from agent_scan.agent_discovery import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
@@ -665,7 +770,7 @@ async def test_claude_code_discoverer_discover_assembles_client_to_inspect(tmp_p
     my_skill.mkdir(parents=True)
     (my_skill / "SKILL.md").write_text("---\nname: demo\ndescription: Demo skill\n---\n\nBody.\n")
 
-    cti = await ClaudeCodeDiscoverer(tmp_path).discover()
+    cti = ClaudeCodeDiscoverer(tmp_path).discover()
 
     assert cti is not None
     assert isinstance(cti, ClientToInspect)
@@ -675,11 +780,10 @@ async def test_claude_code_discoverer_discover_assembles_client_to_inspect(tmp_p
     assert len(cti.skills_dirs) == 1
 
 
-@pytest.mark.asyncio
-async def test_claude_code_discoverer_discover_returns_none_when_not_installed(tmp_path):
+def test_claude_code_discoverer_discover_returns_none_when_not_installed(tmp_path):
     from agent_scan.agent_discovery import ClaudeCodeDiscoverer
 
-    cti = await ClaudeCodeDiscoverer(tmp_path).discover()
+    cti = ClaudeCodeDiscoverer(tmp_path).discover()
 
     assert cti is None
 
@@ -973,8 +1077,7 @@ async def test_discover_clients_to_inspect_falls_back_to_legacy_for_non_claude(t
 # --- Plugin discovery depth cap ---
 
 
-@pytest.mark.asyncio
-async def test_plugin_mcp_servers_respects_max_depth_cap(tmp_path):
+def test_plugin_mcp_servers_respects_max_depth_cap(tmp_path):
     """Plugin .mcp.json files deeper than _MAX_PLUGIN_RGLOB_DEPTH are not discovered.
 
     Depth is counted as ``len(match.relative_to(base).parts)`` where ``base``
@@ -992,7 +1095,7 @@ async def test_plugin_mcp_servers_respects_max_depth_cap(tmp_path):
     too_deep_dir.mkdir(parents=True)
     (too_deep_dir / ".mcp.json").write_text('{"too-deep-srv": {"command": "x"}}')
 
-    mcp_configs = await ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
+    mcp_configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
 
     server_names = {name for entries in mcp_configs.values() if isinstance(entries, list) for name, _ in entries}
     assert "allowed-srv" in server_names
@@ -1024,8 +1127,7 @@ def test_plugin_skills_respects_max_depth_cap(tmp_path):
 # --- JSON5 parsing (comments + empty-file short-circuit) ---
 
 
-@pytest.mark.asyncio
-async def test_load_json_file_accepts_json5_comments_and_trailing_commas(tmp_path):
+def test_load_json_file_accepts_json5_comments_and_trailing_commas(tmp_path):
     """A ~/.claude.json with // comments and a trailing comma parses successfully."""
     from agent_scan.agent_discovery import ClaudeCodeDiscoverer
 
@@ -1039,7 +1141,7 @@ async def test_load_json_file_accepts_json5_comments_and_trailing_commas(tmp_pat
         "}\n"
     )
 
-    mcp_configs = await ClaudeCodeDiscoverer(tmp_path).discover_mcp_servers()
+    mcp_configs = ClaudeCodeDiscoverer(tmp_path).discover_mcp_servers()
 
     assert len(mcp_configs) == 1
     entries = next(iter(mcp_configs.values()))
@@ -1047,15 +1149,14 @@ async def test_load_json_file_accepts_json5_comments_and_trailing_commas(tmp_pat
     assert [name for name, _ in entries] == ["my-server"]
 
 
-@pytest.mark.asyncio
-async def test_load_json_file_treats_empty_file_as_empty_config(tmp_path):
+def test_load_json_file_treats_empty_file_as_empty_config(tmp_path):
     """An empty (or whitespace-only) ~/.claude.json returns no entries, not a parse error."""
     from agent_scan.agent_discovery import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude.json").write_text("   \n  \n")
 
-    mcp_configs = await ClaudeCodeDiscoverer(tmp_path).discover_mcp_servers()
+    mcp_configs = ClaudeCodeDiscoverer(tmp_path).discover_mcp_servers()
 
     assert mcp_configs == {}
 
