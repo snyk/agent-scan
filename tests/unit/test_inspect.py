@@ -730,8 +730,9 @@ async def test_inspect_client_dedup_same_stdio_config_under_two_paths():
     assert len(calls) == 1
     a_ext = result.extensions["/a/.mcp.json"][0]
     b_ext = result.extensions["/b/.mcp.json"][0]
-    assert a_ext.signature_or_error is signature
-    assert b_ext.signature_or_error is signature
+    assert a_ext.signature_or_error == signature
+    assert b_ext.signature_or_error == signature
+    assert a_ext.signature_or_error is not b_ext.signature_or_error
 
 
 @pytest.mark.asyncio
@@ -841,8 +842,9 @@ async def test_inspect_client_caches_errors_too():
     assert len(calls) == 1
     a_ext = result.extensions["/a.json"][0]
     b_ext = result.extensions["/b.json"][0]
-    assert a_ext.signature_or_error is error
-    assert b_ext.signature_or_error is error
+    assert a_ext.signature_or_error == error
+    assert b_ext.signature_or_error == error
+    assert a_ext.signature_or_error is not b_ext.signature_or_error
 
 
 def test_server_dedup_key_returns_none_for_skill_server():
@@ -926,3 +928,28 @@ async def test_inspect_client_cached_configs_are_independent_instances():
     first.env = {"TOKEN": "<REDACTED>"}
     assert isinstance(second, StdioServer)
     assert second.env == {"TOKEN": "abc"}
+
+
+@pytest.mark.asyncio
+async def test_inspect_client_cached_signatures_are_independent_instances():
+    """The cached `signature_or_error` payload (ServerSignature is aliased into ServerScanResult.signature) must also be per-occurrence."""
+    a = StdioServer(command="uvx", args=["s"])
+    b = StdioServer(command="uvx", args=["s"])
+    client = ClientToInspect(
+        name="t",
+        client_path="/p",
+        mcp_configs={
+            "/a.json": [("s", a)],
+            "/b.json": [("s", b)],
+        },
+        skills_dirs={},
+    )
+    signature = _make_signature()
+
+    with patch("agent_scan.inspect.inspect_extension", new_callable=AsyncMock) as mock_ie:
+        mock_ie.side_effect = _fake_inspect_extension_factory([], signature)
+        result = await inspect_client(client, timeout=10, tokens=[], scan_skills=False, signature_cache={})
+
+    first_sig = result.extensions["/a.json"][0].signature_or_error
+    second_sig = result.extensions["/b.json"][0].signature_or_error
+    assert first_sig is not second_sig
