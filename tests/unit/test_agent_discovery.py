@@ -362,33 +362,90 @@ def test_agent_discoverer_subclass_without_name_raises():
                 return {}
 
 
-# --- get_discoverer_class factory ---
+# --- DISCOVERERS registry + find_discoverers ---
 
 
-def test_get_discoverer_class_returns_claude_code_class():
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer, get_discoverer_class
+def test_DISCOVERERS_registers_only_claude_code():
+    from agent_scan.agent_discovery import DISCOVERERS
 
-    cls = get_discoverer_class("claude code")
-    assert cls is ClaudeCodeDiscoverer
-
-
-@pytest.mark.parametrize(
-    "agent_name",
-    ["cursor", "vscode", "windsurf", "claude", "codex", "gemini cli", "amp", "kiro"],
-)
-def test_get_discoverer_class_raises_not_implemented_for_unregistered_agent(agent_name):
-    from agent_scan.agent_discovery import get_discoverer_class
-
-    with pytest.raises(NotImplementedError):
-        get_discoverer_class(agent_name)
+    assert set(DISCOVERERS) == {"claude code"}
 
 
-# --- Pipeline dispatch: ABC for Claude Code, legacy for everything else ---
+def test_find_discoverers_returns_claude_code_when_installed(tmp_path):
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer, find_discoverers
+
+    (tmp_path / ".claude").mkdir()
+
+    found = find_discoverers(tmp_path)
+
+    assert len(found) == 1
+    assert isinstance(found[0], ClaudeCodeDiscoverer)
+    assert found[0].home_directory == tmp_path
+
+
+def test_find_discoverers_returns_empty_when_no_agents_installed(tmp_path):
+    from agent_scan.agent_discovery import find_discoverers
+
+    found = find_discoverers(tmp_path)
+
+    assert found == []
+
+
+# --- _dedup_mcp_servers (load-bearing helper) ---
+
+
+def test_dedup_mcp_servers_keeps_each_server_in_latest_inserted_key():
+    """Server names appearing in multiple keys are retained only under the latest one."""
+    from agent_scan.pipelines import _dedup_mcp_servers
+
+    srv1_a = StdioServer(command="a")
+    srv1_b = StdioServer(command="b")
+    srv2 = StdioServer(command="c")
+    cti = ClientToInspect(
+        name="claude code",
+        client_path="/home/alice/.claude",
+        mcp_configs={
+            "/home/alice/.claude.json": [("srv1", srv1_a), ("srv2", srv2)],
+            "/work/repo": [("srv1", srv1_b)],
+        },
+        skills_dirs={},
+    )
+
+    _dedup_mcp_servers(cti)
+
+    assert cti.mcp_configs["/home/alice/.claude.json"] == [("srv2", srv2)]
+    assert cti.mcp_configs["/work/repo"] == [("srv1", srv1_b)]
+
+
+def test_dedup_mcp_servers_preserves_error_type_entries():
+    """Error-type values (e.g., CouldNotParseMCPConfig) are not modified by dedup."""
+    from agent_scan.pipelines import _dedup_mcp_servers
+
+    err = CouldNotParseMCPConfig(message="boom", traceback="tb", is_failure=True)
+    srv = StdioServer(command="x")
+    cti = ClientToInspect(
+        name="claude code",
+        client_path="/home/alice/.claude",
+        mcp_configs={
+            "/home/alice/.claude.json": err,
+            "/work/repo": [("srv", srv)],
+        },
+        skills_dirs={},
+    )
+
+    _dedup_mcp_servers(cti)
+
+    assert cti.mcp_configs["/home/alice/.claude.json"] is err
+    assert cti.mcp_configs["/work/repo"] == [("srv", srv)]
+
+
+# --- Pipeline dispatch: legacy for all + ABC merge phase ---
 
 
 @pytest.mark.asyncio
-async def test_discover_clients_to_inspect_uses_abc_for_claude_code(tmp_path):
-    """Claude Code should be discovered via ClaudeCodeDiscoverer, not the legacy path."""
+async def test_discover_clients_to_inspect_runs_legacy_for_claude_code(tmp_path):
+    """Legacy get_mcp_config_per_client is invoked for Claude Code (no longer bypassed)."""
+    from agent_scan.inspect import get_mcp_config_per_client as real_legacy
     from agent_scan.models import CandidateClient
     from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
 
@@ -408,29 +465,27 @@ async def test_discover_clients_to_inspect_uses_abc_for_claude_code(tmp_path):
             return_value=[(tmp_path, "alice")],
         ),
         patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
-        patch("agent_scan.pipelines.get_mcp_config_per_client") as spy_legacy,
+        patch(
+            "agent_scan.pipelines.get_mcp_config_per_client",
+            side_effect=real_legacy,
+        ) as spy_legacy,
     ):
         args = InspectArgs(timeout=10, tokens=[], paths=[])
-        ctis, _, _ = await discover_clients_to_inspect(args)
+        await discover_clients_to_inspect(args)
 
-    assert not spy_legacy.called, "Legacy path must not be called for claude code"
-    assert len(ctis) == 1
-    assert ctis[0].name == "claude code"
-    assert ctis[0].username == "alice"
+    assert spy_legacy.called, "Legacy path must be called for claude code"
+    called_names = {call.args[0].name for call in spy_legacy.call_args_list}
+    assert "claude code" in called_names
 
 
 @pytest.mark.asyncio
-async def test_discover_clients_to_inspect_iterates_all_home_dirs_for_claude_code(tmp_path):
-    """With multiple home dirs, the dispatcher constructs one discoverer per user."""
+async def test_discover_clients_to_inspect_merges_abc_into_legacy_cti_and_dedups_servers(tmp_path):
+    """One CTI per (name, username); legacy + ABC keys both present; servers deduped to latest key."""
     from agent_scan.models import CandidateClient
     from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
 
-    alice_home = tmp_path / "alice"
-    bob_home = tmp_path / "bob"
-    (alice_home / ".claude").mkdir(parents=True)
-    (alice_home / ".claude.json").write_text('{"mcpServers": {}}')
-    (bob_home / ".claude").mkdir(parents=True)
-    (bob_home / ".claude.json").write_text('{"mcpServers": {}}')
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude.json").write_text('{"projects": {"/work/repo": {"mcpServers": {"srv": {"command": "echo"}}}}}')
 
     candidate = CandidateClient(
         name="claude code",
@@ -442,22 +497,109 @@ async def test_discover_clients_to_inspect_iterates_all_home_dirs_for_claude_cod
     with (
         patch(
             "agent_scan.pipelines.get_readable_home_directories",
-            return_value=[(alice_home, "alice"), (bob_home, "bob")],
+            return_value=[(tmp_path, "alice")],
         ),
         patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
     ):
-        args = InspectArgs(timeout=10, tokens=[], paths=[], all_users=True)
+        args = InspectArgs(timeout=10, tokens=[], paths=[])
         ctis, _, _ = await discover_clients_to_inspect(args)
 
-    usernames = sorted(cti.username for cti in ctis)
-    assert usernames == ["alice", "bob"]
-    for cti in ctis:
-        assert cti.name == "claude code"
+    claude_ctis = [c for c in ctis if c.name == "claude code" and c.username == "alice"]
+    assert len(claude_ctis) == 1
+    merged = claude_ctis[0]
+
+    keys = list(merged.mcp_configs)
+    legacy_key = next(k for k in keys if k.endswith("/.claude.json"))
+    abc_key = next(k for k in keys if k == "/work/repo")
+    assert legacy_key and abc_key
+
+    abc_entries = merged.mcp_configs[abc_key]
+    legacy_entries = merged.mcp_configs[legacy_key]
+    assert isinstance(abc_entries, list)
+    assert isinstance(legacy_entries, list)
+    # The single server "srv" survives only under the ABC's per-project key.
+    assert [name for name, _ in abc_entries] == ["srv"]
+    assert all(isinstance(s, StdioServer) for _, s in abc_entries)
+    assert legacy_entries == []
+
+
+@pytest.mark.asyncio
+async def test_discover_clients_to_inspect_dedup_keeps_global_only_servers_in_legacy_key(tmp_path):
+    """When ABC produces no project entries, legacy's ~/.claude.json entry is untouched."""
+    from agent_scan.models import CandidateClient
+    from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
+
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude.json").write_text('{"projects": {}}')
+
+    candidate = CandidateClient(
+        name="claude code",
+        client_exists_paths=["~/.claude"],
+        mcp_config_paths=["~/.claude.json"],
+        skills_dir_paths=["~/.claude/skills"],
+    )
+
+    with (
+        patch(
+            "agent_scan.pipelines.get_readable_home_directories",
+            return_value=[(tmp_path, "alice")],
+        ),
+        patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
+    ):
+        args = InspectArgs(timeout=10, tokens=[], paths=[])
+        ctis, _, _ = await discover_clients_to_inspect(args)
+
+    claude_ctis = [c for c in ctis if c.name == "claude code"]
+    assert len(claude_ctis) == 1
+    keys = list(claude_ctis[0].mcp_configs)
+    # Only legacy keys present (no project keys from ABC to dedup against).
+    assert keys == [k for k in keys if k.endswith("/.claude.json")]
+
+
+@pytest.mark.asyncio
+async def test_discover_clients_to_inspect_abc_wins_on_same_key_collision(tmp_path):
+    """Both paths produce a ~/.claude.json key; ABC's value wins after merge+dedup."""
+    from agent_scan.models import CandidateClient
+    from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
+
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude.json").write_text(
+        '{"mcpServers": {"top": {"command": "from-top"}}, '
+        '"projects": {"/work/repo": {"mcpServers": {"proj": {"command": "from-proj"}}}}}'
+    )
+
+    candidate = CandidateClient(
+        name="claude code",
+        client_exists_paths=["~/.claude"],
+        mcp_config_paths=["~/.claude.json"],
+        skills_dir_paths=["~/.claude/skills"],
+    )
+
+    with (
+        patch(
+            "agent_scan.pipelines.get_readable_home_directories",
+            return_value=[(tmp_path, "alice")],
+        ),
+        patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
+    ):
+        args = InspectArgs(timeout=10, tokens=[], paths=[])
+        ctis, _, _ = await discover_clients_to_inspect(args)
+
+    claude_ctis = [c for c in ctis if c.name == "claude code"]
+    assert len(claude_ctis) == 1
+    merged = claude_ctis[0]
+
+    legacy_key = next(k for k in merged.mcp_configs if k.endswith("/.claude.json"))
+    entries = merged.mcp_configs[legacy_key]
+    assert isinstance(entries, list)
+    # After ABC's value overrides legacy under ~/.claude.json AND dedup moves "proj"
+    # into /work/repo, the legacy key retains only the global "top".
+    assert [name for name, _ in entries] == ["top"]
 
 
 @pytest.mark.asyncio
 async def test_discover_clients_to_inspect_falls_back_to_legacy_for_non_claude(tmp_path):
-    """Non-Claude agents (e.g. cursor) should still go through get_mcp_config_per_client."""
+    """Non-Claude agents (e.g. cursor) still go through get_mcp_config_per_client."""
     from agent_scan.models import CandidateClient
     from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
 

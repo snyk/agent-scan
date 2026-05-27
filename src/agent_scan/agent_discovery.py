@@ -262,20 +262,19 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         return [(name, server) for name, server in servers.items()]
 
 
-_DISCOVERERS: dict[str, type[AgentDiscoverer]] = {
+DISCOVERERS: dict[str, type[AgentDiscoverer]] = {
     ClaudeCodeDiscoverer.name: ClaudeCodeDiscoverer,
 }
 
 
-def get_discoverer_class(name: str) -> type[AgentDiscoverer]:
-    """Return the discoverer class for an agent name, or raise NotImplementedError.
-
-    Callers instantiate the class with the target ``home_directory``. Looking
-    up the class (rather than a constructed instance) lets one well-known
-    client be scanned across multiple home directories without re-checking
-    NotImplementedError per user.
-    """
-    cls = _DISCOVERERS.get(name)
-    if cls is None:
-        raise NotImplementedError(f"No AgentDiscoverer implemented for agent {name!r}")
-    return cls
+def find_discoverers(home_directory: Path | None) -> list[AgentDiscoverer]:
+    """Construct one instance per registered discoverer with the given home, and
+    return only those whose ``client_exists()`` confirms the agent is installed.
+    Each returned instance is home-bound; the caller just runs
+    ``await d.discover()`` on each."""
+    found: list[AgentDiscoverer] = []
+    for cls in DISCOVERERS.values():
+        discoverer = cls(home_directory)
+        if discoverer.client_exists() is not None:
+            found.append(discoverer)
+    return found

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from agent_scan.agent_discovery import get_discoverer_class
+from agent_scan.agent_discovery import find_discoverers
 from agent_scan.direct_scanner import direct_scan_to_server_config, is_direct_scan
 from agent_scan.inspect import (
     get_mcp_config_per_client,
@@ -52,6 +52,24 @@ class PushArgs(BaseModel):
     version: str | None = None
 
 
+def _dedup_mcp_servers(cti: ClientToInspect) -> None:
+    """In ``mcp_configs``, keep each server name only under its latest-inserted key.
+
+    Preserves error-type entries (FileNotFoundConfig / UnknownConfigFormat /
+    CouldNotParseMCPConfig) untouched.
+    """
+    last_key: dict[str, str] = {}
+    for key, entries in cti.mcp_configs.items():
+        if isinstance(entries, list):
+            for name, _ in entries:
+                last_key[name] = key
+
+    for key in list(cti.mcp_configs.keys()):
+        entries = cti.mcp_configs[key]
+        if isinstance(entries, list):
+            cti.mcp_configs[key] = [(n, s) for n, s in entries if last_key.get(n) == key]
+
+
 async def discover_clients_to_inspect(
     inspect_args: InspectArgs,
 ) -> tuple[list[ClientToInspect], list[ScanPathResult], list[str]]:
@@ -83,24 +101,40 @@ async def discover_clients_to_inspect(
                     )
                 )
     else:
+        # Phase A — legacy path. Runs for EVERY well-known client including Claude Code.
         for client in get_well_known_clients():
-            try:
-                discoverer_cls = get_discoverer_class(client.name)
-            except NotImplementedError:
-                # Legacy path — unchanged for every agent without a discoverer subclass.
-                ctis = await get_mcp_config_per_client(client, home_dirs_with_users)
-            else:
-                ctis = []
-                for home_directory, username in home_dirs_with_users:
-                    discoverer = discoverer_cls(home_directory)
-                    cti = await discoverer.discover()
-                    if cti is not None:
-                        cti.username = username
-                        ctis.append(cti)
+            ctis = await get_mcp_config_per_client(client, home_dirs_with_users)
             if ctis:
                 clients_to_inspect.extend(ctis)
             else:
                 logger.info(f"Client {client.name} does not exist on this machine. {client.client_exists_paths}")
+
+        # Phase B — ABC path. Runs in parallel and merges into Phase A's output.
+        abc_touched: list[ClientToInspect] = []
+        for home_directory, username in home_dirs_with_users:
+            for discoverer in find_discoverers(home_directory):
+                cti = await discoverer.discover()
+                if cti is None:
+                    continue
+                cti.username = username
+                existing = next(
+                    (c for c in clients_to_inspect if c.name == cti.name and c.username == cti.username),
+                    None,
+                )
+                if existing is None:
+                    clients_to_inspect.append(cti)
+                    abc_touched.append(cti)
+                else:
+                    # Dict union: legacy keys first (insertion order), ABC keys appended.
+                    # ABC values WIN on key collision (silent override of any legacy entry
+                    # under the same key). Phase C dedup below favors latest-inserted key.
+                    existing.mcp_configs = {**existing.mcp_configs, **cti.mcp_configs}
+                    existing.skills_dirs = {**existing.skills_dirs, **cti.skills_dirs}
+                    abc_touched.append(existing)
+
+        # Phase C — server-name dedup on ABC-touched CTIs.
+        for cti in abc_touched:
+            _dedup_mcp_servers(cti)
 
     # Only report usernames where an agent was detected in their home directory.
     # When no usernames were associated with detected agents:
