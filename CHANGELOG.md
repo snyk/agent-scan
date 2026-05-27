@@ -80,3 +80,4 @@
 - `0.5.3` Improve redaction of args and env vars.
 - `0.5.4` Fix bug in parsing of skills. Cosmetic improvements to the CLI. Security fixes. Added agent-guard support for codex.
 - `0.5.5` Introduce bootstrap API and recursive check for mcp_config_globs and skills_dir_globs.
+- `0.5.6` Per-agent discovery refactor with Claude Code support. Bundle all detect_secrets plugins in PyInstaller binary. Starlette security update.
