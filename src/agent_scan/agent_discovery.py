@@ -7,11 +7,12 @@ skills directories. The legacy `inspect.get_mcp_config_per_client()` path
 remains the fallback for agents that don't have a subclass yet.
 """
 
-import json
 import logging
 import traceback
 from abc import ABC, abstractmethod
 from pathlib import Path
+
+import pyjson5
 
 from agent_scan.models import (
     ClaudeConfigFile,
@@ -35,6 +36,11 @@ McpConfigsResult = dict[
     list[tuple[str, StdioServer | RemoteServer]] | FileNotFoundConfig | UnknownConfigFormat | CouldNotParseMCPConfig,
 ]
 SkillsDirsResult = dict[str, list[tuple[str, SkillServer]] | FileNotFoundConfig]
+
+# Cap recursion into ``~/.claude/plugins/{cache,repos}`` to mirror the legacy
+# glob-based discovery, which uses ``CandidateClient.max_glob_depth=6``. We pick
+# a slightly larger budget here because plugin install layouts vary.
+_MAX_PLUGIN_RGLOB_DEPTH = 10
 
 
 class AgentDiscoverer(ABC):
@@ -284,6 +290,8 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
             if not base.exists():
                 continue
             for mcp_file in base.rglob(".mcp.json"):
+                if len(mcp_file.relative_to(base).parts) > _MAX_PLUGIN_RGLOB_DEPTH:
+                    continue
                 if not mcp_file.is_file():
                     continue
                 file_data = self._load_json_file(mcp_file)
@@ -309,6 +317,8 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
             if not base.exists():
                 continue
             for skills_dir in base.rglob("skills"):
+                if len(skills_dir.relative_to(base).parts) > _MAX_PLUGIN_RGLOB_DEPTH:
+                    continue
                 if skills_dir.is_dir():
                     result[skills_dir.as_posix()] = inspect_skills_dir(str(skills_dir))
         return result
@@ -324,11 +334,18 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
     def _load_json_file(self, path: Path) -> dict | CouldNotParseMCPConfig | None:
         """JSON-decode an arbitrary file. ``None`` if missing, parsed dict on success,
         ``CouldNotParseMCPConfig`` on malformed JSON.
+
+        Uses ``pyjson5`` to match the legacy ``mcp_client.scan_mcp_config_file``
+        path, which tolerates ``//`` comments and trailing commas. An empty or
+        whitespace-only file is treated as an empty config (also matching legacy).
         """
         if not path.exists():
             return None
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            content = path.read_text(encoding="utf-8")
+            if content.strip() == "":
+                return {}
+            return pyjson5.loads(content)
         except Exception as e:
             logger.exception("Error reading %s: %s", path.as_posix(), e)
             return CouldNotParseMCPConfig(
@@ -351,10 +368,10 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
                 is_failure=True,
             )
         servers = validated.get_servers()
-        for server_config in servers.values():
+        for name, server_config in servers.items():
             if isinstance(server_config, StdioServer):
-                server_config = check_server_signature(server_config)
-        return [(name, server) for name, server in servers.items()]
+                servers[name] = check_server_signature(server_config)
+        return list(servers.items())
 
 
 DISCOVERERS: dict[str, type[AgentDiscoverer]] = {
@@ -366,10 +383,19 @@ def find_discoverers(home_directory: Path | None) -> list[AgentDiscoverer]:
     """Construct one instance per registered discoverer with the given home, and
     return only those whose ``client_exists()`` confirms the agent is installed.
     Each returned instance is home-bound; the caller just runs
-    ``await d.discover()`` on each."""
+    ``await d.discover()`` on each.
+
+    A discoverer whose ``client_exists()`` raises is skipped (and logged) so a
+    single buggy subclass cannot abort discovery for the whole machine.
+    """
     found: list[AgentDiscoverer] = []
     for cls in DISCOVERERS.values():
         discoverer = cls(home_directory)
-        if discoverer.client_exists() is not None:
+        try:
+            exists = discoverer.client_exists() is not None
+        except Exception:
+            logger.exception("Discoverer %s.client_exists() raised; skipping", cls.__name__)
+            continue
+        if exists:
             found.append(discoverer)
     return found

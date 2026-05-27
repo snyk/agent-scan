@@ -968,3 +968,154 @@ async def test_discover_clients_to_inspect_falls_back_to_legacy_for_non_claude(t
     assert len(ctis) == 1
     assert ctis[0].name == "cursor"
     assert ctis[0].username == "alice"
+
+
+# --- Plugin discovery depth cap ---
+
+
+@pytest.mark.asyncio
+async def test_plugin_mcp_servers_respects_max_depth_cap(tmp_path):
+    """Plugin .mcp.json files deeper than _MAX_PLUGIN_RGLOB_DEPTH are not discovered.
+
+    Depth is counted as ``len(match.relative_to(base).parts)`` where ``base``
+    is ``~/.claude/plugins/cache``. A file directly in ``cache/`` is depth 1.
+    """
+    from agent_scan.agent_discovery import _MAX_PLUGIN_RGLOB_DEPTH, ClaudeCodeDiscoverer
+
+    cache = tmp_path / ".claude" / "plugins" / "cache"
+    # Depth = _MAX_PLUGIN_RGLOB_DEPTH (allowed): N-1 intermediate dirs + the file.
+    allowed_dir = cache.joinpath(*[f"d{i}" for i in range(_MAX_PLUGIN_RGLOB_DEPTH - 1)])
+    allowed_dir.mkdir(parents=True)
+    (allowed_dir / ".mcp.json").write_text('{"allowed-srv": {"command": "a"}}')
+    # Depth = _MAX_PLUGIN_RGLOB_DEPTH + 1 (skipped).
+    too_deep_dir = cache.joinpath(*[f"x{i}" for i in range(_MAX_PLUGIN_RGLOB_DEPTH)])
+    too_deep_dir.mkdir(parents=True)
+    (too_deep_dir / ".mcp.json").write_text('{"too-deep-srv": {"command": "x"}}')
+
+    mcp_configs = await ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
+
+    server_names = {name for entries in mcp_configs.values() if isinstance(entries, list) for name, _ in entries}
+    assert "allowed-srv" in server_names
+    assert "too-deep-srv" not in server_names
+
+
+def test_plugin_skills_respects_max_depth_cap(tmp_path):
+    """Plugin skills/ dirs deeper than _MAX_PLUGIN_RGLOB_DEPTH are not discovered."""
+    from agent_scan.agent_discovery import _MAX_PLUGIN_RGLOB_DEPTH, ClaudeCodeDiscoverer
+
+    cache = tmp_path / ".claude" / "plugins" / "cache"
+    # The "skills" dir itself counts as one part, so put it at the allowed boundary.
+    allowed_parent = cache.joinpath(*[f"d{i}" for i in range(_MAX_PLUGIN_RGLOB_DEPTH - 1)])
+    allowed_skill = allowed_parent / "skills" / "allowed-skill"
+    allowed_skill.mkdir(parents=True)
+    (allowed_skill / "SKILL.md").write_text("---\nname: allowed-skill\ndescription: a\n---\n\nB.\n")
+    too_deep_parent = cache.joinpath(*[f"x{i}" for i in range(_MAX_PLUGIN_RGLOB_DEPTH)])
+    too_deep_skill = too_deep_parent / "skills" / "too-deep-skill"
+    too_deep_skill.mkdir(parents=True)
+    (too_deep_skill / "SKILL.md").write_text("---\nname: too-deep-skill\ndescription: x\n---\n\nB.\n")
+
+    skills_dirs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_skills()
+
+    keys = list(skills_dirs)
+    assert any(k.endswith(f"/{allowed_parent.name}/skills") for k in keys)
+    assert not any(k.endswith(f"/{too_deep_parent.name}/skills") for k in keys)
+
+
+# --- JSON5 parsing (comments + empty-file short-circuit) ---
+
+
+@pytest.mark.asyncio
+async def test_load_json_file_accepts_json5_comments_and_trailing_commas(tmp_path):
+    """A ~/.claude.json with // comments and a trailing comma parses successfully."""
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude.json").write_text(
+        "{\n"
+        "  // top-level comment\n"
+        '  "mcpServers": {\n'
+        '    "my-server": {"command": "echo", "args": ["hi"]},\n'  # trailing comma below
+        "  },\n"
+        "}\n"
+    )
+
+    mcp_configs = await ClaudeCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert len(mcp_configs) == 1
+    entries = next(iter(mcp_configs.values()))
+    assert isinstance(entries, list)
+    assert [name for name, _ in entries] == ["my-server"]
+
+
+@pytest.mark.asyncio
+async def test_load_json_file_treats_empty_file_as_empty_config(tmp_path):
+    """An empty (or whitespace-only) ~/.claude.json returns no entries, not a parse error."""
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude.json").write_text("   \n  \n")
+
+    mcp_configs = await ClaudeCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert mcp_configs == {}
+
+
+# --- _validate_servers writes check_server_signature result back into the dict ---
+
+
+def test_validate_servers_writes_check_server_signature_result_into_dict(tmp_path):
+    """_validate_servers must replace each stdio entry with the value returned by
+    check_server_signature — not just rely on in-place mutation of the input."""
+    from unittest.mock import patch as mock_patch
+
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    replacement = StdioServer(command="replacement", binary_identifier="sig-from-mock")
+
+    with mock_patch(
+        "agent_scan.agent_discovery.check_server_signature",
+        return_value=replacement,
+    ) as signature_mock:
+        result = ClaudeCodeDiscoverer(tmp_path)._validate_servers({"srv": {"command": "original"}}, source="test")
+
+    assert signature_mock.called
+    assert isinstance(result, list)
+    assert len(result) == 1
+    name, server = result[0]
+    assert name == "srv"
+    assert server is replacement
+
+
+# --- find_discoverers exception safety ---
+
+
+def test_find_discoverers_skips_discoverer_that_raises_unexpected_exception(tmp_path):
+    """A discoverer whose client_exists() raises must not crash find_discoverers."""
+    from agent_scan.agent_discovery import (
+        DISCOVERERS,
+        AgentDiscoverer,
+        ClaudeCodeDiscoverer,
+        find_discoverers,
+    )
+
+    class ExplodingDiscoverer(AgentDiscoverer):
+        name = "exploding"
+
+        def client_exists(self):
+            raise RuntimeError("boom")
+
+        async def discover_mcp_servers(self):
+            return {}
+
+        def discover_skills(self):
+            return {}
+
+    (tmp_path / ".claude").mkdir()
+    DISCOVERERS["exploding"] = ExplodingDiscoverer
+    try:
+        found = find_discoverers(tmp_path)
+    finally:
+        del DISCOVERERS["exploding"]
+
+    assert len(found) == 1
+    assert isinstance(found[0], ClaudeCodeDiscoverer)
