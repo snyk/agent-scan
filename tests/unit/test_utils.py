@@ -278,6 +278,7 @@ async def test_get_tool_versions_runs_probes_concurrently(monkeypatch):
     assert started.is_set(), "probes did not run concurrently"
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only behavior")
 class TestGetReadableHomeDirectoriesWindowsTimeout:
     """`Get-CimInstance Win32_UserProfile` can hang indefinitely when WMI is
     stuck (corrupted repository, unresponsive WinMgmt service, slow domain
@@ -292,8 +293,6 @@ class TestGetReadableHomeDirectoriesWindowsTimeout:
 
     def test_windows_profile_query_timeout_does_not_hang(self, monkeypatch, caplog):
         from pathlib import Path
-
-        monkeypatch.setattr(utils_module.platform, "system", lambda: "Windows")
 
         def fake_run(cmd, **kwargs):
             assert "timeout" in kwargs, "PowerShell CIM call must be invoked with a timeout to prevent indefinite hang"
@@ -326,8 +325,6 @@ class TestGetReadableHomeDirectoriesWindowsTimeout:
         against a refactor that drops the kwarg while keeping the except
         TimeoutExpired branch (which would silently never fire)."""
 
-        monkeypatch.setattr(utils_module.platform, "system", lambda: "Windows")
-
         captured: dict = {}
 
         def fake_run(cmd, **kwargs):
@@ -346,6 +343,7 @@ class TestGetReadableHomeDirectoriesWindowsTimeout:
         assert captured["timeout"] > 0
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="pwd module is POSIX-only")
 class TestGetReadableHomeDirectoriesPosix:
     """Cover the Linux/Darwin branch of ``get_readable_home_directories``.
 
@@ -511,3 +509,184 @@ class TestGetReadableHomeDirectoriesPosix:
 
         usernames = {u for _p, u in result}
         assert usernames == {"alice"}, f"non-existent home must be dropped; got {usernames}"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only behavior")
+class TestGetReadableHomeDirectoriesWindows:
+    """Cover the Windows branch of ``get_readable_home_directories``.
+
+    Parallels :class:`TestGetReadableHomeDirectoriesPosix` for the Win32
+    profile enumeration path: every LocalPath emitted by Win32_UserProfile is
+    filtered through ``Path.is_dir()`` + ``os.access(R_OK)`` and the username
+    is derived from the directory's basename. WSL homes are merged in afterward
+    so a Windows-only run still picks up Linux-side scan targets.
+
+    Skipped on POSIX hosts — runs only on actual Windows CI so the platform
+    branch is exercised against real Windows path semantics, not via a
+    ``platform.system`` mock.
+    """
+
+    def _stub_subprocess_run_with_paths(self, monkeypatch, paths):
+        """Make ``subprocess.run`` return the given paths as Win32_UserProfile output."""
+        stdout = "\n".join(str(p) for p in paths) + "\n"
+
+        def fake_run(_cmd, **_kwargs):
+            return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+        monkeypatch.setattr(utils_module.subprocess, "run", fake_run)
+
+    def test_single_user_when_all_users_false(self, monkeypatch):
+        """Single-user mode on Windows must short-circuit before invoking the
+        PowerShell CIM query — a hung WMI must never block the default path."""
+        def boom(*_a, **_kw):
+            raise AssertionError("subprocess.run must NOT be invoked when all_users=False")
+
+        monkeypatch.setattr(utils_module.subprocess, "run", boom)
+
+        result = get_readable_home_directories(all_users=False)
+
+        assert len(result) == 1
+        home_path, _username = result[0]
+        assert str(home_path) == os.path.expanduser("~")
+
+    def test_all_users_enumerates_local_paths(self, monkeypatch, tmp_path):
+        """Every non-empty LocalPath line from Win32_UserProfile must surface as
+        a (path, username) tuple where the username is the directory basename."""
+        alice_home = tmp_path / "alice"
+        bob_home = tmp_path / "bob"
+        alice_home.mkdir()
+        bob_home.mkdir()
+
+        self._stub_subprocess_run_with_paths(monkeypatch, [alice_home, bob_home])
+        monkeypatch.setattr(utils_module.os, "access", lambda *_a, **_k: True)
+        monkeypatch.setattr(utils_module, "get_wsl_home_directories", lambda: [])
+
+        result = get_readable_home_directories(all_users=True)
+
+        usernames = {u for _p, u in result}
+        assert usernames == {"alice", "bob"}, f"expected both profiles enumerated; got {usernames}"
+
+    def test_all_users_excludes_inaccessible_profiles(self, monkeypatch, tmp_path):
+        """A profile whose directory fails ``os.access(R_OK)`` must be dropped —
+        without this filter, an unprivileged ``--scan-all-users`` run on Windows
+        would surface other users' profiles it cannot actually read."""
+        alice_home = tmp_path / "alice"
+        bob_home = tmp_path / "bob"
+        alice_home.mkdir()
+        bob_home.mkdir()
+
+        self._stub_subprocess_run_with_paths(monkeypatch, [alice_home, bob_home])
+        # Only alice's home is readable.
+        monkeypatch.setattr(utils_module.os, "access", lambda path, _mode: str(path) == str(alice_home))
+        monkeypatch.setattr(utils_module, "get_wsl_home_directories", lambda: [])
+
+        result = get_readable_home_directories(all_users=True)
+
+        usernames = {u for _p, u in result}
+        assert usernames == {"alice"}, f"inaccessible profile must be dropped; got {usernames}"
+
+    def test_all_users_excludes_missing_profile_dirs(self, monkeypatch, tmp_path):
+        """A LocalPath whose directory doesn't exist on disk must be dropped
+        (stale Win32_UserProfile entries, deprovisioned accounts)."""
+        alice_home = tmp_path / "alice"
+        alice_home.mkdir()
+        ghost_home = tmp_path / "ghost-never-created"  # not mkdir'd
+
+        self._stub_subprocess_run_with_paths(monkeypatch, [alice_home, ghost_home])
+        monkeypatch.setattr(utils_module.os, "access", lambda *_a, **_k: True)
+        monkeypatch.setattr(utils_module, "get_wsl_home_directories", lambda: [])
+
+        result = get_readable_home_directories(all_users=True)
+
+        usernames = {u for _p, u in result}
+        assert usernames == {"alice"}, f"non-existent profile must be dropped; got {usernames}"
+
+    def test_all_users_skips_blank_local_path_lines(self, monkeypatch, tmp_path):
+        """Win32_UserProfile output can include blank lines (trailing newline,
+        whitespace-only entries). These must be skipped, not coerced into a
+        ``Path('')`` which would resolve to the CWD."""
+        alice_home = tmp_path / "alice"
+        alice_home.mkdir()
+
+        def fake_run(_cmd, **_kwargs):
+            stdout = f"\n   \n{alice_home}\n\n"
+            return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+        monkeypatch.setattr(utils_module.subprocess, "run", fake_run)
+        monkeypatch.setattr(utils_module.os, "access", lambda *_a, **_k: True)
+        monkeypatch.setattr(utils_module, "get_wsl_home_directories", lambda: [])
+
+        result = get_readable_home_directories(all_users=True)
+
+        usernames = {u for _p, u in result}
+        assert usernames == {"alice"}, f"blank lines must be ignored; got {usernames}"
+
+    def test_all_users_merges_wsl_homes_alongside_win32_profiles(self, monkeypatch, tmp_path):
+        """WSL enumeration runs after Win32 profile collection; both result
+        sets must appear in the merged output so a Windows scan reaches
+        Linux-side agent state too."""
+        alice_home = tmp_path / "alice"
+        wsl_home = tmp_path / "wsl_ubuntu_alice"
+        alice_home.mkdir()
+        wsl_home.mkdir()
+
+        self._stub_subprocess_run_with_paths(monkeypatch, [alice_home])
+        monkeypatch.setattr(utils_module.os, "access", lambda *_a, **_k: True)
+        monkeypatch.setattr(
+            utils_module,
+            "get_wsl_home_directories",
+            lambda: [(wsl_home, "wsl_alice")],
+        )
+
+        result = get_readable_home_directories(all_users=True)
+
+        usernames = {u for _p, u in result}
+        assert usernames == {"alice", "wsl_alice"}, (
+            f"WSL homes must merge with Win32 profiles; got {usernames}"
+        )
+
+    def test_all_users_wsl_does_not_overwrite_existing_win32_path(self, monkeypatch, tmp_path):
+        """If WSL enumeration emits a path already covered by a Win32 profile,
+        the Win32 username (set first) must win — otherwise a stale WSL entry
+        could rename a legitimate Windows profile in scan output."""
+        shared_home = tmp_path / "alice"
+        shared_home.mkdir()
+
+        self._stub_subprocess_run_with_paths(monkeypatch, [shared_home])
+        monkeypatch.setattr(utils_module.os, "access", lambda *_a, **_k: True)
+        monkeypatch.setattr(
+            utils_module,
+            "get_wsl_home_directories",
+            lambda: [(shared_home, "wsl_alice_collision")],
+        )
+
+        result = get_readable_home_directories(all_users=True)
+
+        assert len(result) == 1, f"duplicate path must be deduped; got {result}"
+        _path, username = result[0]
+        assert username == "alice", f"Win32 username must win on collision; got {username!r}"
+
+    def test_all_users_subprocess_failure_still_returns_wsl_homes(self, monkeypatch, tmp_path):
+        """A PowerShell failure (CalledProcessError / FileNotFoundError) must
+        be logged and swallowed so WSL enumeration still runs — the two signal
+        sources are independent."""
+        wsl_home = tmp_path / "wsl_alice_home"
+        wsl_home.mkdir()
+
+        def fake_run(cmd, **_kwargs):
+            raise subprocess.CalledProcessError(returncode=1, cmd=cmd)
+
+        monkeypatch.setattr(utils_module.subprocess, "run", fake_run)
+        monkeypatch.setattr(utils_module.os, "access", lambda *_a, **_k: True)
+        monkeypatch.setattr(
+            utils_module,
+            "get_wsl_home_directories",
+            lambda: [(wsl_home, "wsl_alice")],
+        )
+
+        result = get_readable_home_directories(all_users=True)
+
+        usernames = {u for _p, u in result}
+        assert usernames == {"wsl_alice"}, (
+            f"WSL homes must still surface when CIM query fails; got {usernames}"
+        )
