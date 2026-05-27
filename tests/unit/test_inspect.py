@@ -6,11 +6,14 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from agent_scan.inspect import get_mcp_config_per_client, inspect_client
+from agent_scan.inspect import _server_dedup_key, get_mcp_config_per_client, inspect_client
 from agent_scan.mcp_client import scan_mcp_config_file
 from agent_scan.models import (
     CandidateClient,
     ClientToInspect,
+    RemoteServer,
+    ServerStartupError,
+    SkillServer,
     SkippedByRuntimeConfigError,
     StdioServer,
 )
@@ -671,3 +674,191 @@ async def test_inspect_client_skips_server_per_runtime_config_without_starting_s
     # Sanity: the non-skipped server did go through inspect_extension exactly once.
     call_names = [call.args[0] for call in mock_inspect_extension.call_args_list]
     assert call_names == ["other"]
+
+
+# --- signature cache dedup tests ---
+
+
+def _make_signature(server_info_name: str = "x"):
+    """Build a minimal ServerSignature for use as a fake inspect_extension return."""
+    from mcp.types import Implementation, InitializeResult
+
+    from agent_scan.models import ServerSignature
+
+    return ServerSignature(
+        metadata=InitializeResult(
+            protocolVersion="2024-11-05",
+            capabilities={},
+            serverInfo=Implementation(name=server_info_name, version="1"),
+        ),
+    )
+
+
+def _fake_inspect_extension_factory(counter: list[int], signature):
+    """Return an async fake of inspect_extension that records call count and returns InspectedExtensions."""
+    from agent_scan.models import InspectedExtensions
+
+    async def fake(name, server, *args, **kwargs):
+        counter.append(name)
+        return InspectedExtensions(name=name, config=server, signature_or_error=signature)
+
+    return fake
+
+
+@pytest.mark.asyncio
+async def test_inspect_client_dedup_same_stdio_config_under_two_paths():
+    """Same StdioServer (command+args+env) under two config paths is inspected once; both occurrences share the signature."""
+    server_a = StdioServer(command="uvx", args=["my-server"], env={"TOKEN": "abc"})
+    server_b = StdioServer(command="uvx", args=["my-server"], env={"TOKEN": "abc"})
+    client = ClientToInspect(
+        name="test",
+        client_path="/some/path",
+        mcp_configs={
+            "/a/.mcp.json": [("github", server_a)],
+            "/b/.mcp.json": [("github", server_b)],
+        },
+        skills_dirs={},
+    )
+    signature = _make_signature()
+    calls: list[str] = []
+
+    with patch("agent_scan.inspect.inspect_extension", new_callable=AsyncMock) as mock_ie:
+        mock_ie.side_effect = _fake_inspect_extension_factory(calls, signature)
+        cache: dict = {}
+        result = await inspect_client(client, timeout=10, tokens=[], scan_skills=False, signature_cache=cache)
+
+    assert len(calls) == 1
+    a_ext = result.extensions["/a/.mcp.json"][0]
+    b_ext = result.extensions["/b/.mcp.json"][0]
+    assert a_ext.signature_or_error is signature
+    assert b_ext.signature_or_error is signature
+
+
+@pytest.mark.asyncio
+async def test_inspect_pipeline_dedup_across_clients():
+    """Same server config across two distinct ClientToInspect objects is inspected once per pipeline run."""
+    shared = StdioServer(command="uvx", args=["shared-server"], env=None)
+    client1 = ClientToInspect(
+        name="client-one",
+        client_path="/p1",
+        mcp_configs={"/p1/cfg.json": [("shared", shared.model_copy(deep=True))]},
+        skills_dirs={},
+    )
+    client2 = ClientToInspect(
+        name="client-two",
+        client_path="/p2",
+        mcp_configs={"/p2/cfg.json": [("shared", shared.model_copy(deep=True))]},
+        skills_dirs={},
+    )
+    signature = _make_signature()
+    calls: list[str] = []
+
+    with (
+        patch("agent_scan.inspect.inspect_extension", new_callable=AsyncMock) as mock_ie,
+        patch(
+            "agent_scan.pipelines.discover_clients_to_inspect",
+            new_callable=AsyncMock,
+            return_value=([client1, client2], [], ["u"]),
+        ),
+    ):
+        mock_ie.side_effect = _fake_inspect_extension_factory(calls, signature)
+        args = InspectArgs(timeout=10, tokens=[], paths=[], all_users=False)
+        await inspect_pipeline(args)
+
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_inspect_client_does_not_dedup_when_env_differs():
+    """Same command+args but different env => not deduped; both calls happen."""
+    a = StdioServer(command="uvx", args=["server"], env={"TOKEN": "first"})
+    b = StdioServer(command="uvx", args=["server"], env={"TOKEN": "second"})
+    client = ClientToInspect(
+        name="test",
+        client_path="/p",
+        mcp_configs={
+            "/a.json": [("s", a)],
+            "/b.json": [("s", b)],
+        },
+        skills_dirs={},
+    )
+    calls: list[str] = []
+
+    with patch("agent_scan.inspect.inspect_extension", new_callable=AsyncMock) as mock_ie:
+        mock_ie.side_effect = _fake_inspect_extension_factory(calls, _make_signature())
+        await inspect_client(client, timeout=10, tokens=[], scan_skills=False, signature_cache={})
+
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_inspect_client_does_not_dedup_when_args_differ():
+    """Same command but different args => not deduped."""
+    a = StdioServer(command="uvx", args=["server", "--mode=a"])
+    b = StdioServer(command="uvx", args=["server", "--mode=b"])
+    client = ClientToInspect(
+        name="test",
+        client_path="/p",
+        mcp_configs={
+            "/a.json": [("s", a)],
+            "/b.json": [("s", b)],
+        },
+        skills_dirs={},
+    )
+    calls: list[str] = []
+
+    with patch("agent_scan.inspect.inspect_extension", new_callable=AsyncMock) as mock_ie:
+        mock_ie.side_effect = _fake_inspect_extension_factory(calls, _make_signature())
+        await inspect_client(client, timeout=10, tokens=[], scan_skills=False, signature_cache={})
+
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_inspect_client_caches_errors_too():
+    """A failed inspection is cached: a duplicate config doesn't re-call inspect_extension (avoid hammering broken servers)."""
+    server = StdioServer(command="uvx", args=["broken-server"])
+    client = ClientToInspect(
+        name="test",
+        client_path="/p",
+        mcp_configs={
+            "/a.json": [("broken", server.model_copy(deep=True))],
+            "/b.json": [("broken", server.model_copy(deep=True))],
+        },
+        skills_dirs={},
+    )
+    error = ServerStartupError(
+        message="could not start server",
+        traceback="",
+        sub_exception_message="boom",
+        is_failure=True,
+    )
+    calls: list[str] = []
+    with patch("agent_scan.inspect.inspect_extension", new_callable=AsyncMock) as mock_ie:
+        mock_ie.side_effect = _fake_inspect_extension_factory(calls, error)
+        result = await inspect_client(client, timeout=10, tokens=[], scan_skills=False, signature_cache={})
+
+    assert len(calls) == 1
+    a_ext = result.extensions["/a.json"][0]
+    b_ext = result.extensions["/b.json"][0]
+    assert a_ext.signature_or_error is error
+    assert b_ext.signature_or_error is error
+
+
+def test_server_dedup_key_returns_none_for_skill_server():
+    """Skill servers are local file reads; they bypass the cache."""
+    assert _server_dedup_key(SkillServer(path="/some/skill")) is None
+
+
+def test_server_dedup_key_distinguishes_stdio_from_remote_with_same_string():
+    """A remote URL equal to a stdio command must not collide in the cache key."""
+    stdio = StdioServer(command="https://example.com/mcp", args=[])
+    remote = RemoteServer(url="https://example.com/mcp", type="http")
+    assert _server_dedup_key(stdio) != _server_dedup_key(remote)
+
+
+def test_server_dedup_key_stable_for_remote_with_reordered_headers():
+    """Header dicts are unordered; the key must canonicalize them so reorderings hit the cache."""
+    a = RemoteServer(url="https://x", type="http", headers={"A": "1", "B": "2"})
+    b = RemoteServer(url="https://x", type="http", headers={"B": "2", "A": "1"})
+    assert _server_dedup_key(a) == _server_dedup_key(b)
