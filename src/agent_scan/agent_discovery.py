@@ -78,18 +78,20 @@ def _select_servers_payload(file_data: dict) -> dict:
     * Wrapped: ``{"mcpServers": {<name>: <server-config>, ...}}``
     * Flat:    ``{<name>: <server-config>, ...}``
 
-    If ``file_data["mcpServers"]`` exists and looks like a *server map* (its value
-    is a dict, none of whose own top-level keys are server-config discriminators),
-    return it (wrapped). Otherwise return ``file_data`` itself (flat) — this
-    correctly handles the adversarial case of a flat-format file whose single
-    server happens to be literally named "mcpServers".
+    Disambiguation by *value type*, not just key presence: ``file_data["mcpServers"]``
+    is treated as a flat-format server config only if one of the discriminator keys
+    (``command``/``url``/``serverUrl``) is present with a string value — those are
+    always strings on a real server config. A wrapped server *named* "command" maps
+    to a dict (the server's own config), so it correctly stays wrapped.
 
     Note: only applied to plugin and per-project ``.mcp.json`` files. The global
     ``~/.claude.json`` is machine-managed by Claude Code and never flat; its
     parser short-circuits on a missing top-level ``mcpServers`` key.
     """
     candidate = file_data.get("mcpServers")
-    if isinstance(candidate, dict) and not (candidate.keys() & _SERVER_CONFIG_DISCRIMINATOR_KEYS):
+    if isinstance(candidate, dict) and not any(
+        isinstance(candidate.get(key), str) for key in _SERVER_CONFIG_DISCRIMINATOR_KEYS
+    ):
         return candidate
     return file_data
 

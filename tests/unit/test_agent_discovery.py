@@ -627,6 +627,62 @@ def test_select_servers_payload_wrapped_when_inner_has_no_discriminators():
     assert payload is file_data["mcpServers"]
 
 
+def test_select_servers_payload_wrapped_when_server_is_named_after_discriminator():
+    """A wrapped-format payload whose server is *named* "command" / "url" / "serverUrl"
+    must NOT be misread as flat. The inner discriminator key maps to a dict (the server
+    config), never a string (which only a real top-level server config would have).
+    """
+    from agent_scan.agent_discovery import _select_servers_payload
+
+    for discriminator in ("command", "url", "serverUrl"):
+        file_data = {"mcpServers": {discriminator: {"command": "/bin/echo"}}}
+
+        payload = _select_servers_payload(file_data)
+
+        assert payload is file_data["mcpServers"], (
+            f"Wrapped server named {discriminator!r} was misread as flat — "
+            f"detector must inspect value types, not just key presence"
+        )
+
+
+def test_select_servers_payload_wrapped_multiple_servers_one_named_after_discriminator():
+    """A wrapped-format payload with multiple servers, one of which happens to be
+    named "command", still parses as wrapped (the inner "command" value is a dict)."""
+    from agent_scan.agent_discovery import _select_servers_payload
+
+    file_data = {
+        "mcpServers": {
+            "command": {"command": "/bin/cmd"},
+            "other": {"command": "/bin/other"},
+        }
+    }
+
+    payload = _select_servers_payload(file_data)
+
+    assert payload is file_data["mcpServers"]
+
+
+def test_claude_code_discoverer_plugin_mcp_wrapped_server_named_command(tmp_path):
+    """End-to-end: a wrapped plugin .mcp.json with a server *named* "command" parses
+    as wrapped (single server named "command"), not as flat."""
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    plugin_dir = tmp_path / ".claude" / "plugins" / "cache" / "vendor" / "wrapped-cmd-plugin"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / ".mcp.json").write_text('{"mcpServers": {"command": {"command": "/bin/echo", "args": ["c"]}}}')
+
+    mcp_configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
+
+    assert len(mcp_configs) == 1
+    entries = next(iter(mcp_configs.values()))
+    assert isinstance(entries, list) and len(entries) == 1
+    name, server = entries[0]
+    assert name == "command"
+    assert isinstance(server, StdioServer)
+    assert server.command == "/bin/echo"
+    assert server.args == ["c"]
+
+
 def test_claude_code_discoverer_plugin_mcp_servers_empty_when_cache_missing(tmp_path):
     from agent_scan.agent_discovery import ClaudeCodeDiscoverer
 
