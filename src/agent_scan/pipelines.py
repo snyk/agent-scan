@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from agent_scan.agent_discovery import find_discoverers
 from agent_scan.direct_scanner import direct_scan_to_server_config, is_direct_scan
 from agent_scan.inspect import (
+    SignatureCache,
     get_mcp_config_per_client,
     inspect_client,
     inspected_client_to_scan_path_result,
@@ -156,7 +157,7 @@ async def inspect_pipeline(
     # appears in more than one client (same `github` server in Cursor + Claude
     # Code, or the same project ``.mcp.json`` referenced via multiple paths) is
     # inspected once and its signature reused for every other occurrence.
-    signature_cache: dict = {}
+    signature_cache: SignatureCache = {}
     for client_to_inspect in clients_to_inspect:
         inspected_client = await inspect_client(
             client_to_inspect,

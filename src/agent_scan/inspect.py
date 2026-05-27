@@ -2,6 +2,7 @@ import glob
 import logging
 import traceback
 from pathlib import Path
+from typing import TypeAlias
 
 from httpx import HTTPStatusError
 
@@ -36,6 +37,19 @@ from agent_scan.traffic_capture import TrafficCapture
 from agent_scan.well_known_clients import expand_path
 
 logger = logging.getLogger(__name__)
+
+SignatureCache: TypeAlias = dict[
+    tuple,
+    tuple[
+        StdioServer | RemoteServer,
+        ServerSignature
+        | ServerStartupError
+        | ServerHTTPError
+        | SkillScannError
+        | UserDeclinedError
+        | SkippedByRuntimeConfigError,
+    ],
+]
 
 
 def _resolve_glob_with_depth(pattern: str, max_depth: int) -> list[str]:
@@ -315,7 +329,7 @@ async def inspect_client(
     *,
     stream_stderr: bool = False,
     declined_servers: set[tuple[str, str]] | None = None,
-    signature_cache: dict | None = None,
+    signature_cache: SignatureCache | None = None,
 ) -> InspectedClient:
     """
     Scan a client (Cursor, VSCode, etc.) and return a InspectedClient object.
