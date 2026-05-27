@@ -115,7 +115,7 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
     _mcp_config_path = "~/.claude.json"
     _skills_subdir = "skills"
     _project_dotclaude_subdir = ".claude"
-    _plugin_cache_subdir = "plugins/cache"
+    _plugin_subdirs: tuple[str, ...] = ("plugins/cache", "plugins/repos")
 
     # --- public (override AgentDiscoverer abstracts) ---
 
@@ -266,46 +266,51 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
 
     # --- private: plugin discovery ---
 
-    def _plugin_cache_dir(self) -> Path:
-        return expand_path(Path(self._install_path), self.home_directory) / self._plugin_cache_subdir
+    def _plugin_base_dirs(self) -> list[Path]:
+        """Roots where Claude Code stages installed plugins: ``cache/`` (hydrated)
+        and ``repos/`` (git-cloned source). Both can host MCP servers and skills."""
+        install = expand_path(Path(self._install_path), self.home_directory)
+        return [install / sub for sub in self._plugin_subdirs]
 
     async def _discover_plugin_mcp_servers(self) -> McpConfigsResult:
-        """Scan ``~/.claude/plugins/cache/**/.mcp.json``.
+        """Scan plugin ``.mcp.json`` files under every plugin base dir.
 
         Plugin ``.mcp.json`` files use the flat ``{name: serverConfig}`` format
         (no ``mcpServers`` wrapper). A top-level ``mcpServers`` key is also
         tolerated for plugins that ship the wrapped format.
         """
-        cache_dir = self._plugin_cache_dir()
-        if not cache_dir.exists():
-            return {}
         result: McpConfigsResult = {}
-        for mcp_file in cache_dir.rglob(".mcp.json"):
-            if not mcp_file.is_file():
+        for base in self._plugin_base_dirs():
+            if not base.exists():
                 continue
-            file_data = self._load_json_file(mcp_file)
-            if file_data is None:
-                continue
-            if isinstance(file_data, CouldNotParseMCPConfig):
-                result[mcp_file.as_posix()] = file_data
-                continue
-            if not isinstance(file_data, dict) or not file_data:
-                continue
-            raw_servers = file_data.get("mcpServers") if "mcpServers" in file_data else file_data
-            if not isinstance(raw_servers, dict) or not raw_servers:
-                continue
-            result[mcp_file.as_posix()] = self._validate_servers(raw_servers, source=f"plugin {mcp_file.as_posix()}")
+            for mcp_file in base.rglob(".mcp.json"):
+                if not mcp_file.is_file():
+                    continue
+                file_data = self._load_json_file(mcp_file)
+                if file_data is None:
+                    continue
+                if isinstance(file_data, CouldNotParseMCPConfig):
+                    result[mcp_file.as_posix()] = file_data
+                    continue
+                if not isinstance(file_data, dict) or not file_data:
+                    continue
+                raw_servers = file_data.get("mcpServers") if "mcpServers" in file_data else file_data
+                if not isinstance(raw_servers, dict) or not raw_servers:
+                    continue
+                result[mcp_file.as_posix()] = self._validate_servers(
+                    raw_servers, source=f"plugin {mcp_file.as_posix()}"
+                )
         return result
 
     def _discover_plugin_skills(self) -> SkillsDirsResult:
-        """Scan ``~/.claude/plugins/cache/**/skills/`` for plugin-bundled skills."""
-        cache_dir = self._plugin_cache_dir()
-        if not cache_dir.exists():
-            return {}
+        """Scan ``skills/`` subdirs under every plugin base dir."""
         result: SkillsDirsResult = {}
-        for skills_dir in cache_dir.rglob("skills"):
-            if skills_dir.is_dir():
-                result[skills_dir.as_posix()] = inspect_skills_dir(str(skills_dir))
+        for base in self._plugin_base_dirs():
+            if not base.exists():
+                continue
+            for skills_dir in base.rglob("skills"):
+                if skills_dir.is_dir():
+                    result[skills_dir.as_posix()] = inspect_skills_dir(str(skills_dir))
         return result
 
     # --- internal helpers ---

@@ -602,6 +602,56 @@ def test_claude_code_discoverer_discover_skills_includes_plugin_skills(tmp_path)
     assert len(plugin_keys) == 1
 
 
+@pytest.mark.asyncio
+async def test_claude_code_discoverer_plugin_mcp_servers_scans_repos_dir(tmp_path):
+    """Plugins staged under ~/.claude/plugins/repos/**/ are also discovered."""
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    repo_plugin = tmp_path / ".claude" / "plugins" / "repos" / "owner" / "plugin-repo"
+    repo_plugin.mkdir(parents=True)
+    (repo_plugin / ".mcp.json").write_text('{"repo-srv": {"command": "r"}}')
+
+    mcp_configs = await ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
+
+    repos_keys = [k for k in mcp_configs if "/plugins/repos/" in k]
+    assert len(repos_keys) == 1
+    entries = mcp_configs[repos_keys[0]]
+    assert isinstance(entries, list) and entries[0][0] == "repo-srv"
+
+
+def test_claude_code_discoverer_plugin_skills_scans_repos_dir(tmp_path):
+    """Plugin skills staged under ~/.claude/plugins/repos/**/ are also discovered."""
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    skills_dir = tmp_path / ".claude" / "plugins" / "repos" / "owner" / "plugin" / "skills" / "rs"
+    skills_dir.mkdir(parents=True)
+    (skills_dir / "SKILL.md").write_text("---\nname: rs\ndescription: r\n---\n\nB.\n")
+
+    skills_dirs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_skills()
+
+    repos_keys = [k for k in skills_dirs if "/plugins/repos/" in k]
+    assert len(repos_keys) == 1
+
+
+@pytest.mark.asyncio
+async def test_claude_code_discoverer_plugin_mcp_servers_scans_both_cache_and_repos(tmp_path):
+    """Both cache and repos contribute, keyed by their distinct file paths."""
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    cache_plugin = tmp_path / ".claude" / "plugins" / "cache" / "c" / "p"
+    cache_plugin.mkdir(parents=True)
+    (cache_plugin / ".mcp.json").write_text('{"c-srv": {"command": "c"}}')
+
+    repo_plugin = tmp_path / ".claude" / "plugins" / "repos" / "r" / "p"
+    repo_plugin.mkdir(parents=True)
+    (repo_plugin / ".mcp.json").write_text('{"r-srv": {"command": "r"}}')
+
+    mcp_configs = await ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
+
+    assert any("/plugins/cache/" in k for k in mcp_configs)
+    assert any("/plugins/repos/" in k for k in mcp_configs)
+
+
 # --- ClaudeCodeDiscoverer: end-to-end discover() ---
 
 
