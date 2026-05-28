@@ -152,6 +152,65 @@ class AgentDiscoverer(ABC):
             skills_dirs=skills_dirs,
         )
 
+    # --- shared helpers (inherited by every concrete subclass) ---
+
+    def _load_json_file(self, path: Path) -> dict | CouldNotParseMCPConfig | None:
+        """JSON-decode an arbitrary file. ``None`` if missing or unreadable due to
+        permissions, parsed dict on success, ``CouldNotParseMCPConfig`` on
+        malformed JSON.
+
+        Uses ``pyjson5`` to match the legacy ``mcp_client.scan_mcp_config_file``
+        path, which tolerates ``//`` comments and trailing commas. An empty or
+        whitespace-only file is treated as an empty config (also matching legacy).
+
+        ``PermissionError`` is treated like a missing file — under
+        ``--scan-all-users`` an unprivileged process routinely hits homes it
+        can't read, and surfacing those as ``CouldNotParseMCPConfig`` would
+        misclassify access-control denials as malformed-config errors.
+        """
+        try:
+            if not path.exists():
+                return None
+            content = path.read_text(encoding="utf-8")
+            if content.strip() == "":
+                return {}
+            return pyjson5.loads(content)
+        except PermissionError:
+            logger.warning("Permission denied reading %s", path.as_posix())
+            return None
+        except Exception as e:
+            logger.exception("Error reading %s: %s", path.as_posix(), e)
+            return CouldNotParseMCPConfig(
+                message=f"could not parse file {path.as_posix()}",
+                traceback=traceback.format_exc(),
+                is_failure=True,
+            )
+
+    def _validate_servers(
+        self, raw: dict, source: str
+    ) -> list[tuple[str, StdioServer | RemoteServer]] | CouldNotParseMCPConfig:
+        """Validate a raw ``mcpServers`` mapping into typed Stdio/Remote server entries.
+
+        Input is the *already-extracted* server map (e.g. the value of
+        ``mcpServers``). Subclasses that need format-aware whole-file parsing
+        should call this on the extracted dict, after picking the right
+        wrapper layer.
+        """
+        try:
+            validated = ClaudeConfigFile(mcpServers=raw)
+        except Exception as e:
+            logger.exception("Invalid %s: %s", source, e)
+            return CouldNotParseMCPConfig(
+                message=f"could not parse {source}",
+                traceback=traceback.format_exc(),
+                is_failure=True,
+            )
+        servers = validated.get_servers()
+        for name, server_config in servers.items():
+            if isinstance(server_config, StdioServer):
+                servers[name] = check_server_signature(server_config)
+        return list(servers.items())
+
 
 class ClaudeCodeDiscoverer(AgentDiscoverer):
     """Claude Code discovery: ``~/.claude.json`` + ``~/.claude/skills/`` + per-project scopes.
@@ -378,57 +437,6 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         a dict on success, or a ``CouldNotParseMCPConfig`` on malformed JSON.
         """
         return self._load_json_file(expand_path(Path(self._mcp_config_path), self.home_directory))
-
-    def _load_json_file(self, path: Path) -> dict | CouldNotParseMCPConfig | None:
-        """JSON-decode an arbitrary file. ``None`` if missing or unreadable due to
-        permissions, parsed dict on success, ``CouldNotParseMCPConfig`` on
-        malformed JSON.
-
-        Uses ``pyjson5`` to match the legacy ``mcp_client.scan_mcp_config_file``
-        path, which tolerates ``//`` comments and trailing commas. An empty or
-        whitespace-only file is treated as an empty config (also matching legacy).
-
-        ``PermissionError`` is treated like a missing file — under
-        ``--scan-all-users`` an unprivileged process routinely hits homes it
-        can't read, and surfacing those as ``CouldNotParseMCPConfig`` would
-        misclassify access-control denials as malformed-config errors.
-        """
-        try:
-            if not path.exists():
-                return None
-            content = path.read_text(encoding="utf-8")
-            if content.strip() == "":
-                return {}
-            return pyjson5.loads(content)
-        except PermissionError:
-            logger.warning("Permission denied reading %s", path.as_posix())
-            return None
-        except Exception as e:
-            logger.exception("Error reading %s: %s", path.as_posix(), e)
-            return CouldNotParseMCPConfig(
-                message=f"could not parse file {path.as_posix()}",
-                traceback=traceback.format_exc(),
-                is_failure=True,
-            )
-
-    def _validate_servers(
-        self, raw: dict, source: str
-    ) -> list[tuple[str, StdioServer | RemoteServer]] | CouldNotParseMCPConfig:
-        """Validate a raw ``mcpServers`` mapping into typed Stdio/Remote server entries."""
-        try:
-            validated = ClaudeConfigFile(mcpServers=raw)
-        except Exception as e:
-            logger.exception("Invalid %s: %s", source, e)
-            return CouldNotParseMCPConfig(
-                message=f"could not parse {source}",
-                traceback=traceback.format_exc(),
-                is_failure=True,
-            )
-        servers = validated.get_servers()
-        for name, server_config in servers.items():
-            if isinstance(server_config, StdioServer):
-                servers[name] = check_server_signature(server_config)
-        return list(servers.items())
 
 
 DISCOVERERS: dict[str, type[AgentDiscoverer]] = {
