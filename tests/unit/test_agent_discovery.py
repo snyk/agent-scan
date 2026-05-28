@@ -1846,8 +1846,11 @@ def test_vscode_discoverer_walks_workspace_storage_to_find_mcp(tmp_path):
     (workspace / ".vscode").mkdir()
     (workspace / ".vscode" / "mcp.json").write_text('{"servers": {"ws-mcp": {"command": "w"}}}')
 
-    # VSCode's workspace.json records the folder URL.
-    (workspace_hash / "workspace.json").write_text(f'{{"folder": "file://{workspace.as_posix()}"}}')
+    # VSCode's workspace.json records the folder URL. Use ``Path.as_uri`` so the
+    # constructed URI is correct on both POSIX (``file:///tmp/...``) and Windows
+    # (``file:///C:/Users/...``) — manually concatenating ``file://`` + ``as_posix``
+    # produces a malformed two-slash URI on Windows.
+    (workspace_hash / "workspace.json").write_text(f'{{"folder": "{workspace.as_uri()}"}}')
 
     mcp_configs = discoverer.discover_mcp_servers()
 
@@ -1876,7 +1879,7 @@ def test_vscode_discoverer_workspace_storage_skips_malformed_workspace_json(tmp_
     workspace.mkdir()
     (workspace / ".vscode").mkdir()
     (workspace / ".vscode" / "mcp.json").write_text('{"servers": {"good": {"command": "g"}}}')
-    (good / "workspace.json").write_text(f'{{"folder": "file://{workspace.as_posix()}"}}')
+    (good / "workspace.json").write_text(f'{{"folder": "{workspace.as_uri()}"}}')
 
     mcp_configs = discoverer.discover_mcp_servers()
 
@@ -1902,8 +1905,12 @@ def test_vscode_discoverer_workspace_storage_url_decodes_folder_path(tmp_path):
     (workspace / ".vscode").mkdir()
     (workspace / ".vscode" / "mcp.json").write_text('{"servers": {"s": {"command": "x"}}}')
 
-    encoded = workspace.as_posix().replace(" ", "%20")
-    (workspace_hash / "workspace.json").write_text(f'{{"folder": "file://{encoded}"}}')
+    # ``Path.as_uri`` produces ``file:///.../My%20Projects/...`` — VSCode's exact
+    # on-disk shape (percent-encoded). The discoverer must decode before
+    # resolving the path.
+    uri = workspace.as_uri()
+    assert "%20" in uri  # sanity: the space really is encoded
+    (workspace_hash / "workspace.json").write_text(f'{{"folder": "{uri}"}}')
 
     mcp_configs = discoverer.discover_mcp_servers()
 
@@ -1973,7 +1980,7 @@ def test_cursor_discoverer_walks_workspace_storage(tmp_path):
     (workspace / ".cursor").mkdir()
     (workspace / ".cursor" / "mcp.json").write_text('{"mcpServers": {"cur-ws": {"command": "c"}}}')
 
-    (workspace_hash / "workspace.json").write_text(f'{{"folder": "file://{workspace.as_posix()}"}}')
+    (workspace_hash / "workspace.json").write_text(f'{{"folder": "{workspace.as_uri()}"}}')
 
     mcp_configs = discoverer.discover_mcp_servers()
 
@@ -2151,7 +2158,7 @@ def _setup_cursor_workspace(tmp_path, workspace_relpath):
     workspace_hash.mkdir(parents=True)
     workspace = tmp_path / workspace_relpath
     workspace.mkdir(parents=True)
-    (workspace_hash / "workspace.json").write_text(f'{{"folder": "file://{workspace.as_posix()}"}}')
+    (workspace_hash / "workspace.json").write_text(f'{{"folder": "{workspace.as_uri()}"}}')
     return discoverer, workspace
 
 
@@ -2239,7 +2246,7 @@ def test_cursor_workspace_skills_dedups_shared_ancestor(tmp_path):
         wh.mkdir(parents=True)
         ws = tmp_path / sub
         ws.mkdir(parents=True)
-        (wh / "workspace.json").write_text(f'{{"folder": "file://{ws.as_posix()}"}}')
+        (wh / "workspace.json").write_text(f'{{"folder": "{ws.as_uri()}"}}')
 
     _write_skill(tmp_path / "monorepo" / ".cursor" / "skills", "shared")
 
