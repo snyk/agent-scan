@@ -20,6 +20,65 @@ parameters:
     default: false
 
 commands:
+  cc_nightly_seed_and_verify_bash:
+    description: >
+      Shared Bash steps for the Linux + macOS nightly Claude Code jobs.
+      Installs uv + Claude Code nightly, seeds global / project / plugin
+      scopes via real `claude` CLI commands, runs `agent-scan inspect --json`,
+      and asserts every seeded MCP server / skill appears in the output.
+    steps:
+      - checkout
+      - run:
+          name: Install uv
+          command: curl -LsSf https://astral.sh/uv/install.sh | sh
+      - run:
+          name: Install Claude Code nightly
+          command: |
+            curl -fsSL https://claude.ai/install.sh | bash -s nightly
+            echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$BASH_ENV"
+            source "$BASH_ENV"
+            claude --version
+      - run:
+          name: Start Claude Code in workspace (creates ~/.claude.json + projects entry)
+          command: |
+            cd "$CIRCLE_WORKING_DIRECTORY"
+            claude --print "ping" || true
+            test -f "$HOME/.claude.json"
+      - run:
+          name: Seed global / project / plugin scopes via real claude CLI
+          # The stub command (`python -c pass`) exits immediately and fails
+          # MCP handshake on purpose — the verifier only asserts discovery
+          # (server name in scan output), not signature/tool inspection.
+          command: |
+            set -euo pipefail
+            STUB='uv run --no-project python -c pass'
+            claude mcp add --scope user nightly-global-mcp -- $STUB
+            claude mcp add --scope project nightly-project-mcp -- $STUB
+            claude plugin marketplace add ./tests/fixtures/cc-nightly-marketplace
+            claude plugin install nightly-test-plugin@cc-nightly
+            mkdir -p "$HOME/.claude/skills/nightly-global-skill"
+            cp tests/fixtures/cc-nightly-marketplace/_seed/SKILL.md \
+               "$HOME/.claude/skills/nightly-global-skill/SKILL.md"
+            mkdir -p .claude/skills/nightly-project-skill
+            cp tests/fixtures/cc-nightly-marketplace/_seed/SKILL.md \
+               .claude/skills/nightly-project-skill/SKILL.md
+      - run:
+          name: Install agent-scan from this branch
+          command: |
+            uv venv
+            uv pip install -e .
+      - run:
+          name: Run agent-scan inspect --json
+          command: |
+            uv run agent-scan inspect --json --dangerously-run-mcp-servers > scan.json
+      - run:
+          name: Verify Claude Code discovery
+          command: |
+            uv run python tests/ci/verify_cc_nightly_scan.py scan.json --workspace "$CIRCLE_WORKING_DIRECTORY"
+      - store_artifacts:
+          path: scan.json
+      - notify_slack_on_failure
+
   notify_slack_on_failure:
     steps:
       - slack/notify:
@@ -89,54 +148,7 @@ jobs:
     environment:
       AGENT_SCAN_ENVIRONMENT: ci
     steps:
-      - checkout
-      - run:
-          name: Install uv
-          command: curl -LsSf https://astral.sh/uv/install.sh | sh
-      - run:
-          name: Install Claude Code nightly
-          command: |
-            curl -fsSL https://claude.ai/install.sh | bash -s nightly
-            echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$BASH_ENV"
-            source "$BASH_ENV"
-            claude --version
-      - run:
-          name: Start Claude Code in workspace (creates ~/.claude.json + projects entry)
-          command: |
-            cd "$CIRCLE_WORKING_DIRECTORY"
-            claude --print "ping" || true
-            test -f "$HOME/.claude.json"
-      - run:
-          name: Seed global / project / plugin scopes via real claude CLI
-          command: |
-            set -euo pipefail
-            STUB='uv run --no-project python -c pass'
-            claude mcp add --scope user nightly-global-mcp -- $STUB
-            claude mcp add --scope project nightly-project-mcp -- $STUB
-            claude plugin marketplace add ./tests/fixtures/cc-nightly-marketplace
-            claude plugin install nightly-test-plugin@cc-nightly
-            mkdir -p "$HOME/.claude/skills/nightly-global-skill"
-            cp tests/fixtures/cc-nightly-marketplace/_seed/SKILL.md \
-               "$HOME/.claude/skills/nightly-global-skill/SKILL.md"
-            mkdir -p .claude/skills/nightly-project-skill
-            cp tests/fixtures/cc-nightly-marketplace/_seed/SKILL.md \
-               .claude/skills/nightly-project-skill/SKILL.md
-      - run:
-          name: Install agent-scan from this branch
-          command: |
-            uv venv
-            uv pip install -e .
-      - run:
-          name: Run agent-scan inspect --json
-          command: |
-            uv run agent-scan inspect --json --dangerously-run-mcp-servers > scan.json
-      - run:
-          name: Verify Claude Code discovery
-          command: |
-            uv run python tests/ci/verify_cc_nightly_scan.py scan.json --workspace "$CIRCLE_WORKING_DIRECTORY"
-      - store_artifacts:
-          path: scan.json
-      - notify_slack_on_failure
+      - cc_nightly_seed_and_verify_bash
 
   claude-code-nightly-macos:
     macos:
@@ -145,54 +157,7 @@ jobs:
     environment:
       AGENT_SCAN_ENVIRONMENT: ci
     steps:
-      - checkout
-      - run:
-          name: Install uv
-          command: curl -LsSf https://astral.sh/uv/install.sh | sh
-      - run:
-          name: Install Claude Code nightly
-          command: |
-            curl -fsSL https://claude.ai/install.sh | bash -s nightly
-            echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$BASH_ENV"
-            source "$BASH_ENV"
-            claude --version
-      - run:
-          name: Start Claude Code in workspace (creates ~/.claude.json + projects entry)
-          command: |
-            cd "$CIRCLE_WORKING_DIRECTORY"
-            claude --print "ping" || true
-            test -f "$HOME/.claude.json"
-      - run:
-          name: Seed global / project / plugin scopes via real claude CLI
-          command: |
-            set -euo pipefail
-            STUB='uv run --no-project python -c pass'
-            claude mcp add --scope user nightly-global-mcp -- $STUB
-            claude mcp add --scope project nightly-project-mcp -- $STUB
-            claude plugin marketplace add ./tests/fixtures/cc-nightly-marketplace
-            claude plugin install nightly-test-plugin@cc-nightly
-            mkdir -p "$HOME/.claude/skills/nightly-global-skill"
-            cp tests/fixtures/cc-nightly-marketplace/_seed/SKILL.md \
-               "$HOME/.claude/skills/nightly-global-skill/SKILL.md"
-            mkdir -p .claude/skills/nightly-project-skill
-            cp tests/fixtures/cc-nightly-marketplace/_seed/SKILL.md \
-               .claude/skills/nightly-project-skill/SKILL.md
-      - run:
-          name: Install agent-scan from this branch
-          command: |
-            uv venv
-            uv pip install -e .
-      - run:
-          name: Run agent-scan inspect --json
-          command: |
-            uv run agent-scan inspect --json --dangerously-run-mcp-servers > scan.json
-      - run:
-          name: Verify Claude Code discovery
-          command: |
-            uv run python tests/ci/verify_cc_nightly_scan.py scan.json --workspace "$CIRCLE_WORKING_DIRECTORY"
-      - store_artifacts:
-          path: scan.json
-      - notify_slack_on_failure
+      - cc_nightly_seed_and_verify_bash
 
   claude-code-nightly-windows:
     executor:

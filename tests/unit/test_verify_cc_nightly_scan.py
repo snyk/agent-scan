@@ -11,14 +11,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 from tests.ci.verify_cc_nightly_scan import (
     ExpectedArtifact,
     check_scan,
     main,
 )
-
 
 HOME = Path.home().as_posix()
 
@@ -40,19 +37,13 @@ def _scan_path(path: str, servers: list[dict]) -> dict:
 def _full_passing_scan(workspace: str) -> dict:
     """Build a JSON dict where every expected artefact is discovered."""
     return {
-        f"{HOME}/.claude.json": _scan_path(
-            f"{HOME}/.claude.json", [_server("nightly-global-mcp")]
-        ),
-        f"{workspace}/.mcp.json": _scan_path(
-            f"{workspace}/.mcp.json", [_server("nightly-project-mcp")]
-        ),
+        f"{HOME}/.claude.json": _scan_path(f"{HOME}/.claude.json", [_server("nightly-global-mcp")]),
+        f"{workspace}/.mcp.json": _scan_path(f"{workspace}/.mcp.json", [_server("nightly-project-mcp")]),
         f"{HOME}/.claude/plugins/cache/cc-nightly/nightly-test-plugin/.mcp.json": _scan_path(
             f"{HOME}/.claude/plugins/cache/cc-nightly/nightly-test-plugin/.mcp.json",
             [_server("nightly-plugin-mcp")],
         ),
-        f"{HOME}/.claude/skills": _scan_path(
-            f"{HOME}/.claude/skills", [_server("nightly-global-skill", kind="skill")]
-        ),
+        f"{HOME}/.claude/skills": _scan_path(f"{HOME}/.claude/skills", [_server("nightly-global-skill", kind="skill")]),
         f"{workspace}/.claude/skills": _scan_path(
             f"{workspace}/.claude/skills",
             [_server("nightly-project-skill", kind="skill")],
@@ -67,18 +58,14 @@ def _full_passing_scan(workspace: str) -> dict:
 def _default_expected(workspace: str) -> list[ExpectedArtifact]:
     return [
         ExpectedArtifact("global-mcp", "~/.claude.json", "nightly-global-mcp"),
-        ExpectedArtifact(
-            "project-mcp", f"{workspace}/.mcp.json", "nightly-project-mcp"
-        ),
+        ExpectedArtifact("project-mcp", f"{workspace}/.mcp.json", "nightly-project-mcp"),
         ExpectedArtifact(
             "plugin-mcp",
             "~/.claude/plugins/cache/**/.mcp.json",
             "nightly-plugin-mcp",
         ),
         ExpectedArtifact("global-skill", "~/.claude/skills", "nightly-global-skill"),
-        ExpectedArtifact(
-            "project-skill", f"{workspace}/.claude/skills", "nightly-project-skill"
-        ),
+        ExpectedArtifact("project-skill", f"{workspace}/.claude/skills", "nightly-project-skill"),
         ExpectedArtifact(
             "plugin-skill",
             "~/.claude/plugins/cache/**/skills",
@@ -133,9 +120,7 @@ class TestCheckScan:
         workspace = (tmp_path / "repo").as_posix()
         scan = _full_passing_scan(workspace)
         # Replace the canned plugin path with a deeper one.
-        plugin_path = scan.pop(
-            f"{HOME}/.claude/plugins/cache/cc-nightly/nightly-test-plugin/.mcp.json"
-        )
+        plugin_path = scan.pop(f"{HOME}/.claude/plugins/cache/cc-nightly/nightly-test-plugin/.mcp.json")
         new_key = f"{HOME}/.claude/plugins/cache/marketplace-abc/another/deeper/.mcp.json"
         plugin_path["path"] = new_key
         scan[new_key] = plugin_path
@@ -150,11 +135,8 @@ class TestCheckScan:
         not the current process's home (so the verifier can run on a CI machine
         that scanned from a different home)."""
         custom_home = (tmp_path / "fake-home").as_posix()
-        workspace = (tmp_path / "repo").as_posix()
         scan = {
-            f"{custom_home}/.claude.json": _scan_path(
-                f"{custom_home}/.claude.json", [_server("nightly-global-mcp")]
-            ),
+            f"{custom_home}/.claude.json": _scan_path(f"{custom_home}/.claude.json", [_server("nightly-global-mcp")]),
         }
         expected = [
             ExpectedArtifact("global-mcp", "~/.claude.json", "nightly-global-mcp"),
@@ -187,10 +169,9 @@ class TestCheckScan:
 
         assert missing == []
 
-    def test_servers_can_be_none_without_crashing(self, tmp_path):
+    def test_servers_can_be_none_without_crashing(self):
         """When agent-scan fails to parse a config it sets ``servers: None``
         — the matcher should treat that as 'name not found' rather than raise."""
-        workspace = (tmp_path / "repo").as_posix()
         scan = {
             f"{HOME}/.claude.json": {
                 "path": f"{HOME}/.claude.json",
@@ -211,7 +192,7 @@ class TestCheckScan:
 
 
 class TestCliMain:
-    def test_exits_zero_on_full_match(self, tmp_path, capsys, monkeypatch):
+    def test_exits_zero_on_full_match(self, tmp_path):
         workspace = tmp_path / "repo"
         workspace.mkdir()
         scan_file = tmp_path / "scan.json"
@@ -231,10 +212,9 @@ class TestCliMain:
 
         rc = main([str(scan_file), "--workspace", str(workspace)])
 
-        out = capsys.readouterr().out + capsys.readouterr().err
+        captured = capsys.readouterr()
         assert rc != 0
-        # The missing label appears somewhere in the report.
-        assert "global-mcp" in (out + capsys.readouterr().out)
+        assert "global-mcp" in captured.out
 
     def test_missing_scan_file_exits_nonzero(self, tmp_path):
         rc = main([str(tmp_path / "does-not-exist.json"), "--workspace", str(tmp_path)])

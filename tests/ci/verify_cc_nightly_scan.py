@@ -18,7 +18,10 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 
 @dataclass(frozen=True)
@@ -51,6 +54,11 @@ def _expand(pattern: str, home: str) -> str:
 
 
 def _matches(pattern: str, candidate: str, home: str) -> bool:
+    # fnmatch's ``*`` greedily matches ``/`` too, so a single ``*`` already
+    # spans multiple path components and ``**`` (used in the plugin-scope
+    # patterns) is equivalent to ``*`` here. Do not "fix" this to
+    # ``pathlib.PurePath.match`` — that one is stricter about ``/`` and would
+    # break plugin-cache discovery.
     expanded = _expand(pattern, home)
     candidate_norm = _normalize(candidate)
     if "*" in expanded:
@@ -60,7 +68,13 @@ def _matches(pattern: str, candidate: str, home: str) -> bool:
 
 def _server_names(scan_entry: dict[str, Any]) -> set[str]:
     servers = scan_entry.get("servers") or []
-    return {s.get("name") for s in servers if isinstance(s, dict) and s.get("name")}
+    names: set[str] = set()
+    for s in servers:
+        if isinstance(s, dict):
+            name = s.get("name")
+            if isinstance(name, str):
+                names.add(name)
+    return names
 
 
 def check_scan(
@@ -99,16 +113,10 @@ def default_expected(workspace: str) -> list[ExpectedArtifact]:
     return [
         ExpectedArtifact("global-mcp", "~/.claude.json", "nightly-global-mcp"),
         ExpectedArtifact("project-mcp", f"{ws}/.mcp.json", "nightly-project-mcp"),
-        ExpectedArtifact(
-            "plugin-mcp", "~/.claude/plugins/cache/**/.mcp.json", "nightly-plugin-mcp"
-        ),
+        ExpectedArtifact("plugin-mcp", "~/.claude/plugins/cache/**/.mcp.json", "nightly-plugin-mcp"),
         ExpectedArtifact("global-skill", "~/.claude/skills", "nightly-global-skill"),
-        ExpectedArtifact(
-            "project-skill", f"{ws}/.claude/skills", "nightly-project-skill"
-        ),
-        ExpectedArtifact(
-            "plugin-skill", "~/.claude/plugins/cache/**/skills", "nightly-plugin-skill"
-        ),
+        ExpectedArtifact("project-skill", f"{ws}/.claude/skills", "nightly-project-skill"),
+        ExpectedArtifact("plugin-skill", "~/.claude/plugins/cache/**/skills", "nightly-plugin-skill"),
     ]
 
 
@@ -116,8 +124,7 @@ def _format_report(missing: list[ExpectedArtifact], scan: dict[str, Any]) -> str
     lines = [f"Claude Code nightly discovery check FAILED — {len(missing)} missing artefact(s):", ""]
     for art in missing:
         lines.append(
-            f"  - [{art.label}] expected server/skill '{art.server_name}' "
-            f"under path matching '{art.path_pattern}'"
+            f"  - [{art.label}] expected server/skill '{art.server_name}' under path matching '{art.path_pattern}'"
         )
     lines.append("")
     lines.append("Observed scan keys:")
@@ -133,8 +140,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--workspace",
         default=os.getcwd(),
-        help="Workspace directory the job seeded (used for project-scope path keys). "
-        "Defaults to cwd.",
+        help="Workspace directory the job seeded (used for project-scope path keys). Defaults to cwd.",
     )
     parser.add_argument(
         "--home",
