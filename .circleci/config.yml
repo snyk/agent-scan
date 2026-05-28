@@ -3,6 +3,7 @@ version: 2.1
 orbs:
   prodsec: snyk/prodsec-orb@1
   slack: circleci/slack@4.12.5
+  win: circleci/windows@5.0
 
 parameters:
   snyk-scan-context:
@@ -11,6 +12,10 @@ parameters:
     default: etso_llm
   run-daily-security-scan:
     description: When true, runs the daily security-scans workflow (used by scheduled trigger).
+    type: boolean
+    default: false
+  run-nightly-cc-test:
+    description: When true, runs the nightly Claude Code x agent-scan compatibility workflow (used by a separate scheduled trigger).
     type: boolean
     default: false
 
@@ -78,6 +83,173 @@ commands:
             }
 
 jobs:
+  claude-code-nightly-linux:
+    docker:
+      - image: cimg/python:3.12
+    environment:
+      AGENT_SCAN_ENVIRONMENT: ci
+    steps:
+      - checkout
+      - run:
+          name: Install uv
+          command: curl -LsSf https://astral.sh/uv/install.sh | sh
+      - run:
+          name: Install Claude Code nightly
+          command: |
+            curl -fsSL https://claude.ai/install.sh | bash -s nightly
+            echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$BASH_ENV"
+            source "$BASH_ENV"
+            claude --version
+      - run:
+          name: Start Claude Code in workspace (creates ~/.claude.json + projects entry)
+          command: |
+            cd "$CIRCLE_WORKING_DIRECTORY"
+            claude --print "ping" || true
+            test -f "$HOME/.claude.json"
+      - run:
+          name: Seed global / project / plugin scopes via real claude CLI
+          command: |
+            set -euo pipefail
+            STUB='uv run --no-project python -c pass'
+            claude mcp add --scope user nightly-global-mcp -- $STUB
+            claude mcp add --scope project nightly-project-mcp -- $STUB
+            claude plugin marketplace add ./tests/fixtures/cc-nightly-marketplace
+            claude plugin install nightly-test-plugin@cc-nightly
+            mkdir -p "$HOME/.claude/skills/nightly-global-skill"
+            cp tests/fixtures/cc-nightly-marketplace/_seed/SKILL.md \
+               "$HOME/.claude/skills/nightly-global-skill/SKILL.md"
+            mkdir -p .claude/skills/nightly-project-skill
+            cp tests/fixtures/cc-nightly-marketplace/_seed/SKILL.md \
+               .claude/skills/nightly-project-skill/SKILL.md
+      - run:
+          name: Install agent-scan from this branch
+          command: |
+            uv venv
+            uv pip install -e .
+      - run:
+          name: Run agent-scan inspect --json
+          command: |
+            uv run agent-scan inspect --json --dangerously-run-mcp-servers > scan.json
+      - run:
+          name: Verify Claude Code discovery
+          command: |
+            uv run python tests/ci/verify_cc_nightly_scan.py scan.json --workspace "$CIRCLE_WORKING_DIRECTORY"
+      - store_artifacts:
+          path: scan.json
+      - notify_slack_on_failure
+
+  claude-code-nightly-macos:
+    macos:
+      xcode: 15.4.0
+    resource_class: macos.m1.medium.gen1
+    environment:
+      AGENT_SCAN_ENVIRONMENT: ci
+    steps:
+      - checkout
+      - run:
+          name: Install uv
+          command: curl -LsSf https://astral.sh/uv/install.sh | sh
+      - run:
+          name: Install Claude Code nightly
+          command: |
+            curl -fsSL https://claude.ai/install.sh | bash -s nightly
+            echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$BASH_ENV"
+            source "$BASH_ENV"
+            claude --version
+      - run:
+          name: Start Claude Code in workspace (creates ~/.claude.json + projects entry)
+          command: |
+            cd "$CIRCLE_WORKING_DIRECTORY"
+            claude --print "ping" || true
+            test -f "$HOME/.claude.json"
+      - run:
+          name: Seed global / project / plugin scopes via real claude CLI
+          command: |
+            set -euo pipefail
+            STUB='uv run --no-project python -c pass'
+            claude mcp add --scope user nightly-global-mcp -- $STUB
+            claude mcp add --scope project nightly-project-mcp -- $STUB
+            claude plugin marketplace add ./tests/fixtures/cc-nightly-marketplace
+            claude plugin install nightly-test-plugin@cc-nightly
+            mkdir -p "$HOME/.claude/skills/nightly-global-skill"
+            cp tests/fixtures/cc-nightly-marketplace/_seed/SKILL.md \
+               "$HOME/.claude/skills/nightly-global-skill/SKILL.md"
+            mkdir -p .claude/skills/nightly-project-skill
+            cp tests/fixtures/cc-nightly-marketplace/_seed/SKILL.md \
+               .claude/skills/nightly-project-skill/SKILL.md
+      - run:
+          name: Install agent-scan from this branch
+          command: |
+            uv venv
+            uv pip install -e .
+      - run:
+          name: Run agent-scan inspect --json
+          command: |
+            uv run agent-scan inspect --json --dangerously-run-mcp-servers > scan.json
+      - run:
+          name: Verify Claude Code discovery
+          command: |
+            uv run python tests/ci/verify_cc_nightly_scan.py scan.json --workspace "$CIRCLE_WORKING_DIRECTORY"
+      - store_artifacts:
+          path: scan.json
+      - notify_slack_on_failure
+
+  claude-code-nightly-windows:
+    executor:
+      name: win/default
+      shell: powershell.exe
+    environment:
+      AGENT_SCAN_ENVIRONMENT: ci
+    steps:
+      - checkout
+      - run:
+          name: Install uv
+          command: irm https://astral.sh/uv/install.ps1 | iex
+      - run:
+          name: Install Claude Code nightly
+          command: |
+            irm https://claude.ai/install.ps1 | iex
+            $env:Path = "$env:USERPROFILE\.local\bin;$env:Path"
+            [Environment]::SetEnvironmentVariable("Path", $env:Path, "User")
+            claude --version
+      - run:
+          name: Start Claude Code in workspace (creates ~/.claude.json + projects entry)
+          command: |
+            Set-Location $env:CIRCLE_WORKING_DIRECTORY
+            try { claude --print "ping" } catch { }
+            if (-not (Test-Path "$env:USERPROFILE\.claude.json")) { throw "~/.claude.json was not created" }
+      - run:
+          name: Seed global / project / plugin scopes via real claude CLI
+          command: |
+            $ErrorActionPreference = "Stop"
+            $stub = @("uv", "run", "--no-project", "python", "-c", "pass")
+            claude mcp add --scope user nightly-global-mcp -- @stub
+            claude mcp add --scope project nightly-project-mcp -- @stub
+            claude plugin marketplace add ./tests/fixtures/cc-nightly-marketplace
+            claude plugin install nightly-test-plugin@cc-nightly
+            New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.claude\skills\nightly-global-skill" | Out-Null
+            Copy-Item tests/fixtures/cc-nightly-marketplace/_seed/SKILL.md `
+              "$env:USERPROFILE\.claude\skills\nightly-global-skill\SKILL.md"
+            New-Item -ItemType Directory -Force -Path ".claude\skills\nightly-project-skill" | Out-Null
+            Copy-Item tests/fixtures/cc-nightly-marketplace/_seed/SKILL.md `
+              ".claude\skills\nightly-project-skill\SKILL.md"
+      - run:
+          name: Install agent-scan from this branch
+          command: |
+            uv venv
+            uv pip install -e .
+      - run:
+          name: Run agent-scan inspect --json
+          command: |
+            uv run agent-scan inspect --json --dangerously-run-mcp-servers > scan.json
+      - run:
+          name: Verify Claude Code discovery
+          command: |
+            uv run python tests/ci/verify_cc_nightly_scan.py scan.json --workspace $env:CIRCLE_WORKING_DIRECTORY
+      - store_artifacts:
+          path: scan.json
+      - notify_slack_on_failure
+
   security-scans:
     parameters:
       mode:
@@ -125,3 +297,13 @@ workflows:
           context:
             - << pipeline.parameters.snyk-scan-context >>
             - snyk-bot-slack
+
+  nightly-claude-code-compat:
+    when: << pipeline.parameters.run-nightly-cc-test >>
+    jobs:
+      - claude-code-nightly-linux:
+          context: [claude-nightly-tokens, snyk-bot-slack]
+      - claude-code-nightly-macos:
+          context: [claude-nightly-tokens, snyk-bot-slack]
+      - claude-code-nightly-windows:
+          context: [claude-nightly-tokens, snyk-bot-slack]

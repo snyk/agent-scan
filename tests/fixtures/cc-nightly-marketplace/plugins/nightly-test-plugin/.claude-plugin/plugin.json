@@ -1,0 +1,5 @@
+{
+  "name": "nightly-test-plugin",
+  "description": "agent-scan nightly fixture: one MCP server + one skill.",
+  "version": "0.0.1"
+}

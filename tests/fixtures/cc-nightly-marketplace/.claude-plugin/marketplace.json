@@ -1,0 +1,14 @@
+{
+  "name": "cc-nightly",
+  "description": "Test marketplace for the nightly Claude Code x agent-scan CircleCI workflow.",
+  "owner": {
+    "name": "Snyk agent-scan team"
+  },
+  "plugins": [
+    {
+      "name": "nightly-test-plugin",
+      "source": "./plugins/nightly-test-plugin",
+      "description": "Ships one MCP server and one skill so agent-scan plugin-scope discovery can be exercised."
+    }
+  ]
+}
