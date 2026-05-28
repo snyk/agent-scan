@@ -9,6 +9,7 @@ remains the fallback for agents that don't have a subclass yet.
 
 import logging
 import os
+import sys
 import traceback
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
@@ -21,10 +22,14 @@ from agent_scan.models import (
     ClientToInspect,
     CouldNotParseMCPConfig,
     FileNotFoundConfig,
+    MCPConfig,
+    PluginMCPConfigFile,
     RemoteServer,
     SkillServer,
     StdioServer,
     UnknownConfigFormat,
+    VSCodeConfigFile,
+    VSCodeMCPConfig,
 )
 from agent_scan.signed_binary import check_server_signature
 from agent_scan.skill_client import inspect_skills_dir
@@ -121,8 +126,17 @@ class AgentDiscoverer(ABC):
     def __init__(self, home_directory: Path | None) -> None:
         self.home_directory = home_directory
 
-    def __init_subclass__(cls, **kwargs: object) -> None:
+    def __init_subclass__(cls, *, abstract: bool = False, **kwargs: object) -> None:
+        """Enforce a non-empty ``name`` on concrete subclasses.
+
+        Pass ``abstract=True`` (e.g. ``class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True)``)
+        for intermediate base classes that exist only to share implementation
+        with their own concrete subclasses; those don't need a ``name`` of
+        their own and won't ever be registered.
+        """
         super().__init_subclass__(**kwargs)
+        if abstract:
+            return
         if not cls.name:
             raise TypeError(f"{cls.__name__} must set a non-empty 'name' class attribute")
 
@@ -192,9 +206,8 @@ class AgentDiscoverer(ABC):
         """Validate a raw ``mcpServers`` mapping into typed Stdio/Remote server entries.
 
         Input is the *already-extracted* server map (e.g. the value of
-        ``mcpServers``). Subclasses that need format-aware whole-file parsing
-        should call this on the extracted dict, after picking the right
-        wrapper layer.
+        ``mcpServers``). For format-aware whole-file parsing (where the wrapper
+        layout differs across agents), use :meth:`_parse_mcp_file` instead.
         """
         try:
             validated = ClaudeConfigFile(mcpServers=raw)
@@ -210,6 +223,68 @@ class AgentDiscoverer(ABC):
             if isinstance(server_config, StdioServer):
                 servers[name] = check_server_signature(server_config)
         return list(servers.items())
+
+    def _parse_mcp_file(
+        self,
+        path: Path,
+        *,
+        formats: tuple[type[MCPConfig], ...] = (ClaudeConfigFile,),
+    ) -> list[tuple[str, StdioServer | RemoteServer]] | CouldNotParseMCPConfig | None:
+        """Load ``path``, try each ``MCPConfig`` subclass in order, return the first
+        that validates.
+
+        Returns:
+          * ``None`` if the file is missing, empty, or unreadable due to permissions
+            (matches ``_load_json_file`` semantics).
+          * A list of ``(name, server)`` tuples if any of ``formats`` validates the file.
+          * ``CouldNotParseMCPConfig`` if the JSON is malformed, or if none of
+            ``formats`` validates the file.
+
+        ``formats`` order matters: the first model whose ``model_validate``
+        succeeds wins. This mirrors the strategy in
+        ``mcp_client.scan_mcp_config_file``.
+        """
+        data = self._load_json_file(path)
+        if data is None:
+            return None
+        if isinstance(data, CouldNotParseMCPConfig):
+            return data
+        if not isinstance(data, dict) or not data:
+            return None
+
+        last_error: Exception | None = None
+        for model in formats:
+            try:
+                validated = model.model_validate(data)
+            except Exception as e:
+                last_error = e
+                continue
+            servers = validated.get_servers()
+            for name, server_config in servers.items():
+                if isinstance(server_config, StdioServer):
+                    servers[name] = check_server_signature(server_config)
+            return list(servers.items())
+
+        # None of the formats validated — record as parse failure.
+        logger.exception("No MCP format matched %s; last error: %s", path.as_posix(), last_error)
+        return CouldNotParseMCPConfig(
+            message=f"could not parse {path.as_posix()} as any of {[m.__name__ for m in formats]}",
+            traceback="".join(traceback.format_exception(type(last_error), last_error, last_error.__traceback__))
+            if last_error is not None
+            else "",
+            is_failure=True,
+        )
+
+    def _scan_skills_dir(self, path: Path) -> list[tuple[str, SkillServer]] | None:
+        """Return the parsed skill list for ``path`` if it's an existing directory,
+        else ``None``. Thin wrapper that hides the existence check from callers.
+        """
+        try:
+            if not path.exists() or not path.is_dir():
+                return None
+        except PermissionError:
+            return None
+        return inspect_skills_dir(str(path))
 
 
 class ClaudeCodeDiscoverer(AgentDiscoverer):
@@ -439,8 +514,275 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         return self._load_json_file(expand_path(Path(self._mcp_config_path), self.home_directory))
 
 
+# --- VSCode family ----------------------------------------------------------
+
+# Cap traversal into ``<userdata>/User/workspaceStorage/``. Layout is
+# ``<workspaceStorage>/<hash>/workspace.json`` so depth 2 is sufficient.
+_MAX_WORKSPACE_STORAGE_DEPTH = 2
+
+# Format-detection order for VSCode-family ``mcp.json`` / ``settings.json``
+# files. First model whose ``model_validate`` succeeds wins. Order matters:
+# ``ClaudeConfigFile`` (wrapped ``mcpServers``) is the most common across forks
+# and must be tried before ``PluginMCPConfigFile`` (fully flat), which is the
+# most permissive and would otherwise greedily match any ``{name: ...}`` map.
+_VSCODE_FAMILY_FORMATS: tuple[type[MCPConfig], ...] = (
+    ClaudeConfigFile,
+    VSCodeConfigFile,
+    VSCodeMCPConfig,
+    PluginMCPConfigFile,
+)
+
+
+class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
+    """Shared layout for VSCode and its forks (Cursor, Windsurf, Kiro, Antigravity).
+
+    Subclasses override path constants only — the discovery logic is identical
+    across the family:
+
+    * ``_install_paths`` — any one existing means the agent is installed.
+    * ``_user_data_dir_name`` — name of the per-platform userdata folder under
+      ``~/Library/Application Support/`` (macOS), ``~/.config/`` (Linux), or
+      ``~/AppData/Roaming/`` (Windows). Empty means the agent has no userdata
+      tree (Kiro, Antigravity).
+    * ``_user_mcp_file_paths`` — home-relative paths to standalone MCP config
+      files (e.g. ``~/.vscode/mcp.json``).
+    * ``_user_settings_file_paths_template`` — userdata-relative paths to
+      ``settings.json`` files that carry MCP under a nested ``mcp.servers``
+      key. ``{userdata}`` is substituted with the resolved userdata dir.
+    * ``_userdata_user_mcp_file`` — userdata-relative path of a standalone
+      ``mcp.json`` under ``<userdata>/User/`` (set on subclasses that ship one).
+    * ``_workspace_mcp_relative`` — paths *inside* an opened workspace that
+      hold per-workspace MCP config (e.g. ``.vscode/mcp.json``).
+    * ``_skills_dir_paths`` — home-relative paths to skill directories.
+
+    Format detection across all MCP files in the family is via
+    :attr:`_VSCODE_FAMILY_FORMATS` (passed to :meth:`_parse_mcp_file`), so a
+    single subclass can mix wrapped and flat config files without special
+    casing.
+    """
+
+    name: str = ""
+
+    # Subclass overrides.
+    _install_paths: tuple[str, ...] = ()
+    _user_data_dir_name: str = ""
+    _user_mcp_file_paths: tuple[str, ...] = ()
+    _userdata_user_mcp_file: str = ""  # e.g. "User/mcp.json"
+    _user_settings_file: str = ""  # e.g. "User/settings.json"
+    _workspace_mcp_relative: tuple[str, ...] = ()
+    _skills_dir_paths: tuple[str, ...] = ()
+
+    # --- public (override AgentDiscoverer abstracts) ---
+
+    def client_exists(self) -> str | None:
+        for raw in self._install_paths:
+            path = expand_path(Path(raw), self.home_directory)
+            try:
+                if path.exists():
+                    return path.as_posix()
+            except PermissionError:
+                logger.warning("Permission error for path %s", path.as_posix())
+        # The platform-specific userdata dir is a secondary signal — if the
+        # explicit ``_install_paths`` didn't match but the IDE's userdata tree
+        # is present, the IDE has run at least once on this machine.
+        userdata = self._user_data_dir()
+        if userdata is not None:
+            try:
+                if userdata.exists():
+                    return userdata.as_posix()
+            except PermissionError:
+                logger.warning("Permission error for path %s", userdata.as_posix())
+        return None
+
+    def discover_mcp_servers(self) -> McpConfigsResult:
+        result: McpConfigsResult = {}
+        result.update(self._discover_user_mcp_files())
+        result.update(self._discover_user_settings_mcp())
+        result.update(self._discover_workspace_mcp())
+        return result
+
+    def discover_skills(self) -> SkillsDirsResult:
+        result: SkillsDirsResult = {}
+        for raw in self._skills_dir_paths:
+            path = expand_path(Path(raw), self.home_directory)
+            entries = self._scan_skills_dir(path)
+            if entries is not None:
+                result[path.as_posix()] = entries
+        return result
+
+    # --- platform-aware userdata helper ---
+
+    def _user_data_dir(self) -> Path | None:
+        """Resolve ``<userdata>/<_user_data_dir_name>`` for the current platform.
+
+        Returns ``None`` if the subclass doesn't ship a userdata folder
+        (Kiro, Antigravity) or the platform is unsupported.
+        """
+        if not self._user_data_dir_name:
+            return None
+        if sys.platform == "darwin":
+            base = Path(f"~/Library/Application Support/{self._user_data_dir_name}")
+        elif sys.platform in ("linux", "linux2"):
+            base = Path(f"~/.config/{self._user_data_dir_name}")
+        elif sys.platform == "win32":
+            base = Path(f"~/AppData/Roaming/{self._user_data_dir_name}")
+        else:
+            return None
+        return expand_path(base, self.home_directory)
+
+    # --- private: MCP discovery ---
+
+    def _discover_user_mcp_files(self) -> McpConfigsResult:
+        """Parse every file in ``_user_mcp_file_paths`` plus the userdata standalone ``mcp.json``."""
+        result: McpConfigsResult = {}
+        paths: list[Path] = [expand_path(Path(raw), self.home_directory) for raw in self._user_mcp_file_paths]
+        if self._userdata_user_mcp_file:
+            userdata = self._user_data_dir()
+            if userdata is not None:
+                paths.append(userdata / self._userdata_user_mcp_file)
+
+        for path in paths:
+            parsed = self._parse_mcp_file(path, formats=_VSCODE_FAMILY_FORMATS)
+            if parsed is None:
+                continue
+            result[path.as_posix()] = parsed
+        return result
+
+    def _discover_user_settings_mcp(self) -> McpConfigsResult:
+        """Parse ``<userdata>/<_user_settings_file>`` (e.g. ``User/settings.json``).
+
+        ``settings.json`` carries MCP under a nested ``mcp.servers`` key — the
+        ``VSCodeConfigFile`` model handles that shape. We still pass the full
+        family format tuple so a settings file with only ``mcpServers`` (e.g.
+        from a fork that diverges) is still recognized.
+        """
+        if not self._user_settings_file:
+            return {}
+        userdata = self._user_data_dir()
+        if userdata is None:
+            return {}
+        path = userdata / self._user_settings_file
+        parsed = self._parse_mcp_file(path, formats=_VSCODE_FAMILY_FORMATS)
+        if parsed is None:
+            return {}
+        return {path.as_posix(): parsed}
+
+    def _discover_workspace_mcp(self) -> McpConfigsResult:
+        """Walk ``<userdata>/User/workspaceStorage/<hash>/workspace.json``, follow
+        each ``folder`` URL to an opened workspace, then look for per-workspace
+        MCP files (e.g. ``<workspace>/.vscode/mcp.json``).
+
+        Failures inside the workspaceStorage tree (malformed ``workspace.json``,
+        unreadable hash dirs) are logged and skipped — they're VSCode-internal
+        state, not user-authored MCP files, so they must NOT surface as
+        ``CouldNotParseMCPConfig``.
+        """
+        result: McpConfigsResult = {}
+        userdata = self._user_data_dir()
+        if userdata is None or not self._workspace_mcp_relative:
+            return result
+        workspace_storage = userdata / "User" / "workspaceStorage"
+        if not workspace_storage.exists():
+            return result
+
+        for workspace_file in _walk_under_depth(
+            workspace_storage, "workspace.json", _MAX_WORKSPACE_STORAGE_DEPTH, want_file=True
+        ):
+            workspace_root = self._workspace_root_from(workspace_file)
+            if workspace_root is None:
+                continue
+            for rel in self._workspace_mcp_relative:
+                mcp_path = workspace_root / rel
+                parsed = self._parse_mcp_file(mcp_path, formats=_VSCODE_FAMILY_FORMATS)
+                if parsed is None:
+                    continue
+                result[mcp_path.as_posix()] = parsed
+        return result
+
+    def _workspace_root_from(self, workspace_json: Path) -> Path | None:
+        """Read a ``workspace.json`` and return its ``folder`` field as a Path.
+
+        Returns ``None`` for malformed JSON, missing ``folder`` (e.g. multi-root
+        workspaces using ``configuration``), or unparseable file URIs.
+        """
+        try:
+            data = self._load_json_file(workspace_json)
+        except Exception:
+            logger.exception("Could not read %s", workspace_json.as_posix())
+            return None
+        if not isinstance(data, dict):
+            return None
+        folder = data.get("folder")
+        if not isinstance(folder, str):
+            return None
+        if folder.startswith("file://"):
+            folder = folder[len("file://") :]
+        return Path(folder)
+
+
+# --- VSCode family: concrete subclasses ---
+
+
+class VSCodeDiscoverer(VSCodeFamilyDiscoverer):
+    name = "vscode"
+    _user_data_dir_name = "Code"
+    _install_paths = ("~/.vscode",)
+    _user_mcp_file_paths = ("~/.vscode/mcp.json",)
+    _userdata_user_mcp_file = "User/mcp.json"
+    _user_settings_file = "User/settings.json"
+    _workspace_mcp_relative = (".vscode/mcp.json",)
+    _skills_dir_paths = ("~/.copilot/skills",)
+
+
+class CursorDiscoverer(VSCodeFamilyDiscoverer):
+    name = "cursor"
+    _user_data_dir_name = "Cursor"
+    _install_paths = ("~/.cursor",)
+    _user_mcp_file_paths = ("~/.cursor/mcp.json",)
+    _userdata_user_mcp_file = "User/mcp.json"
+    _user_settings_file = "User/settings.json"
+    _workspace_mcp_relative = (".cursor/mcp.json",)
+    _skills_dir_paths = ("~/.cursor/skills",)
+
+
+class WindsurfDiscoverer(VSCodeFamilyDiscoverer):
+    name = "windsurf"
+    _user_data_dir_name = "Windsurf"
+    # ``~/.codeium`` alone is the Codeium VSCode *plugin*; the IDE proper
+    # lives under ``~/.codeium/windsurf``. Use the deeper path so we don't
+    # report Windsurf as installed for plugin-only users.
+    _install_paths = ("~/.codeium/windsurf",)
+    _user_mcp_file_paths = ("~/.codeium/windsurf/mcp_config.json",)
+    _user_settings_file = "User/settings.json"
+    _workspace_mcp_relative = (".windsurf/mcp.json",)
+    _skills_dir_paths = ("~/.codeium/windsurf/skills",)
+
+
+class KiroDiscoverer(VSCodeFamilyDiscoverer):
+    name = "kiro"
+    # Kiro doesn't follow the platform-specific userdata layout (no
+    # ``~/Library/Application Support/Kiro`` observed); everything lives
+    # under ``~/.kiro``.
+    _user_data_dir_name = ""
+    _install_paths = ("~/.kiro",)
+    _user_mcp_file_paths = ("~/.kiro/settings/mcp.json",)
+
+
+class AntigravityDiscoverer(VSCodeFamilyDiscoverer):
+    name = "antigravity"
+    # Same rationale as Windsurf: ``~/.gemini`` alone is the Gemini CLI.
+    _user_data_dir_name = ""
+    _install_paths = ("~/.gemini/antigravity",)
+    _user_mcp_file_paths = ("~/.gemini/antigravity/mcp_config.json",)
+
+
 DISCOVERERS: dict[str, type[AgentDiscoverer]] = {
     ClaudeCodeDiscoverer.name: ClaudeCodeDiscoverer,
+    VSCodeDiscoverer.name: VSCodeDiscoverer,
+    CursorDiscoverer.name: CursorDiscoverer,
+    WindsurfDiscoverer.name: WindsurfDiscoverer,
+    KiroDiscoverer.name: KiroDiscoverer,
+    AntigravityDiscoverer.name: AntigravityDiscoverer,
 }
 
 
