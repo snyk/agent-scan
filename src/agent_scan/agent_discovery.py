@@ -546,9 +546,9 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
       tree (Kiro, Antigravity).
     * ``_user_mcp_file_paths`` — home-relative paths to standalone MCP config
       files (e.g. ``~/.vscode/mcp.json``).
-    * ``_user_settings_file_paths_template`` — userdata-relative paths to
-      ``settings.json`` files that carry MCP under a nested ``mcp.servers``
-      key. ``{userdata}`` is substituted with the resolved userdata dir.
+    * ``_user_settings_file`` — userdata-relative path of a ``settings.json``
+      file that carries MCP under a nested ``mcp.servers`` key (resolved
+      against the platform-specific userdata dir, not the home dir).
     * ``_userdata_user_mcp_file`` — userdata-relative path of a standalone
       ``mcp.json`` under ``<userdata>/User/`` (set on subclasses that ship one).
     * ``_workspace_mcp_relative`` — paths *inside* an opened workspace that
@@ -703,13 +703,16 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         """Read a ``workspace.json`` and return its ``folder`` field as a Path.
 
         Returns ``None`` for malformed JSON, missing ``folder`` (e.g. multi-root
-        workspaces using ``configuration``), or unparseable file URIs.
+        workspaces using ``configuration``), or unparseable file URIs. The
+        ``folder`` field is a ``file://`` URI where path segments are
+        percent-encoded (VSCode stores e.g. ``My%20Projects`` for paths with
+        spaces) — we must decode before constructing the ``Path``, otherwise
+        the per-workspace MCP lookup would silently miss any workspace whose
+        path contains a special character.
         """
-        try:
-            data = self._load_json_file(workspace_json)
-        except Exception:
-            logger.exception("Could not read %s", workspace_json.as_posix())
-            return None
+        from urllib.parse import unquote
+
+        data = self._load_json_file(workspace_json)
         if not isinstance(data, dict):
             return None
         folder = data.get("folder")
@@ -717,7 +720,7 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
             return None
         if folder.startswith("file://"):
             folder = folder[len("file://") :]
-        return Path(folder)
+        return Path(unquote(folder))
 
 
 # --- VSCode family: concrete subclasses ---

@@ -1886,6 +1886,30 @@ def test_vscode_discoverer_workspace_storage_skips_malformed_workspace_json(tmp_
     assert any(k.endswith("/good-repo/.vscode/mcp.json") for k in mcp_configs)
 
 
+def test_vscode_discoverer_workspace_storage_url_decodes_folder_path(tmp_path):
+    """VSCode stores ``folder`` percent-encoded (e.g. ``My%20Projects``); the discoverer must
+    decode before resolving, otherwise workspaces with spaces or special chars are silently missed."""
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    workspace_storage = _userdata(discoverer) / "User" / "workspaceStorage"
+    workspace_hash = workspace_storage / "h"
+    workspace_hash.mkdir(parents=True)
+
+    # Workspace with a literal space in the name; the file:// URL encodes it as %20.
+    workspace = tmp_path / "My Projects" / "repo"
+    workspace.mkdir(parents=True)
+    (workspace / ".vscode").mkdir()
+    (workspace / ".vscode" / "mcp.json").write_text('{"servers": {"s": {"command": "x"}}}')
+
+    encoded = workspace.as_posix().replace(" ", "%20")
+    (workspace_hash / "workspace.json").write_text(f'{{"folder": "file://{encoded}"}}')
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    assert any(k.endswith("/My Projects/repo/.vscode/mcp.json") for k in mcp_configs)
+
+
 def test_vscode_discoverer_workspace_storage_skips_when_folder_key_missing(tmp_path):
     """A ``workspace.json`` without a ``folder`` key (e.g. multi-root) is skipped."""
     from agent_scan.agent_discovery import VSCodeDiscoverer
