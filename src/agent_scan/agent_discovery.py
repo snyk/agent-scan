@@ -14,6 +14,8 @@ import traceback
 from abc import ABC, abstractmethod
 from collections.abc import Iterator
 from pathlib import Path
+from urllib.parse import unquote, urlparse
+from urllib.request import url2pathname
 
 import pyjson5
 
@@ -709,9 +711,13 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         spaces) — we must decode before constructing the ``Path``, otherwise
         the per-workspace MCP lookup would silently miss any workspace whose
         path contains a special character.
-        """
-        from urllib.parse import unquote
 
+        ``url2pathname`` is platform-aware: on POSIX, ``file:///home/user/repo``
+        becomes ``/home/user/repo``; on Windows, ``file:///C:/Users/me/repo``
+        becomes ``C:\\Users\\me\\repo`` (dropping the URL artifact slash before
+        the drive letter). Naïve ``file://`` stripping would leave
+        ``/C:/Users/me/repo`` on Windows, which ``Path`` won't resolve correctly.
+        """
         data = self._load_json_file(workspace_json)
         if not isinstance(data, dict):
             return None
@@ -719,7 +725,7 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         if not isinstance(folder, str):
             return None
         if folder.startswith("file://"):
-            folder = folder[len("file://") :]
+            return Path(url2pathname(urlparse(folder).path))
         return Path(unquote(folder))
 
 

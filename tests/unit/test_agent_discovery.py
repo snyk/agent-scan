@@ -1926,6 +1926,39 @@ def test_vscode_discoverer_workspace_storage_skips_when_folder_key_missing(tmp_p
     assert mcp_configs == {}
 
 
+def test_vscode_discoverer_workspace_root_handles_windows_file_uri(tmp_path, monkeypatch):
+    """Windows VSCode emits ``file:///C:/Users/me/repo`` — the leading ``/`` before the
+    drive letter is a URL artifact, not a real path component. Naïve ``file://`` stripping
+    leaves ``/C:/Users/me/repo``, which ``Path`` does not interpret as ``C:\\Users\\me\\repo``
+    on Windows. ``_workspace_root_from`` must delegate to ``urllib.request.url2pathname``
+    so the URL is converted correctly per-platform.
+
+    We simulate Windows by patching the module-level ``url2pathname`` binding to the
+    pure-Python ``nturl2path`` implementation (importable on every platform).
+    """
+    import nturl2path
+    from pathlib import Path
+
+    from agent_scan import agent_discovery
+
+    monkeypatch.setattr(agent_discovery, "url2pathname", nturl2path.url2pathname, raising=False)
+
+    discoverer = agent_discovery.VSCodeDiscoverer(tmp_path)
+    workspace_json = tmp_path / "workspace.json"
+    workspace_json.write_text('{"folder": "file:///C:/Users/me/repo"}')
+
+    root = discoverer._workspace_root_from(workspace_json)
+
+    assert root is not None
+    # nturl2path drops the URL's leading slash before drive letters and converts
+    # ``/`` to ``\``; we should get an equivalent native Path back.
+    expected = Path(nturl2path.url2pathname("/C:/Users/me/repo"))
+    assert root == expected
+    # And specifically NOT the buggy ``/C:/Users/me/repo`` shape that naïve
+    # ``file://`` stripping would produce.
+    assert "/C:" not in root.as_posix()
+
+
 def test_cursor_discoverer_walks_workspace_storage(tmp_path):
     """Cursor's workspaceStorage layout mirrors VSCode's; per-workspace MCP lives under ``.cursor/mcp.json``."""
     from agent_scan.agent_discovery import CursorDiscoverer
