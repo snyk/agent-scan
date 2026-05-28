@@ -288,6 +288,39 @@ class AgentDiscoverer(ABC):
             return None
         return inspect_skills_dir(str(path))
 
+    # --- shared project-folder enumeration (used by both Claude Code and the VSCode family) ---
+
+    def _discover_project_folders(self) -> list[Path]:
+        """Return the project roots this agent has opened.
+
+        Each subclass surfaces them from its own source of truth: Claude Code
+        reads the ``projects`` map in ``~/.claude.json``; the VSCode family
+        walks ``<userdata>/User/workspaceStorage``. Discoverers without a
+        project concept return ``[]`` so the ancestor walk is a no-op.
+        """
+        return []
+
+    def _project_paths_with_ancestors(self) -> list[Path]:
+        """Project roots plus every ancestor up to filesystem root, deduplicated.
+
+        Walking up lets project-scope MCP and skills discovery pick up config
+        living in any parent folder of an opened project (e.g. a monorepo root
+        that contains many project subdirectories).
+        """
+        seen: set[Path] = set()
+        result: list[Path] = []
+        for project_path in self._discover_project_folders():
+            cur = project_path
+            while True:
+                if cur not in seen:
+                    seen.add(cur)
+                    result.append(cur)
+                parent = cur.parent
+                if parent == cur:
+                    break
+                cur = parent
+        return result
+
 
 class ClaudeCodeDiscoverer(AgentDiscoverer):
     """Claude Code discovery: ``~/.claude.json`` + ``~/.claude/skills/`` + per-project scopes.
@@ -352,28 +385,6 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         if not isinstance(projects, dict):
             return []
         return [Path(p) for p in projects if isinstance(p, str)]
-
-    def _project_paths_with_ancestors(self) -> list[Path]:
-        """Project roots plus every ancestor up to filesystem root, deduplicated.
-
-        Walking up lets project-scope MCP and skills discovery pick up
-        ``.mcp.json`` or ``.claude/skills`` directories living in any
-        parent folder of a registered project (e.g. a monorepo root that
-        contains many project subdirectories).
-        """
-        seen: set[Path] = set()
-        result: list[Path] = []
-        for project_path in self._discover_project_folders():
-            cur = project_path
-            while True:
-                if cur not in seen:
-                    seen.add(cur)
-                    result.append(cur)
-                parent = cur.parent
-                if parent == cur:
-                    break
-                cur = parent
-        return result
 
     # --- private: MCP discovery ---
 
@@ -555,6 +566,8 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
       ``mcp.json`` under ``<userdata>/User/`` (set on subclasses that ship one).
     * ``_workspace_mcp_relative`` — paths *inside* an opened workspace that
       hold per-workspace MCP config (e.g. ``.vscode/mcp.json``).
+    * ``_workspace_skills_relative`` — paths *inside* an opened workspace
+      that hold per-workspace skill directories (e.g. ``.cursor/skills``).
     * ``_skills_dir_paths`` — home-relative paths to skill directories.
 
     Format detection across all MCP files in the family is via
@@ -572,6 +585,7 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
     _userdata_user_mcp_file: str = ""  # e.g. "User/mcp.json"
     _user_settings_file: str = ""  # e.g. "User/settings.json"
     _workspace_mcp_relative: tuple[str, ...] = ()
+    _workspace_skills_relative: tuple[str, ...] = ()
     _skills_dir_paths: tuple[str, ...] = ()
 
     # --- public (override AgentDiscoverer abstracts) ---
@@ -610,6 +624,7 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
             entries = self._scan_skills_dir(path)
             if entries is not None:
                 result[path.as_posix()] = entries
+        result.update(self._discover_workspace_skills())
         return result
 
     # --- platform-aware userdata helper ---
@@ -669,36 +684,66 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
             return {}
         return {path.as_posix(): parsed}
 
-    def _discover_workspace_mcp(self) -> McpConfigsResult:
-        """Walk ``<userdata>/User/workspaceStorage/<hash>/workspace.json``, follow
-        each ``folder`` URL to an opened workspace, then look for per-workspace
-        MCP files (e.g. ``<workspace>/.vscode/mcp.json``).
+    def _discover_project_folders(self) -> list[Path]:
+        """Resolve each opened workspace from ``<userdata>/User/workspaceStorage``.
 
-        Failures inside the workspaceStorage tree (malformed ``workspace.json``,
-        unreadable hash dirs) are logged and skipped — they're VSCode-internal
-        state, not user-authored MCP files, so they must NOT surface as
-        ``CouldNotParseMCPConfig``.
+        Each hash dir under ``workspaceStorage`` carries a ``workspace.json``
+        whose ``folder`` field is a ``file://`` URI pointing at the workspace
+        root. Failures (malformed JSON, missing ``folder``, multi-root) are
+        skipped silently — these are IDE-internal state, not user config.
         """
-        result: McpConfigsResult = {}
         userdata = self._user_data_dir()
-        if userdata is None or not self._workspace_mcp_relative:
-            return result
+        if userdata is None:
+            return []
         workspace_storage = userdata / "User" / "workspaceStorage"
         if not workspace_storage.exists():
-            return result
+            return []
 
+        folders: list[Path] = []
         for workspace_file in _walk_under_depth(
             workspace_storage, "workspace.json", _MAX_WORKSPACE_STORAGE_DEPTH, want_file=True
         ):
             workspace_root = self._workspace_root_from(workspace_file)
-            if workspace_root is None:
-                continue
+            if workspace_root is not None:
+                folders.append(workspace_root)
+        return folders
+
+    def _discover_workspace_mcp(self) -> McpConfigsResult:
+        """For each opened workspace (and every ancestor up to filesystem root),
+        scan the workspace-relative MCP paths.
+
+        Walking ancestors mirrors Claude Code's behavior and lets a monorepo
+        keep its MCP config at the repo root even when Cursor/VSCode opens a
+        subdirectory.
+        """
+        result: McpConfigsResult = {}
+        if not self._workspace_mcp_relative:
+            return result
+        for path in self._project_paths_with_ancestors():
             for rel in self._workspace_mcp_relative:
-                mcp_path = workspace_root / rel
+                mcp_path = path / rel
                 parsed = self._parse_mcp_file(mcp_path, formats=_VSCODE_FAMILY_FORMATS)
                 if parsed is None:
                     continue
                 result[mcp_path.as_posix()] = parsed
+        return result
+
+    # --- private: workspace skills discovery ---
+
+    def _discover_workspace_skills(self) -> SkillsDirsResult:
+        """For each opened workspace (and every ancestor), scan each entry in
+        ``_workspace_skills_relative`` and surface any skill dirs found.
+        """
+        result: SkillsDirsResult = {}
+        if not self._workspace_skills_relative:
+            return result
+        for path in self._project_paths_with_ancestors():
+            for rel in self._workspace_skills_relative:
+                skills_path = path / rel
+                entries = self._scan_skills_dir(skills_path)
+                if entries is None:
+                    continue
+                result[skills_path.as_posix()] = entries
         return result
 
     def _workspace_root_from(self, workspace_json: Path) -> Path | None:
@@ -751,6 +796,14 @@ class CursorDiscoverer(VSCodeFamilyDiscoverer):
     _userdata_user_mcp_file = "User/mcp.json"
     _user_settings_file = "User/settings.json"
     _workspace_mcp_relative = (".cursor/mcp.json",)
+    # Cursor's docs list two primary workspace skill paths and two legacy
+    # compatibility paths (Claude Code and Codex). See cursor.com/docs/skills.
+    _workspace_skills_relative = (
+        ".cursor/skills",
+        ".agents/skills",
+        ".claude/skills",
+        ".codex/skills",
+    )
     _skills_dir_paths = ("~/.cursor/skills",)
 
 

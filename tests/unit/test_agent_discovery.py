@@ -2135,3 +2135,153 @@ def test_vscode_user_data_dir_returns_platform_specific_path(tmp_path):
         assert user_data.as_posix().endswith("/.config/Code")
     elif sys.platform == "win32":
         assert user_data.as_posix().endswith("/AppData/Roaming/Code")
+
+
+# --- shared ancestor-walk now lives on AgentDiscoverer ---
+
+
+def _setup_cursor_workspace(tmp_path, workspace_relpath):
+    """Helper: create a Cursor install with one opened workspace at ``tmp_path/<workspace_relpath>``."""
+    from agent_scan.agent_discovery import CursorDiscoverer
+
+    discoverer = CursorDiscoverer(tmp_path)
+    (tmp_path / ".cursor").mkdir(exist_ok=True)
+    workspace_storage = _userdata(discoverer) / "User" / "workspaceStorage"
+    workspace_hash = workspace_storage / "ws"
+    workspace_hash.mkdir(parents=True)
+    workspace = tmp_path / workspace_relpath
+    workspace.mkdir(parents=True)
+    (workspace_hash / "workspace.json").write_text(f'{{"folder": "file://{workspace.as_posix()}"}}')
+    return discoverer, workspace
+
+
+def test_project_paths_with_ancestors_lives_on_agent_discoverer_base():
+    """The ancestor walk is shared by every discoverer, so it lives on the abstract base."""
+    from agent_scan.agent_discovery import AgentDiscoverer
+
+    assert "_project_paths_with_ancestors" in AgentDiscoverer.__dict__
+
+
+def test_vscode_family_project_paths_with_ancestors_uses_workspace_storage(tmp_path):
+    """For VSCode family, project roots come from workspaceStorage, then fan out into ancestors."""
+    discoverer, workspace = _setup_cursor_workspace(tmp_path, "deep/nested/repo")
+
+    paths = set(discoverer._project_paths_with_ancestors())
+
+    # Workspace + every ancestor up to filesystem root.
+    cur = workspace
+    while True:
+        assert cur in paths
+        if cur.parent == cur:
+            break
+        cur = cur.parent
+
+
+def test_vscode_family_project_paths_empty_when_no_workspaces(tmp_path):
+    """No workspaceStorage entries means no project paths and no ancestors."""
+    from agent_scan.agent_discovery import CursorDiscoverer
+
+    (tmp_path / ".cursor").mkdir()
+    assert CursorDiscoverer(tmp_path)._project_paths_with_ancestors() == []
+
+
+# --- Cursor workspace-scoped skills discovery ---
+
+
+def _write_skill(dir_path, name):
+    dir_path.mkdir(parents=True, exist_ok=True)
+    skill = dir_path / name
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(f"---\nname: {name}\ndescription: t\n---\n\nbody\n")
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [".cursor/skills", ".agents/skills", ".claude/skills", ".codex/skills"],
+)
+def test_cursor_discovers_workspace_skills_at_each_supported_relative_path(tmp_path, relative):
+    """Cursor reads workspace-level skills from .cursor/skills, .agents/skills, .claude/skills, .codex/skills."""
+    discoverer, workspace = _setup_cursor_workspace(tmp_path, "proj")
+    _write_skill(workspace / relative, "ws-skill")
+
+    skills_dirs = discoverer.discover_skills()
+
+    matching = [k for k in skills_dirs if k.endswith(f"/proj/{relative}")]
+    assert len(matching) == 1
+    entries = skills_dirs[matching[0]]
+    assert isinstance(entries, list)
+    skill_name, skill = entries[0]
+    assert skill_name == "ws-skill"
+    assert isinstance(skill, SkillServer)
+
+
+def test_cursor_workspace_skills_picked_up_from_ancestor(tmp_path):
+    """A skills dir at an ancestor of the opened workspace must be surfaced (monorepo case)."""
+    discoverer, workspace = _setup_cursor_workspace(tmp_path, "monorepo/packages/web")
+    # Skills live at the monorepo root, not inside the opened subpackage.
+    _write_skill(tmp_path / "monorepo" / ".cursor" / "skills", "root-skill")
+
+    skills_dirs = discoverer.discover_skills()
+
+    assert any(k.endswith("/monorepo/.cursor/skills") for k in skills_dirs)
+
+
+def test_cursor_workspace_skills_dedups_shared_ancestor(tmp_path):
+    """Two opened workspaces under a shared ancestor with one skills dir → single entry."""
+    from agent_scan.agent_discovery import CursorDiscoverer
+
+    discoverer = CursorDiscoverer(tmp_path)
+    (tmp_path / ".cursor").mkdir()
+    workspace_storage = _userdata(discoverer) / "User" / "workspaceStorage"
+
+    for slug, sub in (("ws-a", "monorepo/a"), ("ws-b", "monorepo/b")):
+        wh = workspace_storage / slug
+        wh.mkdir(parents=True)
+        ws = tmp_path / sub
+        ws.mkdir(parents=True)
+        (wh / "workspace.json").write_text(f'{{"folder": "file://{ws.as_posix()}"}}')
+
+    _write_skill(tmp_path / "monorepo" / ".cursor" / "skills", "shared")
+
+    skills_dirs = discoverer.discover_skills()
+
+    keys = [k for k in skills_dirs if k.endswith("/monorepo/.cursor/skills")]
+    assert len(keys) == 1
+
+
+def test_cursor_workspace_skills_missing_dir_does_not_emit_key(tmp_path):
+    """A workspace without any of the supported relative skill paths produces no workspace skill entries."""
+    discoverer, _ = _setup_cursor_workspace(tmp_path, "bare")
+
+    skills_dirs = discoverer.discover_skills()
+
+    # No `bare/...` keys should be present — the workspace has no skills.
+    assert not any("/bare/" in k for k in skills_dirs)
+
+
+def test_cursor_user_level_skills_still_discovered(tmp_path):
+    """Lifting the ancestor walk must not regress the existing ``~/.cursor/skills`` discovery."""
+    from agent_scan.agent_discovery import CursorDiscoverer
+
+    (tmp_path / ".cursor").mkdir()
+    _write_skill(tmp_path / ".cursor" / "skills", "user-skill")
+
+    skills_dirs = CursorDiscoverer(tmp_path).discover_skills()
+
+    assert any(k.endswith("/.cursor/skills") for k in skills_dirs)
+
+
+# --- Cursor workspace-scoped MCP picks up ancestor .cursor/mcp.json ---
+
+
+def test_cursor_workspace_mcp_picked_up_from_ancestor(tmp_path):
+    """``.cursor/mcp.json`` at an ancestor of the opened workspace is included — same as Claude Code's project walk."""
+    discoverer, workspace = _setup_cursor_workspace(tmp_path, "monorepo/apps/web")
+    ancestor_mcp = tmp_path / "monorepo" / ".cursor"
+    ancestor_mcp.mkdir()
+    (ancestor_mcp / "mcp.json").write_text('{"mcpServers": {"root-mcp": {"command": "r"}}}')
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    matching = [k for k in mcp_configs if k.endswith("/monorepo/.cursor/mcp.json")]
+    assert len(matching) == 1
