@@ -1,5 +1,6 @@
 """Tests for the per-agent discovery ABC (agent_discovery module)."""
 
+import sys
 from unittest.mock import patch
 
 import pytest
@@ -867,10 +868,16 @@ def test_agent_discoverer_subclass_without_name_raises():
 # --- DISCOVERERS registry + find_discoverers ---
 
 
-def test_DISCOVERERS_registers_only_claude_code():
+def test_DISCOVERERS_registers_claude_code_and_vscode_family():
+    """Registry must contain Claude Code plus the VSCode family discoverers.
+
+    The exact set is asserted (rather than just inclusion) so adding a new
+    discoverer requires a deliberate test update — silent additions would
+    affect every multi-user scan.
+    """
     from agent_scan.agent_discovery import DISCOVERERS
 
-    assert set(DISCOVERERS) == {"claude code"}
+    assert set(DISCOVERERS) == {"claude code", "vscode", "cursor", "windsurf", "kiro", "antigravity"}
 
 
 def test_find_discoverers_returns_claude_code_when_installed(tmp_path):
@@ -1583,3 +1590,491 @@ async def test_discover_clients_to_inspect_propagates_all_users_flag_to_home_enu
         f"Pipeline must pass all_users through unchanged to get_readable_home_directories; "
         f"got call sequence {captured['calls']}"
     )
+
+
+# =============================================================================
+# VSCode family discoverers (VSCode, Cursor, Windsurf, Kiro, Antigravity).
+# =============================================================================
+#
+# The base class ``VSCodeFamilyDiscoverer`` encodes a shared layout: an install
+# directory, user-scope MCP file(s), an optional ``settings.json`` with nested
+# ``mcp.servers``, an optional workspaceStorage tree that points at opened
+# workspace folders, and an optional skills directory.  Each concrete subclass
+# only overrides path constants.  The tests below exercise the base behavior
+# through the subclasses (no need for a synthetic "fake" subclass) because the
+# real subclasses are tiny and the assertions are sharper that way.
+#
+# Tests use ``tmp_path`` as the discoverer's ``home_directory`` and lay out
+# fixtures relative to it.  Where the layout is platform-specific
+# (``~/Library/Application Support/...`` on macOS, ``~/.config/...`` on Linux,
+# ``~/AppData/Roaming/...`` on Windows) we ask the discoverer itself for its
+# resolved ``_user_data_dir`` so the test stays platform-agnostic.
+
+
+def _userdata(discoverer):
+    """Resolve the discoverer's per-platform ``<userdata>`` directory.
+
+    Wrapping the call here keeps the platform branch out of every test body —
+    if a discoverer has no userdata dir (e.g. Kiro/Antigravity, which only
+    use dotfile paths) this returns ``None``.
+    """
+    return discoverer._user_data_dir()
+
+
+# --- shared base-class behavior: install detection ---
+
+
+def test_vscode_discoverer_detects_dotfile_install(tmp_path):
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    (tmp_path / ".vscode").mkdir()
+
+    result = VSCodeDiscoverer(tmp_path).client_exists()
+
+    assert result is not None
+    assert result.endswith("/.vscode")
+
+
+def test_vscode_discoverer_detects_userdata_install(tmp_path):
+    """Even without ``~/.vscode``, the userdata dir alone is enough to say VSCode is installed."""
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    user_data = _userdata(discoverer)
+    user_data.mkdir(parents=True)
+
+    result = discoverer.client_exists()
+
+    assert result is not None
+
+
+def test_vscode_discoverer_returns_none_when_absent(tmp_path):
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    assert VSCodeDiscoverer(tmp_path).client_exists() is None
+
+
+def test_cursor_discoverer_detects_installation(tmp_path):
+    from agent_scan.agent_discovery import CursorDiscoverer
+
+    (tmp_path / ".cursor").mkdir()
+
+    assert CursorDiscoverer(tmp_path).client_exists() is not None
+
+
+def test_windsurf_discoverer_requires_windsurf_subdir(tmp_path):
+    """``~/.codeium`` alone is the Codeium VSCode plugin — only ``~/.codeium/windsurf`` proves the Windsurf IDE is installed."""
+    from agent_scan.agent_discovery import WindsurfDiscoverer
+
+    # Just ``~/.codeium`` (plugin-only) — must NOT detect as Windsurf.
+    (tmp_path / ".codeium").mkdir()
+    assert WindsurfDiscoverer(tmp_path).client_exists() is None
+
+    # Now the actual Windsurf IDE subdir exists — detect.
+    (tmp_path / ".codeium" / "windsurf").mkdir()
+    assert WindsurfDiscoverer(tmp_path).client_exists() is not None
+
+
+def test_kiro_discoverer_detects_installation(tmp_path):
+    from agent_scan.agent_discovery import KiroDiscoverer
+
+    (tmp_path / ".kiro").mkdir()
+
+    assert KiroDiscoverer(tmp_path).client_exists() is not None
+
+
+def test_antigravity_discoverer_requires_antigravity_subdir(tmp_path):
+    """``~/.gemini`` alone is the Gemini CLI — only ``~/.gemini/antigravity`` proves the Antigravity IDE is installed."""
+    from agent_scan.agent_discovery import AntigravityDiscoverer
+
+    (tmp_path / ".gemini").mkdir()
+    assert AntigravityDiscoverer(tmp_path).client_exists() is None
+
+    (tmp_path / ".gemini" / "antigravity").mkdir()
+    assert AntigravityDiscoverer(tmp_path).client_exists() is not None
+
+
+# --- user-scope MCP file parsing ---
+
+
+def test_vscode_discoverer_parses_user_dotvscode_mcp_json(tmp_path):
+    """``~/.vscode/mcp.json`` uses VSCode's flat ``{"servers": {...}}`` shape."""
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    (tmp_path / ".vscode").mkdir()
+    (tmp_path / ".vscode" / "mcp.json").write_text('{"servers": {"my-srv": {"command": "echo", "args": ["a"]}}}')
+
+    mcp_configs = VSCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    file_keys = [k for k in mcp_configs if k.endswith("/.vscode/mcp.json")]
+    assert len(file_keys) == 1
+    entries = mcp_configs[file_keys[0]]
+    assert isinstance(entries, list)
+    name, server = entries[0]
+    assert name == "my-srv"
+    assert isinstance(server, StdioServer)
+
+
+def test_vscode_discoverer_parses_settings_json_nested_mcp(tmp_path):
+    """``<userdata>/User/settings.json`` carries MCP servers under a nested ``mcp.servers`` key."""
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    user_dir = _userdata(discoverer) / "User"
+    user_dir.mkdir(parents=True)
+    (user_dir / "settings.json").write_text(
+        '{"editor.fontSize": 14, "mcp": {"servers": {"nested-srv": {"command": "n"}}}}'
+    )
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    file_keys = [k for k in mcp_configs if k.endswith("/User/settings.json")]
+    assert len(file_keys) == 1
+    entries = mcp_configs[file_keys[0]]
+    assert isinstance(entries, list)
+    name, _server = entries[0]
+    assert name == "nested-srv"
+
+
+def test_cursor_discoverer_parses_wrapped_mcp_servers(tmp_path):
+    """``~/.cursor/mcp.json`` uses the wrapped ``{"mcpServers": {...}}`` shape."""
+    from agent_scan.agent_discovery import CursorDiscoverer
+
+    (tmp_path / ".cursor").mkdir()
+    (tmp_path / ".cursor" / "mcp.json").write_text('{"mcpServers": {"cur-srv": {"command": "c"}}}')
+
+    mcp_configs = CursorDiscoverer(tmp_path).discover_mcp_servers()
+
+    file_keys = [k for k in mcp_configs if k.endswith("/.cursor/mcp.json")]
+    assert len(file_keys) == 1
+    entries = mcp_configs[file_keys[0]]
+    assert isinstance(entries, list)
+    name, _ = entries[0]
+    assert name == "cur-srv"
+
+
+def test_windsurf_discoverer_parses_mcp_config_json(tmp_path):
+    from agent_scan.agent_discovery import WindsurfDiscoverer
+
+    cfg_dir = tmp_path / ".codeium" / "windsurf"
+    cfg_dir.mkdir(parents=True)
+    (cfg_dir / "mcp_config.json").write_text('{"mcpServers": {"ws-srv": {"command": "w"}}}')
+
+    mcp_configs = WindsurfDiscoverer(tmp_path).discover_mcp_servers()
+
+    file_keys = [k for k in mcp_configs if k.endswith("/windsurf/mcp_config.json")]
+    assert len(file_keys) == 1
+    entries = mcp_configs[file_keys[0]]
+    name, _ = entries[0]
+    assert name == "ws-srv"
+
+
+def test_kiro_discoverer_parses_settings_mcp_json(tmp_path):
+    from agent_scan.agent_discovery import KiroDiscoverer
+
+    cfg_dir = tmp_path / ".kiro" / "settings"
+    cfg_dir.mkdir(parents=True)
+    (cfg_dir / "mcp.json").write_text('{"mcpServers": {"kr-srv": {"command": "k"}}}')
+
+    mcp_configs = KiroDiscoverer(tmp_path).discover_mcp_servers()
+
+    file_keys = [k for k in mcp_configs if k.endswith("/.kiro/settings/mcp.json")]
+    assert len(file_keys) == 1
+    entries = mcp_configs[file_keys[0]]
+    name, _ = entries[0]
+    assert name == "kr-srv"
+
+
+def test_antigravity_discoverer_parses_mcp_config_json(tmp_path):
+    from agent_scan.agent_discovery import AntigravityDiscoverer
+
+    cfg_dir = tmp_path / ".gemini" / "antigravity"
+    cfg_dir.mkdir(parents=True)
+    (cfg_dir / "mcp_config.json").write_text('{"mcpServers": {"ag-srv": {"command": "a"}}}')
+
+    mcp_configs = AntigravityDiscoverer(tmp_path).discover_mcp_servers()
+
+    file_keys = [k for k in mcp_configs if k.endswith("/antigravity/mcp_config.json")]
+    assert len(file_keys) == 1
+    entries = mcp_configs[file_keys[0]]
+    name, _ = entries[0]
+    assert name == "ag-srv"
+
+
+# --- malformed MCP file surfaces as CouldNotParseMCPConfig ---
+
+
+def test_vscode_discoverer_records_could_not_parse_on_invalid_mcp_json(tmp_path):
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    (tmp_path / ".vscode").mkdir()
+    (tmp_path / ".vscode" / "mcp.json").write_text("{ not valid json")
+
+    mcp_configs = VSCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    file_keys = [k for k in mcp_configs if k.endswith("/mcp.json")]
+    assert len(file_keys) == 1
+    entry = mcp_configs[file_keys[0]]
+    assert isinstance(entry, CouldNotParseMCPConfig)
+    assert entry.is_failure is True
+
+
+def test_vscode_discoverer_returns_empty_when_no_mcp_sources(tmp_path):
+    """Install dir present but no MCP config files anywhere — empty dict, no errors."""
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    (tmp_path / ".vscode").mkdir()
+
+    assert VSCodeDiscoverer(tmp_path).discover_mcp_servers() == {}
+
+
+# --- workspaceStorage walk: per-workspace MCP discovery ---
+
+
+def test_vscode_discoverer_walks_workspace_storage_to_find_mcp(tmp_path):
+    """A workspaceStorage entry pointing at a workspace with ``.vscode/mcp.json`` surfaces that file."""
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    workspace_storage = _userdata(discoverer) / "User" / "workspaceStorage"
+    workspace_hash = workspace_storage / "abc123"
+    workspace_hash.mkdir(parents=True)
+
+    # A workspace folder elsewhere on disk with a per-workspace MCP file.
+    workspace = tmp_path / "code" / "my-repo"
+    workspace.mkdir(parents=True)
+    (workspace / ".vscode").mkdir()
+    (workspace / ".vscode" / "mcp.json").write_text('{"servers": {"ws-mcp": {"command": "w"}}}')
+
+    # VSCode's workspace.json records the folder URL.
+    (workspace_hash / "workspace.json").write_text(f'{{"folder": "file://{workspace.as_posix()}"}}')
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    workspace_keys = [k for k in mcp_configs if k.endswith("/code/my-repo/.vscode/mcp.json")]
+    assert len(workspace_keys) == 1
+    entries = mcp_configs[workspace_keys[0]]
+    assert isinstance(entries, list)
+    name, _ = entries[0]
+    assert name == "ws-mcp"
+
+
+def test_vscode_discoverer_workspace_storage_skips_malformed_workspace_json(tmp_path):
+    """A malformed ``workspace.json`` is logged + skipped — does NOT surface as a CouldNotParseMCPConfig."""
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    workspace_storage = _userdata(discoverer) / "User" / "workspaceStorage"
+    bad = workspace_storage / "bad-hash"
+    bad.mkdir(parents=True)
+    (bad / "workspace.json").write_text("{ broken")
+
+    # Also a working entry alongside the bad one, so we know the walk continues.
+    good = workspace_storage / "good-hash"
+    good.mkdir()
+    workspace = tmp_path / "good-repo"
+    workspace.mkdir()
+    (workspace / ".vscode").mkdir()
+    (workspace / ".vscode" / "mcp.json").write_text('{"servers": {"good": {"command": "g"}}}')
+    (good / "workspace.json").write_text(f'{{"folder": "file://{workspace.as_posix()}"}}')
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    # No entry should reference the broken workspace.json itself.
+    assert not any("bad-hash" in k for k in mcp_configs)
+    # The good entry must still be found.
+    assert any(k.endswith("/good-repo/.vscode/mcp.json") for k in mcp_configs)
+
+
+def test_vscode_discoverer_workspace_storage_skips_when_folder_key_missing(tmp_path):
+    """A ``workspace.json`` without a ``folder`` key (e.g. multi-root) is skipped."""
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    workspace_storage = _userdata(discoverer) / "User" / "workspaceStorage"
+    multi = workspace_storage / "multi-root"
+    multi.mkdir(parents=True)
+    # Multi-root workspaces use ``configuration`` instead of ``folder``.
+    (multi / "workspace.json").write_text('{"configuration": "file:///some/multi-root.code-workspace"}')
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    assert mcp_configs == {}
+
+
+def test_cursor_discoverer_walks_workspace_storage(tmp_path):
+    """Cursor's workspaceStorage layout mirrors VSCode's; per-workspace MCP lives under ``.cursor/mcp.json``."""
+    from agent_scan.agent_discovery import CursorDiscoverer
+
+    discoverer = CursorDiscoverer(tmp_path)
+    workspace_storage = _userdata(discoverer) / "User" / "workspaceStorage"
+    workspace_hash = workspace_storage / "ws"
+    workspace_hash.mkdir(parents=True)
+
+    workspace = tmp_path / "proj"
+    workspace.mkdir()
+    (workspace / ".cursor").mkdir()
+    (workspace / ".cursor" / "mcp.json").write_text('{"mcpServers": {"cur-ws": {"command": "c"}}}')
+
+    (workspace_hash / "workspace.json").write_text(f'{{"folder": "file://{workspace.as_posix()}"}}')
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    workspace_keys = [k for k in mcp_configs if k.endswith("/proj/.cursor/mcp.json")]
+    assert len(workspace_keys) == 1
+
+
+# --- skills discovery ---
+
+
+def test_vscode_discoverer_parses_copilot_skills_dir(tmp_path):
+    """VSCode reads skills from ``~/.copilot/skills`` (Copilot-installed skills)."""
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    skills_dir = tmp_path / ".copilot" / "skills"
+    skills_dir.mkdir(parents=True)
+    my_skill = skills_dir / "my-skill"
+    my_skill.mkdir()
+    (my_skill / "SKILL.md").write_text("---\nname: my-skill\ndescription: t\n---\n\nbody\n")
+    (tmp_path / ".vscode").mkdir()
+
+    skills_dirs = VSCodeDiscoverer(tmp_path).discover_skills()
+
+    keys = [k for k in skills_dirs if k.endswith("/.copilot/skills")]
+    assert len(keys) == 1
+    entries = skills_dirs[keys[0]]
+    assert isinstance(entries, list)
+    skill_name, skill = entries[0]
+    assert skill_name == "my-skill"
+    assert isinstance(skill, SkillServer)
+
+
+def test_kiro_discoverer_has_no_skills_dir(tmp_path):
+    """Kiro doesn't ship a skills directory — ``discover_skills`` returns ``{}``."""
+    from agent_scan.agent_discovery import KiroDiscoverer
+
+    (tmp_path / ".kiro").mkdir()
+
+    assert KiroDiscoverer(tmp_path).discover_skills() == {}
+
+
+# --- integration: ``discover()`` returns ClientToInspect ---
+
+
+def test_vscode_discoverer_discover_returns_client_to_inspect(tmp_path):
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    (tmp_path / ".vscode").mkdir()
+    (tmp_path / ".vscode" / "mcp.json").write_text('{"servers": {"s": {"command": "x"}}}')
+
+    cti = VSCodeDiscoverer(tmp_path).discover()
+
+    assert isinstance(cti, ClientToInspect)
+    assert cti.name == "vscode"
+    assert cti.client_path.endswith("/.vscode")
+    assert any(k.endswith("/.vscode/mcp.json") for k in cti.mcp_configs)
+
+
+def test_cursor_discoverer_discover_returns_client_to_inspect(tmp_path):
+    from agent_scan.agent_discovery import CursorDiscoverer
+
+    (tmp_path / ".cursor").mkdir()
+    (tmp_path / ".cursor" / "mcp.json").write_text('{"mcpServers": {"s": {"command": "x"}}}')
+
+    cti = CursorDiscoverer(tmp_path).discover()
+
+    assert isinstance(cti, ClientToInspect)
+    assert cti.name == "cursor"
+
+
+def test_discoverer_discover_returns_none_when_not_installed(tmp_path):
+    """If the agent isn't installed, ``discover()`` short-circuits to None even with config dirs in place elsewhere."""
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    # Note: no ~/.vscode and no userdata Code dir → not installed.
+    assert VSCodeDiscoverer(tmp_path).discover() is None
+
+
+# --- DISCOVERERS registry & names ---
+
+
+def test_discoverers_registry_includes_all_vscode_family():
+    from agent_scan.agent_discovery import (
+        DISCOVERERS,
+        AntigravityDiscoverer,
+        CursorDiscoverer,
+        KiroDiscoverer,
+        VSCodeDiscoverer,
+        WindsurfDiscoverer,
+    )
+
+    assert DISCOVERERS["vscode"] is VSCodeDiscoverer
+    assert DISCOVERERS["cursor"] is CursorDiscoverer
+    assert DISCOVERERS["windsurf"] is WindsurfDiscoverer
+    assert DISCOVERERS["kiro"] is KiroDiscoverer
+    assert DISCOVERERS["antigravity"] is AntigravityDiscoverer
+
+
+def test_vscode_family_discoverer_names_match_well_known_clients():
+    """``DISCOVERERS`` keys MUST match ``CandidateClient.name`` values in
+    ``well_known_clients.py`` exactly — the merge in
+    ``pipelines.discover_clients_to_inspect`` keys on ``(name, username)``,
+    so any drift produces duplicate (split) entries in scan output."""
+    from agent_scan.agent_discovery import (
+        AntigravityDiscoverer,
+        CursorDiscoverer,
+        KiroDiscoverer,
+        VSCodeDiscoverer,
+        WindsurfDiscoverer,
+    )
+
+    expected_names = {"vscode", "cursor", "windsurf", "kiro", "antigravity"}
+    actual_names = {
+        cls.name
+        for cls in (
+            VSCodeDiscoverer,
+            CursorDiscoverer,
+            WindsurfDiscoverer,
+            KiroDiscoverer,
+            AntigravityDiscoverer,
+        )
+    }
+    assert actual_names == expected_names
+
+
+def test_find_discoverers_picks_up_vscode_family_when_installed(tmp_path):
+    """``find_discoverers`` returns one instance per registered class whose ``client_exists`` is true."""
+    from agent_scan.agent_discovery import find_discoverers
+
+    # Install just Cursor.
+    (tmp_path / ".cursor").mkdir()
+
+    found = find_discoverers(tmp_path)
+    names = {d.name for d in found}
+
+    assert "cursor" in names
+    # The other VSCode-family agents shouldn't be reported as installed.
+    assert "vscode" not in names
+    assert "windsurf" not in names
+
+
+# --- platform skip for user-data tests on platforms we don't lay out fixtures for ---
+
+
+@pytest.mark.skipif(
+    sys.platform not in ("darwin", "linux", "linux2", "win32"),
+    reason="VSCode userdata path mapping only defined for macOS/Linux/Windows",
+)
+def test_vscode_user_data_dir_returns_platform_specific_path(tmp_path):
+    """``_user_data_dir`` resolves to the canonical per-platform userdata folder for VSCode."""
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    user_data = _userdata(VSCodeDiscoverer(tmp_path))
+
+    assert user_data is not None
+    if sys.platform == "darwin":
+        assert user_data.as_posix().endswith("/Library/Application Support/Code")
+    elif sys.platform in ("linux", "linux2"):
+        assert user_data.as_posix().endswith("/.config/Code")
+    elif sys.platform == "win32":
+        assert user_data.as_posix().endswith("/AppData/Roaming/Code")
