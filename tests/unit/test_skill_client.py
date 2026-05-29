@@ -58,6 +58,31 @@ def test_inspect_commands_dir_empty_dir_returns_empty(tmp_path):
     assert inspect_commands_dir(str(commands)) == []
 
 
+def test_inspect_commands_dir_respects_max_walk_depth(tmp_path, monkeypatch):
+    """A command file nested deeper than the depth cap is pruned — traversal stops
+    at the cap rather than walking the whole subtree, mirroring the depth-bounded
+    plugin/extension walks (``_walk_under_depth``) so a pathologically deep tree
+    can't blow up the scan.
+    """
+    import agent_scan.skill_client as skill_client
+
+    monkeypatch.setattr(skill_client, "_MAX_COMMANDS_WALK_DEPTH", 3)
+
+    commands = tmp_path / "commands"
+    commands.mkdir()
+    # Shallow file (relative parts = 1) — within the cap, must be found.
+    (commands / "deploy.md").write_text("# Deploy")
+    # Deep file (relative parts = 4: a/b/c/deep.md) — beyond cap 3, must be pruned.
+    deep = commands / "a" / "b" / "c"
+    deep.mkdir(parents=True)
+    (deep / "deep.md").write_text("# Deep")
+
+    names = {name for name, _ in skill_client.inspect_commands_dir(str(commands))}
+
+    assert "deploy" in names
+    assert "a:b:c:deep" not in names
+
+
 def test_inspect_skill_handles_single_md_file_without_frontmatter(tmp_path):
     cmd = tmp_path / "deploy.md"
     cmd.write_text("# Deploy\nDo the deploy.")

@@ -1736,6 +1736,36 @@ def test_vscode_discoverer_parses_settings_json_nested_mcp(tmp_path):
     assert name == "nested-srv"
 
 
+def test_vscode_discoverer_parses_settings_json_dotted_mcp_servers(tmp_path):
+    """``settings.json`` may flatten the server map under the dotted ``"mcp.servers"``
+    key instead of the nested ``{"mcp": {"servers": ...}}`` object.
+
+    VSCode persists settings in either form (the UI writes the nested object, but a
+    hand-edited / programmatically-written file may use the dotted key). The
+    ``.code-workspace`` scan already accepts both shapes via
+    ``_settings_mcp_server_map``; the user/profile ``settings.json`` path must too,
+    or a dotted-key user would silently slip past discovery.
+    """
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    user_dir = _userdata(discoverer) / "User"
+    user_dir.mkdir(parents=True)
+    (user_dir / "settings.json").write_text('{"editor.fontSize": 14, "mcp.servers": {"dotted-srv": {"command": "d"}}}')
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    file_keys = [k for k in mcp_configs if k.endswith("/User/settings.json")]
+    assert len(file_keys) == 1, (
+        f"settings.json with a dotted mcp.servers key must surface its servers; got keys: {list(mcp_configs)}"
+    )
+    entries = mcp_configs[file_keys[0]]
+    assert isinstance(entries, list)
+    name, server = entries[0]
+    assert name == "dotted-srv"
+    assert isinstance(server, StdioServer)
+
+
 def test_vscode_discoverer_skips_settings_json_without_mcp_section(tmp_path):
     """An editor-only ``settings.json`` (no ``mcp`` or ``mcpServers`` key) must produce
     no entries — neither a ``CouldNotParseMCPConfig`` parse failure nor garbage server
@@ -2278,10 +2308,17 @@ def test_discoverers_registry_includes_all_vscode_family():
 
 
 def test_vscode_family_discoverer_names_match_well_known_clients():
-    """``DISCOVERERS`` keys MUST match ``CandidateClient.name`` values in
-    ``well_known_clients.py`` exactly — the merge in
-    ``pipelines.discover_clients_to_inspect`` keys on ``(name, username)``,
-    so any drift produces duplicate (split) entries in scan output."""
+    """Every VSCode-family discoverer name MUST exist as a ``CandidateClient.name``
+    in ``well_known_clients.py`` — the merge in
+    ``pipelines.discover_clients_to_inspect`` keys on ``(name, username)``, so a
+    discoverer whose name doesn't match its legacy entry produces duplicate
+    (split) entries in scan output for the same agent.
+
+    The expected set is read from the real ``well_known_clients`` module (not a
+    hardcoded literal) and checked against *every* platform list, so a rename in
+    any one of them is caught regardless of which OS the suite runs on. ``vscode``
+    is the canonical 'still aligned' control; the others are the new family.
+    """
     from agent_scan.agent_discovery import (
         AntigravityDiscoverer,
         CursorDiscoverer,
@@ -2289,9 +2326,13 @@ def test_vscode_family_discoverer_names_match_well_known_clients():
         VSCodeDiscoverer,
         WindsurfDiscoverer,
     )
+    from agent_scan.well_known_clients import (
+        LINUX_WELL_KNOWN_CLIENTS,
+        MACOS_WELL_KNOWN_CLIENTS,
+        WINDOWS_WELL_KNOWN_CLIENTS,
+    )
 
-    expected_names = {"vscode", "cursor", "windsurf", "kiro", "antigravity"}
-    actual_names = {
+    family_names = {
         cls.name
         for cls in (
             VSCodeDiscoverer,
@@ -2301,7 +2342,20 @@ def test_vscode_family_discoverer_names_match_well_known_clients():
             AntigravityDiscoverer,
         )
     }
-    assert actual_names == expected_names
+
+    for label, clients in (
+        ("macOS", MACOS_WELL_KNOWN_CLIENTS),
+        ("Linux", LINUX_WELL_KNOWN_CLIENTS),
+        ("Windows", WINDOWS_WELL_KNOWN_CLIENTS),
+    ):
+        well_known_names = {client.name for client in clients}
+        missing = family_names - well_known_names
+        assert not missing, (
+            f"VSCode-family discoverer name(s) {sorted(missing)} have no matching "
+            f"CandidateClient in the {label} well_known_clients list. A discoverer "
+            f"name that drifts from its legacy entry splits one agent into two "
+            f"(name, username) rows in scan output."
+        )
 
 
 def test_find_discoverers_picks_up_vscode_family_when_installed(tmp_path):
@@ -3189,6 +3243,35 @@ def test_vscode_discoverer_profile_settings_json_nested_mcp(tmp_path):
     assert isinstance(server, StdioServer)
 
 
+def test_vscode_discoverer_profile_editor_only_settings_json_not_a_parse_failure(tmp_path):
+    """A named profile's editor-only ``settings.json`` (no ``mcp`` section) must
+    produce no entry — neither a ``CouldNotParseMCPConfig`` parse failure nor
+    coerced server entries.
+
+    ``settings.json`` is multi-purpose, so most profiles carry only editor prefs.
+    The profile walk must gate it the same way the default profile's settings.json
+    is gated (:meth:`_discover_user_settings_mcp`); parsing it directly as MCP
+    surfaces a spurious parse failure per profile on every scan.
+    """
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    profile_dir = _userdata(discoverer) / "User" / "profiles" / "work"
+    profile_dir.mkdir(parents=True)
+    # Realistic editor-only profile settings — no `mcp` / `mcpServers` anywhere.
+    (profile_dir / "settings.json").write_text(
+        '{"editor.fontSize": 14, "telemetry.level": "off", "workbench.colorTheme": "Default Dark+"}'
+    )
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    settings_keys = [k for k in mcp_configs if k.endswith("/profiles/work/settings.json")]
+    assert settings_keys == [], (
+        f"editor-only profile settings.json must not appear in mcp_configs at all, "
+        f"got entries: {[(k, mcp_configs[k]) for k in settings_keys]}"
+    )
+
+
 def test_vscode_discoverer_profile_walk_skips_when_no_profiles(tmp_path):
     """If the user has no named profiles, ``discover_mcp_servers`` doesn't emit any profile keys."""
     from agent_scan.agent_discovery import VSCodeDiscoverer
@@ -3288,6 +3371,51 @@ def test_claude_code_discovers_managed_mcp_servers(tmp_path, monkeypatch):
     assert isinstance(server, StdioServer)
 
 
+def test_managed_mcp_path_honors_program_files_env_on_windows(tmp_path, monkeypatch):
+    """On Windows the enterprise ``managed-mcp.json`` lives under ``Program Files``,
+    but that root can sit on a non-C: drive or be relocated. ``_managed_mcp_path``
+    must resolve it from the machine-level env var (``ProgramW6432`` is the 64-bit
+    root even from a 32-bit process), not a hardcoded ``C:\\Program Files``.
+
+    ``Program Files`` is machine-global, so honoring the scanning process's env is
+    correct even under ``--scan-all-users`` (unlike the per-user ``CLAUDE_CONFIG_DIR``).
+    """
+    import agent_scan.agent_discovery as discovery_module
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    monkeypatch.setattr(discovery_module.sys, "platform", "win32")
+    custom_pf = tmp_path / "CustomDrive" / "Program Files"
+    # Python normalizes os.environ keys to uppercase on Windows; use the
+    # uppercase form so the lookup also matches on case-sensitive test hosts.
+    monkeypatch.setenv("PROGRAMW6432", str(custom_pf))
+    monkeypatch.delenv("PROGRAMFILES", raising=False)
+
+    path = ClaudeCodeDiscoverer(tmp_path)._managed_mcp_path()
+
+    assert path is not None
+    assert path.name == "managed-mcp.json"
+    assert path.parent.name == "ClaudeCode"
+    # Resolved under the relocated Program Files root, not a hardcoded C: drive.
+    assert path.parent.parent == custom_pf
+
+
+def test_managed_mcp_path_falls_back_to_default_program_files_on_windows(tmp_path, monkeypatch):
+    """With no ``Program Files`` env var, fall back to the conventional default
+    rather than returning ``None`` (an enterprise default install still resolves)."""
+    import agent_scan.agent_discovery as discovery_module
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    monkeypatch.setattr(discovery_module.sys, "platform", "win32")
+    monkeypatch.delenv("PROGRAMW6432", raising=False)
+    monkeypatch.delenv("PROGRAMFILES", raising=False)
+
+    path = ClaudeCodeDiscoverer(tmp_path)._managed_mcp_path()
+
+    assert path is not None
+    assert path.as_posix().endswith("ClaudeCode/managed-mcp.json")
+    assert "Program Files" in path.as_posix()
+
+
 def test_claude_code_discovers_global_command_files(tmp_path):
     """``~/.claude/commands/*.md`` are surfaced as skill entries."""
     from agent_scan.agent_discovery import ClaudeCodeDiscoverer
@@ -3358,6 +3486,41 @@ def test_claude_code_ignores_claude_config_dir_when_home_passed(tmp_path, monkey
     all_names = {n for v in mcp_configs.values() if isinstance(v, list) for n, _ in v}
     assert "alice-server" in all_names
     assert "should-not-appear" not in all_names
+
+
+def test_claude_code_honors_claude_config_dir_when_home_equals_real_home(tmp_path, monkeypatch):
+    """CLAUDE_CONFIG_DIR must also be honored when the discoverer's home equals the
+    scanning process's own home (``Path.home()``), not only when it is ``None``.
+
+    Production never passes ``None``: ``get_readable_home_directories`` returns
+    ``(Path.home(), user)`` for the current user, so the pipeline constructs the
+    discoverer with ``Path.home()``. Gating purely on ``is None`` left the
+    relocation dead in every real single-user scan — this exercises the actual
+    wiring (an explicit home == ``Path.home()``).
+    """
+    from pathlib import Path
+
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    home = tmp_path / "me"
+    (home / ".claude").mkdir(parents=True)
+    # Patch Path.home() so the own-home check matches and all home-relative reads
+    # stay inside tmp (hermetic — no access to the developer's real ~/.claude).
+    monkeypatch.setattr(Path, "home", lambda: home)
+
+    cfg = tmp_path / "relocated-claude"
+    cfg.mkdir()
+    (cfg / ".claude.json").write_text('{"mcpServers": {"relocated": {"command": "r"}}}')
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
+
+    mcp_configs = ClaudeCodeDiscoverer(home).discover_mcp_servers()
+
+    keys = [k for k in mcp_configs if k.endswith("/relocated-claude/.claude.json")]
+    assert len(keys) == 1, (
+        f"CLAUDE_CONFIG_DIR relocation must activate on an own-home scan passed as Path.home(); "
+        f"got keys: {list(mcp_configs)}"
+    )
+    assert mcp_configs[keys[0]][0][0] == "relocated"
 
 
 def test_claude_code_discovers_inline_plugin_manifest_mcp_servers(tmp_path):
@@ -3568,6 +3731,35 @@ def test_vscode_honors_vscode_portable_on_own_home_scan(tmp_path, monkeypatch):
     mcp_configs = VSCodeDiscoverer(None).discover_mcp_servers()
 
     assert any(k.endswith("/user-data/User/mcp.json") for k in mcp_configs)
+
+
+def test_vscode_honors_vscode_portable_when_home_equals_real_home(tmp_path, monkeypatch):
+    """VSCODE_PORTABLE must also activate when the discoverer's home equals the
+    scanning process's own home (``Path.home()``), not only when it is ``None``.
+
+    The pipeline constructs the current-user discoverer with ``Path.home()`` (never
+    ``None``), so gating portable mode purely on ``is None`` left it dead in real
+    single-user scans. This exercises the production wiring.
+    """
+    from pathlib import Path
+
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    home = tmp_path / "me"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: home)
+
+    portable = tmp_path / "VSCode-portable"
+    monkeypatch.setenv("VSCODE_PORTABLE", str(portable))
+    mcp = portable / "user-data" / "User" / "mcp.json"
+    mcp.parent.mkdir(parents=True)
+    mcp.write_text('{"servers": {"portable-srv": {"command": "p"}}}')
+
+    mcp_configs = VSCodeDiscoverer(home).discover_mcp_servers()
+
+    assert any(k.endswith("/user-data/User/mcp.json") for k in mcp_configs), (
+        f"VSCODE_PORTABLE must activate on an own-home scan passed as Path.home(); got keys: {list(mcp_configs)}"
+    )
 
 
 def test_vscode_imports_claude_desktop_config_when_discovery_enabled(tmp_path):

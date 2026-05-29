@@ -20,6 +20,12 @@ from agent_scan.models import ServerSignature, SkillServer
 
 logger = logging.getLogger(__name__)
 
+# Cap traversal depth when walking a commands dir, mirroring the value used by
+# the discoverer plugin/extension walks (``agent_discovery._MAX_PLUGIN_RGLOB_DEPTH``).
+# Kept as a separate constant here to avoid a circular import (agent_discovery
+# imports this module).
+_MAX_COMMANDS_WALK_DEPTH = 10
+
 
 def get_skill_md_path(path: str) -> str | None:
     for file in os.listdir(path):
@@ -212,12 +218,22 @@ def inspect_commands_dir(path: str) -> list[tuple[str, SkillServer]]:
     namespaces nested command files by their relative path joined with ``:``
     (e.g. ``commands/git/commit.md`` -> ``git:commit``). Each file becomes one
     ``SkillServer`` pointing at the file itself.
+
+    Traversal is depth-bounded by :data:`_MAX_COMMANDS_WALK_DEPTH`, pruning the
+    walk once it would descend past the cap rather than walking the whole subtree
+    first. This mirrors the discoverer plugin/extension walks
+    (``agent_discovery._walk_under_depth``) so a pathologically deep tree under a
+    commands dir can't blow up the scan. A ``.md`` file is surfaced only when its
+    path relative to ``path`` is at most ``_MAX_COMMANDS_WALK_DEPTH`` components
+    deep.
     """
     logger.info("Scanning commands dir: %s", path)
 
     expanded_path = os.path.expanduser(path)
     commands: list[tuple[str, SkillServer]] = []
-    for root, _dirs, files in os.walk(expanded_path):
+    for root, dirs, files in os.walk(expanded_path):
+        relative_root = os.path.relpath(root, expanded_path)
+        dir_depth = 0 if relative_root == os.curdir else len(relative_root.split(os.sep))
         for file in files:
             if not file.endswith(".md"):
                 continue
@@ -225,5 +241,9 @@ def inspect_commands_dir(path: str) -> list[tuple[str, SkillServer]]:
             relative = os.path.relpath(full_path, expanded_path)
             name = os.path.splitext(relative)[0].replace(os.path.sep, ":")
             commands.append((name, SkillServer(path=full_path)))
+        # A file inside the current dir sits at depth+1; prune once that reaches
+        # the cap so we don't descend into deeper subdirectories.
+        if dir_depth + 1 >= _MAX_COMMANDS_WALK_DEPTH:
+            dirs.clear()
     logger.info("Found %d command files", len(commands))
     return commands

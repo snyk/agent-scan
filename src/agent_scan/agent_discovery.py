@@ -46,6 +46,10 @@ McpConfigsResult = dict[
     list[tuple[str, StdioServer | RemoteServer]] | FileNotFoundConfig | UnknownConfigFormat | CouldNotParseMCPConfig,
 ]
 SkillsDirsResult = dict[str, list[tuple[str, SkillServer]] | FileNotFoundConfig]
+# Return type of the per-file MCP parsers (``_parse_mcp_file`` /
+# ``_parse_settings_mcp_gated``): parsed servers, a parse failure, or ``None``
+# when the file is absent/empty/not-MCP.
+McpScanResult = list[tuple[str, StdioServer | RemoteServer]] | CouldNotParseMCPConfig | None
 
 # Cap traversal into ``~/.claude/plugins/{cache,repos}`` to mirror the legacy
 # glob-based discovery, which uses ``CandidateClient.max_glob_depth=6``. We pick
@@ -134,6 +138,21 @@ class AgentDiscoverer(ABC):
         # the several discovery methods that consult it need not re-walk the
         # workspaceStorage tree / re-read ~/.claude.json each time.
         self._project_paths_cache: list[Path] | None = None
+
+    def _scans_own_home(self) -> bool:
+        """True when this discoverer targets the scanning process's own user.
+
+        Env-var-relocated config paths (``CLAUDE_CONFIG_DIR``, ``VSCODE_PORTABLE``)
+        reflect the *scanning process's* environment, so they may only be honored
+        when the home being scanned is that same user's. ``home_directory is None``
+        is the explicit own-home sentinel, but production never passes it: for the
+        current user ``get_readable_home_directories`` returns ``Path.home()`` (see
+        ``pipelines.discover_clients_to_inspect``), so an equal ``Path.home()`` must
+        also count as own-home — otherwise those env paths never activate in a real
+        scan. Other users' homes under ``--scan-all-users`` compare unequal and are
+        correctly excluded (the scanner can't know their env).
+        """
+        return self.home_directory is None or self.home_directory == Path.home()
 
     def __init_subclass__(cls, *, abstract: bool = False, **kwargs: object) -> None:
         """Enforce a non-empty ``name`` on concrete subclasses.
@@ -425,11 +444,12 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         """The base directory holding Claude Code state (``~/.claude`` by default).
 
         ``CLAUDE_CONFIG_DIR`` relocates this directory. The env var reflects the
-        *scanning process's* environment, so it is honored only on own-home scans
-        (``home_directory is None``); under ``--scan-all-users`` the scanner can't
-        know each target user's env, so the per-home default is used instead.
+        *scanning process's* environment, so it is honored only when scanning the
+        process's own home (see :meth:`_scans_own_home`); under ``--scan-all-users``
+        the scanner can't know each *other* target user's env, so the per-home
+        default is used instead.
         """
-        if self.home_directory is None:
+        if self._scans_own_home():
             config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
             if config_dir:
                 return Path(config_dir)
@@ -442,7 +462,7 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         ``<base>/.claude.json``; falls back to the legacy ``~/.claude.json`` when
         that relocated file does not exist.
         """
-        if self.home_directory is None and os.environ.get("CLAUDE_CONFIG_DIR"):
+        if self._scans_own_home() and os.environ.get("CLAUDE_CONFIG_DIR"):
             relocated = self._claude_base_dir() / ".claude.json"
             if relocated.exists():
                 return relocated
@@ -625,7 +645,16 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         if sys.platform in ("linux", "linux2"):
             return Path("/etc/claude-code/managed-mcp.json")
         if sys.platform == "win32":
-            return Path(r"C:\Program Files\ClaudeCode\managed-mcp.json")
+            # ``Program Files`` may live on a non-C: drive or be relocated, so
+            # resolve it from the machine-level env var instead of hardcoding the
+            # drive. ``PROGRAMW6432`` always points at the 64-bit root (even from a
+            # 32-bit process); fall back to ``PROGRAMFILES`` then the conventional
+            # default. This is a machine-global path (not per-user), so honoring
+            # the scanning process's env is correct even under ``--scan-all-users``.
+            # (Python uppercases ``os.environ`` keys on Windows, so the canonical
+            # mixed-case ``ProgramW6432``/``ProgramFiles`` vars resolve here.)
+            program_files = os.environ.get("PROGRAMW6432") or os.environ.get("PROGRAMFILES") or r"C:\Program Files"
+            return Path(program_files) / "ClaudeCode" / "managed-mcp.json"
         return None
 
     def _discover_managed_mcp_servers(self) -> McpConfigsResult:
@@ -948,9 +977,10 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         """Userdata dir under ``$VSCODE_PORTABLE`` (``<portable>/user-data``).
 
         Best-effort: the env var reflects the scanning process, so it is honored
-        only on own-home scans (``home_directory is None``); a no-op otherwise.
+        only when scanning the process's own home (see :meth:`_scans_own_home`);
+        a no-op otherwise.
         """
-        if not self._portable_env_var or self.home_directory is not None:
+        if not self._portable_env_var or not self._scans_own_home():
             return None
         portable = os.environ.get(self._portable_env_var)
         if not portable:
@@ -1010,20 +1040,30 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         handled by :meth:`_discover_user_mcp_files` (via ``_userdata_user_mcp_file``)
         and :meth:`_discover_user_settings_mcp` (via ``_user_settings_file``); this
         walk only covers the *named* profiles under ``profiles/``.
+
+        ``settings.json`` is parsed via the presence-gated
+        :meth:`_parse_settings_mcp_gated` (it is multi-purpose, so an editor-only
+        profile settings file must not surface as a parse failure), while the
+        standalone ``mcp.json`` is parsed directly — matching how the default
+        profile's two files are each handled.
         """
-        filenames: list[str] = []
+        # (filename, parser) pairs, each gated on the subclass actually shipping
+        # that file type. The standalone mcp.json uses the direct MCP parser; the
+        # multi-purpose settings.json uses the presence-gated parser so ordinary
+        # editor settings aren't misreported as malformed MCP.
+        parsers: list[tuple[str, Callable[[Path], McpScanResult]]] = []
         if self._userdata_user_mcp_file:
-            filenames.append("mcp.json")
+            parsers.append(("mcp.json", lambda p: self._parse_mcp_file(p, formats=_VSCODE_FAMILY_FORMATS)))
         if self._user_settings_file:
-            filenames.append("settings.json")
-        if not filenames:
+            parsers.append(("settings.json", self._parse_settings_mcp_gated))
+        if not parsers:
             return {}
         result: McpConfigsResult = {}
         for userdata in self._user_data_dirs():
             for profile in self._profile_dirs(userdata):
-                for filename in filenames:
+                for filename, parse in parsers:
                     candidate = profile / filename
-                    parsed = self._parse_mcp_file(candidate, formats=_VSCODE_FAMILY_FORMATS)
+                    parsed = parse(candidate)
                     if parsed is None:
                         continue
                     result[candidate.as_posix()] = parsed
@@ -1046,13 +1086,26 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         nested ``mcp.servers`` (VSCode), bare ``mcpServers`` (a fork that
         diverges), or any other recognized shape still parses.
 
+        The flattened dotted ``"mcp.servers"`` key is handled up front via
+        :meth:`_settings_mcp_server_map` (the same extractor the ``.code-workspace``
+        scan uses), because none of the format models recognize a dotted key —
+        without this a dotted-form ``settings.json`` would slip past discovery.
+
         Shared by :meth:`_discover_user_settings_mcp` (userdata-relative paths)
         and :meth:`_discover_gated_home_settings_mcp` (home-relative paths).
         """
         data = self._load_json_file(path)
         if isinstance(data, CouldNotParseMCPConfig):
             return data
-        if not isinstance(data, dict) or ("mcp" not in data and "mcpServers" not in data):
+        if not isinstance(data, dict):
+            return None
+        # Dotted/nested ``mcp.servers`` (the shape VSCode settings actually use)
+        # is extracted explicitly — the format models below only match nested-
+        # object, bare ``mcpServers``, or flat shapes, not a dotted key.
+        servers = self._settings_mcp_server_map(data)
+        if servers:
+            return self._validate_servers(servers, source=f"mcp.servers in {path.as_posix()}")
+        if "mcp" not in data and "mcpServers" not in data:
             return None
         return self._parse_mcp_file(path, formats=_VSCODE_FAMILY_FORMATS)
 
@@ -1296,9 +1349,19 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
                 files.append(ref)
         return files
 
-    def _code_workspace_servers(self, settings: dict) -> dict | None:
-        """Extract the MCP server map from a ``.code-workspace`` ``settings`` block
-        (nested ``mcp.servers`` or flattened ``mcp.servers`` dotted key)."""
+    def _settings_mcp_server_map(self, settings: dict) -> dict | None:
+        """Extract the MCP server map from a settings-shaped dict, accepting either
+        the nested ``{"mcp": {"servers": {...}}}`` object or the flattened dotted
+        ``{"mcp.servers": {...}}`` key.
+
+        VSCode (and forks) persist settings in either form — the settings UI writes
+        the nested object, but a hand-edited or programmatically-written
+        ``settings.json`` / ``.code-workspace`` may use the dotted key. Shared by
+        the ``.code-workspace`` scan (:meth:`_discover_code_workspace_mcp`) and the
+        user/profile ``settings.json`` gate (:meth:`_parse_settings_mcp_gated`) so
+        both honor the dotted form identically (rather than one path silently
+        dropping it).
+        """
         mcp = settings.get("mcp")
         if isinstance(mcp, dict) and isinstance(mcp.get("servers"), dict):
             return mcp["servers"]
@@ -1319,7 +1382,7 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
             settings = data.get("settings")
             if not isinstance(settings, dict):
                 continue
-            servers = self._code_workspace_servers(settings)
+            servers = self._settings_mcp_server_map(settings)
             if not servers:
                 continue
             result[ws_file.as_posix()] = self._validate_servers(
