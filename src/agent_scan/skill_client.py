@@ -63,7 +63,10 @@ def _inspect_skill_file(expanded_path: str) -> ServerSignature:
             if isinstance(yaml_data.get("description"), str):
                 description = yaml_data["description"]
 
-    base_prompt = Prompt(name=os.path.basename(expanded_path), description=content)
+    # Name the single prompt after the command's resolved ``name`` (file stem, or
+    # a frontmatter ``name`` override) so it matches ``serverInfo`` below rather
+    # than carrying the raw ``<stem>.md`` filename.
+    base_prompt = Prompt(name=name, description=content)
     return ServerSignature(
         metadata=InitializeResult(
             protocolVersion="built-in",

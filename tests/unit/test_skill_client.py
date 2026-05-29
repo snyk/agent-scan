@@ -95,6 +95,31 @@ def test_inspect_skill_handles_single_md_file_without_frontmatter(tmp_path):
     assert any("Do the deploy." in (p.description or "") for p in sig.prompts)
 
 
+def test_inspect_skill_command_file_prompt_name_matches_server_name(tmp_path):
+    """The single prompt emitted for a command file carries the command's resolved
+    name (the file stem) — not the raw ``<stem>.md`` filename — so the prompt and
+    ``serverInfo`` agree on one name."""
+    cmd = tmp_path / "deploy.md"
+    cmd.write_text("# Deploy\nDo the deploy.")
+
+    sig = inspect_skill(SkillServer(path=str(cmd)))
+
+    assert sig.metadata.serverInfo.name == "deploy"
+    assert [p.name for p in sig.prompts] == ["deploy"]
+
+
+def test_inspect_skill_command_file_prompt_name_follows_frontmatter_name(tmp_path):
+    """A frontmatter ``name`` override applies to both ``serverInfo`` and the prompt,
+    keeping the two consistent."""
+    cmd = tmp_path / "deploy.md"
+    cmd.write_text("---\nname: ship-it\ndescription: d\n---\nbody")
+
+    sig = inspect_skill(SkillServer(path=str(cmd)))
+
+    assert sig.metadata.serverInfo.name == "ship-it"
+    assert [p.name for p in sig.prompts] == ["ship-it"]
+
+
 def test_inspect_skill_uses_frontmatter_description_for_command_file(tmp_path):
     cmd = tmp_path / "release.md"
     cmd.write_text("---\ndescription: Cut a release\n---\nSteps to release.")
