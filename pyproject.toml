@@ -31,6 +31,7 @@ override-dependencies = [
     "python-multipart>=0.0.27",
     "idna>=3.15",
     "starlette>=1.0.1",
+    "pyjwt>=2.13.0",
 ]
 
 [project.scripts]
