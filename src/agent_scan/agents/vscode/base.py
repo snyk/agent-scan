@@ -830,4 +830,3 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         if parsed is None:
             return {}
         return {path.as_posix(): parsed}
-

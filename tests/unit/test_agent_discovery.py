@@ -2693,10 +2693,7 @@ def test_vscode_extension_mcp_skips_unrelated_json_named_mcp_json(tmp_path):
     mcp_configs = VSCodeDiscoverer(tmp_path).discover_mcp_servers()
 
     leaked = [k for k in mcp_configs if "/x.schema-1.0.0/" in k]
-    assert leaked == [], (
-        f"a non-MCP file named mcp.json must be skipped, got: "
-        f"{[(k, mcp_configs[k]) for k in leaked]}"
-    )
+    assert leaked == [], f"a non-MCP file named mcp.json must be skipped, got: {[(k, mcp_configs[k]) for k in leaked]}"
 
 
 def test_vscode_extension_mcp_still_flags_malformed_mcp_shaped_file(tmp_path):
