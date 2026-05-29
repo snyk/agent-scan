@@ -45,7 +45,13 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
     _mcp_config_path = "~/.claude.json"
     _skills_subdir = "skills"
     _project_dotclaude_subdir = ".claude"
-    _plugin_subdirs: tuple[str, ...] = ("plugins/cache", "plugins/repos")
+    # Subtrees under a plugin *root* (see ``_plugin_root_dirs``) that stage
+    # installed plugins. ``cache`` is the hydrated install tree and
+    # ``marketplaces`` the cloned marketplace sources (the current layout, per
+    # ``~/.claude/plugins`` and the plugin-marketplaces docs); ``repos`` is the
+    # legacy name kept for back-compat with older installs. All can host MCP
+    # servers / skills / commands.
+    _plugin_subdirs: tuple[str, ...] = ("cache", "marketplaces", "repos")
 
     # --- public (override AgentDiscoverer abstracts) ---
 
@@ -211,10 +217,37 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
 
     # --- private: plugin discovery ---
 
+    def _plugin_root_dirs(self) -> list[Path]:
+        """Plugin *root* directories — each holds the ``cache``/``marketplaces``/
+        ``repos`` subtrees (see :attr:`_plugin_subdirs`).
+
+        The default is ``<base>/plugins`` for each global folder (``base`` already
+        honors ``CLAUDE_CONFIG_DIR``). Two env vars relocate or extend it; like
+        ``CLAUDE_CONFIG_DIR`` they reflect the *scanning process's* environment, so
+        they are honored only on an own-home scan (see :meth:`_scans_own_home`) —
+        under ``--scan-all-users`` the scanner can't know another user's env:
+
+        * ``CLAUDE_CODE_PLUGIN_CACHE_DIR`` — overrides the plugins root (despite the
+          name it is the parent dir; ``cache``/``marketplaces`` live beneath it).
+        * ``CLAUDE_CODE_PLUGIN_SEED_DIR`` — ``os.pathsep``-separated read-only seed
+          roots mirroring the plugins layout (container/CI pre-population).
+
+        All resolved roots are scanned; results key by absolute path so any overlap
+        with the default dedupes, and a non-existent root is skipped downstream.
+        """
+        roots = [folder / "plugins" for folder in self._discover_global_folders()]
+        if self._scans_own_home():
+            cache_dir = os.environ.get("CLAUDE_CODE_PLUGIN_CACHE_DIR")
+            if cache_dir:
+                roots.append(Path(cache_dir))
+            seed_dir = os.environ.get("CLAUDE_CODE_PLUGIN_SEED_DIR")
+            if seed_dir:
+                roots.extend(Path(p) for p in seed_dir.split(os.pathsep) if p)
+        return roots
+
     def _plugin_base_dirs(self) -> list[Path]:
-        """Roots where Claude Code stages installed plugins: ``cache/`` (hydrated)
-        and ``repos/`` (git-cloned source). Both can host MCP servers and skills."""
-        return [folder / sub for folder in self._discover_global_folders() for sub in self._plugin_subdirs]
+        """Every ``<plugin-root>/<subdir>`` to scan for plugin MCP servers and skills."""
+        return [root / sub for root in self._plugin_root_dirs() for sub in self._plugin_subdirs]
 
     def _discover_plugin_mcp_servers(self) -> McpConfigsResult:
         """Scan plugin ``.mcp.json`` files under every plugin base dir.
