@@ -3709,3 +3709,16 @@ def test_antigravity_discovers_singular_agent_home_skills(tmp_path):
     keys = [k for k in skills_dirs if k.endswith("/.agent/skills")]
     assert len(keys) == 1
     assert {n for n, _ in skills_dirs[keys[0]]} == {"home-skill"}
+
+
+def test_vscode_devcontainer_non_dict_intermediate_does_not_crash(tmp_path):
+    """A devcontainer.json whose ``customizations.vscode`` is a non-dict must not
+    raise (which would abort the whole discoverer) — it yields no entry."""
+    discoverer, workspace = _setup_vscode_workspace(tmp_path, "proj")
+    devc = workspace / ".devcontainer"
+    devc.mkdir()
+    (devc / "devcontainer.json").write_text('{"customizations": {"vscode": "oops"}}')
+
+    mcp_configs = discoverer.discover_mcp_servers()  # must not raise
+
+    assert not any("devcontainer.json" in k for k in mcp_configs)

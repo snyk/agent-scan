@@ -716,6 +716,35 @@ def _claude_desktop_config_path(home_directory: Path | None) -> Path | None:
     return expand_path(Path(rel), home_directory)
 
 
+def _file_uri_to_path(uri: object) -> Path | None:
+    """Convert a ``file://`` URI to a ``Path``, or ``None`` for a non-string or
+    non-``file://`` value (e.g. ``vscode-remote://`` points at a filesystem we
+    can't scan from this process).
+
+    ``url2pathname`` decodes percent-encoding (VSCode stores e.g. ``My%20Projects``
+    for paths with spaces) and is platform-aware: on POSIX ``file:///home/u/repo``
+    becomes ``/home/u/repo``; on Windows ``file:///C:/Users/me/repo`` becomes
+    ``C:\\Users\\me\\repo`` (dropping the URL artifact slash before the drive
+    letter). Naïve ``file://`` stripping would leave ``/C:/Users/me/repo`` on
+    Windows, which ``Path`` won't resolve correctly.
+    """
+    if not isinstance(uri, str) or not uri.startswith("file://"):
+        return None
+    return Path(url2pathname(urlparse(uri).path))
+
+
+def _nested_dict_get(data: object, *keys: str) -> object:
+    """Walk ``keys`` through nested dicts, returning ``None`` if any level is
+    missing or not a dict. Safe alternative to chained ``.get(k, {}).get(...)``,
+    which raises ``AttributeError`` when an intermediate value is a non-dict."""
+    node: object = data
+    for key in keys:
+        if not isinstance(node, dict):
+            return None
+        node = node.get(key)
+    return node
+
+
 def _read_chat_setting(settings: dict, key: str) -> object:
     """Read a ``chat.<key>`` setting in either dotted (``"chat.<key>"``) or
     nested (``{"chat": {"<key>": ...}}``) form. Returns ``None`` if absent."""
@@ -1195,11 +1224,7 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
                 data = self._load_json_file(path)
                 if not isinstance(data, dict):
                     continue
-                servers = (
-                    data.get("customizations", {}).get("vscode", {}).get("mcp", {}).get("servers")
-                    if isinstance(data.get("customizations"), dict)
-                    else None
-                )
+                servers = _nested_dict_get(data, "customizations", "vscode", "mcp", "servers")
                 if not isinstance(servers, dict) or not servers:
                     continue
                 result[path.as_posix()] = self._validate_servers(
@@ -1224,9 +1249,9 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
                 data = self._load_json_file(workspace_file)
                 if not isinstance(data, dict):
                     continue
-                ref = data.get("workspace")
-                if isinstance(ref, str) and ref.startswith("file://"):
-                    files.append(Path(url2pathname(urlparse(ref).path)))
+                ref = _file_uri_to_path(data.get("workspace"))
+                if ref is not None:
+                    files.append(ref)
         return files
 
     def _code_workspace_servers(self, settings: dict) -> dict | None:
@@ -1313,32 +1338,15 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
     def _workspace_root_from(self, workspace_json: Path) -> Path | None:
         """Read a ``workspace.json`` and return its ``folder`` field as a Path.
 
-        Returns ``None`` for malformed JSON, missing ``folder`` (e.g. multi-root
-        workspaces using ``configuration``), or any non-``file://`` scheme
-        (``vscode-remote://``, ``vscode-vfs://``, etc. point at filesystems
-        we can't scan from this process).
-
-        The ``folder`` field is a ``file://`` URI where path segments are
-        percent-encoded (VSCode stores e.g. ``My%20Projects`` for paths with
-        spaces) — ``url2pathname`` decodes before constructing the ``Path``,
-        otherwise the per-workspace MCP lookup would silently miss any
-        workspace whose path contains a special character.
-
-        ``url2pathname`` is platform-aware: on POSIX, ``file:///home/user/repo``
-        becomes ``/home/user/repo``; on Windows, ``file:///C:/Users/me/repo``
-        becomes ``C:\\Users\\me\\repo`` (dropping the URL artifact slash before
-        the drive letter). Naïve ``file://`` stripping would leave
-        ``/C:/Users/me/repo`` on Windows, which ``Path`` won't resolve correctly.
+        Returns ``None`` for malformed JSON, a missing ``folder`` (e.g. multi-root
+        workspaces using ``workspace``/``configuration``), or any non-``file://``
+        scheme. ``file://`` URI decoding (percent-encoding + platform-aware drive
+        handling) is delegated to :func:`_file_uri_to_path`.
         """
         data = self._load_json_file(workspace_json)
         if not isinstance(data, dict):
             return None
-        folder = data.get("folder")
-        if not isinstance(folder, str):
-            return None
-        if not folder.startswith("file://"):
-            return None
-        return Path(url2pathname(urlparse(folder).path))
+        return _file_uri_to_path(data.get("folder"))
 
 
 # --- VSCode family: concrete subclasses ---

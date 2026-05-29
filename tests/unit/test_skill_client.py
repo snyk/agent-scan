@@ -71,3 +71,26 @@ def test_inspect_skill_uses_frontmatter_description_for_command_file(tmp_path):
     sig = inspect_skill(SkillServer(path=str(cmd)))
 
     assert sig.metadata.instructions == "Cut a release"
+
+
+def test_inspect_skill_non_string_frontmatter_does_not_crash(tmp_path):
+    """A command file whose frontmatter ``description`` is a YAML list (not a
+    string) must not raise — it should fall back to the file stem / empty desc."""
+    cmd = tmp_path / "weird.md"
+    cmd.write_text("---\ndescription:\n  - a\n  - b\n---\nbody")
+
+    sig = inspect_skill(SkillServer(path=str(cmd)))
+
+    assert sig.metadata.serverInfo.name == "weird"
+    assert isinstance(sig.metadata.instructions, str)
+
+
+def test_inspect_skill_body_horizontal_rules_not_parsed_as_frontmatter(tmp_path):
+    """A file that does NOT start with frontmatter but uses ``---`` as markdown
+    horizontal rules must keep the file stem as its name, not parse body text."""
+    cmd = tmp_path / "deploy.md"
+    cmd.write_text("Run build\n\n---\n\nname: hijacked\ndescription: nope\n\n---\n\ndone")
+
+    sig = inspect_skill(SkillServer(path=str(cmd)))
+
+    assert sig.metadata.serverInfo.name == "deploy"

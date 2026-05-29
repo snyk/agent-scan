@@ -40,15 +40,22 @@ def _inspect_skill_file(config: SkillServer, expanded_path: str) -> ServerSignat
 
     name = os.path.splitext(os.path.basename(expanded_path))[0]
     description = ""
+    # Only treat the file as having YAML frontmatter when it actually *starts*
+    # with a ``---`` fence; otherwise ``---`` used as a markdown horizontal rule
+    # in the body would be misread as frontmatter.
     content_chunks = content.split("---")
-    if len(content_chunks) > 2:
+    if content.lstrip().startswith("---") and len(content_chunks) > 2:
         try:
             yaml_data = yaml.safe_load(content_chunks[1].strip())
         except YAMLError:
             yaml_data = None
         if isinstance(yaml_data, dict):
-            name = yaml_data.get("name", name)
-            description = yaml_data.get("description", "")
+            # Guard against non-string frontmatter values (e.g. a YAML list),
+            # which would otherwise fail Pydantic validation downstream.
+            if isinstance(yaml_data.get("name"), str):
+                name = yaml_data["name"]
+            if isinstance(yaml_data.get("description"), str):
+                description = yaml_data["description"]
 
     base_prompt = Prompt(name=os.path.basename(expanded_path), description=content)
     return ServerSignature(
