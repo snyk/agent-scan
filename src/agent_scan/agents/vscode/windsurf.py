@@ -14,6 +14,11 @@ class WindsurfDiscoverer(VSCodeFamilyDiscoverer):
     # report Windsurf as installed for plugin-only users.
     _install_paths = ("~/.codeium/windsurf",)
     _user_mcp_file_paths = ("~/.codeium/windsurf/mcp_config.json",)
+    # Windsurf documents MCP at exactly one location — the global
+    # ``~/.codeium/windsurf/mcp_config.json`` above (it has no per-project MCP).
+    # The two paths below are inherited VSCode-family fallbacks, NOT Codeium-
+    # documented: ``User/settings.json`` (presence-gated, so harmless) and a
+    # speculative workspace ``.windsurf/mcp.json``. Kept as belt-and-suspenders.
     _user_settings_file = "User/settings.json"
     _workspace_mcp_relative = (".windsurf/mcp.json",)
     # Windsurf docs: workspace skills at ``.windsurf/skills`` plus cross-agent

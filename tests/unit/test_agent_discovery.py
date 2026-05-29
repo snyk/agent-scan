@@ -3533,11 +3533,13 @@ def test_vscode_discoverer_profile_walk_skips_when_no_profiles(tmp_path):
 
 # --- Kiro Powers: per-power mcp.json under ~/.kiro/powers/installed/ ---
 #
-# A Kiro Power bundles MCP + steering + hooks into one installable unit. Per
-# the kirodotdev/powers repo and kiro.dev/docs/powers/, installed powers live
-# at ``~/.kiro/powers/installed/<name>/`` and ship their own ``mcp.json``.
-# Kiro also writes a merged ``~/.kiro/powers.mcp.json`` at install time.
-# Powers are documented as user-global only — no project-scoped equivalent.
+# A Kiro Power bundles MCP + steering into one installable unit. The official
+# kirodotdev/powers repo (e.g. databricks/POWER.md) documents installed powers
+# living at ``~/.kiro/powers/installed/<name>/`` and shipping their own
+# ``mcp.json``. Powers are user-global only — no project-scoped equivalent.
+# (Kiro does NOT write a separate merged ``~/.kiro/powers.mcp.json``; on install
+# it namespaces each Power's servers into a ``powers`` block inside
+# ``~/.kiro/settings/mcp.json``.)
 
 
 def test_kiro_powers_per_power_mcp_json_discovered(tmp_path):
@@ -3558,23 +3560,6 @@ def test_kiro_powers_per_power_mcp_json_discovered(tmp_path):
     name, server = entries[0]
     assert name == "stripe-mcp"
     assert isinstance(server, StdioServer)
-
-
-def test_kiro_powers_merged_mcp_file_discovered(tmp_path):
-    """The auto-generated ``~/.kiro/powers.mcp.json`` is read alongside ``settings/mcp.json``."""
-    from agent_scan.agents import KiroDiscoverer
-
-    kiro_dir = tmp_path / ".kiro"
-    kiro_dir.mkdir()
-    (kiro_dir / "powers.mcp.json").write_text('{"mcpServers": {"merged-srv": {"command": "m"}}}')
-
-    mcp_configs = KiroDiscoverer(tmp_path).discover_mcp_servers()
-
-    matching = [k for k in mcp_configs if k.endswith("/.kiro/powers.mcp.json")]
-    assert len(matching) == 1
-    entries = mcp_configs[matching[0]]
-    name, _ = entries[0]
-    assert name == "merged-srv"
 
 
 def test_kiro_powers_walk_finds_multiple_installed_powers(tmp_path):
