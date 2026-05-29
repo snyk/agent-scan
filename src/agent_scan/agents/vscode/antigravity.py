@@ -31,14 +31,24 @@ class AntigravityDiscoverer(VSCodeFamilyDiscoverer):
     # Gemini's remote servers use the ``httpUrl`` key (Streamable HTTP), which
     # ``RemoteServer`` accepts as a URL alias (see its ``AliasChoices``).
     _gated_home_settings_files = ("~/.gemini/settings.json",)
-    # Per Antigravity docs / Google codelabs: user-global at
-    # ``~/.gemini/antigravity/skills/`` and workspace at ``.agent/skills``
-    # (singular ``.agent``). The plural ``.agents/skills`` is the newer reported
-    # default; ``~/.agent/skills`` (singular, HOME) is a tool-agnostic location
-    # Antigravity also reads. ``~/.gemini/skills/`` is shared CLI+IDE.
+    # User-global skill dirs the Antigravity IDE reads, most-reliable first:
+    #   * ``~/.gemini/skills`` — shared across all Antigravity tools (CLI+IDE);
+    #     the location skills reliably load from in practice.
+    #   * ``~/.agents/skills`` (PLURAL) — Antigravity 2.0's default global dir
+    #     and the ``npx`` skills-installer target (its ``.skill-lock.json`` lists
+    #     ``antigravity``).
+    #   * ``~/.gemini/antigravity/skills`` — the officially documented global
+    #     path (Google codelab); kept even though its real-world pickup is
+    #     unreliable.
+    #   * ``~/.agent/skills`` (SINGULAR) — the v1-era path, still read by 2.0 for
+    #     backward compatibility. Kept as a harmless fallback.
+    # NOT included: ``~/.gemini/antigravity-ide/skills`` (no first-party source
+    # documents it) and ``~/.gemini/antigravity-cli/skills`` (CLI-only, not read
+    # by the IDE). Workspace ``.agent``/``.agents`` paths are below.
     _skills_dir_paths = (
-        "~/.gemini/antigravity/skills",
         "~/.gemini/skills",
+        "~/.agents/skills",
+        "~/.gemini/antigravity/skills",
         "~/.agent/skills",
     )
     _workspace_skills_relative = (".agent/skills", ".agents/skills")

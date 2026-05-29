@@ -4338,6 +4338,22 @@ def test_antigravity_discovers_singular_agent_home_skills(tmp_path):
     assert {n for n, _ in skills_dirs[keys[0]]} == {"home-skill"}
 
 
+def test_antigravity_discovers_plural_agents_home_skills(tmp_path):
+    """Antigravity 2.0's default global skills dir / npx install target is the
+    PLURAL ``~/.agents/skills`` (the singular ``~/.agent/skills`` is the legacy
+    back-compat path). The plural must be discovered at the user/home level."""
+    from agent_scan.agents import AntigravityDiscoverer
+
+    (tmp_path / ".gemini" / "antigravity").mkdir(parents=True)
+    _write_skill(tmp_path / ".agents" / "skills", "plural-home-skill")
+
+    skills_dirs = AntigravityDiscoverer(tmp_path).discover_skills()
+
+    keys = [k for k in skills_dirs if k.endswith("/.agents/skills")]
+    assert len(keys) == 1, f"plural ~/.agents/skills must be scanned; got: {list(skills_dirs)}"
+    assert {n for n, _ in skills_dirs[keys[0]]} == {"plural-home-skill"}
+
+
 def test_vscode_devcontainer_non_dict_intermediate_does_not_crash(tmp_path):
     """A devcontainer.json whose ``customizations.vscode`` is a non-dict must not
     raise (which would abort the whole discoverer) — it yields no entry."""
