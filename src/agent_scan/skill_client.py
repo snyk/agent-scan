@@ -28,8 +28,49 @@ def get_skill_md_path(path: str) -> str | None:
     return None
 
 
+def _inspect_skill_file(config: SkillServer, expanded_path: str) -> ServerSignature:
+    """Inspect a single-file skill/command (a flat ``*.md``).
+
+    Command files (``~/.claude/commands/*.md``) are markdown files with optional
+    YAML frontmatter, not ``<name>/SKILL.md`` directories. The name defaults to
+    the file stem; an optional frontmatter ``name``/``description`` overrides it.
+    """
+    with open(expanded_path, encoding="utf-8") as f:
+        content = f.read()
+
+    name = os.path.splitext(os.path.basename(expanded_path))[0]
+    description = ""
+    content_chunks = content.split("---")
+    if len(content_chunks) > 2:
+        try:
+            yaml_data = yaml.safe_load(content_chunks[1].strip())
+        except YAMLError:
+            yaml_data = None
+        if isinstance(yaml_data, dict):
+            name = yaml_data.get("name", name)
+            description = yaml_data.get("description", "")
+
+    base_prompt = Prompt(name=os.path.basename(expanded_path), description=content)
+    return ServerSignature(
+        metadata=InitializeResult(
+            protocolVersion="built-in",
+            instructions=description,
+            capabilities=ServerCapabilities(tools=ToolsCapability(listChanged=False)),
+            prompts=PromptsCapability(listChanged=False),
+            resources=ResourcesCapability(listChanged=False),
+            serverInfo=Implementation(name=name, version="skills"),
+        ),
+        prompts=[base_prompt],
+        resources=[],
+        tools=[],
+    )
+
+
 def inspect_skill(config: SkillServer) -> ServerSignature:
     logger.info(f"Scanning skill at path: {config.path}")
+    expanded_path = os.path.expanduser(config.path)
+    if os.path.isfile(expanded_path):
+        return _inspect_skill_file(config, expanded_path)
     skill_md_path = get_skill_md_path(config.path)
     if skill_md_path is None:
         raise Exception(f"neither SKILL.md nor skill.md file found at path: {config.path}")
@@ -154,3 +195,28 @@ def inspect_skills_dir(path: str) -> list[tuple[str, SkillServer]]:
             skills_servers.append((candidate_skill_dir, SkillServer(path=candidate_skill_dir_full_path)))
     logger.info("Found %d skills servers", len(skills_servers))
     return skills_servers
+
+
+def inspect_commands_dir(path: str) -> list[tuple[str, SkillServer]]:
+    """List command files under ``path`` as skill entries.
+
+    Unlike :func:`inspect_skills_dir` (which expects ``<name>/SKILL.md``
+    subdirectories), command files are flat ``*.md`` files. Claude Code
+    namespaces nested command files by their relative path joined with ``:``
+    (e.g. ``commands/git/commit.md`` -> ``git:commit``). Each file becomes one
+    ``SkillServer`` pointing at the file itself.
+    """
+    logger.info("Scanning commands dir: %s", path)
+
+    expanded_path = os.path.expanduser(path)
+    commands: list[tuple[str, SkillServer]] = []
+    for root, _dirs, files in os.walk(expanded_path):
+        for file in files:
+            if not file.endswith(".md"):
+                continue
+            full_path = os.path.join(root, file)
+            relative = os.path.relpath(full_path, expanded_path)
+            name = os.path.splitext(relative)[0].replace(os.path.sep, ":")
+            commands.append((name, SkillServer(path=full_path)))
+    logger.info("Found %d command files", len(commands))
+    return commands

@@ -1736,6 +1736,37 @@ def test_vscode_discoverer_parses_settings_json_nested_mcp(tmp_path):
     assert name == "nested-srv"
 
 
+def test_vscode_discoverer_skips_settings_json_without_mcp_section(tmp_path):
+    """An editor-only ``settings.json`` (no ``mcp`` or ``mcpServers`` key) must produce
+    no entries — neither a ``CouldNotParseMCPConfig`` parse failure nor garbage server
+    entries materialized out of editor preferences.
+
+    ``settings.json`` is multi-purpose; it carries MCP under a nested ``mcp`` key
+    *if* the user configures one, but most users never will. We must not flag a
+    typical editor-config file as a malformed MCP config, and we must not let a
+    permissive flat format coerce keys like ``editor.fontSize`` into server entries.
+    """
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    user_dir = _userdata(discoverer) / "User"
+    user_dir.mkdir(parents=True)
+    # Realistic editor-only settings.json — no `mcp` / `mcpServers` anywhere.
+    (user_dir / "settings.json").write_text(
+        '{"editor.fontSize": 14, "telemetry.level": "off", '
+        '"workbench.colorTheme": "Default Dark+", '
+        '"editor.formatOnSave": true}'
+    )
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    settings_keys = [k for k in mcp_configs if k.endswith("/User/settings.json")]
+    assert settings_keys == [], (
+        f"settings.json with no mcp section must not appear in mcp_configs at all, "
+        f"got entries: {[(k, mcp_configs[k]) for k in settings_keys]}"
+    )
+
+
 def test_cursor_discoverer_parses_wrapped_mcp_servers(tmp_path):
     """``~/.cursor/mcp.json`` uses the wrapped ``{"mcpServers": {...}}`` shape."""
     from agent_scan.agent_discovery import CursorDiscoverer
@@ -1799,6 +1830,65 @@ def test_antigravity_discoverer_parses_mcp_config_json(tmp_path):
     entries = mcp_configs[file_keys[0]]
     name, _ = entries[0]
     assert name == "ag-srv"
+
+
+def test_antigravity_discoverer_parses_settings_json_nested_mcp(tmp_path):
+    """Antigravity is a VSCode fork; like VSCode/Cursor it carries a per-user
+    ``User/settings.json`` that can hold MCP under a nested ``mcp.servers`` key.
+
+    Without ``_user_settings_file`` set on ``AntigravityDiscoverer`` this file is
+    never scanned, so users who configure MCP through the editor settings UI
+    (rather than ``~/.gemini/antigravity/mcp_config.json``) would slip past discovery.
+    """
+    from agent_scan.agent_discovery import AntigravityDiscoverer
+
+    discoverer = AntigravityDiscoverer(tmp_path)
+    # Antigravity has two userdata names (``Antigravity`` for v1.x,
+    # ``Antigravity IDE`` for v2.0). Use the first one; the discoverer must
+    # scan every entry in ``_user_data_dirs()``.
+    userdata_dirs = discoverer._user_data_dirs()
+    assert userdata_dirs, "Antigravity must declare at least one userdata dir name"
+    user_dir = userdata_dirs[0] / "User"
+    user_dir.mkdir(parents=True)
+    (user_dir / "settings.json").write_text(
+        '{"editor.fontSize": 14, "mcp": {"servers": {"ag-nested": {"command": "x"}}}}'
+    )
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    file_keys = [k for k in mcp_configs if k.endswith("/User/settings.json")]
+    assert len(file_keys) == 1, (
+        f"AntigravityDiscoverer must scan User/settings.json for nested mcp.servers; "
+        f"got mcp_configs keys: {list(mcp_configs)}"
+    )
+    entries = mcp_configs[file_keys[0]]
+    assert isinstance(entries, list)
+    name, _ = entries[0]
+    assert name == "ag-nested"
+
+
+def test_antigravity_discoverer_has_no_workspace_mcp_path():
+    """Antigravity intentionally has no ``_workspace_mcp_relative`` configured.
+
+    Google's official Antigravity docs site is a client-rendered SPA whose
+    pages don't disclose a workspace-scoped ``mcp.json`` path, and the
+    canonical sitemap doesn't list one either. Community write-ups float
+    candidates (e.g. ``.agents/mcp_config.json``) but those aren't Google-
+    official. A wrong guess here would let a user-controlled file on disk
+    feed parse failures into every scan — so this test pins the empty value
+    and forces a deliberate code review before any path is added.
+
+    If a future contributor needs to add a workspace path, they must:
+    (1) cite an official Google source documenting the exact path, and
+    (2) update both this test and the comment in ``AntigravityDiscoverer``.
+    """
+    from agent_scan.agent_discovery import AntigravityDiscoverer
+
+    assert AntigravityDiscoverer._workspace_mcp_relative == (), (
+        "Antigravity must not declare a workspace MCP path without official "
+        "Google documentation confirming it. See the comment on "
+        "AntigravityDiscoverer for context."
+    )
 
 
 # --- malformed MCP file surfaces as CouldNotParseMCPConfig ---
@@ -1940,15 +2030,21 @@ def test_vscode_discoverer_workspace_root_handles_windows_file_uri(tmp_path, mon
     on Windows. ``_workspace_root_from`` must delegate to ``urllib.request.url2pathname``
     so the URL is converted correctly per-platform.
 
-    We simulate Windows by patching the module-level ``url2pathname`` binding to the
-    pure-Python ``nturl2path`` implementation (importable on every platform).
+    We don't import ``nturl2path`` (deprecated in Python 3.14+ and slated for removal).
+    Instead we patch the module-level ``url2pathname`` binding with a tiny stand-in
+    that mirrors Windows' conversion for our fixture (strip the URL artifact slash
+    before the drive letter, swap ``/`` for ``\\``), and assert the production code
+    returns that. This locks the "delegate to ``url2pathname``, don't strip ``file://``
+    by hand" contract on every platform without depending on a deprecated module.
     """
-    import nturl2path
     from pathlib import Path
 
     from agent_scan import agent_discovery
 
-    monkeypatch.setattr(agent_discovery, "url2pathname", nturl2path.url2pathname, raising=False)
+    def fake_windows_url2pathname(url: str) -> str:
+        return url.lstrip("/").replace("/", "\\")
+
+    monkeypatch.setattr(agent_discovery, "url2pathname", fake_windows_url2pathname, raising=False)
 
     discoverer = agent_discovery.VSCodeDiscoverer(tmp_path)
     workspace_json = tmp_path / "workspace.json"
@@ -1957,13 +2053,47 @@ def test_vscode_discoverer_workspace_root_handles_windows_file_uri(tmp_path, mon
     root = discoverer._workspace_root_from(workspace_json)
 
     assert root is not None
-    # nturl2path drops the URL's leading slash before drive letters and converts
-    # ``/`` to ``\``; we should get an equivalent native Path back.
-    expected = Path(nturl2path.url2pathname("/C:/Users/me/repo"))
-    assert root == expected
+    # The production code must hand the URL path to the patched ``url2pathname``;
+    # our stand-in returns Windows-form ``C:\Users\me\repo``.
+    assert root == Path(fake_windows_url2pathname("/C:/Users/me/repo"))
     # And specifically NOT the buggy ``/C:/Users/me/repo`` shape that naïve
     # ``file://`` stripping would produce.
     assert "/C:" not in root.as_posix()
+
+
+def test_vscode_discoverer_workspace_root_returns_none_for_non_file_uri(tmp_path):
+    """Remote-workspace URIs (``vscode-remote://``, ``vscode-vfs://``, etc.) point
+    at filesystems we can't scan from this process. ``_workspace_root_from`` must
+    return ``None`` for any non-``file://`` scheme rather than coercing the whole
+    URL into a ``Path`` — that would surface a non-existent path downstream and
+    risk silent garbage entries if any future caller stopped checking existence.
+    """
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+
+    for remote in (
+        "vscode-remote://ssh-remote+host/home/me/repo",
+        "vscode-vfs://github/owner/repo",
+        "vscode-remote://wsl+Ubuntu/home/me/repo",
+    ):
+        workspace_json = tmp_path / "ws.json"
+        workspace_json.write_text(f'{{"folder": "{remote}"}}')
+        assert discoverer._workspace_root_from(workspace_json) is None, remote
+
+
+def test_vscode_discoverer_workspace_storage_skips_remote_folder_uri(tmp_path):
+    """End-to-end: a workspaceStorage entry pointing at a ``vscode-remote://`` folder
+    must not surface anything in ``discover_mcp_servers`` — not even a parse failure."""
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    workspace_storage = _userdata(discoverer) / "User" / "workspaceStorage"
+    remote_hash = workspace_storage / "remote"
+    remote_hash.mkdir(parents=True)
+    (remote_hash / "workspace.json").write_text('{"folder": "vscode-remote://ssh-remote+host/home/me/repo"}')
+
+    assert discoverer.discover_mcp_servers() == {}
 
 
 def test_cursor_discoverer_walks_workspace_storage(tmp_path):
@@ -2010,6 +2140,74 @@ def test_vscode_discoverer_parses_copilot_skills_dir(tmp_path):
     assert isinstance(entries, list)
     skill_name, skill = entries[0]
     assert skill_name == "my-skill"
+    assert isinstance(skill, SkillServer)
+
+
+@pytest.mark.parametrize("relative", ["~/.copilot/skills", "~/.claude/skills", "~/.agents/skills"])
+def test_vscode_discoverer_reads_each_documented_user_skills_path(tmp_path, relative):
+    """Per the official VS Code Agent Skills docs
+    (code.visualstudio.com/docs/copilot/customization/agent-skills),
+    VS Code reads user-level skills from three locations:
+    ``~/.copilot/skills``, ``~/.claude/skills``, and ``~/.agents/skills``.
+
+    Each must be picked up independently so users who store skills under
+    only one of these paths still surface in scans.
+    """
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    skills_dir = tmp_path / relative.replace("~/", "")
+    _write_skill(skills_dir, "user-skill")
+    (tmp_path / ".vscode").mkdir()
+
+    skills_dirs = VSCodeDiscoverer(tmp_path).discover_skills()
+
+    suffix = relative.replace("~", "")
+    matching = [k for k in skills_dirs if k.endswith(suffix)]
+    assert len(matching) == 1, f"VSCodeDiscoverer must surface skills at {relative}; got keys: {list(skills_dirs)}"
+    entries = skills_dirs[matching[0]]
+    assert isinstance(entries, list)
+    skill_name, _ = entries[0]
+    assert skill_name == "user-skill"
+
+
+def _setup_vscode_workspace(tmp_path, workspace_relpath):
+    """Helper: create a VSCode install with one opened workspace at ``tmp_path/<workspace_relpath>``."""
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    (tmp_path / ".vscode").mkdir(exist_ok=True)
+    workspace_storage = _userdata(discoverer) / "User" / "workspaceStorage"
+    workspace_hash = workspace_storage / "ws"
+    workspace_hash.mkdir(parents=True)
+    workspace = tmp_path / workspace_relpath
+    workspace.mkdir(parents=True)
+    (workspace_hash / "workspace.json").write_text(f'{{"folder": "{workspace.as_uri()}"}}')
+    return discoverer, workspace
+
+
+@pytest.mark.parametrize("relative", [".github/skills", ".claude/skills", ".agents/skills"])
+def test_vscode_discoverer_reads_each_documented_workspace_skills_path(tmp_path, relative):
+    """Per the official VS Code Agent Skills docs
+    (code.visualstudio.com/docs/copilot/customization/agent-skills),
+    VS Code reads project skills from three locations inside the workspace:
+    ``.github/skills``, ``.claude/skills``, and ``.agents/skills``.
+
+    The ``.github/skills`` path is VS Code's canonical workspace skills location;
+    the other two are documented cross-agent compatibility paths.
+    """
+    discoverer, workspace = _setup_vscode_workspace(tmp_path, "proj")
+    _write_skill(workspace / relative, "ws-skill")
+
+    skills_dirs = discoverer.discover_skills()
+
+    matching = [k for k in skills_dirs if k.endswith(f"/proj/{relative}")]
+    assert len(matching) == 1, (
+        f"VSCodeDiscoverer must surface workspace skills at {relative}; got keys: {list(skills_dirs)}"
+    )
+    entries = skills_dirs[matching[0]]
+    assert isinstance(entries, list)
+    skill_name, skill = entries[0]
+    assert skill_name == "ws-skill"
     assert isinstance(skill, SkillServer)
 
 
@@ -2292,3 +2490,1222 @@ def test_cursor_workspace_mcp_picked_up_from_ancestor(tmp_path):
 
     matching = [k for k in mcp_configs if k.endswith("/monorepo/.cursor/mcp.json")]
     assert len(matching) == 1
+
+
+# --- VSCode-family extension walks (parity with Claude Code plugin walks) ---
+
+
+def test_vscode_extension_mcp_discovers_wrapped_mcp_json(tmp_path):
+    """An extension dropping ``mcp.json`` under ``~/.vscode/extensions/<ext>/`` is picked up."""
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    ext_dir = tmp_path / ".vscode" / "extensions" / "publisher.example-1.0.0"
+    ext_dir.mkdir(parents=True)
+    (ext_dir / "mcp.json").write_text('{"mcpServers": {"ext-srv": {"command": "e"}}}')
+
+    mcp_configs = VSCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    matching = [k for k in mcp_configs if "/extensions/publisher.example-1.0.0/mcp.json" in k]
+    assert len(matching) == 1
+    entries = mcp_configs[matching[0]]
+    assert isinstance(entries, list)
+    name, server = entries[0]
+    assert name == "ext-srv"
+    assert isinstance(server, StdioServer)
+
+
+def test_vscode_extension_mcp_discovers_vscode_flat_servers_shape(tmp_path):
+    """An extension shipping the VSCode-flat ``{"servers": {...}}`` shape also parses."""
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    ext_dir = tmp_path / ".vscode" / "extensions" / "x.flat-2.0.0"
+    ext_dir.mkdir(parents=True)
+    (ext_dir / "mcp.json").write_text('{"servers": {"flat-srv": {"command": "f"}}}')
+
+    mcp_configs = VSCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    matching = [k for k in mcp_configs if k.endswith("/x.flat-2.0.0/mcp.json")]
+    assert len(matching) == 1
+    entries = mcp_configs[matching[0]]
+    assert isinstance(entries, list)
+    name, _ = entries[0]
+    assert name == "flat-srv"
+
+
+def test_vscode_extension_mcp_empty_when_extensions_dir_missing(tmp_path):
+    """No ``extensions/`` tree means no extension-scope keys in the result."""
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    (tmp_path / ".vscode").mkdir()
+
+    mcp_configs = VSCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert not any("/extensions/" in k for k in mcp_configs)
+
+
+def test_vscode_extension_mcp_records_could_not_parse_for_invalid_json(tmp_path):
+    """A malformed ``mcp.json`` inside an extension dir surfaces as ``CouldNotParseMCPConfig``."""
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    ext_dir = tmp_path / ".vscode" / "extensions" / "x.bad-0.0.1"
+    ext_dir.mkdir(parents=True)
+    (ext_dir / "mcp.json").write_text("{ not valid json")
+
+    mcp_configs = VSCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    matching = [k for k in mcp_configs if k.endswith("/x.bad-0.0.1/mcp.json")]
+    assert len(matching) == 1
+    entry = mcp_configs[matching[0]]
+    assert isinstance(entry, CouldNotParseMCPConfig)
+    assert entry.is_failure is True
+
+
+def test_vscode_extension_skills_discovers_skills_dir(tmp_path):
+    """An extension shipping a ``skills/`` directory is picked up."""
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    ext_skill_dir = tmp_path / ".vscode" / "extensions" / "p.ext-1.0.0" / "skills" / "ext-skill"
+    ext_skill_dir.mkdir(parents=True)
+    (ext_skill_dir / "SKILL.md").write_text("---\nname: ext-skill\ndescription: e\n---\n\nbody.\n")
+
+    skills_dirs = VSCodeDiscoverer(tmp_path).discover_skills()
+
+    matching = [k for k in skills_dirs if k.endswith("/p.ext-1.0.0/skills")]
+    assert len(matching) == 1
+    entries = skills_dirs[matching[0]]
+    assert isinstance(entries, list)
+    name, skill = entries[0]
+    assert name == "ext-skill"
+    assert isinstance(skill, SkillServer)
+
+
+def test_vscode_extension_skills_empty_when_extensions_dir_missing(tmp_path):
+    """No ``extensions/`` tree means no extension-scope skill keys."""
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    (tmp_path / ".vscode").mkdir()
+
+    skills_dirs = VSCodeDiscoverer(tmp_path).discover_skills()
+
+    assert not any("/extensions/" in k for k in skills_dirs)
+
+
+def test_cursor_extension_mcp_discovers_mcp_json(tmp_path):
+    """Cursor's ``~/.cursor/extensions/<ext>/mcp.json`` is scanned the same way as VSCode's."""
+    from agent_scan.agent_discovery import CursorDiscoverer
+
+    ext_dir = tmp_path / ".cursor" / "extensions" / "vendor.curext-3.1.4"
+    ext_dir.mkdir(parents=True)
+    (ext_dir / "mcp.json").write_text('{"mcpServers": {"cur-ext-srv": {"command": "c"}}}')
+
+    mcp_configs = CursorDiscoverer(tmp_path).discover_mcp_servers()
+
+    matching = [k for k in mcp_configs if k.endswith("/vendor.curext-3.1.4/mcp.json")]
+    assert len(matching) == 1
+    entries = mcp_configs[matching[0]]
+    assert isinstance(entries, list)
+    name, _ = entries[0]
+    assert name == "cur-ext-srv"
+
+
+def test_cursor_extension_skills_discovers_skills_dir(tmp_path):
+    """Cursor extensions can ship a ``skills/`` directory just like VSCode."""
+    from agent_scan.agent_discovery import CursorDiscoverer
+
+    ext_skill_dir = tmp_path / ".cursor" / "extensions" / "v.c-1.0.0" / "skills" / "cur-skill"
+    ext_skill_dir.mkdir(parents=True)
+    (ext_skill_dir / "SKILL.md").write_text("---\nname: cur-skill\ndescription: c\n---\n\nbody.\n")
+
+    skills_dirs = CursorDiscoverer(tmp_path).discover_skills()
+
+    matching = [k for k in skills_dirs if k.endswith("/v.c-1.0.0/skills")]
+    assert len(matching) == 1
+
+
+def test_windsurf_extension_mcp_discovers_mcp_json(tmp_path):
+    """Windsurf is a VSCode fork; ``~/.codeium/windsurf/extensions/`` follows the same convention."""
+    from agent_scan.agent_discovery import WindsurfDiscoverer
+
+    ext_dir = tmp_path / ".codeium" / "windsurf" / "extensions" / "v.ws-1.0.0"
+    ext_dir.mkdir(parents=True)
+    (ext_dir / "mcp.json").write_text('{"mcpServers": {"ws-ext-srv": {"command": "w"}}}')
+
+    mcp_configs = WindsurfDiscoverer(tmp_path).discover_mcp_servers()
+
+    matching = [k for k in mcp_configs if k.endswith("/v.ws-1.0.0/mcp.json")]
+    assert len(matching) == 1
+    entries = mcp_configs[matching[0]]
+    assert isinstance(entries, list)
+    name, _ = entries[0]
+    assert name == "ws-ext-srv"
+
+
+def test_vscode_extension_walk_respects_max_depth_cap(tmp_path, monkeypatch):
+    """An extension nested deeper than the depth cap is not scanned.
+
+    Mirrors the Claude Code plugin-walk depth test: pruning protects against
+    pathologically deep trees blowing up the walk.
+    """
+    import agent_scan.agent_discovery as discovery_module
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    monkeypatch.setattr(discovery_module, "_MAX_PLUGIN_RGLOB_DEPTH", 3)
+
+    # Inside ``~/.vscode/extensions/`` the relative-parts depth of
+    # ``a/b/c/d/mcp.json`` is 4 — beyond cap 3, so it must NOT be discovered.
+    deep = tmp_path / ".vscode" / "extensions" / "a" / "b" / "c" / "d"
+    deep.mkdir(parents=True)
+    (deep / "mcp.json").write_text('{"mcpServers": {"deep": {"command": "x"}}}')
+
+    mcp_configs = VSCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert not any("/a/b/c/d/mcp.json" in k for k in mcp_configs)
+
+
+def test_kiro_discoverer_walks_kiro_extensions_dir(tmp_path):
+    """Kiro is a VSCode fork using the OpenVSX registry, so installed extensions
+    live at ``~/.kiro/extensions/`` and can ship ``mcp.json`` like any VSCode-family ext.
+
+    The historical assertion that Kiro doesn't walk extensions was wrong — the path
+    just hadn't been wired up yet.
+    """
+    from agent_scan.agent_discovery import KiroDiscoverer
+
+    ext_dir = tmp_path / ".kiro" / "extensions" / "x.kr-1.0.0"
+    ext_dir.mkdir(parents=True)
+    (ext_dir / "mcp.json").write_text('{"mcpServers": {"kr-ext": {"command": "k"}}}')
+
+    mcp_configs = KiroDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert any("/extensions/" in k for k in mcp_configs)
+
+
+def test_antigravity_discoverer_walks_gemini_extensions_dir(tmp_path):
+    """Antigravity's documented extensions location is ``~/.gemini/extensions/`` (shared
+    with the Gemini CLI), not ``~/.gemini/antigravity/extensions/``. Confirm we walk the
+    correct path and ignore the wrong one."""
+    from agent_scan.agent_discovery import AntigravityDiscoverer
+
+    correct_ext_dir = tmp_path / ".gemini" / "extensions" / "x.ag-1.0.0"
+    correct_ext_dir.mkdir(parents=True)
+    (correct_ext_dir / "mcp.json").write_text('{"mcpServers": {"ag-ext": {"command": "a"}}}')
+
+    wrong_ext_dir = tmp_path / ".gemini" / "antigravity" / "extensions" / "x.wrong-1.0.0"
+    wrong_ext_dir.mkdir(parents=True)
+    (wrong_ext_dir / "mcp.json").write_text('{"mcpServers": {"wrong-ext": {"command": "w"}}}')
+
+    mcp_configs = AntigravityDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert any("/.gemini/extensions/x.ag-1.0.0/mcp.json" in k for k in mcp_configs)
+    assert not any("/.gemini/antigravity/extensions/" in k for k in mcp_configs)
+
+
+# --- Workspace-skill coverage for Windsurf / Kiro / Antigravity ---
+#
+# Per the agents' official docs:
+#   - Windsurf: workspace skills at ``.windsurf/skills/`` + cross-agent compat
+#     paths ``.agents/skills/`` and ``.claude/skills/``
+#   - Kiro:    user-global ``~/.kiro/skills/`` and workspace ``.kiro/skills/``;
+#     userdata lives at ``~/Library/Application Support/kiro/`` (lowercase).
+#   - Antigravity: user-global ``~/.gemini/antigravity/skills/`` and workspace
+#     ``.agent/skills/`` (singular ``.agent``, not ``.agents``); userdata at
+#     ``~/Library/Application Support/Antigravity/``.
+
+
+def _setup_workspace(discoverer, tmp_path, workspace_relpath):
+    """Set up a workspaceStorage entry for any VSCode-family discoverer.
+
+    Generalizes ``_setup_cursor_workspace`` so Windsurf, Kiro, and Antigravity
+    tests can reuse the same scaffolding now that those discoverers also have
+    a userdata dir.
+    """
+    workspace_storage = _userdata(discoverer) / "User" / "workspaceStorage"
+    workspace_hash = workspace_storage / "ws"
+    workspace_hash.mkdir(parents=True)
+    workspace = tmp_path / workspace_relpath
+    workspace.mkdir(parents=True)
+    (workspace_hash / "workspace.json").write_text(f'{{"folder": "{workspace.as_uri()}"}}')
+    return workspace
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [".windsurf/skills", ".agents/skills", ".claude/skills"],
+)
+def test_windsurf_discovers_workspace_skills_at_each_supported_relative_path(tmp_path, relative):
+    """Windsurf docs list ``.windsurf/skills`` plus cross-agent compat for ``.agents`` and ``.claude``."""
+    from agent_scan.agent_discovery import WindsurfDiscoverer
+
+    (tmp_path / ".codeium" / "windsurf").mkdir(parents=True)
+    discoverer = WindsurfDiscoverer(tmp_path)
+    workspace = _setup_workspace(discoverer, tmp_path, "proj")
+    _write_skill(workspace / relative, "ws-skill")
+
+    skills_dirs = discoverer.discover_skills()
+
+    matching = [k for k in skills_dirs if k.endswith(f"/proj/{relative}")]
+    assert len(matching) == 1
+    entries = skills_dirs[matching[0]]
+    assert isinstance(entries, list)
+    assert any(name == "ws-skill" for name, _ in entries)
+
+
+def test_kiro_user_global_skills_discovered(tmp_path):
+    """Kiro's user-global skills live at ``~/.kiro/skills/`` per the Kiro docs."""
+    from agent_scan.agent_discovery import KiroDiscoverer
+
+    _write_skill(tmp_path / ".kiro" / "skills", "kiro-user-skill")
+
+    skills_dirs = KiroDiscoverer(tmp_path).discover_skills()
+
+    matching = [k for k in skills_dirs if k.endswith("/.kiro/skills")]
+    assert len(matching) == 1
+    entries = skills_dirs[matching[0]]
+    assert any(name == "kiro-user-skill" for name, _ in entries)
+
+
+def test_kiro_user_data_dir_resolves_to_lowercase_kiro(tmp_path):
+    """Kiro's userdata folder is named ``kiro`` (lowercase) — observed in IDE storage at
+    ``~/Library/Application Support/kiro/User/globalStorage/``."""
+    from agent_scan.agent_discovery import KiroDiscoverer
+
+    userdata = KiroDiscoverer(tmp_path)._user_data_dir()
+
+    assert userdata is not None
+    assert userdata.name == "kiro"
+
+
+def test_kiro_discovers_workspace_skills_at_kiro_relative(tmp_path):
+    """Per Kiro docs, workspace skills live at ``<project>/.kiro/skills/``."""
+    from agent_scan.agent_discovery import KiroDiscoverer
+
+    (tmp_path / ".kiro").mkdir()
+    discoverer = KiroDiscoverer(tmp_path)
+    workspace = _setup_workspace(discoverer, tmp_path, "myproj")
+    _write_skill(workspace / ".kiro" / "skills", "kr-ws-skill")
+
+    skills_dirs = discoverer.discover_skills()
+
+    matching = [k for k in skills_dirs if k.endswith("/myproj/.kiro/skills")]
+    assert len(matching) == 1
+    entries = skills_dirs[matching[0]]
+    assert any(name == "kr-ws-skill" for name, _ in entries)
+
+
+def test_antigravity_user_global_skills_discovered(tmp_path):
+    """Antigravity's user-global skills live at ``~/.gemini/antigravity/skills/``."""
+    from agent_scan.agent_discovery import AntigravityDiscoverer
+
+    _write_skill(tmp_path / ".gemini" / "antigravity" / "skills", "ag-user-skill")
+
+    skills_dirs = AntigravityDiscoverer(tmp_path).discover_skills()
+
+    matching = [k for k in skills_dirs if k.endswith("/.gemini/antigravity/skills")]
+    assert len(matching) == 1
+    entries = skills_dirs[matching[0]]
+    assert any(name == "ag-user-skill" for name, _ in entries)
+
+
+def test_antigravity_user_data_dir_resolves_to_capital_antigravity(tmp_path):
+    """Antigravity's userdata folder is named ``Antigravity`` — observed at
+    ``~/Library/Application Support/Antigravity/`` and ``AppData/Roaming/Antigravity``."""
+    from agent_scan.agent_discovery import AntigravityDiscoverer
+
+    userdata = AntigravityDiscoverer(tmp_path)._user_data_dir()
+
+    assert userdata is not None
+    assert userdata.name == "Antigravity"
+
+
+def test_antigravity_discovers_workspace_skills_at_singular_agent_relative(tmp_path):
+    """Per Antigravity docs the workspace path is ``.agent/skills`` (singular ``agent``)."""
+    from agent_scan.agent_discovery import AntigravityDiscoverer
+
+    (tmp_path / ".gemini" / "antigravity").mkdir(parents=True)
+    discoverer = AntigravityDiscoverer(tmp_path)
+    workspace = _setup_workspace(discoverer, tmp_path, "myproj")
+    _write_skill(workspace / ".agent" / "skills", "ag-ws-skill")
+
+    skills_dirs = discoverer.discover_skills()
+
+    matching = [k for k in skills_dirs if k.endswith("/myproj/.agent/skills")]
+    assert len(matching) == 1
+    entries = skills_dirs[matching[0]]
+    assert any(name == "ag-ws-skill" for name, _ in entries)
+
+
+# NOTE: ``.agents/skills`` (plural) IS now a documented Antigravity workspace
+# skills path (the newer default alongside the singular ``.agent/skills``); the
+# positive case is covered by
+# ``test_antigravity_discovers_plural_agents_workspace_skills``.
+
+
+# --- Antigravity v2.0: second userdata folder ("Antigravity IDE") ---
+#
+# v2.0 split the IDE into two AppData/Application-Support directories:
+# v1.x writes to ``Antigravity``, v2.0 writes to ``Antigravity IDE``. Both
+# must be scanned so users on either version don't fall off the radar.
+
+
+def _platform_userdata_root():
+    """Return the platform-specific ``<userdata>`` parent dir (e.g.
+    ``~/Library/Application Support`` on macOS) as a relative-to-home path."""
+    if sys.platform == "darwin":
+        return "Library/Application Support"
+    if sys.platform in ("linux", "linux2"):
+        return ".config"
+    if sys.platform == "win32":
+        return "AppData/Roaming"
+    pytest.skip("Unsupported platform for VSCode-family userdata tests")
+    return ""  # unreachable
+
+
+def test_antigravity_user_data_dirs_includes_both_v1_and_v2_names(tmp_path):
+    """``_user_data_dirs()`` exposes every candidate userdata folder. For Antigravity
+    that's both the v1.x ``Antigravity`` and the v2.0 ``Antigravity IDE``."""
+    from agent_scan.agent_discovery import AntigravityDiscoverer
+
+    dirs = AntigravityDiscoverer(tmp_path)._user_data_dirs()
+
+    names = [d.name for d in dirs]
+    assert "Antigravity" in names
+    assert "Antigravity IDE" in names
+
+
+def test_antigravity_v1_userdata_remains_first_candidate(tmp_path):
+    """The v1.x ``Antigravity`` name stays the first candidate so existing single-userdata
+    callers (and tests using ``_user_data_dir()``) keep their previous behavior."""
+    from agent_scan.agent_discovery import AntigravityDiscoverer
+
+    userdata = AntigravityDiscoverer(tmp_path)._user_data_dir()
+
+    assert userdata is not None
+    assert userdata.name == "Antigravity"
+
+
+def test_antigravity_discovers_workspace_skills_via_v2_userdata(tmp_path):
+    """A workspace registered under the v2.0 ``Antigravity IDE`` userdata folder must be
+    walked for ``.agent/skills/`` just like one registered under v1.x."""
+    from agent_scan.agent_discovery import AntigravityDiscoverer
+
+    discoverer = AntigravityDiscoverer(tmp_path)
+    v2_userdata = tmp_path / _platform_userdata_root() / "Antigravity IDE"
+    workspace_storage = v2_userdata / "User" / "workspaceStorage" / "ws"
+    workspace_storage.mkdir(parents=True)
+    workspace = tmp_path / "v2proj"
+    workspace.mkdir()
+    (workspace_storage / "workspace.json").write_text(f'{{"folder": "{workspace.as_uri()}"}}')
+
+    _write_skill(workspace / ".agent" / "skills", "v2-skill")
+
+    skills_dirs = discoverer.discover_skills()
+
+    matching = [k for k in skills_dirs if k.endswith("/v2proj/.agent/skills")]
+    assert len(matching) == 1
+    entries = skills_dirs[matching[0]]
+    assert any(name == "v2-skill" for name, _ in entries)
+
+
+def test_antigravity_client_exists_detects_v2_userdata_only_install(tmp_path):
+    """If only the v2.0 userdata folder exists (no ``~/.gemini/antigravity`` dotfile,
+    no v1 userdata), ``client_exists`` still reports Antigravity as present."""
+    from agent_scan.agent_discovery import AntigravityDiscoverer
+
+    v2_userdata = tmp_path / _platform_userdata_root() / "Antigravity IDE"
+    v2_userdata.mkdir(parents=True)
+
+    assert AntigravityDiscoverer(tmp_path).client_exists() is not None
+
+
+# --- Cross-agent user-level skill paths (Cursor + Windsurf) ---
+#
+# Per the official docs both IDEs honor cross-agent compatibility paths under
+# the user's home dir (not just inside the workspace). For Cursor that's
+# ``~/.agents/skills``, ``~/.claude/skills``, ``~/.codex/skills``; for
+# Windsurf it's ``~/.agents/skills`` and ``~/.claude/skills``.
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [".agents/skills", ".claude/skills", ".codex/skills"],
+)
+def test_cursor_user_global_cross_compat_skills_discovered(tmp_path, relative):
+    """Cursor docs (cursor.com/docs/skills) list user-level skill paths
+    ``~/.agents/skills``, ``~/.claude/skills``, and ``~/.codex/skills`` in
+    addition to ``~/.cursor/skills``."""
+    from agent_scan.agent_discovery import CursorDiscoverer
+
+    (tmp_path / ".cursor").mkdir()
+    _write_skill(tmp_path / relative, "cur-user-cross-skill")
+
+    skills_dirs = CursorDiscoverer(tmp_path).discover_skills()
+
+    matching = [k for k in skills_dirs if k.endswith(f"/{relative}")]
+    assert len(matching) == 1
+    entries = skills_dirs[matching[0]]
+    assert any(name == "cur-user-cross-skill" for name, _ in entries)
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [".agents/skills", ".claude/skills"],
+)
+def test_windsurf_user_global_cross_compat_skills_discovered(tmp_path, relative):
+    """Windsurf docs (docs.windsurf.com/windsurf/cascade/skills) list user-level
+    cross-compat paths ``~/.agents/skills`` and ``~/.claude/skills`` alongside
+    the canonical ``~/.codeium/windsurf/skills``."""
+    from agent_scan.agent_discovery import WindsurfDiscoverer
+
+    (tmp_path / ".codeium" / "windsurf").mkdir(parents=True)
+    _write_skill(tmp_path / relative, "ws-user-cross-skill")
+
+    skills_dirs = WindsurfDiscoverer(tmp_path).discover_skills()
+
+    matching = [k for k in skills_dirs if k.endswith(f"/{relative}")]
+    assert len(matching) == 1
+    entries = skills_dirs[matching[0]]
+    assert any(name == "ws-user-cross-skill" for name, _ in entries)
+
+
+# --- Kiro: workspace MCP under ``.kiro/settings/mcp.json`` ---
+#
+# Per kiro.dev/docs/mcp/configuration/, Kiro reads workspace MCP from
+# ``<root>/.kiro/settings/mcp.json`` (parallel to user-global
+# ``~/.kiro/settings/mcp.json``).
+
+
+def test_kiro_discoverer_parses_workspace_settings_mcp_json(tmp_path):
+    """A ``.kiro/settings/mcp.json`` inside an opened workspace surfaces in
+    ``discover_mcp_servers``."""
+    from agent_scan.agent_discovery import KiroDiscoverer
+
+    (tmp_path / ".kiro").mkdir()
+    discoverer = KiroDiscoverer(tmp_path)
+    workspace = _setup_workspace(discoverer, tmp_path, "kproj")
+    ws_settings = workspace / ".kiro" / "settings"
+    ws_settings.mkdir(parents=True)
+    (ws_settings / "mcp.json").write_text('{"mcpServers": {"kr-ws": {"command": "k"}}}')
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    matching = [k for k in mcp_configs if k.endswith("/kproj/.kiro/settings/mcp.json")]
+    assert len(matching) == 1
+    entries = mcp_configs[matching[0]]
+    assert isinstance(entries, list)
+    name, server = entries[0]
+    assert name == "kr-ws"
+    assert isinstance(server, StdioServer)
+
+
+# --- Kiro: extension walks ---
+#
+# Kiro is a VSCode fork that uses the OpenVSX extension registry. Installed
+# extensions live under ``~/.kiro/extensions/`` and can ship an ``mcp.json``
+# (VSCode/Copilot contribution-point convention) or a ``skills/`` dir, both of
+# which a security scanner should discover.
+
+
+def test_kiro_extension_mcp_discovers_mcp_json(tmp_path):
+    """An extension dropping ``mcp.json`` under ``~/.kiro/extensions/<ext>/`` is picked up."""
+    from agent_scan.agent_discovery import KiroDiscoverer
+
+    ext_dir = tmp_path / ".kiro" / "extensions" / "p.kr-ext-1.0.0"
+    ext_dir.mkdir(parents=True)
+    (ext_dir / "mcp.json").write_text('{"mcpServers": {"kr-ext-srv": {"command": "k"}}}')
+
+    mcp_configs = KiroDiscoverer(tmp_path).discover_mcp_servers()
+
+    matching = [k for k in mcp_configs if "/extensions/p.kr-ext-1.0.0/mcp.json" in k]
+    assert len(matching) == 1
+    entries = mcp_configs[matching[0]]
+    assert isinstance(entries, list)
+    name, server = entries[0]
+    assert name == "kr-ext-srv"
+    assert isinstance(server, StdioServer)
+
+
+def test_kiro_extension_skills_discovers_skills_dir(tmp_path):
+    """An extension shipping a ``skills/`` directory under ``~/.kiro/extensions/`` surfaces."""
+    from agent_scan.agent_discovery import KiroDiscoverer
+
+    ext_skill_dir = tmp_path / ".kiro" / "extensions" / "p.kr-1.0.0" / "skills" / "kr-skill"
+    ext_skill_dir.mkdir(parents=True)
+    (ext_skill_dir / "SKILL.md").write_text("---\nname: kr-skill\ndescription: t\n---\n\nbody\n")
+
+    skills_dirs = KiroDiscoverer(tmp_path).discover_skills()
+
+    matching = [k for k in skills_dirs if k.endswith("/extensions/p.kr-1.0.0/skills")]
+    assert len(matching) == 1
+
+
+# --- Antigravity: shared MCP path under ``~/.gemini/config/`` ---
+#
+# Per Google Cloud Community docs on Antigravity, the unified MCP config that
+# the CLI *and* IDE both consult lives at ``~/.gemini/config/mcp_config.json``
+# (in addition to the IDE-specific ``~/.gemini/antigravity/mcp_config.json``).
+
+
+def test_antigravity_shared_gemini_config_mcp_discovered(tmp_path):
+    """``~/.gemini/config/mcp_config.json`` is read alongside the antigravity-specific
+    file so users who set up shared MCP across Gemini CLI + Antigravity IDE surface here."""
+    from agent_scan.agent_discovery import AntigravityDiscoverer
+
+    config_dir = tmp_path / ".gemini" / "config"
+    config_dir.mkdir(parents=True)
+    (config_dir / "mcp_config.json").write_text('{"mcpServers": {"shared-srv": {"command": "g"}}}')
+    (tmp_path / ".gemini" / "antigravity").mkdir(parents=True)
+
+    mcp_configs = AntigravityDiscoverer(tmp_path).discover_mcp_servers()
+
+    matching = [k for k in mcp_configs if k.endswith("/.gemini/config/mcp_config.json")]
+    assert len(matching) == 1
+    entries = mcp_configs[matching[0]]
+    name, server = entries[0]
+    assert name == "shared-srv"
+    assert isinstance(server, StdioServer)
+
+
+# --- Antigravity: shared skills under ``~/.gemini/skills/`` ---
+
+
+def test_antigravity_user_shared_skills_discovered(tmp_path):
+    """Per the Antigravity docs, skills shared between CLI and IDE go under
+    ``~/.gemini/skills/`` — distinct from the IDE-only ``~/.gemini/antigravity/skills/``."""
+    from agent_scan.agent_discovery import AntigravityDiscoverer
+
+    (tmp_path / ".gemini" / "antigravity").mkdir(parents=True)
+    _write_skill(tmp_path / ".gemini" / "skills", "shared-skill")
+
+    skills_dirs = AntigravityDiscoverer(tmp_path).discover_skills()
+
+    matching = [k for k in skills_dirs if k.endswith("/.gemini/skills")]
+    assert len(matching) == 1
+    entries = skills_dirs[matching[0]]
+    assert any(name == "shared-skill" for name, _ in entries)
+
+
+# --- Antigravity: extension walks under ``~/.gemini/extensions/`` ---
+#
+# Reported in Antigravity / Gemini CLI docs: installed extensions land under
+# ``~/.gemini/extensions/<ext>/`` (this is shared with the Gemini CLI, not under
+# the ``antigravity/`` subdir). Walk this tree the same way as other VSCode forks.
+
+
+def test_antigravity_extension_mcp_discovers_mcp_json(tmp_path):
+    """``~/.gemini/extensions/<ext>/mcp.json`` is walked and parsed."""
+    from agent_scan.agent_discovery import AntigravityDiscoverer
+
+    ext_dir = tmp_path / ".gemini" / "extensions" / "v.ag-ext-2.0.0"
+    ext_dir.mkdir(parents=True)
+    (ext_dir / "mcp.json").write_text('{"mcpServers": {"ag-ext-srv": {"command": "a"}}}')
+    (tmp_path / ".gemini" / "antigravity").mkdir(parents=True)
+
+    mcp_configs = AntigravityDiscoverer(tmp_path).discover_mcp_servers()
+
+    matching = [k for k in mcp_configs if "/extensions/v.ag-ext-2.0.0/mcp.json" in k]
+    assert len(matching) == 1
+    entries = mcp_configs[matching[0]]
+    assert isinstance(entries, list)
+    name, server = entries[0]
+    assert name == "ag-ext-srv"
+    assert isinstance(server, StdioServer)
+
+
+def test_antigravity_extension_skills_discovers_skills_dir(tmp_path):
+    """An extension shipping ``skills/`` under ``~/.gemini/extensions/`` surfaces."""
+    from agent_scan.agent_discovery import AntigravityDiscoverer
+
+    ext_skill_dir = tmp_path / ".gemini" / "extensions" / "p.ag-1.0.0" / "skills" / "ag-ext-skill"
+    ext_skill_dir.mkdir(parents=True)
+    (ext_skill_dir / "SKILL.md").write_text("---\nname: ag-ext-skill\ndescription: t\n---\n\nbody\n")
+    (tmp_path / ".gemini" / "antigravity").mkdir(parents=True)
+
+    skills_dirs = AntigravityDiscoverer(tmp_path).discover_skills()
+
+    matching = [k for k in skills_dirs if k.endswith("/extensions/p.ag-1.0.0/skills")]
+    assert len(matching) == 1
+
+
+# --- VSCode: profile-specific MCP discovery ---
+#
+# VSCode profiles live at ``<userdata>/User/profiles/<id>/`` and each profile
+# can have its own ``mcp.json``. A user with multiple profiles can be running
+# wildly different MCP server sets per profile — we must scan all of them.
+
+
+def test_vscode_discoverer_parses_profile_specific_mcp_json(tmp_path):
+    """Each ``<userdata>/User/profiles/<id>/mcp.json`` is parsed and keyed by absolute path."""
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    profile_dir = _userdata(discoverer) / "User" / "profiles" / "work"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "mcp.json").write_text('{"servers": {"profile-srv": {"command": "p"}}}')
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    matching = [k for k in mcp_configs if k.endswith("/profiles/work/mcp.json")]
+    assert len(matching) == 1
+    entries = mcp_configs[matching[0]]
+    assert isinstance(entries, list)
+    name, server = entries[0]
+    assert name == "profile-srv"
+    assert isinstance(server, StdioServer)
+
+
+def test_vscode_discoverer_walks_multiple_profile_mcp_files(tmp_path):
+    """Multiple profile dirs each surface their own mcp.json."""
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    profiles_root = _userdata(discoverer) / "User" / "profiles"
+    for name in ("work", "personal"):
+        d = profiles_root / name
+        d.mkdir(parents=True)
+        (d / "mcp.json").write_text(f'{{"servers": {{"{name}-srv": {{"command": "x"}}}}}}')
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    keys = [k for k in mcp_configs if "/profiles/" in k]
+    assert len(keys) == 2
+
+
+def test_vscode_discoverer_profile_settings_json_nested_mcp(tmp_path):
+    """A profile's ``settings.json`` with nested ``mcp.servers`` is parsed (same shape as the default profile)."""
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    profile_dir = _userdata(discoverer) / "User" / "profiles" / "team"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "settings.json").write_text('{"mcp": {"servers": {"settings-srv": {"command": "s"}}}}')
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    matching = [k for k in mcp_configs if k.endswith("/profiles/team/settings.json")]
+    assert len(matching) == 1
+    entries = mcp_configs[matching[0]]
+    name, server = entries[0]
+    assert name == "settings-srv"
+    assert isinstance(server, StdioServer)
+
+
+def test_vscode_discoverer_profile_walk_skips_when_no_profiles(tmp_path):
+    """If the user has no named profiles, ``discover_mcp_servers`` doesn't emit any profile keys."""
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    user_dir = _userdata(discoverer) / "User"
+    user_dir.mkdir(parents=True)
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    assert not any("/profiles/" in k for k in mcp_configs)
+
+
+# --- Kiro Powers: per-power mcp.json under ~/.kiro/powers/installed/ ---
+#
+# A Kiro Power bundles MCP + steering + hooks into one installable unit. Per
+# the kirodotdev/powers repo and kiro.dev/docs/powers/, installed powers live
+# at ``~/.kiro/powers/installed/<name>/`` and ship their own ``mcp.json``.
+# Kiro also writes a merged ``~/.kiro/powers.mcp.json`` at install time.
+# Powers are documented as user-global only — no project-scoped equivalent.
+
+
+def test_kiro_powers_per_power_mcp_json_discovered(tmp_path):
+    """Each ``~/.kiro/powers/installed/<name>/mcp.json`` is parsed and keyed by absolute path."""
+    from agent_scan.agent_discovery import KiroDiscoverer
+
+    power_dir = tmp_path / ".kiro" / "powers" / "installed" / "stripe"
+    power_dir.mkdir(parents=True)
+    (power_dir / "POWER.md").write_text("---\nname: stripe\ndescription: t\n---\n\nbody\n")
+    (power_dir / "mcp.json").write_text('{"mcpServers": {"stripe-mcp": {"command": "s"}}}')
+
+    mcp_configs = KiroDiscoverer(tmp_path).discover_mcp_servers()
+
+    matching = [k for k in mcp_configs if k.endswith("/installed/stripe/mcp.json")]
+    assert len(matching) == 1
+    entries = mcp_configs[matching[0]]
+    assert isinstance(entries, list)
+    name, server = entries[0]
+    assert name == "stripe-mcp"
+    assert isinstance(server, StdioServer)
+
+
+def test_kiro_powers_merged_mcp_file_discovered(tmp_path):
+    """The auto-generated ``~/.kiro/powers.mcp.json`` is read alongside ``settings/mcp.json``."""
+    from agent_scan.agent_discovery import KiroDiscoverer
+
+    kiro_dir = tmp_path / ".kiro"
+    kiro_dir.mkdir()
+    (kiro_dir / "powers.mcp.json").write_text('{"mcpServers": {"merged-srv": {"command": "m"}}}')
+
+    mcp_configs = KiroDiscoverer(tmp_path).discover_mcp_servers()
+
+    matching = [k for k in mcp_configs if k.endswith("/.kiro/powers.mcp.json")]
+    assert len(matching) == 1
+    entries = mcp_configs[matching[0]]
+    name, _ = entries[0]
+    assert name == "merged-srv"
+
+
+def test_kiro_powers_walk_finds_multiple_installed_powers(tmp_path):
+    """Multiple installed powers each surface their own mcp.json."""
+    from agent_scan.agent_discovery import KiroDiscoverer
+
+    installed = tmp_path / ".kiro" / "powers" / "installed"
+    for name in ("stripe", "supabase"):
+        d = installed / name
+        d.mkdir(parents=True)
+        (d / "mcp.json").write_text(f'{{"mcpServers": {{"{name}-srv": {{"command": "x"}}}}}}')
+
+    mcp_configs = KiroDiscoverer(tmp_path).discover_mcp_servers()
+
+    keys = [k for k in mcp_configs if "/powers/installed/" in k and k.endswith("/mcp.json")]
+    assert len(keys) == 2
+
+
+# --- ClaudeCodeDiscoverer: NEW gaps (managed-mcp, commands, CLAUDE_CONFIG_DIR, plugin manifest) ---
+
+
+def test_claude_code_discovers_managed_mcp_servers(tmp_path, monkeypatch):
+    """Enterprise managed-mcp.json (a system absolute path) is parsed as a
+    wrapped ``mcpServers`` config and surfaced."""
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    (tmp_path / ".claude").mkdir()
+    managed = tmp_path / "managed-mcp.json"
+    managed.write_text('{"mcpServers": {"corp-server": {"command": "corp"}}}')
+
+    discoverer = ClaudeCodeDiscoverer(tmp_path)
+    monkeypatch.setattr(discoverer, "_managed_mcp_path", lambda: managed)
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    keys = [k for k in mcp_configs if k.endswith("/managed-mcp.json")]
+    assert len(keys) == 1
+    name, server = mcp_configs[keys[0]][0]
+    assert name == "corp-server"
+    assert isinstance(server, StdioServer)
+
+
+def test_claude_code_discovers_global_command_files(tmp_path):
+    """``~/.claude/commands/*.md`` are surfaced as skill entries."""
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    commands = tmp_path / ".claude" / "commands"
+    commands.mkdir(parents=True)
+    (commands / "deploy.md").write_text("# Deploy")
+
+    skills = ClaudeCodeDiscoverer(tmp_path).discover_skills()
+
+    keys = [k for k in skills if k.endswith("/.claude/commands")]
+    assert len(keys) == 1
+    names = {n for n, _ in skills[keys[0]]}
+    assert names == {"deploy"}
+
+
+def test_claude_code_discovers_project_command_files(tmp_path):
+    """``<project>/.claude/commands/*.md`` are surfaced for opened projects."""
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    project = tmp_path / "repo"
+    cmds = project / ".claude" / "commands"
+    cmds.mkdir(parents=True)
+    (cmds / "test.md").write_text("# Test")
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude.json").write_text(f'{{"projects": {{"{project.as_posix()}": {{"mcpServers": {{}}}}}}}}')
+
+    skills = ClaudeCodeDiscoverer(tmp_path).discover_skills()
+
+    keys = [k for k in skills if k.endswith("/repo/.claude/commands")]
+    assert len(keys) == 1
+    assert {n for n, _ in skills[keys[0]]} == {"test"}
+
+
+def test_claude_code_honors_claude_config_dir_on_own_home_scan(tmp_path, monkeypatch):
+    """When CLAUDE_CONFIG_DIR is set and no explicit home is passed (own-home
+    scan), MCP config is read from ``<CLAUDE_CONFIG_DIR>/.claude.json``."""
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    cfg = tmp_path / "custom-claude"
+    cfg.mkdir()
+    (cfg / ".claude.json").write_text('{"mcpServers": {"relocated": {"command": "r"}}}')
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
+
+    mcp_configs = ClaudeCodeDiscoverer(None).discover_mcp_servers()
+
+    keys = [k for k in mcp_configs if k.endswith("/custom-claude/.claude.json")]
+    assert len(keys) == 1
+    assert mcp_configs[keys[0]][0][0] == "relocated"
+
+
+def test_claude_code_ignores_claude_config_dir_when_home_passed(tmp_path, monkeypatch):
+    """Under multi-user scans (an explicit home is passed) the scanning
+    process's CLAUDE_CONFIG_DIR must NOT relocate the target user's config."""
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    cfg = tmp_path / "process-env-dir"
+    cfg.mkdir()
+    (cfg / ".claude.json").write_text('{"mcpServers": {"should-not-appear": {"command": "x"}}}')
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(cfg))
+
+    home = tmp_path / "alice"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude.json").write_text('{"mcpServers": {"alice-server": {"command": "a"}}}')
+
+    mcp_configs = ClaudeCodeDiscoverer(home).discover_mcp_servers()
+
+    all_names = {n for v in mcp_configs.values() if isinstance(v, list) for n, _ in v}
+    assert "alice-server" in all_names
+    assert "should-not-appear" not in all_names
+
+
+def test_claude_code_discovers_inline_plugin_manifest_mcp_servers(tmp_path):
+    """A plugin's ``.claude-plugin/plugin.json`` with an inline ``mcpServers``
+    map is surfaced from the plugin walk."""
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    plugin = tmp_path / ".claude" / "plugins" / "cache" / "my-plugin"
+    manifest_dir = plugin / ".claude-plugin"
+    manifest_dir.mkdir(parents=True)
+    (manifest_dir / "plugin.json").write_text('{"name": "my-plugin", "mcpServers": {"plugin-srv": {"command": "p"}}}')
+
+    mcp_configs = ClaudeCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    keys = [k for k in mcp_configs if k.endswith("/.claude-plugin/plugin.json")]
+    assert len(keys) == 1
+    assert mcp_configs[keys[0]][0][0] == "plugin-srv"
+
+
+def test_claude_code_discovers_inline_plugin_manifest_skills(tmp_path):
+    """A plugin manifest's ``skills`` list points at plugin-root-relative skill
+    dirs, which are scanned for SKILL.md skills."""
+    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+
+    plugin = tmp_path / ".claude" / "plugins" / "cache" / "my-plugin"
+    manifest_dir = plugin / ".claude-plugin"
+    manifest_dir.mkdir(parents=True)
+    (manifest_dir / "plugin.json").write_text('{"name": "my-plugin", "skills": ["custom-skills"]}')
+    _write_skill(plugin / "custom-skills", "special")
+
+    skills = ClaudeCodeDiscoverer(tmp_path).discover_skills()
+
+    keys = [k for k in skills if k.endswith("/my-plugin/custom-skills")]
+    assert len(keys) == 1
+    assert {n for n, _ in skills[keys[0]]} == {"special"}
+
+
+# --- VSCode family: NEW gaps (agentSkillsLocations, devcontainer, .code-workspace,
+#     Insiders, portable mode, Claude Desktop import) ---
+
+
+def test_vscode_agent_skills_locations_dotted_key_absolute_path(tmp_path):
+    """``chat.agentSkillsLocations`` in User/settings.json (dotted form) points at
+    an absolute custom skills dir that is scanned."""
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    (tmp_path / ".vscode").mkdir()
+    custom = tmp_path / "my-custom-skills"
+    _write_skill(custom, "custom-skill")
+    settings = _userdata(discoverer) / "User" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(f'{{"chat.agentSkillsLocations": ["{custom.as_posix()}"]}}')
+
+    skills_dirs = discoverer.discover_skills()
+
+    keys = [k for k in skills_dirs if k.endswith("/my-custom-skills")]
+    assert len(keys) == 1
+    assert {n for n, _ in skills_dirs[keys[0]]} == {"custom-skill"}
+
+
+def test_vscode_agent_skills_locations_nested_key(tmp_path):
+    """Nested ``chat: {agentSkillsLocations: [...]}`` form is also honored."""
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    (tmp_path / ".vscode").mkdir()
+    custom = tmp_path / "nested-skills"
+    _write_skill(custom, "nested-skill")
+    settings = _userdata(discoverer) / "User" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(f'{{"chat": {{"agentSkillsLocations": ["{custom.as_posix()}"]}}}}')
+
+    skills_dirs = discoverer.discover_skills()
+
+    assert any(k.endswith("/nested-skills") for k in skills_dirs)
+
+
+def test_vscode_agent_skills_locations_workspace_relative(tmp_path):
+    """A relative ``chat.agentSkillsLocations`` entry in a workspace
+    ``.vscode/settings.json`` resolves against the workspace root."""
+    discoverer, workspace = _setup_vscode_workspace(tmp_path, "proj")
+    _write_skill(workspace / "team-skills", "team-skill")
+    vscode_settings = workspace / ".vscode" / "settings.json"
+    vscode_settings.parent.mkdir(parents=True, exist_ok=True)
+    vscode_settings.write_text('{"chat.agentSkillsLocations": ["team-skills"]}')
+
+    skills_dirs = discoverer.discover_skills()
+
+    keys = [k for k in skills_dirs if k.endswith("/proj/team-skills")]
+    assert len(keys) == 1
+    assert {n for n, _ in skills_dirs[keys[0]]} == {"team-skill"}
+
+
+def test_vscode_discovers_devcontainer_mcp(tmp_path):
+    """``.devcontainer/devcontainer.json`` with
+    ``customizations.vscode.mcp.servers`` is surfaced."""
+    discoverer, workspace = _setup_vscode_workspace(tmp_path, "proj")
+    devc = workspace / ".devcontainer"
+    devc.mkdir()
+    (devc / "devcontainer.json").write_text(
+        '{"customizations": {"vscode": {"mcp": {"servers": {"dc-srv": {"command": "d"}}}}}}'
+    )
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    keys = [k for k in mcp_configs if k.endswith("/proj/.devcontainer/devcontainer.json")]
+    assert len(keys) == 1
+    assert mcp_configs[keys[0]][0][0] == "dc-srv"
+
+
+def test_vscode_devcontainer_without_mcp_yields_no_entry(tmp_path):
+    """A devcontainer.json without the nested mcp path produces no entry and no
+    parse error."""
+    discoverer, workspace = _setup_vscode_workspace(tmp_path, "proj")
+    devc = workspace / ".devcontainer"
+    devc.mkdir()
+    (devc / "devcontainer.json").write_text('{"image": "ubuntu", "customizations": {"vscode": {}}}')
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    assert not any("devcontainer.json" in k for k in mcp_configs)
+
+
+def test_vscode_discovers_code_workspace_mcp(tmp_path):
+    """A ``.code-workspace`` referenced from workspaceStorage's ``workspace``
+    pointer has its ``settings.mcp.servers`` surfaced."""
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    (tmp_path / ".vscode").mkdir()
+    ws_file = tmp_path / "team.code-workspace"
+    ws_file.write_text('{"folders": [{"path": "."}], "settings": {"mcp": {"servers": {"cw-srv": {"command": "c"}}}}}')
+    storage = _userdata(discoverer) / "User" / "workspaceStorage" / "h1"
+    storage.mkdir(parents=True)
+    (storage / "workspace.json").write_text(f'{{"workspace": "{ws_file.as_uri()}"}}')
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    keys = [k for k in mcp_configs if k.endswith("/team.code-workspace")]
+    assert len(keys) == 1
+    assert mcp_configs[keys[0]][0][0] == "cw-srv"
+
+
+def test_vscode_discovers_code_workspace_dotted_mcp_servers(tmp_path):
+    """``.code-workspace`` settings using the flattened ``mcp.servers`` key also work."""
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    (tmp_path / ".vscode").mkdir()
+    ws_file = tmp_path / "dotted.code-workspace"
+    ws_file.write_text('{"settings": {"mcp.servers": {"dotted-srv": {"command": "x"}}}}')
+    storage = _userdata(discoverer) / "User" / "workspaceStorage" / "h2"
+    storage.mkdir(parents=True)
+    (storage / "workspace.json").write_text(f'{{"workspace": "{ws_file.as_uri()}"}}')
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    assert any(k.endswith("/dotted.code-workspace") for k in mcp_configs)
+
+
+def test_vscode_discovers_code_workspace_skill_locations(tmp_path):
+    """``chat.agentSkillsLocations`` inside a ``.code-workspace`` settings block,
+    relative to the workspace file, is scanned."""
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    (tmp_path / ".vscode").mkdir()
+    _write_skill(tmp_path / "ws-skills", "cw-skill")
+    ws_file = tmp_path / "team.code-workspace"
+    ws_file.write_text('{"settings": {"chat.agentSkillsLocations": ["ws-skills"]}}')
+    storage = _userdata(discoverer) / "User" / "workspaceStorage" / "h3"
+    storage.mkdir(parents=True)
+    (storage / "workspace.json").write_text(f'{{"workspace": "{ws_file.as_uri()}"}}')
+
+    skills_dirs = discoverer.discover_skills()
+
+    assert any(k.endswith("/ws-skills") for k in skills_dirs)
+
+
+def test_vscode_discovers_insiders_userdata_mcp(tmp_path):
+    """MCP under the Insiders userdata (``Code - Insiders``) is surfaced."""
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    (tmp_path / ".vscode").mkdir()
+    insiders = [d for d in discoverer._user_data_dirs() if d.as_posix().endswith("Code - Insiders")]
+    assert insiders, "VSCode discoverer must include a 'Code - Insiders' userdata dir"
+    mcp = insiders[0] / "User" / "mcp.json"
+    mcp.parent.mkdir(parents=True)
+    mcp.write_text('{"servers": {"insiders-srv": {"command": "i"}}}')
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    assert any(k.endswith("Code - Insiders/User/mcp.json") for k in mcp_configs)
+
+
+def test_vscode_honors_vscode_portable_on_own_home_scan(tmp_path, monkeypatch):
+    """VSCODE_PORTABLE relocates userdata to ``<portable>/user-data`` on own-home scans."""
+    from agent_scan.agent_discovery import VSCodeDiscoverer
+
+    portable = tmp_path / "VSCode-portable"
+    monkeypatch.setenv("VSCODE_PORTABLE", str(portable))
+    mcp = portable / "user-data" / "User" / "mcp.json"
+    mcp.parent.mkdir(parents=True)
+    mcp.write_text('{"servers": {"portable-srv": {"command": "p"}}}')
+
+    mcp_configs = VSCodeDiscoverer(None).discover_mcp_servers()
+
+    assert any(k.endswith("/user-data/User/mcp.json") for k in mcp_configs)
+
+
+def test_vscode_imports_claude_desktop_config_when_discovery_enabled(tmp_path):
+    """When ``chat.mcp.discovery.enabled`` is true, VSCode reuses Claude Desktop's
+    ``claude_desktop_config.json``."""
+    from agent_scan.agent_discovery import VSCodeDiscoverer, _claude_desktop_config_path
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    (tmp_path / ".vscode").mkdir()
+    settings = _userdata(discoverer) / "User" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text('{"chat.mcp.discovery.enabled": true}')
+
+    desktop = _claude_desktop_config_path(tmp_path)
+    assert desktop is not None
+    desktop.parent.mkdir(parents=True, exist_ok=True)
+    desktop.write_text('{"mcpServers": {"desktop-srv": {"command": "d"}}}')
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    keys = [k for k in mcp_configs if k.endswith("claude_desktop_config.json")]
+    assert len(keys) == 1
+    assert mcp_configs[keys[0]][0][0] == "desktop-srv"
+
+
+def test_vscode_does_not_import_claude_desktop_config_when_discovery_disabled(tmp_path):
+    """Without the discovery setting, the Claude Desktop config is not imported."""
+    from agent_scan.agent_discovery import VSCodeDiscoverer, _claude_desktop_config_path
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    (tmp_path / ".vscode").mkdir()
+    desktop = _claude_desktop_config_path(tmp_path)
+    if desktop is None:
+        pytest.skip("no Claude Desktop path on this platform")
+    desktop.parent.mkdir(parents=True, exist_ok=True)
+    desktop.write_text('{"mcpServers": {"desktop-srv": {"command": "d"}}}')
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    assert not any(k.endswith("claude_desktop_config.json") for k in mcp_configs)
+
+
+# --- Windsurf + Antigravity: NEW gaps ---
+
+
+def test_windsurf_discovers_system_skills_dir(tmp_path, monkeypatch):
+    """Windsurf reads machine-wide skills from a per-OS system path."""
+    from agent_scan.agent_discovery import WindsurfDiscoverer
+
+    (tmp_path / ".codeium" / "windsurf").mkdir(parents=True)
+    system = tmp_path / "system-windsurf-skills"
+    _write_skill(system, "system-skill")
+
+    discoverer = WindsurfDiscoverer(tmp_path)
+    monkeypatch.setattr(discoverer, "_platform_system_skills_dirs", lambda: [system])
+
+    skills_dirs = discoverer.discover_skills()
+
+    keys = [k for k in skills_dirs if k.endswith("/system-windsurf-skills")]
+    assert len(keys) == 1
+    assert {n for n, _ in skills_dirs[keys[0]]} == {"system-skill"}
+
+
+@pytest.mark.skipif(
+    sys.platform not in ("darwin", "linux", "linux2", "win32"),
+    reason="system skills path only defined for macOS/Linux/Windows",
+)
+def test_windsurf_system_skills_path_is_platform_specific():
+    """The configured system skills path matches the documented per-OS location."""
+    from agent_scan.agent_discovery import WindsurfDiscoverer
+
+    dirs = WindsurfDiscoverer(None)._platform_system_skills_dirs()
+
+    assert len(dirs) == 1
+    p = dirs[0].as_posix()
+    if sys.platform == "darwin":
+        assert p == "/Library/Application Support/Windsurf/skills"
+    elif sys.platform in ("linux", "linux2"):
+        assert p == "/etc/windsurf/skills"
+    elif sys.platform == "win32":
+        assert p.endswith("ProgramData/Windsurf/skills")
+
+
+def test_antigravity_discovers_gemini_settings_mcp(tmp_path):
+    """Antigravity reads MCP from the shared ``~/.gemini/settings.json``."""
+    from agent_scan.agent_discovery import AntigravityDiscoverer
+
+    (tmp_path / ".gemini" / "antigravity").mkdir(parents=True)
+    settings = tmp_path / ".gemini" / "settings.json"
+    settings.write_text('{"mcpServers": {"gemini-srv": {"command": "g"}}}')
+
+    mcp_configs = AntigravityDiscoverer(tmp_path).discover_mcp_servers()
+
+    keys = [k for k in mcp_configs if k.endswith("/.gemini/settings.json")]
+    assert len(keys) == 1
+    assert mcp_configs[keys[0]][0][0] == "gemini-srv"
+
+
+def test_antigravity_gemini_settings_without_mcp_is_not_a_parse_error(tmp_path):
+    """An editor-only ``~/.gemini/settings.json`` produces no entry, not a parse error."""
+    from agent_scan.agent_discovery import AntigravityDiscoverer
+
+    (tmp_path / ".gemini" / "antigravity").mkdir(parents=True)
+    settings = tmp_path / ".gemini" / "settings.json"
+    settings.write_text('{"theme": "dark", "telemetry": {"enabled": false}}')
+
+    mcp_configs = AntigravityDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert not any(k.endswith("/.gemini/settings.json") for k in mcp_configs)
+
+
+def test_antigravity_discovers_plural_agents_workspace_skills(tmp_path):
+    """Antigravity reads workspace skills from the plural ``.agents/skills`` path."""
+    from agent_scan.agent_discovery import AntigravityDiscoverer
+
+    discoverer = AntigravityDiscoverer(tmp_path)
+    (tmp_path / ".gemini" / "antigravity").mkdir(parents=True)
+    workspace = tmp_path / "proj"
+    workspace.mkdir()
+    _write_skill(workspace / ".agents" / "skills", "plural-skill")
+    storage = discoverer._user_data_dir() / "User" / "workspaceStorage" / "h"
+    storage.mkdir(parents=True)
+    (storage / "workspace.json").write_text(f'{{"folder": "{workspace.as_uri()}"}}')
+
+    skills_dirs = discoverer.discover_skills()
+
+    assert any(k.endswith("/proj/.agents/skills") for k in skills_dirs)
+
+
+def test_antigravity_discovers_singular_agent_home_skills(tmp_path):
+    """Antigravity reads user-global skills from the singular ``~/.agent/skills`` path."""
+    from agent_scan.agent_discovery import AntigravityDiscoverer
+
+    (tmp_path / ".gemini" / "antigravity").mkdir(parents=True)
+    _write_skill(tmp_path / ".agent" / "skills", "home-skill")
+
+    skills_dirs = AntigravityDiscoverer(tmp_path).discover_skills()
+
+    keys = [k for k in skills_dirs if k.endswith("/.agent/skills")]
+    assert len(keys) == 1
+    assert {n for n, _ in skills_dirs[keys[0]]} == {"home-skill"}
