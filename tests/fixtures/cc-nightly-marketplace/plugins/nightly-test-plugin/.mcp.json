@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "nightly-plugin-mcp": {
+      "command": "echo",
+      "args": ["nightly-plugin-mcp stub server"]
+    }
+  }
+}
