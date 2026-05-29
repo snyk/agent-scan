@@ -36,6 +36,29 @@ class TestRemoteServerUrlAlias:
         )
         assert server.url == "https://primary.example.com/mcp"
 
+    def test_http_url_alias_works(self):
+        # Gemini CLI / Antigravity declare Streamable-HTTP remote servers with
+        # an ``httpUrl`` key; it must map onto ``url`` like ``serverUrl`` does.
+        server = RemoteServer.model_validate({"httpUrl": "https://mcp.gemini.example/mcp"})
+        assert server.url == "https://mcp.gemini.example/mcp"
+
+    def test_http_url_alias_with_headers(self):
+        server = RemoteServer.model_validate(
+            {
+                "httpUrl": "https://mcp.gemini.example/mcp",
+                "headers": {"Authorization": "Bearer token"},
+            }
+        )
+        assert server.url == "https://mcp.gemini.example/mcp"
+        assert server.headers == {"Authorization": "Bearer token"}
+
+    def test_url_takes_precedence_over_http_url_when_both_present(self):
+        # ``url`` is first in AliasChoices, so it wins over ``httpUrl``.
+        server = RemoteServer.model_validate(
+            {"url": "https://primary.example.com/mcp", "httpUrl": "https://secondary.example.com/mcp"}
+        )
+        assert server.url == "https://primary.example.com/mcp"
+
 
 class TestStdioServerRebalance:
     """Test that StdioServer automatically rebalances command and args on creation."""

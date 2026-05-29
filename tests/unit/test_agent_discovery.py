@@ -1929,6 +1929,40 @@ def test_antigravity_discoverer_parses_settings_json_nested_mcp(tmp_path):
     assert name == "ag-nested"
 
 
+def test_antigravity_discoverer_parses_gemini_settings_http_url_server(tmp_path):
+    """``~/.gemini/settings.json`` is shared with the Gemini CLI, whose remote
+    (Streamable-HTTP) servers are declared with an ``httpUrl`` key. Such a server
+    must be discovered as a RemoteServer — not surface the whole file as a parse
+    failure (the original bug: ``httpUrl`` matched no server shape, so the entire
+    ``mcpServers`` block failed validation and was reported malformed)."""
+    from agent_scan.agents import AntigravityDiscoverer
+
+    # Install marker so the discoverer treats Antigravity as present.
+    (tmp_path / ".gemini" / "antigravity").mkdir(parents=True)
+    (tmp_path / ".gemini" / "settings.json").write_text(
+        '{"mcpServers": {"gemini-remote": {"httpUrl": "https://mcp.gemini.example/mcp"}}}'
+    )
+
+    mcp_configs = AntigravityDiscoverer(tmp_path).discover_mcp_servers()
+
+    file_keys = [k for k in mcp_configs if k.endswith("/.gemini/settings.json")]
+    assert len(file_keys) == 1, f"~/.gemini/settings.json must be scanned; got keys: {list(mcp_configs)}"
+    entry = mcp_configs[file_keys[0]]
+    assert not isinstance(entry, CouldNotParseMCPConfig), "httpUrl server must not fail the whole file"
+    assert isinstance(entry, list)
+    name, server = entry[0]
+    assert name == "gemini-remote"
+    assert getattr(server, "url", None) == "https://mcp.gemini.example/mcp"
+
+
+def test_looks_like_mcp_payload_recognizes_flat_http_url_map():
+    """The opportunistic-walk gate must recognise a flat ``{name: {httpUrl: ...}}``
+    map as MCP so extension/profile walks don't skip Gemini-style remote servers."""
+    from agent_scan.agents.base import _looks_like_mcp_payload
+
+    assert _looks_like_mcp_payload({"srv": {"httpUrl": "https://example.com/mcp"}})
+
+
 def test_antigravity_discoverer_has_no_workspace_mcp_path():
     """Antigravity intentionally has no ``_workspace_mcp_relative`` configured.
 

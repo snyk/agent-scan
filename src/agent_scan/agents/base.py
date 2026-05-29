@@ -49,8 +49,10 @@ McpScanResult = list[tuple[str, StdioServer | RemoteServer]] | CouldNotParseMCPC
 _MAX_PLUGIN_RGLOB_DEPTH = 10
 
 # Top-level keys that only ever appear on a single server config (StdioServer.command,
-# RemoteServer.url/serverUrl). Used to disambiguate wrapped vs flat .mcp.json payloads.
-_SERVER_CONFIG_DISCRIMINATOR_KEYS = frozenset({"command", "url", "serverUrl"})
+# RemoteServer.url/serverUrl/httpUrl). Used to disambiguate wrapped vs flat .mcp.json
+# payloads. Must stay in sync with RemoteServer's URL AliasChoices and the
+# PluginMCPConfigFile flat-format gate in models.py.
+_SERVER_CONFIG_DISCRIMINATOR_KEYS = frozenset({"command", "url", "serverUrl", "httpUrl"})
 
 
 def _walk_under_depth(base: Path, name: str, max_path_depth: int, *, want_file: bool) -> Iterator[Path]:
@@ -84,8 +86,8 @@ def _select_servers_payload(file_data: dict) -> dict:
 
     Disambiguation by *value type*, not just key presence: ``file_data["mcpServers"]``
     is treated as a flat-format server config only if one of the discriminator keys
-    (``command``/``url``/``serverUrl``) is present with a string value — those are
-    always strings on a real server config. A wrapped server *named* "command" maps
+    (``command``/``url``/``serverUrl``/``httpUrl``) is present with a string value —
+    those are always strings on a real server config. A wrapped server *named* "command" maps
     to a dict (the server's own config), so it correctly stays wrapped.
 
     Note: only applied to plugin and per-project ``.mcp.json`` files. The global
@@ -114,8 +116,8 @@ def _looks_like_mcp_payload(data: dict) -> bool:
       later validation failure is a *genuine* malformed-MCP signal worth
       surfacing rather than swallowing; or
     * is a non-empty flat ``{name: serverConfig}`` map whose every value is a dict
-      bearing a server discriminator (``command``/``url``/``serverUrl``) — the
-      wrapper-less shape that is still valid MCP (Claude Code plugin format).
+      bearing a server discriminator (``command``/``url``/``serverUrl``/``httpUrl``) —
+      the wrapper-less shape that is still valid MCP (Claude Code plugin format).
 
     Everything else is treated as "not an MCP file" and skipped by callers that
     opt in via ``_parse_mcp_file(..., skip_unrecognized=True)``.

@@ -113,7 +113,9 @@ class ScalarToolLabels(BaseModel):
 
 class RemoteServer(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
-    url: str = Field(validation_alias=AliasChoices("url", "serverUrl"))
+    # ``serverUrl`` (Figma/Antigravity) and ``httpUrl`` (Gemini CLI Streamable HTTP)
+    # are vendor aliases for the same remote-server URL. First present wins.
+    url: str = Field(validation_alias=AliasChoices("url", "serverUrl", "httpUrl"))
     type: Literal["sse", "http"] | None = None
     headers: dict[str, str] = Field(default_factory=dict)
 
@@ -220,7 +222,7 @@ class PluginMCPConfigFile(MCPConfig):
         for v in data.values():
             if not isinstance(v, dict):
                 raise ValueError("values must be dicts")
-            if not ("command" in v or "url" in v or "serverUrl" in v):
+            if not ("command" in v or "url" in v or "serverUrl" in v or "httpUrl" in v):
                 raise ValueError("values must look like server configs")
         return {"servers": data}
 

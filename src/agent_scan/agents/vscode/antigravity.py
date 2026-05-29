@@ -28,8 +28,8 @@ class AntigravityDiscoverer(VSCodeFamilyDiscoverer):
     # The shared ``~/.gemini/settings.json`` (used by the Gemini CLI + Antigravity)
     # can carry MCP under a top-level ``mcpServers`` key. Parsed with the
     # presence-gate so an editor-only settings file is not flagged as malformed.
-    # NOTE: Gemini's remote ``httpUrl`` server shape is not covered by
-    # ``RemoteServer`` (``url``/``serverUrl`` only) — out of scope here.
+    # Gemini's remote servers use the ``httpUrl`` key (Streamable HTTP), which
+    # ``RemoteServer`` accepts as a URL alias (see its ``AliasChoices``).
     _gated_home_settings_files = ("~/.gemini/settings.json",)
     # Per Antigravity docs / Google codelabs: user-global at
     # ``~/.gemini/antigravity/skills/`` and workspace at ``.agent/skills``
