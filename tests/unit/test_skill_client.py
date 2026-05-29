@@ -6,6 +6,8 @@ Code command files are flat ``*.md`` files, so they need their own scanner
 ``SkillServer`` so the discovered commands can be inspected downstream.
 """
 
+from pathlib import Path
+
 from agent_scan.models import SkillServer
 from agent_scan.skill_client import inspect_commands_dir, inspect_skill
 
@@ -20,7 +22,11 @@ def test_inspect_commands_dir_surfaces_flat_md_files(tmp_path):
 
     assert set(found) == {"deploy", "release"}
     assert isinstance(found["deploy"], SkillServer)
-    assert found["deploy"].path.endswith("/commands/deploy.md")
+    # ``inspect_commands_dir`` builds paths with ``os.path.join`` (OS-native
+    # separators), so compare via ``Path`` rather than a hardcoded "/" suffix.
+    deploy_path = Path(found["deploy"].path)
+    assert deploy_path.name == "deploy.md"
+    assert deploy_path.parent.name == "commands"
 
 
 def test_inspect_commands_dir_namespaces_nested_files_with_colon(tmp_path):
