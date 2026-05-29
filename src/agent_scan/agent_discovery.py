@@ -12,7 +12,8 @@ import os
 import sys
 import traceback
 from abc import ABC, abstractmethod
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from functools import cached_property
 from pathlib import Path
 from urllib.parse import urlparse
 from urllib.request import url2pathname
@@ -127,6 +128,12 @@ class AgentDiscoverer(ABC):
 
     def __init__(self, home_directory: Path | None) -> None:
         self.home_directory = home_directory
+        # Lazily-populated cache for _project_paths_with_ancestors. A discoverer
+        # is constructed once per home and used for a single scan (see
+        # find_discoverers), so the project list is stable for its lifetime and
+        # the several discovery methods that consult it need not re-walk the
+        # workspaceStorage tree / re-read ~/.claude.json each time.
+        self._project_paths_cache: list[Path] | None = None
 
     def __init_subclass__(cls, *, abstract: bool = False, **kwargs: object) -> None:
         """Enforce a non-empty ``name`` on concrete subclasses.
@@ -202,6 +209,19 @@ class AgentDiscoverer(ABC):
                 is_failure=True,
             )
 
+    def _servers_to_signed_list(self, validated: MCPConfig) -> list[tuple[str, StdioServer | RemoteServer]]:
+        """Materialize a validated config's servers into ``(name, server)`` tuples,
+        replacing each Stdio entry with its signature-checked form.
+
+        Shared by :meth:`_validate_servers` and :meth:`_parse_mcp_file` so the
+        signature-check step stays in one place.
+        """
+        servers = validated.get_servers()
+        for name, server_config in servers.items():
+            if isinstance(server_config, StdioServer):
+                servers[name] = check_server_signature(server_config)
+        return list(servers.items())
+
     def _validate_servers(
         self, raw: dict, source: str
     ) -> list[tuple[str, StdioServer | RemoteServer]] | CouldNotParseMCPConfig:
@@ -220,11 +240,7 @@ class AgentDiscoverer(ABC):
                 traceback=traceback.format_exc(),
                 is_failure=True,
             )
-        servers = validated.get_servers()
-        for name, server_config in servers.items():
-            if isinstance(server_config, StdioServer):
-                servers[name] = check_server_signature(server_config)
-        return list(servers.items())
+        return self._servers_to_signed_list(validated)
 
     def _parse_mcp_file(
         self,
@@ -261,11 +277,7 @@ class AgentDiscoverer(ABC):
             except Exception as e:
                 last_error = e
                 continue
-            servers = validated.get_servers()
-            for name, server_config in servers.items():
-                if isinstance(server_config, StdioServer):
-                    servers[name] = check_server_signature(server_config)
-            return list(servers.items())
+            return self._servers_to_signed_list(validated)
 
         # None of the formats validated — record as parse failure.
         logger.exception("No MCP format matched %s; last error: %s", path.as_posix(), last_error)
@@ -288,6 +300,29 @@ class AgentDiscoverer(ABC):
             return None
         return inspect_skills_dir(str(path))
 
+    def _discover_dirs_under(
+        self,
+        bases: list[Path],
+        subdir_name: str,
+        inspect_fn: Callable[[str], list[tuple[str, SkillServer]]],
+    ) -> SkillsDirsResult:
+        """Walk each base dir for ``subdir_name`` directories and inspect each hit.
+
+        Shared by the Claude Code plugin ``skills``/``commands`` walks and the
+        VSCode-family extension ``skills`` walk — all iterate identically: for
+        each existing base, ``_walk_under_depth`` for the named directory, then
+        run ``inspect_fn`` (``inspect_skills_dir`` or ``inspect_commands_dir``)
+        on each match.
+        """
+        result: SkillsDirsResult = {}
+        for base in bases:
+            if not base.exists():
+                continue
+            for found in _walk_under_depth(base, subdir_name, _MAX_PLUGIN_RGLOB_DEPTH, want_file=False):
+                if found.is_dir():
+                    result[found.as_posix()] = inspect_fn(str(found))
+        return result
+
     # --- shared project-folder enumeration (used by both Claude Code and the VSCode family) ---
 
     def _discover_project_folders(self) -> list[Path]:
@@ -306,7 +341,14 @@ class AgentDiscoverer(ABC):
         Walking up lets project-scope MCP and skills discovery pick up config
         living in any parent folder of an opened project (e.g. a monorepo root
         that contains many project subdirectories).
+
+        The result is cached for the discoverer's lifetime — every project-scope
+        discovery method calls this, and recomputing would re-walk
+        workspaceStorage (VSCode family) or re-read ``~/.claude.json`` (Claude
+        Code) on each call.
         """
+        if self._project_paths_cache is not None:
+            return self._project_paths_cache
         seen: set[Path] = set()
         result: list[Path] = []
         for project_path in self._discover_project_folders():
@@ -319,6 +361,7 @@ class AgentDiscoverer(ABC):
                 if parent == cur:
                     break
                 cur = parent
+        self._project_paths_cache = result
         return result
 
 
@@ -545,14 +588,7 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
 
     def _discover_plugin_skills(self) -> SkillsDirsResult:
         """Scan ``skills/`` subdirs under every plugin base dir."""
-        result: SkillsDirsResult = {}
-        for base in self._plugin_base_dirs():
-            if not base.exists():
-                continue
-            for skills_dir in _walk_under_depth(base, "skills", _MAX_PLUGIN_RGLOB_DEPTH, want_file=False):
-                if skills_dir.is_dir():
-                    result[skills_dir.as_posix()] = inspect_skills_dir(str(skills_dir))
-        return result
+        return self._discover_dirs_under(self._plugin_base_dirs(), "skills", inspect_skills_dir)
 
     # --- private: commands discovery (commands are skills per current docs) ---
 
@@ -576,14 +612,7 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
 
     def _discover_plugin_commands(self) -> SkillsDirsResult:
         """Scan ``commands/`` subdirs under every plugin base dir."""
-        result: SkillsDirsResult = {}
-        for base in self._plugin_base_dirs():
-            if not base.exists():
-                continue
-            for commands_dir in _walk_under_depth(base, "commands", _MAX_PLUGIN_RGLOB_DEPTH, want_file=False):
-                if commands_dir.is_dir():
-                    result[commands_dir.as_posix()] = inspect_commands_dir(str(commands_dir))
-        return result
+        return self._discover_dirs_under(self._plugin_base_dirs(), "commands", inspect_commands_dir)
 
     # --- private: enterprise/managed MCP discovery ---
 
@@ -614,7 +643,29 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
             return {}
         return {path.as_posix(): parsed}
 
-    # --- private: inline plugin manifest MCP discovery ---
+    # --- private: inline plugin manifest discovery ---
+
+    @cached_property
+    def _plugin_manifests(self) -> list[tuple[Path, dict]]:
+        """``(manifest_path, parsed_dict)`` for every readable ``plugin.json`` under
+        the plugin base dirs.
+
+        Walked and loaded once and cached for the discoverer's lifetime — the
+        inline-MCP and skills manifest scans both consume it, so neither the walk
+        nor the JSON read is repeated. Malformed or non-dict manifests are
+        skipped (so a bad ``plugin.json`` is silently ignored, as before).
+        """
+        manifests: list[tuple[Path, dict]] = []
+        for base in self._plugin_base_dirs():
+            if not base.exists():
+                continue
+            for manifest in _walk_under_depth(base, "plugin.json", _MAX_PLUGIN_RGLOB_DEPTH, want_file=True):
+                if not manifest.is_file():
+                    continue
+                data = self._load_json_file(manifest)
+                if isinstance(data, dict):
+                    manifests.append((manifest, data))
+        return manifests
 
     def _discover_plugin_manifest_mcp_servers(self) -> McpConfigsResult:
         """Parse inline ``mcpServers`` from each plugin's
@@ -626,21 +677,13 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         ``.mcp.json`` walk, so only the inline dict form is handled here.
         """
         result: McpConfigsResult = {}
-        for base in self._plugin_base_dirs():
-            if not base.exists():
+        for manifest, data in self._plugin_manifests:
+            inline = data.get("mcpServers")
+            if not isinstance(inline, dict) or not inline:
                 continue
-            for manifest in _walk_under_depth(base, "plugin.json", _MAX_PLUGIN_RGLOB_DEPTH, want_file=True):
-                if not manifest.is_file():
-                    continue
-                data = self._load_json_file(manifest)
-                if not isinstance(data, dict):
-                    continue
-                inline = data.get("mcpServers")
-                if not isinstance(inline, dict) or not inline:
-                    continue
-                result[manifest.as_posix()] = self._validate_servers(
-                    inline, source=f"plugin manifest {manifest.as_posix()}"
-                )
+            result[manifest.as_posix()] = self._validate_servers(
+                inline, source=f"plugin manifest {manifest.as_posix()}"
+            )
         return result
 
     def _discover_plugin_manifest_skills(self) -> SkillsDirsResult:
@@ -649,25 +692,17 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         parent of the ``.claude-plugin`` dir). Only string entries are honored.
         """
         result: SkillsDirsResult = {}
-        for base in self._plugin_base_dirs():
-            if not base.exists():
+        for manifest, data in self._plugin_manifests:
+            skills = data.get("skills")
+            if not isinstance(skills, list):
                 continue
-            for manifest in _walk_under_depth(base, "plugin.json", _MAX_PLUGIN_RGLOB_DEPTH, want_file=True):
-                if not manifest.is_file():
+            plugin_root = manifest.parent.parent
+            for rel in skills:
+                if not isinstance(rel, str):
                     continue
-                data = self._load_json_file(manifest)
-                if not isinstance(data, dict):
-                    continue
-                skills = data.get("skills")
-                if not isinstance(skills, list):
-                    continue
-                plugin_root = manifest.parent.parent
-                for rel in skills:
-                    if not isinstance(rel, str):
-                        continue
-                    skills_dir = plugin_root / rel
-                    if skills_dir.is_dir():
-                        result[skills_dir.as_posix()] = inspect_skills_dir(str(skills_dir))
+                skills_dir = plugin_root / rel
+                if skills_dir.is_dir():
+                    result[skills_dir.as_posix()] = inspect_skills_dir(str(skills_dir))
         return result
 
     # --- internal helpers ---
@@ -925,12 +960,27 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
     def _user_data_dir(self) -> Path | None:
         """First candidate userdata path (or ``None`` if none declared).
 
-        Kept for backward compatibility with tests and callers that want a
-        single deterministic path. Discovery methods that should scan every
-        candidate use :meth:`_user_data_dirs` instead.
+        A single-path convenience for tests that want one deterministic
+        ``<userdata>`` directory. Production discovery scans every candidate via
+        :meth:`_user_data_dirs`; it does not use this accessor.
         """
         dirs = self._user_data_dirs()
         return dirs[0] if dirs else None
+
+    def _profile_dirs(self, userdata: Path) -> list[Path]:
+        """Named-profile directories under ``<userdata>/User/profiles`` (empty if
+        the directory is absent or unreadable).
+
+        VSCode and its forks store each named profile as its own subdir there,
+        each able to ship its own ``mcp.json`` / ``settings.json``. Used by the
+        profile MCP, skill-locations, and Claude-Desktop-discovery scans, which
+        all enumerate these the same way.
+        """
+        profiles_dir = userdata / "User" / "profiles"
+        try:
+            return [p for p in profiles_dir.iterdir() if p.is_dir()]
+        except (PermissionError, FileNotFoundError):
+            return []
 
     # --- private: MCP discovery ---
 
@@ -961,21 +1011,17 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         and :meth:`_discover_user_settings_mcp` (via ``_user_settings_file``); this
         walk only covers the *named* profiles under ``profiles/``.
         """
+        filenames: list[str] = []
+        if self._userdata_user_mcp_file:
+            filenames.append("mcp.json")
+        if self._user_settings_file:
+            filenames.append("settings.json")
+        if not filenames:
+            return {}
         result: McpConfigsResult = {}
         for userdata in self._user_data_dirs():
-            profiles_dir = userdata / "User" / "profiles"
-            if not profiles_dir.exists():
-                continue
-            try:
-                profile_subdirs = [p for p in profiles_dir.iterdir() if p.is_dir()]
-            except (PermissionError, FileNotFoundError):
-                continue
-            for profile in profile_subdirs:
-                for filename in ("mcp.json", "settings.json"):
-                    if filename == "settings.json" and not self._user_settings_file:
-                        continue
-                    if filename == "mcp.json" and not self._userdata_user_mcp_file:
-                        continue
+            for profile in self._profile_dirs(userdata):
+                for filename in filenames:
                     candidate = profile / filename
                     parsed = self._parse_mcp_file(candidate, formats=_VSCODE_FAMILY_FORMATS)
                     if parsed is None:
@@ -983,55 +1029,62 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
                     result[candidate.as_posix()] = parsed
         return result
 
+    def _parse_settings_mcp_gated(
+        self, path: Path
+    ) -> list[tuple[str, StdioServer | RemoteServer]] | CouldNotParseMCPConfig | None:
+        """Parse a multi-purpose ``settings.json`` for MCP, gated on a top-level
+        ``mcp``/``mcpServers`` key.
+
+        ``settings.json`` carries far more than MCP, so most files have neither
+        key — those return ``None`` (no entry) rather than a
+        ``CouldNotParseMCPConfig`` parse failure (the file isn't malformed MCP,
+        it just isn't MCP). Without this gate the full format tuple is tried and
+        the last format's ``ValidationError`` is surfaced as a false positive. A
+        genuinely malformed file is returned as ``CouldNotParseMCPConfig``
+        (consistent with how malformed standalone ``mcp.json`` files are
+        treated). When the gate passes, the full family format tuple is used so a
+        nested ``mcp.servers`` (VSCode), bare ``mcpServers`` (a fork that
+        diverges), or any other recognized shape still parses.
+
+        Shared by :meth:`_discover_user_settings_mcp` (userdata-relative paths)
+        and :meth:`_discover_gated_home_settings_mcp` (home-relative paths).
+        """
+        data = self._load_json_file(path)
+        if isinstance(data, CouldNotParseMCPConfig):
+            return data
+        if not isinstance(data, dict) or ("mcp" not in data and "mcpServers" not in data):
+            return None
+        return self._parse_mcp_file(path, formats=_VSCODE_FAMILY_FORMATS)
+
     def _discover_user_settings_mcp(self) -> McpConfigsResult:
         """Parse ``<userdata>/<_user_settings_file>`` (e.g. ``User/settings.json``)
-        from every candidate userdata folder.
-
-        ``settings.json`` is multi-purpose — most users never configure MCP
-        through it. We therefore gate parsing on the presence of either
-        ``mcp`` or ``mcpServers`` at the top level: an editor-only
-        ``settings.json`` (``{"editor.fontSize": 14, ...}``) must produce no
-        entries at all, not a ``CouldNotParseMCPConfig`` parse failure (the
-        file isn't malformed MCP — it just isn't MCP). Without this gate the
-        full format tuple is tried and the last format's ``ValidationError``
-        is surfaced as a false-positive parse error.
-
-        When the gate passes, the full family format tuple is used so a
-        nested ``mcp.servers`` (VSCode), bare ``mcpServers`` (a fork that
-        diverges), or any other recognized shape is still parsed correctly.
+        from every candidate userdata folder, gated via
+        :meth:`_parse_settings_mcp_gated`.
         """
         if not self._user_settings_file:
             return {}
         result: McpConfigsResult = {}
         for userdata in self._user_data_dirs():
             path = userdata / self._user_settings_file
-            data = self._load_json_file(path)
-            if isinstance(data, CouldNotParseMCPConfig):
-                # Malformed settings.json — surface as a parse failure (consistent
-                # with how malformed standalone mcp.json files are treated).
-                result[path.as_posix()] = data
-                continue
-            if not isinstance(data, dict) or ("mcp" not in data and "mcpServers" not in data):
-                continue
-            parsed = self._parse_mcp_file(path, formats=_VSCODE_FAMILY_FORMATS)
-            if parsed is None:
-                continue
-            result[path.as_posix()] = parsed
+            entry = self._parse_settings_mcp_gated(path)
+            if entry is not None:
+                result[path.as_posix()] = entry
         return result
 
-    def _discover_project_folders(self) -> list[Path]:
-        """Resolve each opened workspace from every ``<userdata>/User/workspaceStorage``.
+    @cached_property
+    def _workspace_json_files(self) -> list[tuple[Path, dict]]:
+        """``(workspace_file, parsed_dict)`` for every ``workspace.json`` under
+        ``<userdata>/User/workspaceStorage`` across all candidate userdata dirs.
 
-        Each hash dir under ``workspaceStorage`` carries a ``workspace.json``
-        whose ``folder`` field is a ``file://`` URI pointing at the workspace
-        root. Failures (malformed JSON, missing ``folder``, multi-root) are
-        skipped silently — these are IDE-internal state, not user config.
-
-        Folders are collected across *every* candidate userdata dir, so an IDE
-        whose userdata path was renamed across versions (Antigravity v1.x →
-        v2.0) still surfaces workspaces opened under either.
+        Walked and loaded once and cached for the discoverer's lifetime. Both the
+        single-root project-folder resolution (``folder`` field) and the
+        multi-root ``.code-workspace`` scan (``workspace`` field) read from this,
+        so the tree is walked once and each file parsed once. Files are collected
+        across *every* candidate userdata dir, so an IDE whose userdata path was
+        renamed across versions (Antigravity v1.x → v2.0) still surfaces
+        workspaces opened under either. Malformed / non-dict files are skipped.
         """
-        folders: list[Path] = []
+        results: list[tuple[Path, dict]] = []
         for userdata in self._user_data_dirs():
             workspace_storage = userdata / "User" / "workspaceStorage"
             if not workspace_storage.exists():
@@ -1039,9 +1092,25 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
             for workspace_file in _walk_under_depth(
                 workspace_storage, "workspace.json", _MAX_WORKSPACE_STORAGE_DEPTH, want_file=True
             ):
-                workspace_root = self._workspace_root_from(workspace_file)
-                if workspace_root is not None:
-                    folders.append(workspace_root)
+                data = self._load_json_file(workspace_file)
+                if isinstance(data, dict):
+                    results.append((workspace_file, data))
+        return results
+
+    def _discover_project_folders(self) -> list[Path]:
+        """Resolve each opened workspace's single-root ``folder`` from
+        ``workspaceStorage`` (see :attr:`_workspace_json_files`).
+
+        The ``folder`` field is a ``file://`` URI pointing at the workspace root.
+        Entries that are malformed, lack ``folder`` (e.g. multi-root workspaces
+        using ``workspace``/``configuration``), or use a non-``file://`` scheme
+        are skipped silently — IDE-internal state, not user config.
+        """
+        folders: list[Path] = []
+        for _workspace_file, data in self._workspace_json_files:
+            workspace_root = _file_uri_to_path(data.get("folder"))
+            if workspace_root is not None:
+                folders.append(workspace_root)
         return folders
 
     def _discover_workspace_mcp(self) -> McpConfigsResult:
@@ -1116,14 +1185,7 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
 
     def _discover_extension_skills(self) -> SkillsDirsResult:
         """Walk each extension root for ``skills/`` subdirectories."""
-        result: SkillsDirsResult = {}
-        for base in self._extension_base_dirs():
-            if not base.exists():
-                continue
-            for skills_dir in _walk_under_depth(base, "skills", _MAX_PLUGIN_RGLOB_DEPTH, want_file=False):
-                if skills_dir.is_dir():
-                    result[skills_dir.as_posix()] = inspect_skills_dir(str(skills_dir))
-        return result
+        return self._discover_dirs_under(self._extension_base_dirs(), "skills", inspect_skills_dir)
 
     # --- private: chat.agentSkillsLocations ---
 
@@ -1164,12 +1226,7 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         if self._user_settings_file:
             for userdata in self._user_data_dirs():
                 pairs.append((userdata / self._user_settings_file, None))
-                profiles_dir = userdata / "User" / "profiles"
-                try:
-                    profile_subdirs = [p for p in profiles_dir.iterdir() if p.is_dir()]
-                except (PermissionError, FileNotFoundError):
-                    profile_subdirs = []
-                for profile in profile_subdirs:
+                for profile in self._profile_dirs(userdata):
                     pairs.append((profile / "settings.json", None))
         for path in self._project_paths_with_ancestors():
             pairs.append((path / ".vscode" / "settings.json", path))
@@ -1190,23 +1247,16 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
     # --- private: home-relative gated settings.json (e.g. ~/.gemini/settings.json) ---
 
     def _discover_gated_home_settings_mcp(self) -> McpConfigsResult:
-        """Parse each ``_gated_home_settings_files`` entry for MCP, gated on the
-        presence of a top-level ``mcp``/``mcpServers`` key (mirrors
-        :meth:`_discover_user_settings_mcp`) so editor-only settings files don't
+        """Parse each ``_gated_home_settings_files`` entry (home-relative settings
+        files such as ``~/.gemini/settings.json``) for MCP, gated via
+        :meth:`_parse_settings_mcp_gated` so editor-only settings files don't
         surface as parse failures."""
         result: McpConfigsResult = {}
         for raw in self._gated_home_settings_files:
             path = expand_path(Path(raw), self.home_directory)
-            data = self._load_json_file(path)
-            if isinstance(data, CouldNotParseMCPConfig):
-                result[path.as_posix()] = data
-                continue
-            if not isinstance(data, dict) or ("mcp" not in data and "mcpServers" not in data):
-                continue
-            parsed = self._parse_mcp_file(path, formats=_VSCODE_FAMILY_FORMATS)
-            if parsed is None:
-                continue
-            result[path.as_posix()] = parsed
+            entry = self._parse_settings_mcp_gated(path)
+            if entry is not None:
+                result[path.as_posix()] = entry
         return result
 
     # --- private: devcontainer.json MCP ---
@@ -1237,21 +1287,13 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
     def _code_workspace_files(self) -> list[Path]:
         """``.code-workspace`` files referenced by the ``workspace`` field of any
         ``workspaceStorage/*/workspace.json`` (the multi-root counterpart of the
-        single-root ``folder`` field)."""
+        single-root ``folder`` field). Reads from the shared
+        :attr:`_workspace_json_files` cache, so it does not re-walk the tree."""
         files: list[Path] = []
-        for userdata in self._user_data_dirs():
-            workspace_storage = userdata / "User" / "workspaceStorage"
-            if not workspace_storage.exists():
-                continue
-            for workspace_file in _walk_under_depth(
-                workspace_storage, "workspace.json", _MAX_WORKSPACE_STORAGE_DEPTH, want_file=True
-            ):
-                data = self._load_json_file(workspace_file)
-                if not isinstance(data, dict):
-                    continue
-                ref = _file_uri_to_path(data.get("workspace"))
-                if ref is not None:
-                    files.append(ref)
+        for _workspace_file, data in self._workspace_json_files:
+            ref = _file_uri_to_path(data.get("workspace"))
+            if ref is not None:
+                files.append(ref)
         return files
 
     def _code_workspace_servers(self, settings: dict) -> dict | None:
@@ -1310,12 +1352,7 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
             return False
         for userdata in self._user_data_dirs():
             candidates = [userdata / self._user_settings_file]
-            profiles_dir = userdata / "User" / "profiles"
-            try:
-                profile_settings = [p / "settings.json" for p in profiles_dir.iterdir() if p.is_dir()]
-            except (PermissionError, FileNotFoundError):
-                profile_settings = []
-            candidates.extend(profile_settings)
+            candidates.extend(profile / "settings.json" for profile in self._profile_dirs(userdata))
             for path in candidates:
                 data = self._load_json_file(path)
                 if isinstance(data, dict) and _read_chat_setting(data, "mcp.discovery.enabled") is True:

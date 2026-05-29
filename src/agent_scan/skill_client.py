@@ -28,7 +28,7 @@ def get_skill_md_path(path: str) -> str | None:
     return None
 
 
-def _inspect_skill_file(config: SkillServer, expanded_path: str) -> ServerSignature:
+def _inspect_skill_file(expanded_path: str) -> ServerSignature:
     """Inspect a single-file skill/command (a flat ``*.md``).
 
     Command files (``~/.claude/commands/*.md``) are markdown files with optional
@@ -77,7 +77,7 @@ def inspect_skill(config: SkillServer) -> ServerSignature:
     logger.info(f"Scanning skill at path: {config.path}")
     expanded_path = os.path.expanduser(config.path)
     if os.path.isfile(expanded_path):
-        return _inspect_skill_file(config, expanded_path)
+        return _inspect_skill_file(expanded_path)
     skill_md_path = get_skill_md_path(config.path)
     if skill_md_path is None:
         raise Exception(f"neither SKILL.md nor skill.md file found at path: {config.path}")
