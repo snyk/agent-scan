@@ -86,10 +86,26 @@ def _file_uri_to_path(uri: object) -> Path | None:
     ``C:\\Users\\me\\repo`` (dropping the URL artifact slash before the drive
     letter). Naïve ``file://`` stripping would leave ``/C:/Users/me/repo`` on
     Windows, which ``Path`` won't resolve correctly.
+
+    A non-empty host denotes a UNC/network share (``file://server/share`` ->
+    ``\\\\server\\share``). ``urlparse`` peels the host into ``netloc`` and leaves
+    only ``/share/...`` in ``path``, so the host is re-attached as a UNC root
+    rather than dropped — otherwise the share would be silently rewritten to a
+    bogus local ``/share/...`` path. The empty host and the explicit
+    ``localhost`` host both denote a plain local path (RFC 8089). A share that
+    isn't mounted on the scanning host simply fails the downstream existence
+    check and is skipped.
     """
     if not isinstance(uri, str) or not uri.startswith("file://"):
         return None
-    return Path(url2pathname(urlparse(uri).path))
+    parsed = urlparse(uri)
+    local_path = url2pathname(parsed.path)
+    host = parsed.netloc
+    if not host or host.lower() == "localhost":
+        return Path(local_path)
+    # ``os.sep`` keeps the UNC prefix correct per platform: ``\\server\share`` on
+    # Windows, ``//server/share`` on POSIX.
+    return Path(f"{os.sep}{os.sep}{host}{local_path}")
 
 
 def _nested_dict_get(data: object, *keys: str) -> object:
@@ -114,6 +130,33 @@ def _read_chat_setting(settings: dict, key: str) -> object:
     if isinstance(chat, dict):
         return chat.get(key)
     return None
+
+
+def _resolve_code_workspace_folder(entry: object, base_dir: Path) -> Path | None:
+    """Resolve one ``.code-workspace`` ``folders[]`` entry to a Path.
+
+    A multi-root workspace lists its roots as ``{"path": "frontend"}`` (relative
+    to the ``.code-workspace`` file's directory — often ``../``-relative — or
+    absolute) or, for explicit/remote roots, ``{"uri": "file:///abs/repo"}``.
+
+    Prefers ``uri`` (decoded via :func:`_file_uri_to_path`, so a non-``file://``
+    scheme yields ``None``); otherwise resolves ``path`` against ``base_dir`` and
+    normalizes lexically (``os.path.normpath``) to collapse ``..`` segments so the
+    result dedups cleanly against other discovered roots. Returns ``None`` for a
+    non-dict entry or one carrying neither a usable ``uri`` nor ``path``.
+    """
+    if not isinstance(entry, dict):
+        return None
+    uri = entry.get("uri")
+    if isinstance(uri, str):
+        return _file_uri_to_path(uri)
+    rel = entry.get("path")
+    if not isinstance(rel, str) or not rel:
+        return None
+    candidate = Path(rel)
+    if not candidate.is_absolute():
+        candidate = base_dir / candidate
+    return Path(os.path.normpath(candidate))
 
 
 class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
@@ -367,13 +410,16 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
     def _parse_settings_mcp_gated(
         self, path: Path
     ) -> list[tuple[str, StdioServer | RemoteServer]] | CouldNotParseMCPConfig | None:
-        """Parse a multi-purpose ``settings.json`` for MCP, gated on a top-level
-        ``mcp``/``mcpServers`` key.
+        """Parse a multi-purpose ``settings.json`` for MCP, gated on the presence
+        of actual MCP servers (a top-level ``mcpServers`` or an ``mcp.servers``).
 
-        ``settings.json`` carries far more than MCP, so most files have neither
-        key — those return ``None`` (no entry) rather than a
-        ``CouldNotParseMCPConfig`` parse failure (the file isn't malformed MCP,
-        it just isn't MCP). Without this gate the full format tuple is tried and
+        ``settings.json`` carries far more than MCP, so most files have no servers
+        — those return ``None`` (no entry) rather than a ``CouldNotParseMCPConfig``
+        parse failure (the file isn't malformed MCP, it just isn't MCP). A
+        top-level ``mcp`` object that carries no ``servers`` (e.g. only ``inputs``
+        or ``discovery``) likewise returns ``None``: it holds nothing to surface,
+        so handing it to the format tuple would only produce a false-positive
+        parse error. Without this gate the full format tuple is tried and
         the last format's ``ValidationError`` is surfaced as a false positive. A
         genuinely malformed file is returned as ``CouldNotParseMCPConfig``
         (consistent with how malformed standalone ``mcp.json`` files are
@@ -400,7 +446,16 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         servers = self._settings_mcp_server_map(data)
         if servers:
             return self._validate_servers(servers, source=f"mcp.servers in {path.as_posix()}")
-        if "mcp" not in data and "mcpServers" not in data:
+        # ``_settings_mcp_server_map`` already covers nested/dotted ``mcp.servers``
+        # (the shapes VSCode actually writes). The only remaining cases worth
+        # handing to the format tuple are a bare top-level ``mcpServers`` (a fork
+        # that diverges) or an ``mcp`` object that *has* a ``servers`` key in a
+        # malformed shape we still want flagged. An ``mcp`` object with no
+        # ``servers`` at all (e.g. only ``inputs`` or ``discovery``) carries no
+        # servers, so return ``None`` rather than letting every format fail and
+        # surface a false-positive parse error.
+        mcp = data.get("mcp")
+        if "mcpServers" not in data and not (isinstance(mcp, dict) and "servers" in mcp):
             return None
         return self._parse_mcp_file(path, formats=_VSCODE_FAMILY_FORMATS)
 
@@ -446,19 +501,29 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         return results
 
     def _discover_project_folders(self) -> list[Path]:
-        """Resolve each opened workspace's single-root ``folder`` from
-        ``workspaceStorage`` (see :attr:`_workspace_json_files`).
+        """Resolve opened-workspace roots from ``workspaceStorage`` (see
+        :attr:`_workspace_json_files`).
 
-        The ``folder`` field is a ``file://`` URI pointing at the workspace root.
-        Entries that are malformed, lack ``folder`` (e.g. multi-root workspaces
-        using ``workspace``/``configuration``), or use a non-``file://`` scheme
-        are skipped silently — IDE-internal state, not user config.
+        Single-root windows store a ``folder`` ``file://`` URI pointing directly
+        at the workspace root. Multi-root windows instead store a ``workspace``
+        URI pointing at a ``.code-workspace`` file whose ``folders[]`` array lists
+        the constituent roots; those are expanded here — when this agent honors
+        ``.code-workspace`` files (:attr:`_code_workspace_enabled`) — so each
+        folder's own workspace-scoped config (``.vscode/mcp.json``, skills,
+        ``.devcontainer``, …) is discovered exactly as single-root folders are.
+        These roots flow into :meth:`_project_paths_with_ancestors`, which every
+        workspace-relative scan consumes.
+
+        Entries that are malformed, lack a resolvable root, or use a non-``file://``
+        scheme are skipped silently — IDE-internal state, not user config.
         """
         folders: list[Path] = []
         for _workspace_file, data in self._workspace_json_files:
             workspace_root = _file_uri_to_path(data.get("folder"))
             if workspace_root is not None:
                 folders.append(workspace_root)
+        if self._code_workspace_enabled:
+            folders.extend(self._code_workspace_folder_roots())
         return folders
 
     def _discover_workspace_mcp(self) -> McpConfigsResult:
@@ -517,6 +582,12 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         :meth:`ClaudeCodeDiscoverer._discover_plugin_mcp_servers` but uses
         :attr:`_VSCODE_FAMILY_FORMATS` so wrapped, VSCode-flat ``servers``, and
         fully flat shapes all parse.
+
+        ``skip_unrecognized=True``: this walk matches every file merely *named*
+        ``mcp.json``, and extensions ship unrelated files under that name (JSON
+        schemas, fixtures). Those are skipped rather than surfaced as
+        ``CouldNotParseMCPConfig`` false positives; a file with a real MCP shape
+        that fails to validate is still reported as malformed.
         """
         result: McpConfigsResult = {}
         for base in self._extension_base_dirs():
@@ -525,7 +596,7 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
             for mcp_file in _walk_under_depth(base, "mcp.json", _MAX_PLUGIN_RGLOB_DEPTH, want_file=True):
                 if not mcp_file.is_file():
                     continue
-                parsed = self._parse_mcp_file(mcp_file, formats=_VSCODE_FAMILY_FORMATS)
+                parsed = self._parse_mcp_file(mcp_file, formats=_VSCODE_FAMILY_FORMATS, skip_unrecognized=True)
                 if parsed is None:
                     continue
                 result[mcp_file.as_posix()] = parsed
@@ -644,6 +715,42 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
                 files.append(ref)
         return files
 
+    @cached_property
+    def _code_workspace_json_files(self) -> list[tuple[Path, dict]]:
+        """``(code_workspace_file, parsed_dict)`` for every opened ``.code-workspace``.
+
+        Each file is loaded once and cached for the discoverer's lifetime; the
+        inline-settings MCP scan, the skill-locations scan, and the multi-root
+        folder-roots expansion all read from here, so a ``.code-workspace`` is
+        parsed once rather than re-read per consumer. Malformed / non-dict files
+        are skipped.
+        """
+        results: list[tuple[Path, dict]] = []
+        for ws_file in self._code_workspace_files():
+            data = self._load_json_file(ws_file)
+            if isinstance(data, dict):
+                results.append((ws_file, data))
+        return results
+
+    def _code_workspace_folder_roots(self) -> list[Path]:
+        """Constituent root folders of every opened multi-root ``.code-workspace``.
+
+        Each entry in the file's ``folders`` array names a root via ``path`` or
+        ``uri`` (see :func:`_resolve_code_workspace_folder`). Surfacing these lets
+        each folder's own workspace-scoped config be discovered for multi-root
+        workspaces, mirroring the single-root ``folder`` path.
+        """
+        roots: list[Path] = []
+        for ws_file, data in self._code_workspace_json_files:
+            folders = data.get("folders")
+            if not isinstance(folders, list):
+                continue
+            for entry in folders:
+                root = _resolve_code_workspace_folder(entry, ws_file.parent)
+                if root is not None:
+                    roots.append(root)
+        return roots
+
     def _settings_mcp_server_map(self, settings: dict) -> dict | None:
         """Extract the MCP server map from a settings-shaped dict, accepting either
         the nested ``{"mcp": {"servers": {...}}}`` object or the flattened dotted
@@ -670,10 +777,7 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         result: McpConfigsResult = {}
         if not self._code_workspace_enabled:
             return result
-        for ws_file in self._code_workspace_files():
-            data = self._load_json_file(ws_file)
-            if not isinstance(data, dict):
-                continue
+        for ws_file, data in self._code_workspace_json_files:
             settings = data.get("settings")
             if not isinstance(settings, dict):
                 continue
@@ -692,10 +796,7 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         result: SkillsDirsResult = {}
         if not self._code_workspace_enabled or not self._settings_skill_locations_enabled:
             return result
-        for ws_file in self._code_workspace_files():
-            data = self._load_json_file(ws_file)
-            if not isinstance(data, dict):
-                continue
+        for ws_file, data in self._code_workspace_json_files:
             settings = data.get("settings")
             if not isinstance(settings, dict):
                 continue
@@ -730,15 +831,3 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
             return {}
         return {path.as_posix(): parsed}
 
-    def _workspace_root_from(self, workspace_json: Path) -> Path | None:
-        """Read a ``workspace.json`` and return its ``folder`` field as a Path.
-
-        Returns ``None`` for malformed JSON, a missing ``folder`` (e.g. multi-root
-        workspaces using ``workspace``/``configuration``), or any non-``file://``
-        scheme. ``file://`` URI decoding (percent-encoding + platform-aware drive
-        handling) is delegated to :func:`_file_uri_to_path`.
-        """
-        data = self._load_json_file(workspace_json)
-        if not isinstance(data, dict):
-            return None
-        return _file_uri_to_path(data.get("folder"))

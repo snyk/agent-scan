@@ -1799,6 +1799,36 @@ def test_vscode_discoverer_skips_settings_json_without_mcp_section(tmp_path):
     )
 
 
+def test_vscode_discoverer_skips_settings_json_mcp_without_servers(tmp_path):
+    """A ``settings.json`` whose top-level ``mcp`` object carries no ``servers``
+    (e.g. only ``inputs`` or ``mcp.discovery.enabled``) must produce no entry —
+    not a ``CouldNotParseMCPConfig`` parse failure.
+
+    The presence-gate keys off actual servers, not the bare ``mcp`` key: an
+    ``mcp`` block without ``servers`` holds nothing to surface, so handing it to
+    the format tuple (which would fail every model and report a malformed config)
+    is a false positive we must avoid.
+    """
+    from agent_scan.agents import VSCodeDiscoverer
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    user_dir = _userdata(discoverer) / "User"
+    user_dir.mkdir(parents=True)
+    # ``mcp`` present but server-less (inputs only) + the nested discovery toggle.
+    (user_dir / "settings.json").write_text(
+        '{"editor.fontSize": 14, "mcp": {"inputs": [{"id": "token", "type": "promptString"}]}, '
+        '"chat": {"mcp": {"discovery": {"enabled": true}}}}'
+    )
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    settings_keys = [k for k in mcp_configs if k.endswith("/User/settings.json")]
+    assert settings_keys == [], (
+        f"settings.json with an mcp block but no servers must not appear in mcp_configs, "
+        f"got entries: {[(k, mcp_configs[k]) for k in settings_keys]}"
+    )
+
+
 def test_cursor_discoverer_parses_wrapped_mcp_servers(tmp_path):
     """``~/.cursor/mcp.json`` uses the wrapped ``{"mcpServers": {...}}`` shape."""
     from agent_scan.agents import CursorDiscoverer
@@ -2055,11 +2085,11 @@ def test_vscode_discoverer_workspace_storage_skips_when_folder_key_missing(tmp_p
     assert mcp_configs == {}
 
 
-def test_vscode_discoverer_workspace_root_handles_windows_file_uri(tmp_path, monkeypatch):
+def test_vscode_discoverer_workspace_root_handles_windows_file_uri(monkeypatch):
     """Windows VSCode emits ``file:///C:/Users/me/repo`` — the leading ``/`` before the
     drive letter is a URL artifact, not a real path component. Naïve ``file://`` stripping
     leaves ``/C:/Users/me/repo``, which ``Path`` does not interpret as ``C:\\Users\\me\\repo``
-    on Windows. ``_workspace_root_from`` must delegate to ``urllib.request.url2pathname``
+    on Windows. ``_file_uri_to_path`` must delegate to ``urllib.request.url2pathname``
     so the URL is converted correctly per-platform.
 
     We don't import ``nturl2path`` (deprecated in Python 3.14+ and slated for removal).
@@ -2071,8 +2101,8 @@ def test_vscode_discoverer_workspace_root_handles_windows_file_uri(tmp_path, mon
     """
     from pathlib import Path
 
-    from agent_scan.agents import VSCodeDiscoverer
     from agent_scan.agents.vscode import base as vscode_base
+    from agent_scan.agents.vscode.base import _file_uri_to_path
 
     def fake_windows_url2pathname(url: str) -> str:
         return url.lstrip("/").replace("/", "\\")
@@ -2081,11 +2111,7 @@ def test_vscode_discoverer_workspace_root_handles_windows_file_uri(tmp_path, mon
     # so patch it there.
     monkeypatch.setattr(vscode_base, "url2pathname", fake_windows_url2pathname, raising=False)
 
-    discoverer = VSCodeDiscoverer(tmp_path)
-    workspace_json = tmp_path / "workspace.json"
-    workspace_json.write_text('{"folder": "file:///C:/Users/me/repo"}')
-
-    root = discoverer._workspace_root_from(workspace_json)
+    root = _file_uri_to_path("file:///C:/Users/me/repo")
 
     assert root is not None
     # The production code must hand the URL path to the patched ``url2pathname``;
@@ -2096,25 +2122,50 @@ def test_vscode_discoverer_workspace_root_handles_windows_file_uri(tmp_path, mon
     assert "/C:" not in root.as_posix()
 
 
-def test_vscode_discoverer_workspace_root_returns_none_for_non_file_uri(tmp_path):
+def test_vscode_discoverer_workspace_root_returns_none_for_non_file_uri():
     """Remote-workspace URIs (``vscode-remote://``, ``vscode-vfs://``, etc.) point
-    at filesystems we can't scan from this process. ``_workspace_root_from`` must
+    at filesystems we can't scan from this process. ``_file_uri_to_path`` must
     return ``None`` for any non-``file://`` scheme rather than coercing the whole
     URL into a ``Path`` — that would surface a non-existent path downstream and
     risk silent garbage entries if any future caller stopped checking existence.
     """
-    from agent_scan.agents import VSCodeDiscoverer
-
-    discoverer = VSCodeDiscoverer(tmp_path)
+    from agent_scan.agents.vscode.base import _file_uri_to_path
 
     for remote in (
         "vscode-remote://ssh-remote+host/home/me/repo",
         "vscode-vfs://github/owner/repo",
         "vscode-remote://wsl+Ubuntu/home/me/repo",
     ):
-        workspace_json = tmp_path / "ws.json"
-        workspace_json.write_text(f'{{"folder": "{remote}"}}')
-        assert discoverer._workspace_root_from(workspace_json) is None, remote
+        assert _file_uri_to_path(remote) is None, remote
+
+
+def test_file_uri_to_path_preserves_unc_host(tmp_path):
+    """A UNC ``file://server/share/repo`` URI must keep its host. ``urlparse`` splits
+    the host into ``netloc`` and leaves only ``/share/repo`` in ``path``; converting
+    just ``path`` would silently rewrite the share to a bogus local ``/share/repo``.
+    The host is re-attached as a UNC root instead (``\\\\server\\share`` on Windows,
+    ``//server/share`` on POSIX — a non-mounted share just fails the downstream
+    existence check and is skipped).
+    """
+    from agent_scan.agents.vscode.base import _file_uri_to_path
+
+    root = _file_uri_to_path("file://server/share/repo")
+
+    assert root is not None
+    # Host preserved, not collapsed to a bogus local path.
+    assert "server" in root.as_posix(), root.as_posix()
+    assert root.as_posix() == "//server/share/repo"
+
+
+def test_file_uri_to_path_treats_localhost_host_as_local(tmp_path):
+    """An explicit ``localhost`` host (and the empty host) denote a plain local path
+    per RFC 8089 — it must not be turned into a ``//localhost/...`` UNC path."""
+    from pathlib import Path
+
+    from agent_scan.agents.vscode.base import _file_uri_to_path
+
+    assert _file_uri_to_path("file://localhost/home/me/repo") == Path("/home/me/repo")
+    assert _file_uri_to_path("file:///home/me/repo") == Path("/home/me/repo")
 
 
 def test_vscode_discoverer_workspace_storage_skips_remote_folder_uri(tmp_path):
@@ -2617,6 +2668,57 @@ def test_vscode_extension_mcp_records_could_not_parse_for_invalid_json(tmp_path)
     entry = mcp_configs[matching[0]]
     assert isinstance(entry, CouldNotParseMCPConfig)
     assert entry.is_failure is True
+
+
+def test_vscode_extension_mcp_skips_unrelated_json_named_mcp_json(tmp_path):
+    """An extension shipping a file *named* ``mcp.json`` that isn't an MCP config
+    (e.g. a bundled JSON Schema) is skipped silently — not surfaced as a
+    ``CouldNotParseMCPConfig`` false positive.
+
+    The extension walk matches every file by that name, so only recognizably
+    MCP-shaped files should produce entries. A JSON Schema has no
+    ``mcpServers``/``mcp``/``servers`` wrapper and is not a flat server map, so it
+    is correctly treated as "not MCP" rather than "malformed MCP".
+    """
+    from agent_scan.agents import VSCodeDiscoverer
+
+    ext_dir = tmp_path / ".vscode" / "extensions" / "x.schema-1.0.0"
+    ext_dir.mkdir(parents=True)
+    (ext_dir / "mcp.json").write_text(
+        '{"$schema": "https://json-schema.org/draft-07/schema", '
+        '"title": "config schema", "type": "object", '
+        '"properties": {"foo": {"type": "string"}}}'
+    )
+
+    mcp_configs = VSCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    leaked = [k for k in mcp_configs if "/x.schema-1.0.0/" in k]
+    assert leaked == [], (
+        f"a non-MCP file named mcp.json must be skipped, got: "
+        f"{[(k, mcp_configs[k]) for k in leaked]}"
+    )
+
+
+def test_vscode_extension_mcp_still_flags_malformed_mcp_shaped_file(tmp_path):
+    """A walked ``mcp.json`` that *is* MCP-shaped (carries an ``mcpServers``
+    wrapper) but fails validation is still reported as ``CouldNotParseMCPConfig``.
+
+    The skip only suppresses files that were never plausibly MCP — a wrapper-keyed
+    file with a broken server entry is a genuine malformation worth surfacing.
+    """
+    from agent_scan.agents import VSCodeDiscoverer
+
+    ext_dir = tmp_path / ".vscode" / "extensions" / "x.brokenmcp-1.0.0"
+    ext_dir.mkdir(parents=True)
+    # Recognizably MCP (mcpServers wrapper), but the server has neither a
+    # ``command`` (stdio) nor a ``url`` (remote), so no server model validates.
+    (ext_dir / "mcp.json").write_text('{"mcpServers": {"bad": {"args": ["x"]}}}')
+
+    mcp_configs = VSCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    matching = [k for k in mcp_configs if k.endswith("/x.brokenmcp-1.0.0/mcp.json")]
+    assert len(matching) == 1
+    assert isinstance(mcp_configs[matching[0]], CouldNotParseMCPConfig)
 
 
 def test_vscode_extension_skills_discovers_skills_dir(tmp_path):
@@ -3706,6 +3808,96 @@ def test_vscode_discovers_code_workspace_skill_locations(tmp_path):
     skills_dirs = discoverer.discover_skills()
 
     assert any(k.endswith("/ws-skills") for k in skills_dirs)
+
+
+def test_vscode_discovers_multi_root_code_workspace_folder_mcp(tmp_path):
+    """A multi-root ``.code-workspace`` lists its roots in ``folders[].path``
+    (relative to the workspace file, incl. ``../``). Each such root must be scanned
+    for its own ``.vscode/mcp.json`` — not just the file's inline ``settings`` block.
+
+    Without expanding ``folders[]`` the workspace.json carries only ``workspace``
+    (not ``folder``), so these per-folder configs would slip past discovery entirely.
+    """
+    from agent_scan.agents import VSCodeDiscoverer
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    (tmp_path / ".vscode").mkdir()
+
+    # Workspace file lives in monorepo/; one root is a sibling subdir, the other a
+    # ``../``-relative dir that normalizes to tmp_path/shared-lib.
+    ws_dir = tmp_path / "monorepo"
+    ws_dir.mkdir()
+    fe = ws_dir / "frontend"
+    (fe / ".vscode").mkdir(parents=True)
+    (fe / ".vscode" / "mcp.json").write_text('{"servers": {"fe-srv": {"command": "f"}}}')
+    shared = tmp_path / "shared-lib"
+    (shared / ".vscode").mkdir(parents=True)
+    (shared / ".vscode" / "mcp.json").write_text('{"servers": {"shared-srv": {"command": "s"}}}')
+
+    ws_file = ws_dir / "team.code-workspace"
+    # No inline settings.mcp — the only servers come from the folder roots.
+    ws_file.write_text('{"folders": [{"path": "frontend"}, {"path": "../shared-lib"}]}')
+    storage = _userdata(discoverer) / "User" / "workspaceStorage" / "h-multi"
+    storage.mkdir(parents=True)
+    (storage / "workspace.json").write_text(f'{{"workspace": "{ws_file.as_uri()}"}}')
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    assert any(k.endswith("/frontend/.vscode/mcp.json") for k in mcp_configs), (
+        f"relative folders[].path root not scanned; keys: {list(mcp_configs)}"
+    )
+    assert any(k.endswith("/shared-lib/.vscode/mcp.json") for k in mcp_configs), (
+        f"../-relative folders[].path root not scanned; keys: {list(mcp_configs)}"
+    )
+
+
+def test_vscode_discovers_multi_root_code_workspace_folder_uri(tmp_path):
+    """A ``folders[]`` entry may use an explicit ``uri`` (``file://``) instead of a
+    relative ``path``; that root is resolved and scanned the same way."""
+    from agent_scan.agents import VSCodeDiscoverer
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    (tmp_path / ".vscode").mkdir()
+
+    svc = tmp_path / "service"
+    (svc / ".vscode").mkdir(parents=True)
+    (svc / ".vscode" / "mcp.json").write_text('{"servers": {"svc-srv": {"command": "v"}}}')
+
+    ws_file = tmp_path / "byuri.code-workspace"
+    ws_file.write_text(f'{{"folders": [{{"uri": "{svc.as_uri()}"}}]}}')
+    storage = _userdata(discoverer) / "User" / "workspaceStorage" / "h-uri"
+    storage.mkdir(parents=True)
+    (storage / "workspace.json").write_text(f'{{"workspace": "{ws_file.as_uri()}"}}')
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    assert any(k.endswith("/service/.vscode/mcp.json") for k in mcp_configs), (
+        f"folders[].uri root not scanned; keys: {list(mcp_configs)}"
+    )
+
+
+def test_vscode_discovers_multi_root_code_workspace_folder_skills(tmp_path):
+    """Per-folder workspace skills (``<root>/.github/skills``) are discovered for
+    a multi-root ``.code-workspace`` root, mirroring the single-root folder path."""
+    from agent_scan.agents import VSCodeDiscoverer
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    (tmp_path / ".vscode").mkdir()
+
+    fe = tmp_path / "ws" / "frontend"
+    _write_skill(fe / ".github" / "skills", "fe-skill")
+
+    ws_file = tmp_path / "ws" / "team.code-workspace"
+    ws_file.write_text('{"folders": [{"path": "frontend"}]}')
+    storage = _userdata(discoverer) / "User" / "workspaceStorage" / "h-skills"
+    storage.mkdir(parents=True)
+    (storage / "workspace.json").write_text(f'{{"workspace": "{ws_file.as_uri()}"}}')
+
+    skills_dirs = discoverer.discover_skills()
+
+    assert any(k.endswith("/frontend/.github/skills") for k in skills_dirs), (
+        f"per-folder workspace skills not discovered; keys: {list(skills_dirs)}"
+    )
 
 
 def test_vscode_discovers_insiders_userdata_mcp(tmp_path):

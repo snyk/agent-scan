@@ -100,6 +100,34 @@ def _select_servers_payload(file_data: dict) -> dict:
     return file_data
 
 
+def _looks_like_mcp_payload(data: dict) -> bool:
+    """True if a parsed JSON dict has a recognizable MCP shape.
+
+    Used to gate *opportunistic* discovery — the extension/plugin walks surface
+    every file merely *named* ``mcp.json``, and extensions routinely ship
+    unrelated files under that name (a JSON schema, a fixture, another tool's
+    config). Without a gate each unparseable one becomes a
+    ``CouldNotParseMCPConfig`` false positive. A file is recognized when it
+    either:
+
+    * carries a wrapper key (``mcpServers``/``mcp``/``servers``) — in which case a
+      later validation failure is a *genuine* malformed-MCP signal worth
+      surfacing rather than swallowing; or
+    * is a non-empty flat ``{name: serverConfig}`` map whose every value is a dict
+      bearing a server discriminator (``command``/``url``/``serverUrl``) — the
+      wrapper-less shape that is still valid MCP (Claude Code plugin format).
+
+    Everything else is treated as "not an MCP file" and skipped by callers that
+    opt in via ``_parse_mcp_file(..., skip_unrecognized=True)``.
+    """
+    if any(key in data for key in ("mcpServers", "mcp", "servers")):
+        return True
+    return bool(data) and all(
+        isinstance(value, dict) and any(disc in value for disc in _SERVER_CONFIG_DISCRIMINATOR_KEYS)
+        for value in data.values()
+    )
+
+
 class AgentDiscoverer(ABC):
     """Abstract per-agent discoverer.
 
@@ -258,6 +286,7 @@ class AgentDiscoverer(ABC):
         path: Path,
         *,
         formats: tuple[type[MCPConfig], ...] = (ClaudeConfigFile,),
+        skip_unrecognized: bool = False,
     ) -> list[tuple[str, StdioServer | RemoteServer]] | CouldNotParseMCPConfig | None:
         """Load ``path``, try each ``MCPConfig`` subclass in order, return the first
         that validates.
@@ -272,6 +301,16 @@ class AgentDiscoverer(ABC):
         ``formats`` order matters: the first model whose ``model_validate``
         succeeds wins. This mirrors the strategy in
         ``mcp_client.scan_mcp_config_file``.
+
+        ``skip_unrecognized`` is an opt-in for *opportunistic* walks that match
+        every file merely *named* ``mcp.json`` (the extension walk). When set, a
+        valid-JSON file with no recognizable MCP shape (see
+        :func:`_looks_like_mcp_payload`) returns ``None`` (skip) instead of a
+        ``CouldNotParseMCPConfig`` — so an unrelated extension file isn't reported
+        as a malformed config. A wrapper-keyed file that then fails to validate is
+        still surfaced as malformed. Callers parsing an explicitly-named config
+        file (e.g. ``~/.vscode/mcp.json``) leave this off so genuine malformations
+        there are still reported.
         """
         data = self._load_json_file(path)
         if data is None:
@@ -279,6 +318,8 @@ class AgentDiscoverer(ABC):
         if isinstance(data, CouldNotParseMCPConfig):
             return data
         if not isinstance(data, dict) or not data:
+            return None
+        if skip_unrecognized and not _looks_like_mcp_payload(data):
             return None
 
         last_error: Exception | None = None
