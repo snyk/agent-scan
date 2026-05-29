@@ -132,6 +132,54 @@ def _read_chat_setting(settings: dict, key: str) -> object:
     return None
 
 
+def _setting_flag_enabled(value: object) -> bool:
+    """True if a VS Code boolean-ish setting value is "on".
+
+    VS Code's ``asBoolean`` helper accepts a real bool or the case-insensitive
+    strings ``"true"``/``"false"``, so a hand-edited string flag still resolves.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() == "true"
+    return False
+
+
+def _enabled_skill_location_paths(locations: object) -> list[str]:
+    """Non-empty path strings from a ``chat.agentSkillsLocations`` value.
+
+    VS Code registers this setting as an *object* mapping each location
+    (``~``/relative path string — not a glob) to a boolean, e.g.
+    ``{".github/skills": true, "old-skills": false}``; its ``getLocationsValue``
+    parser ignores the array form entirely. We honor the object form (keeping
+    only entries whose flag is truthy) and *also* tolerate a bare list of path
+    strings as a defensive fallback for hand-edited / legacy files. Resolution of
+    each returned path (``~`` / absolute / relative) is left to the caller.
+    """
+    if isinstance(locations, dict):
+        return [k for k, v in locations.items() if isinstance(k, str) and k and _setting_flag_enabled(v)]
+    if isinstance(locations, list):
+        return [k for k in locations if isinstance(k, str) and k]
+    return []
+
+
+def _claude_desktop_discovery_on(value: object) -> bool:
+    """True if ``chat.mcp.discovery.enabled`` enables the Claude Desktop import.
+
+    VS Code registers this setting as an *object* keyed by discovery source
+    (``claude-desktop``/``windsurf``/``cursor-global``/``cursor-workspace``) →
+    boolean; a legacy bare ``true`` is migrated to "all sources on". So the
+    Claude Desktop import is on when the value is the legacy boolean ``true`` or
+    an object whose ``claude-desktop`` entry is truthy. Other sources don't gate
+    the Claude Desktop import.
+    """
+    if value is True:
+        return True
+    if isinstance(value, dict):
+        return _setting_flag_enabled(value.get("claude-desktop"))
+    return False
+
+
 def _resolve_code_workspace_folder(entry: object, base_dir: Path) -> Path | None:
     """Resolve one ``.code-workspace`` ``folders[]`` entry to a Path.
 
@@ -611,19 +659,17 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
     def _skill_locations_from_settings(self, settings: dict, base_dir: Path | None) -> SkillsDirsResult:
         """Scan each dir listed in a settings object's ``chat.agentSkillsLocations``.
 
-        Entries may be absolute, ``~``-prefixed, or relative (resolved against
-        ``base_dir``, the workspace root for workspace-scoped settings). Only
-        existing directories are surfaced.
+        The setting is a VS Code object map (``{path: bool}``); a bare list is a
+        defensive fallback (see :func:`_enabled_skill_location_paths`). Entries may
+        be absolute, ``~``-prefixed, or relative (resolved against ``base_dir``, the
+        workspace root for workspace-scoped settings). Only existing directories
+        are surfaced.
         """
         result: SkillsDirsResult = {}
         if not self._settings_skill_locations_enabled or not isinstance(settings, dict):
             return result
         locations = _read_chat_setting(settings, "agentSkillsLocations")
-        if not isinstance(locations, list):
-            return result
-        for raw in locations:
-            if not isinstance(raw, str) or not raw:
-                continue
+        for raw in _enabled_skill_location_paths(locations):
             if raw.startswith("~"):
                 path = expand_path(Path(raw), self.home_directory)
             elif Path(raw).is_absolute():
@@ -814,7 +860,9 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
             candidates.extend(profile / "settings.json" for profile in self._profile_dirs(userdata))
             for path in candidates:
                 data = self._load_json_file(path)
-                if isinstance(data, dict) and _read_chat_setting(data, "mcp.discovery.enabled") is True:
+                if isinstance(data, dict) and _claude_desktop_discovery_on(
+                    _read_chat_setting(data, "mcp.discovery.enabled")
+                ):
                     return True
         return False
 

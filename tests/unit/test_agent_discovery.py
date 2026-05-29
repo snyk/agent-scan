@@ -3755,6 +3755,103 @@ def test_vscode_agent_skills_locations_workspace_relative(tmp_path):
     assert {n for n, _ in skills_dirs[keys[0]]} == {"team-skill"}
 
 
+def test_vscode_agent_skills_locations_object_form_enabled(tmp_path):
+    """VS Code registers ``chat.agentSkillsLocations`` as an *object* mapping
+    each path to a boolean (``{path: true}``); the array form is a defensive
+    extra. A path with value ``true`` must be scanned."""
+    import json
+
+    from agent_scan.agents import VSCodeDiscoverer
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    (tmp_path / ".vscode").mkdir()
+    custom = tmp_path / "object-skills"
+    _write_skill(custom, "object-skill")
+    settings = _userdata(discoverer) / "User" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(json.dumps({"chat.agentSkillsLocations": {custom.as_posix(): True}}))
+
+    skills_dirs = discoverer.discover_skills()
+
+    keys = [k for k in skills_dirs if k.endswith("/object-skills")]
+    assert len(keys) == 1, f"object-form agentSkillsLocations must be honored; got: {list(skills_dirs)}"
+    assert {n for n, _ in skills_dirs[keys[0]]} == {"object-skill"}
+
+
+def test_vscode_agent_skills_locations_object_form_false_excluded(tmp_path):
+    """A path mapped to ``false`` in the object form must NOT be scanned."""
+    import json
+
+    from agent_scan.agents import VSCodeDiscoverer
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    (tmp_path / ".vscode").mkdir()
+    custom = tmp_path / "disabled-skills"
+    _write_skill(custom, "disabled-skill")
+    settings = _userdata(discoverer) / "User" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(json.dumps({"chat.agentSkillsLocations": {custom.as_posix(): False}}))
+
+    skills_dirs = discoverer.discover_skills()
+
+    assert not any(k.endswith("/disabled-skills") for k in skills_dirs), "a location mapped to false must be excluded"
+
+
+def test_vscode_imports_claude_desktop_config_when_discovery_object_form(tmp_path):
+    """VS Code registers ``chat.mcp.discovery.enabled`` as an *object* keyed by
+    discovery source (``claude-desktop``/``windsurf``/…); a legacy bare ``true``
+    is migrated to that object. The Claude Desktop import must fire when the
+    ``claude-desktop`` source is enabled via the object form."""
+    import json
+
+    from agent_scan.agents import VSCodeDiscoverer
+    from agent_scan.agents.vscode.base import _claude_desktop_config_path
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    (tmp_path / ".vscode").mkdir()
+    settings = _userdata(discoverer) / "User" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(json.dumps({"chat.mcp.discovery.enabled": {"claude-desktop": True}}))
+
+    desktop = _claude_desktop_config_path(tmp_path)
+    assert desktop is not None
+    desktop.parent.mkdir(parents=True, exist_ok=True)
+    desktop.write_text('{"mcpServers": {"desktop-srv": {"command": "d"}}}')
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    keys = [k for k in mcp_configs if k.endswith("claude_desktop_config.json")]
+    assert len(keys) == 1, f"object-form discovery.enabled must trigger import; got: {list(mcp_configs)}"
+    assert mcp_configs[keys[0]][0][0] == "desktop-srv"
+
+
+def test_vscode_does_not_import_claude_desktop_when_object_claude_desktop_off(tmp_path):
+    """Object-form discovery with ``claude-desktop: false`` (even if another
+    source is on) must NOT import the Claude Desktop config."""
+    import json
+
+    from agent_scan.agents import VSCodeDiscoverer
+    from agent_scan.agents.vscode.base import _claude_desktop_config_path
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    (tmp_path / ".vscode").mkdir()
+    settings = _userdata(discoverer) / "User" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(json.dumps({"chat.mcp.discovery.enabled": {"claude-desktop": False, "windsurf": True}}))
+
+    desktop = _claude_desktop_config_path(tmp_path)
+    if desktop is None:
+        pytest.skip("no Claude Desktop path on this platform")
+    desktop.parent.mkdir(parents=True, exist_ok=True)
+    desktop.write_text('{"mcpServers": {"desktop-srv": {"command": "d"}}}')
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    assert not any(k.endswith("claude_desktop_config.json") for k in mcp_configs), (
+        "claude-desktop:false must not import the Claude Desktop config"
+    )
+
+
 def test_vscode_discovers_devcontainer_mcp(tmp_path):
     """``.devcontainer/devcontainer.json`` with
     ``customizations.vscode.mcp.servers`` is surfaced."""
