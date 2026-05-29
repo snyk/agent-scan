@@ -21,8 +21,8 @@ from agent_scan.models import ServerSignature, SkillServer
 logger = logging.getLogger(__name__)
 
 # Cap traversal depth when walking a commands dir, mirroring the value used by
-# the discoverer plugin/extension walks (``agent_discovery._MAX_PLUGIN_RGLOB_DEPTH``).
-# Kept as a separate constant here to avoid a circular import (agent_discovery
+# the discoverer plugin/extension walks (``agents.base._MAX_PLUGIN_RGLOB_DEPTH``).
+# Kept as a separate constant here to avoid a circular import (agents.base
 # imports this module).
 _MAX_COMMANDS_WALK_DEPTH = 10
 
@@ -222,7 +222,7 @@ def inspect_commands_dir(path: str) -> list[tuple[str, SkillServer]]:
     Traversal is depth-bounded by :data:`_MAX_COMMANDS_WALK_DEPTH`, pruning the
     walk once it would descend past the cap rather than walking the whole subtree
     first. This mirrors the discoverer plugin/extension walks
-    (``agent_discovery._walk_under_depth``) so a pathologically deep tree under a
+    (``agents.base._walk_under_depth``) so a pathologically deep tree under a
     commands dir can't blow up the scan. A ``.md`` file is surfaced only when its
     path relative to ``path`` is at most ``_MAX_COMMANDS_WALK_DEPTH`` components
     deep.

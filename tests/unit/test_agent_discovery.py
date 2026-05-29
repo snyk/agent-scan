@@ -1,4 +1,4 @@
-"""Tests for the per-agent discovery ABC (agent_discovery module)."""
+"""Tests for the per-agent discovery ABC (agent_scan.agents package)."""
 
 import sys
 from unittest.mock import patch
@@ -16,7 +16,7 @@ from agent_scan.models import (
 
 
 def test_claude_code_discoverer_detects_installation(tmp_path):
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
 
@@ -27,7 +27,7 @@ def test_claude_code_discoverer_detects_installation(tmp_path):
 
 
 def test_claude_code_discoverer_returns_none_when_absent(tmp_path):
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     result = ClaudeCodeDiscoverer(tmp_path).client_exists()
 
@@ -38,7 +38,7 @@ def test_claude_code_discoverer_returns_none_when_absent(tmp_path):
 
 
 def test_claude_code_discoverer_parses_mcp_servers(tmp_path):
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude.json").write_text('{"mcpServers": {"my-server": {"command": "echo", "args": ["hi"]}}}')
@@ -59,7 +59,7 @@ def test_claude_code_discoverer_parses_mcp_servers(tmp_path):
 
 def test_claude_code_discoverer_returns_empty_when_json_has_no_mcp_fields(tmp_path):
     """JSON without top-level mcpServers and without projects returns no entries."""
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude.json").write_text('{"unrelated": "data"}')
@@ -71,7 +71,7 @@ def test_claude_code_discoverer_returns_empty_when_json_has_no_mcp_fields(tmp_pa
 
 def test_claude_code_discoverer_records_could_not_parse_on_invalid_json(tmp_path):
     """Malformed JSON in ~/.claude.json becomes CouldNotParseMCPConfig with traceback."""
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude.json").write_text("{not valid json")
@@ -86,7 +86,7 @@ def test_claude_code_discoverer_records_could_not_parse_on_invalid_json(tmp_path
 
 
 def test_claude_code_discoverer_returns_empty_when_mcp_config_missing(tmp_path):
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
     # no ~/.claude.json on disk
@@ -102,7 +102,7 @@ def test_claude_code_discoverer_returns_empty_when_mcp_config_missing(tmp_path):
 
 
 def test_claude_code_discoverer_parses_skills(tmp_path):
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     skills_dir = tmp_path / ".claude" / "skills"
     skills_dir.mkdir(parents=True)
@@ -124,7 +124,7 @@ def test_claude_code_discoverer_parses_skills(tmp_path):
 
 
 def test_claude_code_discoverer_skills_returns_empty_when_dir_missing(tmp_path):
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
     # no ~/.claude/skills on disk
@@ -138,7 +138,7 @@ def test_claude_code_discoverer_skills_returns_empty_when_dir_missing(tmp_path):
 
 
 def test_claude_code_discoverer_global_folders_returns_claude_dir(tmp_path):
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     folders = ClaudeCodeDiscoverer(tmp_path)._discover_global_folders()
 
@@ -147,7 +147,7 @@ def test_claude_code_discoverer_global_folders_returns_claude_dir(tmp_path):
 
 
 def test_claude_code_discoverer_project_folders_lists_project_paths(tmp_path):
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude.json").write_text(
@@ -161,7 +161,7 @@ def test_claude_code_discoverer_project_folders_lists_project_paths(tmp_path):
 
 
 def test_claude_code_discoverer_project_folders_empty_when_no_projects_key(tmp_path):
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude.json").write_text('{"mcpServers": {}}')
@@ -172,7 +172,7 @@ def test_claude_code_discoverer_project_folders_empty_when_no_projects_key(tmp_p
 
 
 def test_claude_code_discoverer_project_folders_empty_when_config_missing(tmp_path):
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     folders = ClaudeCodeDiscoverer(tmp_path)._discover_project_folders()
 
@@ -184,7 +184,7 @@ def test_claude_code_discoverer_project_folders_empty_when_config_missing(tmp_pa
 
 def test_project_paths_with_ancestors_empty_when_no_projects(tmp_path):
     """No projects listed in ~/.claude.json → empty list."""
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude.json").write_text('{"projects": {}}')
@@ -198,7 +198,7 @@ def test_project_paths_with_ancestors_walks_up_to_filesystem_root(tmp_path):
     """A single project fans out into itself + every ancestor up to '/'."""
     from pathlib import Path
 
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude.json").write_text('{"projects": {"/a/b/c/d": {"mcpServers": {}}}}')
@@ -216,7 +216,7 @@ def test_project_paths_with_ancestors_dedups_shared_ancestors(tmp_path):
     """Two sibling projects sharing ancestors yield each ancestor only once."""
     from pathlib import Path
 
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude.json").write_text(
@@ -242,7 +242,7 @@ def test_project_paths_with_ancestors_terminates_at_root(tmp_path):
     """Walk terminates at filesystem root (no infinite loop)."""
     from pathlib import Path
 
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude.json").write_text('{"projects": {"/": {"mcpServers": {}}}}')
@@ -257,7 +257,7 @@ def test_project_paths_with_ancestors_terminates_at_root(tmp_path):
 
 def test_claude_code_discoverer_project_skills_walks_ancestors(tmp_path):
     """An ancestor of a project with a .claude/skills dir is also scanned."""
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
     project_root = tmp_path / "work" / "repo"
@@ -278,7 +278,7 @@ def test_claude_code_discoverer_project_skills_walks_ancestors(tmp_path):
 
 def test_claude_code_discoverer_project_skills_dedups_shared_ancestor_skills(tmp_path):
     """Two sibling projects whose shared ancestor has skills produce a single entry."""
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
     repo_a = tmp_path / "work" / "repo-a"
@@ -304,7 +304,7 @@ def test_claude_code_discoverer_project_skills_dedups_shared_ancestor_skills(tmp
 
 def test_claude_code_discoverer_parses_project_mcp_servers(tmp_path):
     """Each project's mcpServers becomes its own entry keyed by the project path."""
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude.json").write_text(
@@ -326,7 +326,7 @@ def test_claude_code_discoverer_parses_project_mcp_servers(tmp_path):
 
 def test_claude_code_discoverer_project_mcp_servers_skips_projects_without_mcp(tmp_path):
     """Projects with no mcpServers key (or empty) don't produce entries."""
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude.json").write_text(
@@ -344,7 +344,7 @@ def test_claude_code_discoverer_project_mcp_servers_skips_projects_without_mcp(t
 
 def test_claude_code_discoverer_project_mcp_servers_reads_dotmcp_file(tmp_path):
     """A <project>/.mcp.json file is parsed as an additional MCP source for that project."""
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
     project_root = tmp_path / "work" / "repo"
@@ -365,7 +365,7 @@ def test_claude_code_discoverer_project_mcp_servers_reads_dotmcp_file(tmp_path):
 
 def test_claude_code_discoverer_project_mcp_servers_reads_ancestor_dotmcp(tmp_path):
     """A <ancestor>/.mcp.json is also discovered while walking up from a project."""
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
     project_root = tmp_path / "work" / "repo"
@@ -383,7 +383,7 @@ def test_claude_code_discoverer_project_mcp_servers_reads_ancestor_dotmcp(tmp_pa
 
 def test_claude_code_discoverer_project_mcp_servers_records_could_not_parse_for_dotmcp(tmp_path):
     """A malformed <project>/.mcp.json becomes a CouldNotParseMCPConfig entry."""
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
     project_root = tmp_path / "work" / "repo"
@@ -407,7 +407,7 @@ def test_claude_code_discoverer_project_mcp_servers_reads_flat_format_dotmcp(tmp
     Previously a flat-format project file was silently dropped (no top-level
     "mcpServers" key). The shared payload selector now recognises it.
     """
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
     project_root = tmp_path / "work" / "repo"
@@ -430,7 +430,7 @@ def test_claude_code_discoverer_project_mcp_servers_reads_flat_format_dotmcp(tmp
 def test_claude_code_discoverer_project_mcp_servers_flat_dotmcp_with_server_named_mcpServers(tmp_path):
     """A flat-format ``<project>/.mcp.json`` whose single server is literally named
     "mcpServers" is parsed as flat (not misread as a wrapped payload)."""
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
     project_root = tmp_path / "work" / "repo"
@@ -453,7 +453,7 @@ def test_claude_code_discoverer_project_mcp_servers_flat_dotmcp_with_server_name
 
 def test_claude_code_discoverer_discover_mcp_servers_combines_global_and_project(tmp_path):
     """The public discover_mcp_servers merges global + project results."""
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude.json").write_text(
@@ -479,7 +479,7 @@ def test_claude_code_discoverer_discover_mcp_servers_combines_global_and_project
 
 def test_claude_code_discoverer_project_skills_scans_per_project_dotclaude(tmp_path):
     """For each project listed in ~/.claude.json, scan <project>/.claude/skills."""
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
     project_root = tmp_path / "work" / "repo"
@@ -503,7 +503,7 @@ def test_claude_code_discoverer_project_skills_scans_per_project_dotclaude(tmp_p
 
 def test_claude_code_discoverer_project_skills_skips_missing_project_folders(tmp_path):
     """Projects whose folders don't exist on disk are silently skipped."""
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude.json").write_text('{"projects": {"/nonexistent/path/that/wont/be/here": {"mcpServers": {}}}}')
@@ -515,7 +515,7 @@ def test_claude_code_discoverer_project_skills_skips_missing_project_folders(tmp
 
 def test_claude_code_discoverer_discover_skills_combines_global_and_project(tmp_path):
     """The public discover_skills merges global + project results."""
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude" / "skills" / "global-skill").mkdir(parents=True)
     (tmp_path / ".claude" / "skills" / "global-skill" / "SKILL.md").write_text(
@@ -538,7 +538,7 @@ def test_claude_code_discoverer_discover_skills_combines_global_and_project(tmp_
 
 def test_claude_code_discoverer_plugin_mcp_servers_parses_flat_format(tmp_path):
     """Plugin .mcp.json files use the flat {name: serverConfig} format."""
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     plugin_dir = tmp_path / ".claude" / "plugins" / "cache" / "vendor" / "my-plugin" / "1.0.0"
     plugin_dir.mkdir(parents=True)
@@ -565,7 +565,7 @@ def test_claude_code_discoverer_plugin_mcp_flat_format_with_server_named_mcpServ
     ``command`` at the top level of the inner dict. We must take the flat
     interpretation and produce a single server named "mcpServers".
     """
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     plugin_dir = tmp_path / ".claude" / "plugins" / "cache" / "vendor" / "weird-plugin"
     plugin_dir.mkdir(parents=True)
@@ -586,7 +586,7 @@ def test_claude_code_discoverer_plugin_mcp_flat_format_with_server_named_mcpServ
 def test_claude_code_discoverer_plugin_mcp_wrapped_format_still_works(tmp_path):
     """The wrapped format ``{"mcpServers": {<name>: <server-config>}}`` still parses
     correctly — i.e., the detection didn't break the common case."""
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     plugin_dir = tmp_path / ".claude" / "plugins" / "cache" / "vendor" / "wrapped-plugin"
     plugin_dir.mkdir(parents=True)
@@ -606,7 +606,7 @@ def test_claude_code_discoverer_plugin_mcp_wrapped_format_still_works(tmp_path):
 def test_select_servers_payload_flat_remote_server_named_mcpServers():
     """A flat-format payload with a single RemoteServer named "mcpServers"
     (``url`` discriminator instead of ``command``) is also detected as flat."""
-    from agent_scan.agent_discovery import _select_servers_payload
+    from agent_scan.agents.base import _select_servers_payload
 
     file_data = {"mcpServers": {"url": "https://example.com/mcp", "type": "http"}}
 
@@ -619,7 +619,7 @@ def test_select_servers_payload_flat_remote_server_named_mcpServers():
 def test_select_servers_payload_wrapped_when_inner_has_no_discriminators():
     """When file_data["mcpServers"] has no server-config discriminator keys at its
     top level, it's a server map → wrapped."""
-    from agent_scan.agent_discovery import _select_servers_payload
+    from agent_scan.agents.base import _select_servers_payload
 
     file_data = {"mcpServers": {"srv-a": {"command": "a"}, "srv-b": {"url": "https://b"}}}
 
@@ -633,7 +633,7 @@ def test_select_servers_payload_wrapped_when_server_is_named_after_discriminator
     must NOT be misread as flat. The inner discriminator key maps to a dict (the server
     config), never a string (which only a real top-level server config would have).
     """
-    from agent_scan.agent_discovery import _select_servers_payload
+    from agent_scan.agents.base import _select_servers_payload
 
     for discriminator in ("command", "url", "serverUrl"):
         file_data = {"mcpServers": {discriminator: {"command": "/bin/echo"}}}
@@ -649,7 +649,7 @@ def test_select_servers_payload_wrapped_when_server_is_named_after_discriminator
 def test_select_servers_payload_wrapped_multiple_servers_one_named_after_discriminator():
     """A wrapped-format payload with multiple servers, one of which happens to be
     named "command", still parses as wrapped (the inner "command" value is a dict)."""
-    from agent_scan.agent_discovery import _select_servers_payload
+    from agent_scan.agents.base import _select_servers_payload
 
     file_data = {
         "mcpServers": {
@@ -666,7 +666,7 @@ def test_select_servers_payload_wrapped_multiple_servers_one_named_after_discrim
 def test_claude_code_discoverer_plugin_mcp_wrapped_server_named_command(tmp_path):
     """End-to-end: a wrapped plugin .mcp.json with a server *named* "command" parses
     as wrapped (single server named "command"), not as flat."""
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     plugin_dir = tmp_path / ".claude" / "plugins" / "cache" / "vendor" / "wrapped-cmd-plugin"
     plugin_dir.mkdir(parents=True)
@@ -685,7 +685,7 @@ def test_claude_code_discoverer_plugin_mcp_wrapped_server_named_command(tmp_path
 
 
 def test_claude_code_discoverer_plugin_mcp_servers_empty_when_cache_missing(tmp_path):
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
 
@@ -695,7 +695,7 @@ def test_claude_code_discoverer_plugin_mcp_servers_empty_when_cache_missing(tmp_
 
 
 def test_claude_code_discoverer_plugin_mcp_records_could_not_parse(tmp_path):
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     plugin_dir = tmp_path / ".claude" / "plugins" / "cache" / "bad" / "plugin"
     plugin_dir.mkdir(parents=True)
@@ -710,7 +710,7 @@ def test_claude_code_discoverer_plugin_mcp_records_could_not_parse(tmp_path):
 
 
 def test_claude_code_discoverer_plugin_skills_scans_cache(tmp_path):
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     plugin_skill_dir = tmp_path / ".claude" / "plugins" / "cache" / "vendor" / "my-plugin" / "skills" / "plug-skill"
     plugin_skill_dir.mkdir(parents=True)
@@ -729,7 +729,7 @@ def test_claude_code_discoverer_plugin_skills_scans_cache(tmp_path):
 
 
 def test_claude_code_discoverer_plugin_skills_empty_when_cache_missing(tmp_path):
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
 
@@ -740,7 +740,7 @@ def test_claude_code_discoverer_plugin_skills_empty_when_cache_missing(tmp_path)
 
 def test_claude_code_discoverer_discover_mcp_includes_plugin_servers(tmp_path):
     """Plugin MCP entries flow through public discover_mcp_servers."""
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
     plugin_dir = tmp_path / ".claude" / "plugins" / "cache" / "v" / "p"
@@ -755,7 +755,7 @@ def test_claude_code_discoverer_discover_mcp_includes_plugin_servers(tmp_path):
 
 def test_claude_code_discoverer_discover_skills_includes_plugin_skills(tmp_path):
     """Plugin skill dirs flow through public discover_skills."""
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     plugin_skill_dir = tmp_path / ".claude" / "plugins" / "cache" / "v" / "p" / "skills" / "ps"
     plugin_skill_dir.mkdir(parents=True)
@@ -769,7 +769,7 @@ def test_claude_code_discoverer_discover_skills_includes_plugin_skills(tmp_path)
 
 def test_claude_code_discoverer_plugin_mcp_servers_scans_repos_dir(tmp_path):
     """Plugins staged under ~/.claude/plugins/repos/**/ are also discovered."""
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     repo_plugin = tmp_path / ".claude" / "plugins" / "repos" / "owner" / "plugin-repo"
     repo_plugin.mkdir(parents=True)
@@ -785,7 +785,7 @@ def test_claude_code_discoverer_plugin_mcp_servers_scans_repos_dir(tmp_path):
 
 def test_claude_code_discoverer_plugin_skills_scans_repos_dir(tmp_path):
     """Plugin skills staged under ~/.claude/plugins/repos/**/ are also discovered."""
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     skills_dir = tmp_path / ".claude" / "plugins" / "repos" / "owner" / "plugin" / "skills" / "rs"
     skills_dir.mkdir(parents=True)
@@ -799,7 +799,7 @@ def test_claude_code_discoverer_plugin_skills_scans_repos_dir(tmp_path):
 
 def test_claude_code_discoverer_plugin_mcp_servers_scans_both_cache_and_repos(tmp_path):
     """Both cache and repos contribute, keyed by their distinct file paths."""
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     cache_plugin = tmp_path / ".claude" / "plugins" / "cache" / "c" / "p"
     cache_plugin.mkdir(parents=True)
@@ -819,7 +819,7 @@ def test_claude_code_discoverer_plugin_mcp_servers_scans_both_cache_and_repos(tm
 
 
 def test_claude_code_discoverer_discover_assembles_client_to_inspect(tmp_path):
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude.json").write_text('{"mcpServers": {"toy": {"command": "echo", "args": []}}}')
@@ -838,7 +838,7 @@ def test_claude_code_discoverer_discover_assembles_client_to_inspect(tmp_path):
 
 
 def test_claude_code_discoverer_discover_returns_none_when_not_installed(tmp_path):
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     cti = ClaudeCodeDiscoverer(tmp_path).discover()
 
@@ -850,7 +850,7 @@ def test_claude_code_discoverer_discover_returns_none_when_not_installed(tmp_pat
 
 def test_agent_discoverer_subclass_without_name_raises():
     """A subclass that forgets to set 'name' must fail at class-definition time."""
-    from agent_scan.agent_discovery import AgentDiscoverer
+    from agent_scan.agents import AgentDiscoverer
 
     with pytest.raises(TypeError, match="must set a non-empty 'name'"):
 
@@ -875,13 +875,13 @@ def test_DISCOVERERS_registers_claude_code_and_vscode_family():
     discoverer requires a deliberate test update — silent additions would
     affect every multi-user scan.
     """
-    from agent_scan.agent_discovery import DISCOVERERS
+    from agent_scan.agents import DISCOVERERS
 
     assert set(DISCOVERERS) == {"claude code", "vscode", "cursor", "windsurf", "kiro", "antigravity"}
 
 
 def test_find_discoverers_returns_claude_code_when_installed(tmp_path):
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer, find_discoverers
+    from agent_scan.agents import ClaudeCodeDiscoverer, find_discoverers
 
     (tmp_path / ".claude").mkdir()
 
@@ -893,7 +893,7 @@ def test_find_discoverers_returns_claude_code_when_installed(tmp_path):
 
 
 def test_find_discoverers_returns_empty_when_no_agents_installed(tmp_path):
-    from agent_scan.agent_discovery import find_discoverers
+    from agent_scan.agents import find_discoverers
 
     found = find_discoverers(tmp_path)
 
@@ -1157,7 +1157,8 @@ def test_plugin_mcp_servers_respects_max_depth_cap(tmp_path):
     Depth is counted as ``len(match.relative_to(base).parts)`` where ``base``
     is ``~/.claude/plugins/cache``. A file directly in ``cache/`` is depth 1.
     """
-    from agent_scan.agent_discovery import _MAX_PLUGIN_RGLOB_DEPTH, ClaudeCodeDiscoverer
+    from agent_scan.agents.base import _MAX_PLUGIN_RGLOB_DEPTH
+    from agent_scan.agents.claude_code import ClaudeCodeDiscoverer
 
     cache = tmp_path / ".claude" / "plugins" / "cache"
     # Depth = _MAX_PLUGIN_RGLOB_DEPTH (allowed): N-1 intermediate dirs + the file.
@@ -1178,7 +1179,8 @@ def test_plugin_mcp_servers_respects_max_depth_cap(tmp_path):
 
 def test_plugin_skills_respects_max_depth_cap(tmp_path):
     """Plugin skills/ dirs deeper than _MAX_PLUGIN_RGLOB_DEPTH are not discovered."""
-    from agent_scan.agent_discovery import _MAX_PLUGIN_RGLOB_DEPTH, ClaudeCodeDiscoverer
+    from agent_scan.agents.base import _MAX_PLUGIN_RGLOB_DEPTH
+    from agent_scan.agents.claude_code import ClaudeCodeDiscoverer
 
     cache = tmp_path / ".claude" / "plugins" / "cache"
     # The "skills" dir itself counts as one part, so put it at the allowed boundary.
@@ -1210,7 +1212,7 @@ def test_server_config_discriminator_keys_match_model_required_fields():
     """
     from pydantic import AliasChoices
 
-    from agent_scan.agent_discovery import _SERVER_CONFIG_DISCRIMINATOR_KEYS
+    from agent_scan.agents.base import _SERVER_CONFIG_DISCRIMINATOR_KEYS
     from agent_scan.models import RemoteServer, StdioServer
 
     expected: set[str] = set()
@@ -1228,7 +1230,7 @@ def test_server_config_discriminator_keys_match_model_required_fields():
     assert expected == set(_SERVER_CONFIG_DISCRIMINATOR_KEYS), (
         f"Required model fields {expected} drifted from "
         f"_SERVER_CONFIG_DISCRIMINATOR_KEYS {set(_SERVER_CONFIG_DISCRIMINATOR_KEYS)}. "
-        "Update the constant in agent_discovery.py so the flat-vs-wrapped detector "
+        "Update the constant in agents/base.py so the flat-vs-wrapped detector "
         "still recognises every required server-config key."
     )
 
@@ -1241,7 +1243,7 @@ def test_plugin_walk_prunes_traversal_beyond_cap(tmp_path, monkeypatch):
     """
     from pathlib import Path
 
-    import agent_scan.agent_discovery as ad
+    import agent_scan.agents.base as ad
 
     cache = tmp_path / ".claude" / "plugins" / "cache"
     # Build a tree 3x deeper than the cap. If pruning didn't work, os.walk would
@@ -1275,7 +1277,7 @@ def test_plugin_walk_prunes_traversal_beyond_cap(tmp_path, monkeypatch):
 
 def test_load_json_file_accepts_json5_comments_and_trailing_commas(tmp_path):
     """A ~/.claude.json with // comments and a trailing comma parses successfully."""
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude.json").write_text(
@@ -1297,7 +1299,7 @@ def test_load_json_file_accepts_json5_comments_and_trailing_commas(tmp_path):
 
 def test_load_json_file_treats_empty_file_as_empty_config(tmp_path):
     """An empty (or whitespace-only) ~/.claude.json returns no entries, not a parse error."""
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude.json").write_text("   \n  \n")
@@ -1315,12 +1317,12 @@ def test_validate_servers_writes_check_server_signature_result_into_dict(tmp_pat
     check_server_signature — not just rely on in-place mutation of the input."""
     from unittest.mock import patch as mock_patch
 
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     replacement = StdioServer(command="replacement", binary_identifier="sig-from-mock")
 
     with mock_patch(
-        "agent_scan.agent_discovery.check_server_signature",
+        "agent_scan.agents.base.check_server_signature",
         return_value=replacement,
     ) as signature_mock:
         result = ClaudeCodeDiscoverer(tmp_path)._validate_servers({"srv": {"command": "original"}}, source="test")
@@ -1338,7 +1340,7 @@ def test_validate_servers_writes_check_server_signature_result_into_dict(tmp_pat
 
 def test_find_discoverers_skips_discoverer_that_raises_unexpected_exception(tmp_path):
     """A discoverer whose client_exists() raises must not crash find_discoverers."""
-    from agent_scan.agent_discovery import (
+    from agent_scan.agents import (
         DISCOVERERS,
         AgentDiscoverer,
         ClaudeCodeDiscoverer,
@@ -1373,7 +1375,7 @@ async def test_discover_clients_to_inspect_skips_discoverer_whose_discover_raise
     """A discoverer whose discover() raises mid-pipeline must not abort the loop —
     other discoverers' results (and the legacy CTI) still land in clients_to_inspect.
     """
-    from agent_scan.agent_discovery import DISCOVERERS, AgentDiscoverer
+    from agent_scan.agents import DISCOVERERS, AgentDiscoverer
     from agent_scan.models import CandidateClient
     from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
 
@@ -1434,7 +1436,7 @@ def test_load_json_file_returns_none_on_permission_error(tmp_path, monkeypatch):
     """
     from pathlib import Path
 
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude.json").write_text('{"mcpServers": {"srv": {"command": "echo"}}}')
@@ -1458,7 +1460,7 @@ def test_load_json_file_still_returns_could_not_parse_for_malformed_json(tmp_pat
     """Regression guard: real parse failures still produce ``CouldNotParseMCPConfig``.
     Splitting out the ``PermissionError`` branch must not weaken malformed-JSON handling.
     """
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude.json").write_text("{not valid json")
@@ -1625,7 +1627,7 @@ def _userdata(discoverer):
 
 
 def test_vscode_discoverer_detects_dotfile_install(tmp_path):
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
 
     (tmp_path / ".vscode").mkdir()
 
@@ -1637,7 +1639,7 @@ def test_vscode_discoverer_detects_dotfile_install(tmp_path):
 
 def test_vscode_discoverer_detects_userdata_install(tmp_path):
     """Even without ``~/.vscode``, the userdata dir alone is enough to say VSCode is installed."""
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
 
     discoverer = VSCodeDiscoverer(tmp_path)
     user_data = _userdata(discoverer)
@@ -1649,13 +1651,13 @@ def test_vscode_discoverer_detects_userdata_install(tmp_path):
 
 
 def test_vscode_discoverer_returns_none_when_absent(tmp_path):
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
 
     assert VSCodeDiscoverer(tmp_path).client_exists() is None
 
 
 def test_cursor_discoverer_detects_installation(tmp_path):
-    from agent_scan.agent_discovery import CursorDiscoverer
+    from agent_scan.agents import CursorDiscoverer
 
     (tmp_path / ".cursor").mkdir()
 
@@ -1664,7 +1666,7 @@ def test_cursor_discoverer_detects_installation(tmp_path):
 
 def test_windsurf_discoverer_requires_windsurf_subdir(tmp_path):
     """``~/.codeium`` alone is the Codeium VSCode plugin — only ``~/.codeium/windsurf`` proves the Windsurf IDE is installed."""
-    from agent_scan.agent_discovery import WindsurfDiscoverer
+    from agent_scan.agents import WindsurfDiscoverer
 
     # Just ``~/.codeium`` (plugin-only) — must NOT detect as Windsurf.
     (tmp_path / ".codeium").mkdir()
@@ -1676,7 +1678,7 @@ def test_windsurf_discoverer_requires_windsurf_subdir(tmp_path):
 
 
 def test_kiro_discoverer_detects_installation(tmp_path):
-    from agent_scan.agent_discovery import KiroDiscoverer
+    from agent_scan.agents import KiroDiscoverer
 
     (tmp_path / ".kiro").mkdir()
 
@@ -1685,7 +1687,7 @@ def test_kiro_discoverer_detects_installation(tmp_path):
 
 def test_antigravity_discoverer_requires_antigravity_subdir(tmp_path):
     """``~/.gemini`` alone is the Gemini CLI — only ``~/.gemini/antigravity`` proves the Antigravity IDE is installed."""
-    from agent_scan.agent_discovery import AntigravityDiscoverer
+    from agent_scan.agents import AntigravityDiscoverer
 
     (tmp_path / ".gemini").mkdir()
     assert AntigravityDiscoverer(tmp_path).client_exists() is None
@@ -1699,7 +1701,7 @@ def test_antigravity_discoverer_requires_antigravity_subdir(tmp_path):
 
 def test_vscode_discoverer_parses_user_dotvscode_mcp_json(tmp_path):
     """``~/.vscode/mcp.json`` uses VSCode's flat ``{"servers": {...}}`` shape."""
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
 
     (tmp_path / ".vscode").mkdir()
     (tmp_path / ".vscode" / "mcp.json").write_text('{"servers": {"my-srv": {"command": "echo", "args": ["a"]}}}')
@@ -1717,7 +1719,7 @@ def test_vscode_discoverer_parses_user_dotvscode_mcp_json(tmp_path):
 
 def test_vscode_discoverer_parses_settings_json_nested_mcp(tmp_path):
     """``<userdata>/User/settings.json`` carries MCP servers under a nested ``mcp.servers`` key."""
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
 
     discoverer = VSCodeDiscoverer(tmp_path)
     user_dir = _userdata(discoverer) / "User"
@@ -1746,7 +1748,7 @@ def test_vscode_discoverer_parses_settings_json_dotted_mcp_servers(tmp_path):
     ``_settings_mcp_server_map``; the user/profile ``settings.json`` path must too,
     or a dotted-key user would silently slip past discovery.
     """
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
 
     discoverer = VSCodeDiscoverer(tmp_path)
     user_dir = _userdata(discoverer) / "User"
@@ -1776,7 +1778,7 @@ def test_vscode_discoverer_skips_settings_json_without_mcp_section(tmp_path):
     typical editor-config file as a malformed MCP config, and we must not let a
     permissive flat format coerce keys like ``editor.fontSize`` into server entries.
     """
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
 
     discoverer = VSCodeDiscoverer(tmp_path)
     user_dir = _userdata(discoverer) / "User"
@@ -1799,7 +1801,7 @@ def test_vscode_discoverer_skips_settings_json_without_mcp_section(tmp_path):
 
 def test_cursor_discoverer_parses_wrapped_mcp_servers(tmp_path):
     """``~/.cursor/mcp.json`` uses the wrapped ``{"mcpServers": {...}}`` shape."""
-    from agent_scan.agent_discovery import CursorDiscoverer
+    from agent_scan.agents import CursorDiscoverer
 
     (tmp_path / ".cursor").mkdir()
     (tmp_path / ".cursor" / "mcp.json").write_text('{"mcpServers": {"cur-srv": {"command": "c"}}}')
@@ -1815,7 +1817,7 @@ def test_cursor_discoverer_parses_wrapped_mcp_servers(tmp_path):
 
 
 def test_windsurf_discoverer_parses_mcp_config_json(tmp_path):
-    from agent_scan.agent_discovery import WindsurfDiscoverer
+    from agent_scan.agents import WindsurfDiscoverer
 
     cfg_dir = tmp_path / ".codeium" / "windsurf"
     cfg_dir.mkdir(parents=True)
@@ -1831,7 +1833,7 @@ def test_windsurf_discoverer_parses_mcp_config_json(tmp_path):
 
 
 def test_kiro_discoverer_parses_settings_mcp_json(tmp_path):
-    from agent_scan.agent_discovery import KiroDiscoverer
+    from agent_scan.agents import KiroDiscoverer
 
     cfg_dir = tmp_path / ".kiro" / "settings"
     cfg_dir.mkdir(parents=True)
@@ -1847,7 +1849,7 @@ def test_kiro_discoverer_parses_settings_mcp_json(tmp_path):
 
 
 def test_antigravity_discoverer_parses_mcp_config_json(tmp_path):
-    from agent_scan.agent_discovery import AntigravityDiscoverer
+    from agent_scan.agents import AntigravityDiscoverer
 
     cfg_dir = tmp_path / ".gemini" / "antigravity"
     cfg_dir.mkdir(parents=True)
@@ -1870,7 +1872,7 @@ def test_antigravity_discoverer_parses_settings_json_nested_mcp(tmp_path):
     never scanned, so users who configure MCP through the editor settings UI
     (rather than ``~/.gemini/antigravity/mcp_config.json``) would slip past discovery.
     """
-    from agent_scan.agent_discovery import AntigravityDiscoverer
+    from agent_scan.agents import AntigravityDiscoverer
 
     discoverer = AntigravityDiscoverer(tmp_path)
     # Antigravity has two userdata names (``Antigravity`` for v1.x,
@@ -1912,7 +1914,7 @@ def test_antigravity_discoverer_has_no_workspace_mcp_path():
     (1) cite an official Google source documenting the exact path, and
     (2) update both this test and the comment in ``AntigravityDiscoverer``.
     """
-    from agent_scan.agent_discovery import AntigravityDiscoverer
+    from agent_scan.agents import AntigravityDiscoverer
 
     assert AntigravityDiscoverer._workspace_mcp_relative == (), (
         "Antigravity must not declare a workspace MCP path without official "
@@ -1925,7 +1927,7 @@ def test_antigravity_discoverer_has_no_workspace_mcp_path():
 
 
 def test_vscode_discoverer_records_could_not_parse_on_invalid_mcp_json(tmp_path):
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
 
     (tmp_path / ".vscode").mkdir()
     (tmp_path / ".vscode" / "mcp.json").write_text("{ not valid json")
@@ -1941,7 +1943,7 @@ def test_vscode_discoverer_records_could_not_parse_on_invalid_mcp_json(tmp_path)
 
 def test_vscode_discoverer_returns_empty_when_no_mcp_sources(tmp_path):
     """Install dir present but no MCP config files anywhere — empty dict, no errors."""
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
 
     (tmp_path / ".vscode").mkdir()
 
@@ -1953,7 +1955,7 @@ def test_vscode_discoverer_returns_empty_when_no_mcp_sources(tmp_path):
 
 def test_vscode_discoverer_walks_workspace_storage_to_find_mcp(tmp_path):
     """A workspaceStorage entry pointing at a workspace with ``.vscode/mcp.json`` surfaces that file."""
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
 
     discoverer = VSCodeDiscoverer(tmp_path)
     workspace_storage = _userdata(discoverer) / "User" / "workspaceStorage"
@@ -1984,7 +1986,7 @@ def test_vscode_discoverer_walks_workspace_storage_to_find_mcp(tmp_path):
 
 def test_vscode_discoverer_workspace_storage_skips_malformed_workspace_json(tmp_path):
     """A malformed ``workspace.json`` is logged + skipped — does NOT surface as a CouldNotParseMCPConfig."""
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
 
     discoverer = VSCodeDiscoverer(tmp_path)
     workspace_storage = _userdata(discoverer) / "User" / "workspaceStorage"
@@ -2012,7 +2014,7 @@ def test_vscode_discoverer_workspace_storage_skips_malformed_workspace_json(tmp_
 def test_vscode_discoverer_workspace_storage_url_decodes_folder_path(tmp_path):
     """VSCode stores ``folder`` percent-encoded (e.g. ``My%20Projects``); the discoverer must
     decode before resolving, otherwise workspaces with spaces or special chars are silently missed."""
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
 
     discoverer = VSCodeDiscoverer(tmp_path)
     workspace_storage = _userdata(discoverer) / "User" / "workspaceStorage"
@@ -2039,7 +2041,7 @@ def test_vscode_discoverer_workspace_storage_url_decodes_folder_path(tmp_path):
 
 def test_vscode_discoverer_workspace_storage_skips_when_folder_key_missing(tmp_path):
     """A ``workspace.json`` without a ``folder`` key (e.g. multi-root) is skipped."""
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
 
     discoverer = VSCodeDiscoverer(tmp_path)
     workspace_storage = _userdata(discoverer) / "User" / "workspaceStorage"
@@ -2069,14 +2071,17 @@ def test_vscode_discoverer_workspace_root_handles_windows_file_uri(tmp_path, mon
     """
     from pathlib import Path
 
-    from agent_scan import agent_discovery
+    from agent_scan.agents import VSCodeDiscoverer
+    from agent_scan.agents.vscode import base as vscode_base
 
     def fake_windows_url2pathname(url: str) -> str:
         return url.lstrip("/").replace("/", "\\")
 
-    monkeypatch.setattr(agent_discovery, "url2pathname", fake_windows_url2pathname, raising=False)
+    # ``url2pathname`` is resolved inside ``_file_uri_to_path`` (agents.vscode.base),
+    # so patch it there.
+    monkeypatch.setattr(vscode_base, "url2pathname", fake_windows_url2pathname, raising=False)
 
-    discoverer = agent_discovery.VSCodeDiscoverer(tmp_path)
+    discoverer = VSCodeDiscoverer(tmp_path)
     workspace_json = tmp_path / "workspace.json"
     workspace_json.write_text('{"folder": "file:///C:/Users/me/repo"}')
 
@@ -2098,7 +2103,7 @@ def test_vscode_discoverer_workspace_root_returns_none_for_non_file_uri(tmp_path
     URL into a ``Path`` — that would surface a non-existent path downstream and
     risk silent garbage entries if any future caller stopped checking existence.
     """
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
 
     discoverer = VSCodeDiscoverer(tmp_path)
 
@@ -2115,7 +2120,7 @@ def test_vscode_discoverer_workspace_root_returns_none_for_non_file_uri(tmp_path
 def test_vscode_discoverer_workspace_storage_skips_remote_folder_uri(tmp_path):
     """End-to-end: a workspaceStorage entry pointing at a ``vscode-remote://`` folder
     must not surface anything in ``discover_mcp_servers`` — not even a parse failure."""
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
 
     discoverer = VSCodeDiscoverer(tmp_path)
     workspace_storage = _userdata(discoverer) / "User" / "workspaceStorage"
@@ -2128,7 +2133,7 @@ def test_vscode_discoverer_workspace_storage_skips_remote_folder_uri(tmp_path):
 
 def test_cursor_discoverer_walks_workspace_storage(tmp_path):
     """Cursor's workspaceStorage layout mirrors VSCode's; per-workspace MCP lives under ``.cursor/mcp.json``."""
-    from agent_scan.agent_discovery import CursorDiscoverer
+    from agent_scan.agents import CursorDiscoverer
 
     discoverer = CursorDiscoverer(tmp_path)
     workspace_storage = _userdata(discoverer) / "User" / "workspaceStorage"
@@ -2153,7 +2158,7 @@ def test_cursor_discoverer_walks_workspace_storage(tmp_path):
 
 def test_vscode_discoverer_parses_copilot_skills_dir(tmp_path):
     """VSCode reads skills from ``~/.copilot/skills`` (Copilot-installed skills)."""
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
 
     skills_dir = tmp_path / ".copilot" / "skills"
     skills_dir.mkdir(parents=True)
@@ -2183,7 +2188,7 @@ def test_vscode_discoverer_reads_each_documented_user_skills_path(tmp_path, rela
     Each must be picked up independently so users who store skills under
     only one of these paths still surface in scans.
     """
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
 
     skills_dir = tmp_path / relative.replace("~/", "")
     _write_skill(skills_dir, "user-skill")
@@ -2202,7 +2207,7 @@ def test_vscode_discoverer_reads_each_documented_user_skills_path(tmp_path, rela
 
 def _setup_vscode_workspace(tmp_path, workspace_relpath):
     """Helper: create a VSCode install with one opened workspace at ``tmp_path/<workspace_relpath>``."""
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
 
     discoverer = VSCodeDiscoverer(tmp_path)
     (tmp_path / ".vscode").mkdir(exist_ok=True)
@@ -2243,7 +2248,7 @@ def test_vscode_discoverer_reads_each_documented_workspace_skills_path(tmp_path,
 
 def test_kiro_discoverer_has_no_skills_dir(tmp_path):
     """Kiro doesn't ship a skills directory — ``discover_skills`` returns ``{}``."""
-    from agent_scan.agent_discovery import KiroDiscoverer
+    from agent_scan.agents import KiroDiscoverer
 
     (tmp_path / ".kiro").mkdir()
 
@@ -2254,7 +2259,7 @@ def test_kiro_discoverer_has_no_skills_dir(tmp_path):
 
 
 def test_vscode_discoverer_discover_returns_client_to_inspect(tmp_path):
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
 
     (tmp_path / ".vscode").mkdir()
     (tmp_path / ".vscode" / "mcp.json").write_text('{"servers": {"s": {"command": "x"}}}')
@@ -2268,7 +2273,7 @@ def test_vscode_discoverer_discover_returns_client_to_inspect(tmp_path):
 
 
 def test_cursor_discoverer_discover_returns_client_to_inspect(tmp_path):
-    from agent_scan.agent_discovery import CursorDiscoverer
+    from agent_scan.agents import CursorDiscoverer
 
     (tmp_path / ".cursor").mkdir()
     (tmp_path / ".cursor" / "mcp.json").write_text('{"mcpServers": {"s": {"command": "x"}}}')
@@ -2281,7 +2286,7 @@ def test_cursor_discoverer_discover_returns_client_to_inspect(tmp_path):
 
 def test_discoverer_discover_returns_none_when_not_installed(tmp_path):
     """If the agent isn't installed, ``discover()`` short-circuits to None even with config dirs in place elsewhere."""
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
 
     # Note: no ~/.vscode and no userdata Code dir → not installed.
     assert VSCodeDiscoverer(tmp_path).discover() is None
@@ -2291,7 +2296,7 @@ def test_discoverer_discover_returns_none_when_not_installed(tmp_path):
 
 
 def test_discoverers_registry_includes_all_vscode_family():
-    from agent_scan.agent_discovery import (
+    from agent_scan.agents import (
         DISCOVERERS,
         AntigravityDiscoverer,
         CursorDiscoverer,
@@ -2319,7 +2324,7 @@ def test_vscode_family_discoverer_names_match_well_known_clients():
     any one of them is caught regardless of which OS the suite runs on. ``vscode``
     is the canonical 'still aligned' control; the others are the new family.
     """
-    from agent_scan.agent_discovery import (
+    from agent_scan.agents import (
         AntigravityDiscoverer,
         CursorDiscoverer,
         KiroDiscoverer,
@@ -2360,7 +2365,7 @@ def test_vscode_family_discoverer_names_match_well_known_clients():
 
 def test_find_discoverers_picks_up_vscode_family_when_installed(tmp_path):
     """``find_discoverers`` returns one instance per registered class whose ``client_exists`` is true."""
-    from agent_scan.agent_discovery import find_discoverers
+    from agent_scan.agents import find_discoverers
 
     # Install just Cursor.
     (tmp_path / ".cursor").mkdir()
@@ -2383,7 +2388,7 @@ def test_find_discoverers_picks_up_vscode_family_when_installed(tmp_path):
 )
 def test_vscode_user_data_dir_returns_platform_specific_path(tmp_path):
     """``_user_data_dir`` resolves to the canonical per-platform userdata folder for VSCode."""
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
 
     user_data = _userdata(VSCodeDiscoverer(tmp_path))
 
@@ -2401,7 +2406,7 @@ def test_vscode_user_data_dir_returns_platform_specific_path(tmp_path):
 
 def _setup_cursor_workspace(tmp_path, workspace_relpath):
     """Helper: create a Cursor install with one opened workspace at ``tmp_path/<workspace_relpath>``."""
-    from agent_scan.agent_discovery import CursorDiscoverer
+    from agent_scan.agents import CursorDiscoverer
 
     discoverer = CursorDiscoverer(tmp_path)
     (tmp_path / ".cursor").mkdir(exist_ok=True)
@@ -2416,7 +2421,7 @@ def _setup_cursor_workspace(tmp_path, workspace_relpath):
 
 def test_project_paths_with_ancestors_lives_on_agent_discoverer_base():
     """The ancestor walk is shared by every discoverer, so it lives on the abstract base."""
-    from agent_scan.agent_discovery import AgentDiscoverer
+    from agent_scan.agents import AgentDiscoverer
 
     assert "_project_paths_with_ancestors" in AgentDiscoverer.__dict__
 
@@ -2438,7 +2443,7 @@ def test_vscode_family_project_paths_with_ancestors_uses_workspace_storage(tmp_p
 
 def test_vscode_family_project_paths_empty_when_no_workspaces(tmp_path):
     """No workspaceStorage entries means no project paths and no ancestors."""
-    from agent_scan.agent_discovery import CursorDiscoverer
+    from agent_scan.agents import CursorDiscoverer
 
     (tmp_path / ".cursor").mkdir()
     assert CursorDiscoverer(tmp_path)._project_paths_with_ancestors() == []
@@ -2487,7 +2492,7 @@ def test_cursor_workspace_skills_picked_up_from_ancestor(tmp_path):
 
 def test_cursor_workspace_skills_dedups_shared_ancestor(tmp_path):
     """Two opened workspaces under a shared ancestor with one skills dir → single entry."""
-    from agent_scan.agent_discovery import CursorDiscoverer
+    from agent_scan.agents import CursorDiscoverer
 
     discoverer = CursorDiscoverer(tmp_path)
     (tmp_path / ".cursor").mkdir()
@@ -2520,7 +2525,7 @@ def test_cursor_workspace_skills_missing_dir_does_not_emit_key(tmp_path):
 
 def test_cursor_user_level_skills_still_discovered(tmp_path):
     """Lifting the ancestor walk must not regress the existing ``~/.cursor/skills`` discovery."""
-    from agent_scan.agent_discovery import CursorDiscoverer
+    from agent_scan.agents import CursorDiscoverer
 
     (tmp_path / ".cursor").mkdir()
     _write_skill(tmp_path / ".cursor" / "skills", "user-skill")
@@ -2551,7 +2556,7 @@ def test_cursor_workspace_mcp_picked_up_from_ancestor(tmp_path):
 
 def test_vscode_extension_mcp_discovers_wrapped_mcp_json(tmp_path):
     """An extension dropping ``mcp.json`` under ``~/.vscode/extensions/<ext>/`` is picked up."""
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
 
     ext_dir = tmp_path / ".vscode" / "extensions" / "publisher.example-1.0.0"
     ext_dir.mkdir(parents=True)
@@ -2570,7 +2575,7 @@ def test_vscode_extension_mcp_discovers_wrapped_mcp_json(tmp_path):
 
 def test_vscode_extension_mcp_discovers_vscode_flat_servers_shape(tmp_path):
     """An extension shipping the VSCode-flat ``{"servers": {...}}`` shape also parses."""
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
 
     ext_dir = tmp_path / ".vscode" / "extensions" / "x.flat-2.0.0"
     ext_dir.mkdir(parents=True)
@@ -2588,7 +2593,7 @@ def test_vscode_extension_mcp_discovers_vscode_flat_servers_shape(tmp_path):
 
 def test_vscode_extension_mcp_empty_when_extensions_dir_missing(tmp_path):
     """No ``extensions/`` tree means no extension-scope keys in the result."""
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
 
     (tmp_path / ".vscode").mkdir()
 
@@ -2599,7 +2604,7 @@ def test_vscode_extension_mcp_empty_when_extensions_dir_missing(tmp_path):
 
 def test_vscode_extension_mcp_records_could_not_parse_for_invalid_json(tmp_path):
     """A malformed ``mcp.json`` inside an extension dir surfaces as ``CouldNotParseMCPConfig``."""
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
 
     ext_dir = tmp_path / ".vscode" / "extensions" / "x.bad-0.0.1"
     ext_dir.mkdir(parents=True)
@@ -2616,7 +2621,7 @@ def test_vscode_extension_mcp_records_could_not_parse_for_invalid_json(tmp_path)
 
 def test_vscode_extension_skills_discovers_skills_dir(tmp_path):
     """An extension shipping a ``skills/`` directory is picked up."""
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
 
     ext_skill_dir = tmp_path / ".vscode" / "extensions" / "p.ext-1.0.0" / "skills" / "ext-skill"
     ext_skill_dir.mkdir(parents=True)
@@ -2635,7 +2640,7 @@ def test_vscode_extension_skills_discovers_skills_dir(tmp_path):
 
 def test_vscode_extension_skills_empty_when_extensions_dir_missing(tmp_path):
     """No ``extensions/`` tree means no extension-scope skill keys."""
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
 
     (tmp_path / ".vscode").mkdir()
 
@@ -2646,7 +2651,7 @@ def test_vscode_extension_skills_empty_when_extensions_dir_missing(tmp_path):
 
 def test_cursor_extension_mcp_discovers_mcp_json(tmp_path):
     """Cursor's ``~/.cursor/extensions/<ext>/mcp.json`` is scanned the same way as VSCode's."""
-    from agent_scan.agent_discovery import CursorDiscoverer
+    from agent_scan.agents import CursorDiscoverer
 
     ext_dir = tmp_path / ".cursor" / "extensions" / "vendor.curext-3.1.4"
     ext_dir.mkdir(parents=True)
@@ -2664,7 +2669,7 @@ def test_cursor_extension_mcp_discovers_mcp_json(tmp_path):
 
 def test_cursor_extension_skills_discovers_skills_dir(tmp_path):
     """Cursor extensions can ship a ``skills/`` directory just like VSCode."""
-    from agent_scan.agent_discovery import CursorDiscoverer
+    from agent_scan.agents import CursorDiscoverer
 
     ext_skill_dir = tmp_path / ".cursor" / "extensions" / "v.c-1.0.0" / "skills" / "cur-skill"
     ext_skill_dir.mkdir(parents=True)
@@ -2678,7 +2683,7 @@ def test_cursor_extension_skills_discovers_skills_dir(tmp_path):
 
 def test_windsurf_extension_mcp_discovers_mcp_json(tmp_path):
     """Windsurf is a VSCode fork; ``~/.codeium/windsurf/extensions/`` follows the same convention."""
-    from agent_scan.agent_discovery import WindsurfDiscoverer
+    from agent_scan.agents import WindsurfDiscoverer
 
     ext_dir = tmp_path / ".codeium" / "windsurf" / "extensions" / "v.ws-1.0.0"
     ext_dir.mkdir(parents=True)
@@ -2700,10 +2705,12 @@ def test_vscode_extension_walk_respects_max_depth_cap(tmp_path, monkeypatch):
     Mirrors the Claude Code plugin-walk depth test: pruning protects against
     pathologically deep trees blowing up the walk.
     """
-    import agent_scan.agent_discovery as discovery_module
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
+    from agent_scan.agents.vscode import base as vscode_base
 
-    monkeypatch.setattr(discovery_module, "_MAX_PLUGIN_RGLOB_DEPTH", 3)
+    # The extension walk reads ``_MAX_PLUGIN_RGLOB_DEPTH`` from its own module
+    # (agents.vscode.base), so patch the cap there.
+    monkeypatch.setattr(vscode_base, "_MAX_PLUGIN_RGLOB_DEPTH", 3)
 
     # Inside ``~/.vscode/extensions/`` the relative-parts depth of
     # ``a/b/c/d/mcp.json`` is 4 — beyond cap 3, so it must NOT be discovered.
@@ -2723,7 +2730,7 @@ def test_kiro_discoverer_walks_kiro_extensions_dir(tmp_path):
     The historical assertion that Kiro doesn't walk extensions was wrong — the path
     just hadn't been wired up yet.
     """
-    from agent_scan.agent_discovery import KiroDiscoverer
+    from agent_scan.agents import KiroDiscoverer
 
     ext_dir = tmp_path / ".kiro" / "extensions" / "x.kr-1.0.0"
     ext_dir.mkdir(parents=True)
@@ -2738,7 +2745,7 @@ def test_antigravity_discoverer_walks_gemini_extensions_dir(tmp_path):
     """Antigravity's documented extensions location is ``~/.gemini/extensions/`` (shared
     with the Gemini CLI), not ``~/.gemini/antigravity/extensions/``. Confirm we walk the
     correct path and ignore the wrong one."""
-    from agent_scan.agent_discovery import AntigravityDiscoverer
+    from agent_scan.agents import AntigravityDiscoverer
 
     correct_ext_dir = tmp_path / ".gemini" / "extensions" / "x.ag-1.0.0"
     correct_ext_dir.mkdir(parents=True)
@@ -2788,7 +2795,7 @@ def _setup_workspace(discoverer, tmp_path, workspace_relpath):
 )
 def test_windsurf_discovers_workspace_skills_at_each_supported_relative_path(tmp_path, relative):
     """Windsurf docs list ``.windsurf/skills`` plus cross-agent compat for ``.agents`` and ``.claude``."""
-    from agent_scan.agent_discovery import WindsurfDiscoverer
+    from agent_scan.agents import WindsurfDiscoverer
 
     (tmp_path / ".codeium" / "windsurf").mkdir(parents=True)
     discoverer = WindsurfDiscoverer(tmp_path)
@@ -2806,7 +2813,7 @@ def test_windsurf_discovers_workspace_skills_at_each_supported_relative_path(tmp
 
 def test_kiro_user_global_skills_discovered(tmp_path):
     """Kiro's user-global skills live at ``~/.kiro/skills/`` per the Kiro docs."""
-    from agent_scan.agent_discovery import KiroDiscoverer
+    from agent_scan.agents import KiroDiscoverer
 
     _write_skill(tmp_path / ".kiro" / "skills", "kiro-user-skill")
 
@@ -2821,7 +2828,7 @@ def test_kiro_user_global_skills_discovered(tmp_path):
 def test_kiro_user_data_dir_resolves_to_lowercase_kiro(tmp_path):
     """Kiro's userdata folder is named ``kiro`` (lowercase) — observed in IDE storage at
     ``~/Library/Application Support/kiro/User/globalStorage/``."""
-    from agent_scan.agent_discovery import KiroDiscoverer
+    from agent_scan.agents import KiroDiscoverer
 
     userdata = KiroDiscoverer(tmp_path)._user_data_dir()
 
@@ -2831,7 +2838,7 @@ def test_kiro_user_data_dir_resolves_to_lowercase_kiro(tmp_path):
 
 def test_kiro_discovers_workspace_skills_at_kiro_relative(tmp_path):
     """Per Kiro docs, workspace skills live at ``<project>/.kiro/skills/``."""
-    from agent_scan.agent_discovery import KiroDiscoverer
+    from agent_scan.agents import KiroDiscoverer
 
     (tmp_path / ".kiro").mkdir()
     discoverer = KiroDiscoverer(tmp_path)
@@ -2848,7 +2855,7 @@ def test_kiro_discovers_workspace_skills_at_kiro_relative(tmp_path):
 
 def test_antigravity_user_global_skills_discovered(tmp_path):
     """Antigravity's user-global skills live at ``~/.gemini/antigravity/skills/``."""
-    from agent_scan.agent_discovery import AntigravityDiscoverer
+    from agent_scan.agents import AntigravityDiscoverer
 
     _write_skill(tmp_path / ".gemini" / "antigravity" / "skills", "ag-user-skill")
 
@@ -2863,7 +2870,7 @@ def test_antigravity_user_global_skills_discovered(tmp_path):
 def test_antigravity_user_data_dir_resolves_to_capital_antigravity(tmp_path):
     """Antigravity's userdata folder is named ``Antigravity`` — observed at
     ``~/Library/Application Support/Antigravity/`` and ``AppData/Roaming/Antigravity``."""
-    from agent_scan.agent_discovery import AntigravityDiscoverer
+    from agent_scan.agents import AntigravityDiscoverer
 
     userdata = AntigravityDiscoverer(tmp_path)._user_data_dir()
 
@@ -2873,7 +2880,7 @@ def test_antigravity_user_data_dir_resolves_to_capital_antigravity(tmp_path):
 
 def test_antigravity_discovers_workspace_skills_at_singular_agent_relative(tmp_path):
     """Per Antigravity docs the workspace path is ``.agent/skills`` (singular ``agent``)."""
-    from agent_scan.agent_discovery import AntigravityDiscoverer
+    from agent_scan.agents import AntigravityDiscoverer
 
     (tmp_path / ".gemini" / "antigravity").mkdir(parents=True)
     discoverer = AntigravityDiscoverer(tmp_path)
@@ -2917,7 +2924,7 @@ def _platform_userdata_root():
 def test_antigravity_user_data_dirs_includes_both_v1_and_v2_names(tmp_path):
     """``_user_data_dirs()`` exposes every candidate userdata folder. For Antigravity
     that's both the v1.x ``Antigravity`` and the v2.0 ``Antigravity IDE``."""
-    from agent_scan.agent_discovery import AntigravityDiscoverer
+    from agent_scan.agents import AntigravityDiscoverer
 
     dirs = AntigravityDiscoverer(tmp_path)._user_data_dirs()
 
@@ -2929,7 +2936,7 @@ def test_antigravity_user_data_dirs_includes_both_v1_and_v2_names(tmp_path):
 def test_antigravity_v1_userdata_remains_first_candidate(tmp_path):
     """The v1.x ``Antigravity`` name stays the first candidate so existing single-userdata
     callers (and tests using ``_user_data_dir()``) keep their previous behavior."""
-    from agent_scan.agent_discovery import AntigravityDiscoverer
+    from agent_scan.agents import AntigravityDiscoverer
 
     userdata = AntigravityDiscoverer(tmp_path)._user_data_dir()
 
@@ -2940,7 +2947,7 @@ def test_antigravity_v1_userdata_remains_first_candidate(tmp_path):
 def test_antigravity_discovers_workspace_skills_via_v2_userdata(tmp_path):
     """A workspace registered under the v2.0 ``Antigravity IDE`` userdata folder must be
     walked for ``.agent/skills/`` just like one registered under v1.x."""
-    from agent_scan.agent_discovery import AntigravityDiscoverer
+    from agent_scan.agents import AntigravityDiscoverer
 
     discoverer = AntigravityDiscoverer(tmp_path)
     v2_userdata = tmp_path / _platform_userdata_root() / "Antigravity IDE"
@@ -2963,7 +2970,7 @@ def test_antigravity_discovers_workspace_skills_via_v2_userdata(tmp_path):
 def test_antigravity_client_exists_detects_v2_userdata_only_install(tmp_path):
     """If only the v2.0 userdata folder exists (no ``~/.gemini/antigravity`` dotfile,
     no v1 userdata), ``client_exists`` still reports Antigravity as present."""
-    from agent_scan.agent_discovery import AntigravityDiscoverer
+    from agent_scan.agents import AntigravityDiscoverer
 
     v2_userdata = tmp_path / _platform_userdata_root() / "Antigravity IDE"
     v2_userdata.mkdir(parents=True)
@@ -2987,7 +2994,7 @@ def test_cursor_user_global_cross_compat_skills_discovered(tmp_path, relative):
     """Cursor docs (cursor.com/docs/skills) list user-level skill paths
     ``~/.agents/skills``, ``~/.claude/skills``, and ``~/.codex/skills`` in
     addition to ``~/.cursor/skills``."""
-    from agent_scan.agent_discovery import CursorDiscoverer
+    from agent_scan.agents import CursorDiscoverer
 
     (tmp_path / ".cursor").mkdir()
     _write_skill(tmp_path / relative, "cur-user-cross-skill")
@@ -3008,7 +3015,7 @@ def test_windsurf_user_global_cross_compat_skills_discovered(tmp_path, relative)
     """Windsurf docs (docs.windsurf.com/windsurf/cascade/skills) list user-level
     cross-compat paths ``~/.agents/skills`` and ``~/.claude/skills`` alongside
     the canonical ``~/.codeium/windsurf/skills``."""
-    from agent_scan.agent_discovery import WindsurfDiscoverer
+    from agent_scan.agents import WindsurfDiscoverer
 
     (tmp_path / ".codeium" / "windsurf").mkdir(parents=True)
     _write_skill(tmp_path / relative, "ws-user-cross-skill")
@@ -3031,7 +3038,7 @@ def test_windsurf_user_global_cross_compat_skills_discovered(tmp_path, relative)
 def test_kiro_discoverer_parses_workspace_settings_mcp_json(tmp_path):
     """A ``.kiro/settings/mcp.json`` inside an opened workspace surfaces in
     ``discover_mcp_servers``."""
-    from agent_scan.agent_discovery import KiroDiscoverer
+    from agent_scan.agents import KiroDiscoverer
 
     (tmp_path / ".kiro").mkdir()
     discoverer = KiroDiscoverer(tmp_path)
@@ -3061,7 +3068,7 @@ def test_kiro_discoverer_parses_workspace_settings_mcp_json(tmp_path):
 
 def test_kiro_extension_mcp_discovers_mcp_json(tmp_path):
     """An extension dropping ``mcp.json`` under ``~/.kiro/extensions/<ext>/`` is picked up."""
-    from agent_scan.agent_discovery import KiroDiscoverer
+    from agent_scan.agents import KiroDiscoverer
 
     ext_dir = tmp_path / ".kiro" / "extensions" / "p.kr-ext-1.0.0"
     ext_dir.mkdir(parents=True)
@@ -3080,7 +3087,7 @@ def test_kiro_extension_mcp_discovers_mcp_json(tmp_path):
 
 def test_kiro_extension_skills_discovers_skills_dir(tmp_path):
     """An extension shipping a ``skills/`` directory under ``~/.kiro/extensions/`` surfaces."""
-    from agent_scan.agent_discovery import KiroDiscoverer
+    from agent_scan.agents import KiroDiscoverer
 
     ext_skill_dir = tmp_path / ".kiro" / "extensions" / "p.kr-1.0.0" / "skills" / "kr-skill"
     ext_skill_dir.mkdir(parents=True)
@@ -3102,7 +3109,7 @@ def test_kiro_extension_skills_discovers_skills_dir(tmp_path):
 def test_antigravity_shared_gemini_config_mcp_discovered(tmp_path):
     """``~/.gemini/config/mcp_config.json`` is read alongside the antigravity-specific
     file so users who set up shared MCP across Gemini CLI + Antigravity IDE surface here."""
-    from agent_scan.agent_discovery import AntigravityDiscoverer
+    from agent_scan.agents import AntigravityDiscoverer
 
     config_dir = tmp_path / ".gemini" / "config"
     config_dir.mkdir(parents=True)
@@ -3125,7 +3132,7 @@ def test_antigravity_shared_gemini_config_mcp_discovered(tmp_path):
 def test_antigravity_user_shared_skills_discovered(tmp_path):
     """Per the Antigravity docs, skills shared between CLI and IDE go under
     ``~/.gemini/skills/`` — distinct from the IDE-only ``~/.gemini/antigravity/skills/``."""
-    from agent_scan.agent_discovery import AntigravityDiscoverer
+    from agent_scan.agents import AntigravityDiscoverer
 
     (tmp_path / ".gemini" / "antigravity").mkdir(parents=True)
     _write_skill(tmp_path / ".gemini" / "skills", "shared-skill")
@@ -3147,7 +3154,7 @@ def test_antigravity_user_shared_skills_discovered(tmp_path):
 
 def test_antigravity_extension_mcp_discovers_mcp_json(tmp_path):
     """``~/.gemini/extensions/<ext>/mcp.json`` is walked and parsed."""
-    from agent_scan.agent_discovery import AntigravityDiscoverer
+    from agent_scan.agents import AntigravityDiscoverer
 
     ext_dir = tmp_path / ".gemini" / "extensions" / "v.ag-ext-2.0.0"
     ext_dir.mkdir(parents=True)
@@ -3167,7 +3174,7 @@ def test_antigravity_extension_mcp_discovers_mcp_json(tmp_path):
 
 def test_antigravity_extension_skills_discovers_skills_dir(tmp_path):
     """An extension shipping ``skills/`` under ``~/.gemini/extensions/`` surfaces."""
-    from agent_scan.agent_discovery import AntigravityDiscoverer
+    from agent_scan.agents import AntigravityDiscoverer
 
     ext_skill_dir = tmp_path / ".gemini" / "extensions" / "p.ag-1.0.0" / "skills" / "ag-ext-skill"
     ext_skill_dir.mkdir(parents=True)
@@ -3189,7 +3196,7 @@ def test_antigravity_extension_skills_discovers_skills_dir(tmp_path):
 
 def test_vscode_discoverer_parses_profile_specific_mcp_json(tmp_path):
     """Each ``<userdata>/User/profiles/<id>/mcp.json`` is parsed and keyed by absolute path."""
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
 
     discoverer = VSCodeDiscoverer(tmp_path)
     profile_dir = _userdata(discoverer) / "User" / "profiles" / "work"
@@ -3209,7 +3216,7 @@ def test_vscode_discoverer_parses_profile_specific_mcp_json(tmp_path):
 
 def test_vscode_discoverer_walks_multiple_profile_mcp_files(tmp_path):
     """Multiple profile dirs each surface their own mcp.json."""
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
 
     discoverer = VSCodeDiscoverer(tmp_path)
     profiles_root = _userdata(discoverer) / "User" / "profiles"
@@ -3226,7 +3233,7 @@ def test_vscode_discoverer_walks_multiple_profile_mcp_files(tmp_path):
 
 def test_vscode_discoverer_profile_settings_json_nested_mcp(tmp_path):
     """A profile's ``settings.json`` with nested ``mcp.servers`` is parsed (same shape as the default profile)."""
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
 
     discoverer = VSCodeDiscoverer(tmp_path)
     profile_dir = _userdata(discoverer) / "User" / "profiles" / "team"
@@ -3253,7 +3260,7 @@ def test_vscode_discoverer_profile_editor_only_settings_json_not_a_parse_failure
     is gated (:meth:`_discover_user_settings_mcp`); parsing it directly as MCP
     surfaces a spurious parse failure per profile on every scan.
     """
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
 
     discoverer = VSCodeDiscoverer(tmp_path)
     profile_dir = _userdata(discoverer) / "User" / "profiles" / "work"
@@ -3274,7 +3281,7 @@ def test_vscode_discoverer_profile_editor_only_settings_json_not_a_parse_failure
 
 def test_vscode_discoverer_profile_walk_skips_when_no_profiles(tmp_path):
     """If the user has no named profiles, ``discover_mcp_servers`` doesn't emit any profile keys."""
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
 
     discoverer = VSCodeDiscoverer(tmp_path)
     user_dir = _userdata(discoverer) / "User"
@@ -3296,7 +3303,7 @@ def test_vscode_discoverer_profile_walk_skips_when_no_profiles(tmp_path):
 
 def test_kiro_powers_per_power_mcp_json_discovered(tmp_path):
     """Each ``~/.kiro/powers/installed/<name>/mcp.json`` is parsed and keyed by absolute path."""
-    from agent_scan.agent_discovery import KiroDiscoverer
+    from agent_scan.agents import KiroDiscoverer
 
     power_dir = tmp_path / ".kiro" / "powers" / "installed" / "stripe"
     power_dir.mkdir(parents=True)
@@ -3316,7 +3323,7 @@ def test_kiro_powers_per_power_mcp_json_discovered(tmp_path):
 
 def test_kiro_powers_merged_mcp_file_discovered(tmp_path):
     """The auto-generated ``~/.kiro/powers.mcp.json`` is read alongside ``settings/mcp.json``."""
-    from agent_scan.agent_discovery import KiroDiscoverer
+    from agent_scan.agents import KiroDiscoverer
 
     kiro_dir = tmp_path / ".kiro"
     kiro_dir.mkdir()
@@ -3333,7 +3340,7 @@ def test_kiro_powers_merged_mcp_file_discovered(tmp_path):
 
 def test_kiro_powers_walk_finds_multiple_installed_powers(tmp_path):
     """Multiple installed powers each surface their own mcp.json."""
-    from agent_scan.agent_discovery import KiroDiscoverer
+    from agent_scan.agents import KiroDiscoverer
 
     installed = tmp_path / ".kiro" / "powers" / "installed"
     for name in ("stripe", "supabase"):
@@ -3353,7 +3360,7 @@ def test_kiro_powers_walk_finds_multiple_installed_powers(tmp_path):
 def test_claude_code_discovers_managed_mcp_servers(tmp_path, monkeypatch):
     """Enterprise managed-mcp.json (a system absolute path) is parsed as a
     wrapped ``mcpServers`` config and surfaced."""
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
     managed = tmp_path / "managed-mcp.json"
@@ -3380,8 +3387,8 @@ def test_managed_mcp_path_honors_program_files_env_on_windows(tmp_path, monkeypa
     ``Program Files`` is machine-global, so honoring the scanning process's env is
     correct even under ``--scan-all-users`` (unlike the per-user ``CLAUDE_CONFIG_DIR``).
     """
-    import agent_scan.agent_discovery as discovery_module
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    import agent_scan.agents.claude_code as discovery_module
+    from agent_scan.agents.claude_code import ClaudeCodeDiscoverer
 
     monkeypatch.setattr(discovery_module.sys, "platform", "win32")
     custom_pf = tmp_path / "CustomDrive" / "Program Files"
@@ -3402,8 +3409,8 @@ def test_managed_mcp_path_honors_program_files_env_on_windows(tmp_path, monkeypa
 def test_managed_mcp_path_falls_back_to_default_program_files_on_windows(tmp_path, monkeypatch):
     """With no ``Program Files`` env var, fall back to the conventional default
     rather than returning ``None`` (an enterprise default install still resolves)."""
-    import agent_scan.agent_discovery as discovery_module
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    import agent_scan.agents.claude_code as discovery_module
+    from agent_scan.agents.claude_code import ClaudeCodeDiscoverer
 
     monkeypatch.setattr(discovery_module.sys, "platform", "win32")
     monkeypatch.delenv("PROGRAMW6432", raising=False)
@@ -3418,7 +3425,7 @@ def test_managed_mcp_path_falls_back_to_default_program_files_on_windows(tmp_pat
 
 def test_claude_code_discovers_global_command_files(tmp_path):
     """``~/.claude/commands/*.md`` are surfaced as skill entries."""
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     commands = tmp_path / ".claude" / "commands"
     commands.mkdir(parents=True)
@@ -3434,7 +3441,7 @@ def test_claude_code_discovers_global_command_files(tmp_path):
 
 def test_claude_code_discovers_project_command_files(tmp_path):
     """``<project>/.claude/commands/*.md`` are surfaced for opened projects."""
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     project = tmp_path / "repo"
     cmds = project / ".claude" / "commands"
@@ -3453,7 +3460,7 @@ def test_claude_code_discovers_project_command_files(tmp_path):
 def test_claude_code_honors_claude_config_dir_on_own_home_scan(tmp_path, monkeypatch):
     """When CLAUDE_CONFIG_DIR is set and no explicit home is passed (own-home
     scan), MCP config is read from ``<CLAUDE_CONFIG_DIR>/.claude.json``."""
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     cfg = tmp_path / "custom-claude"
     cfg.mkdir()
@@ -3470,7 +3477,7 @@ def test_claude_code_honors_claude_config_dir_on_own_home_scan(tmp_path, monkeyp
 def test_claude_code_ignores_claude_config_dir_when_home_passed(tmp_path, monkeypatch):
     """Under multi-user scans (an explicit home is passed) the scanning
     process's CLAUDE_CONFIG_DIR must NOT relocate the target user's config."""
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     cfg = tmp_path / "process-env-dir"
     cfg.mkdir()
@@ -3500,7 +3507,7 @@ def test_claude_code_honors_claude_config_dir_when_home_equals_real_home(tmp_pat
     """
     from pathlib import Path
 
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     home = tmp_path / "me"
     (home / ".claude").mkdir(parents=True)
@@ -3526,7 +3533,7 @@ def test_claude_code_honors_claude_config_dir_when_home_equals_real_home(tmp_pat
 def test_claude_code_discovers_inline_plugin_manifest_mcp_servers(tmp_path):
     """A plugin's ``.claude-plugin/plugin.json`` with an inline ``mcpServers``
     map is surfaced from the plugin walk."""
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     plugin = tmp_path / ".claude" / "plugins" / "cache" / "my-plugin"
     manifest_dir = plugin / ".claude-plugin"
@@ -3543,7 +3550,7 @@ def test_claude_code_discovers_inline_plugin_manifest_mcp_servers(tmp_path):
 def test_claude_code_discovers_inline_plugin_manifest_skills(tmp_path):
     """A plugin manifest's ``skills`` list points at plugin-root-relative skill
     dirs, which are scanned for SKILL.md skills."""
-    from agent_scan.agent_discovery import ClaudeCodeDiscoverer
+    from agent_scan.agents import ClaudeCodeDiscoverer
 
     plugin = tmp_path / ".claude" / "plugins" / "cache" / "my-plugin"
     manifest_dir = plugin / ".claude-plugin"
@@ -3565,7 +3572,7 @@ def test_claude_code_discovers_inline_plugin_manifest_skills(tmp_path):
 def test_vscode_agent_skills_locations_dotted_key_absolute_path(tmp_path):
     """``chat.agentSkillsLocations`` in User/settings.json (dotted form) points at
     an absolute custom skills dir that is scanned."""
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
 
     discoverer = VSCodeDiscoverer(tmp_path)
     (tmp_path / ".vscode").mkdir()
@@ -3584,7 +3591,7 @@ def test_vscode_agent_skills_locations_dotted_key_absolute_path(tmp_path):
 
 def test_vscode_agent_skills_locations_nested_key(tmp_path):
     """Nested ``chat: {agentSkillsLocations: [...]}`` form is also honored."""
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
 
     discoverer = VSCodeDiscoverer(tmp_path)
     (tmp_path / ".vscode").mkdir()
@@ -3648,7 +3655,7 @@ def test_vscode_devcontainer_without_mcp_yields_no_entry(tmp_path):
 def test_vscode_discovers_code_workspace_mcp(tmp_path):
     """A ``.code-workspace`` referenced from workspaceStorage's ``workspace``
     pointer has its ``settings.mcp.servers`` surfaced."""
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
 
     discoverer = VSCodeDiscoverer(tmp_path)
     (tmp_path / ".vscode").mkdir()
@@ -3667,7 +3674,7 @@ def test_vscode_discovers_code_workspace_mcp(tmp_path):
 
 def test_vscode_discovers_code_workspace_dotted_mcp_servers(tmp_path):
     """``.code-workspace`` settings using the flattened ``mcp.servers`` key also work."""
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
 
     discoverer = VSCodeDiscoverer(tmp_path)
     (tmp_path / ".vscode").mkdir()
@@ -3685,7 +3692,7 @@ def test_vscode_discovers_code_workspace_dotted_mcp_servers(tmp_path):
 def test_vscode_discovers_code_workspace_skill_locations(tmp_path):
     """``chat.agentSkillsLocations`` inside a ``.code-workspace`` settings block,
     relative to the workspace file, is scanned."""
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
 
     discoverer = VSCodeDiscoverer(tmp_path)
     (tmp_path / ".vscode").mkdir()
@@ -3703,7 +3710,7 @@ def test_vscode_discovers_code_workspace_skill_locations(tmp_path):
 
 def test_vscode_discovers_insiders_userdata_mcp(tmp_path):
     """MCP under the Insiders userdata (``Code - Insiders``) is surfaced."""
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
 
     discoverer = VSCodeDiscoverer(tmp_path)
     (tmp_path / ".vscode").mkdir()
@@ -3720,7 +3727,7 @@ def test_vscode_discovers_insiders_userdata_mcp(tmp_path):
 
 def test_vscode_honors_vscode_portable_on_own_home_scan(tmp_path, monkeypatch):
     """VSCODE_PORTABLE relocates userdata to ``<portable>/user-data`` on own-home scans."""
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
 
     portable = tmp_path / "VSCode-portable"
     monkeypatch.setenv("VSCODE_PORTABLE", str(portable))
@@ -3743,7 +3750,7 @@ def test_vscode_honors_vscode_portable_when_home_equals_real_home(tmp_path, monk
     """
     from pathlib import Path
 
-    from agent_scan.agent_discovery import VSCodeDiscoverer
+    from agent_scan.agents import VSCodeDiscoverer
 
     home = tmp_path / "me"
     home.mkdir()
@@ -3765,7 +3772,8 @@ def test_vscode_honors_vscode_portable_when_home_equals_real_home(tmp_path, monk
 def test_vscode_imports_claude_desktop_config_when_discovery_enabled(tmp_path):
     """When ``chat.mcp.discovery.enabled`` is true, VSCode reuses Claude Desktop's
     ``claude_desktop_config.json``."""
-    from agent_scan.agent_discovery import VSCodeDiscoverer, _claude_desktop_config_path
+    from agent_scan.agents import VSCodeDiscoverer
+    from agent_scan.agents.vscode.base import _claude_desktop_config_path
 
     discoverer = VSCodeDiscoverer(tmp_path)
     (tmp_path / ".vscode").mkdir()
@@ -3787,7 +3795,8 @@ def test_vscode_imports_claude_desktop_config_when_discovery_enabled(tmp_path):
 
 def test_vscode_does_not_import_claude_desktop_config_when_discovery_disabled(tmp_path):
     """Without the discovery setting, the Claude Desktop config is not imported."""
-    from agent_scan.agent_discovery import VSCodeDiscoverer, _claude_desktop_config_path
+    from agent_scan.agents import VSCodeDiscoverer
+    from agent_scan.agents.vscode.base import _claude_desktop_config_path
 
     discoverer = VSCodeDiscoverer(tmp_path)
     (tmp_path / ".vscode").mkdir()
@@ -3807,7 +3816,7 @@ def test_vscode_does_not_import_claude_desktop_config_when_discovery_disabled(tm
 
 def test_windsurf_discovers_system_skills_dir(tmp_path, monkeypatch):
     """Windsurf reads machine-wide skills from a per-OS system path."""
-    from agent_scan.agent_discovery import WindsurfDiscoverer
+    from agent_scan.agents import WindsurfDiscoverer
 
     (tmp_path / ".codeium" / "windsurf").mkdir(parents=True)
     system = tmp_path / "system-windsurf-skills"
@@ -3829,7 +3838,7 @@ def test_windsurf_discovers_system_skills_dir(tmp_path, monkeypatch):
 )
 def test_windsurf_system_skills_path_is_platform_specific():
     """The configured system skills path matches the documented per-OS location."""
-    from agent_scan.agent_discovery import WindsurfDiscoverer
+    from agent_scan.agents import WindsurfDiscoverer
 
     dirs = WindsurfDiscoverer(None)._platform_system_skills_dirs()
 
@@ -3845,7 +3854,7 @@ def test_windsurf_system_skills_path_is_platform_specific():
 
 def test_antigravity_discovers_gemini_settings_mcp(tmp_path):
     """Antigravity reads MCP from the shared ``~/.gemini/settings.json``."""
-    from agent_scan.agent_discovery import AntigravityDiscoverer
+    from agent_scan.agents import AntigravityDiscoverer
 
     (tmp_path / ".gemini" / "antigravity").mkdir(parents=True)
     settings = tmp_path / ".gemini" / "settings.json"
@@ -3860,7 +3869,7 @@ def test_antigravity_discovers_gemini_settings_mcp(tmp_path):
 
 def test_antigravity_gemini_settings_without_mcp_is_not_a_parse_error(tmp_path):
     """An editor-only ``~/.gemini/settings.json`` produces no entry, not a parse error."""
-    from agent_scan.agent_discovery import AntigravityDiscoverer
+    from agent_scan.agents import AntigravityDiscoverer
 
     (tmp_path / ".gemini" / "antigravity").mkdir(parents=True)
     settings = tmp_path / ".gemini" / "settings.json"
@@ -3873,7 +3882,7 @@ def test_antigravity_gemini_settings_without_mcp_is_not_a_parse_error(tmp_path):
 
 def test_antigravity_discovers_plural_agents_workspace_skills(tmp_path):
     """Antigravity reads workspace skills from the plural ``.agents/skills`` path."""
-    from agent_scan.agent_discovery import AntigravityDiscoverer
+    from agent_scan.agents import AntigravityDiscoverer
 
     discoverer = AntigravityDiscoverer(tmp_path)
     (tmp_path / ".gemini" / "antigravity").mkdir(parents=True)
@@ -3891,7 +3900,7 @@ def test_antigravity_discovers_plural_agents_workspace_skills(tmp_path):
 
 def test_antigravity_discovers_singular_agent_home_skills(tmp_path):
     """Antigravity reads user-global skills from the singular ``~/.agent/skills`` path."""
-    from agent_scan.agent_discovery import AntigravityDiscoverer
+    from agent_scan.agents import AntigravityDiscoverer
 
     (tmp_path / ".gemini" / "antigravity").mkdir(parents=True)
     _write_skill(tmp_path / ".agent" / "skills", "home-skill")
