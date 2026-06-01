@@ -4,7 +4,6 @@ plugin, command, and enterprise (managed-mcp) scopes."""
 import logging
 import os
 import sys
-from functools import cached_property
 from pathlib import Path
 
 from agent_scan.agents.base import (
@@ -90,6 +89,14 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         result.update(self._discover_project_commands())
         result.update(self._discover_plugin_commands())
         result.update(self._discover_plugin_manifest_skills())
+        # NOTE: enterprise/managed skills are a documented Claude Code scope (the
+        # "Enterprise" tier in the skills hierarchy, which overrides personal and
+        # project skills) but are intentionally NOT discovered here. Unlike
+        # ``managed-mcp.json`` — which has a fixed per-OS path (see
+        # ``_managed_mcp_path``) — the docs pin managed skills only to "managed
+        # settings" and document no concrete skills directory to scan. We do not
+        # guess a path by convention; revisit if/when the docs specify one.
+        # Follow-up: ADS-365.
         return result
 
     # --- config-dir resolution (CLAUDE_CONFIG_DIR) ---
@@ -176,8 +183,14 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
             projects = {}
 
         result: McpConfigsResult = {}
+        # Iterate every opened project root *and* its ancestors up to filesystem
+        # root, so config in a parent folder (e.g. a monorepo root) is picked up
+        # for the sub-projects beneath it.
         for path in self._project_paths_with_ancestors():
             key = path.as_posix()
+            # Source 1: inline ``projects.<path>.mcpServers`` recorded in ``.claude.json``.
+            # For an ancestor this only matches if that ancestor was itself opened
+            # as a project (i.e. has its own ``projects`` entry); otherwise it misses.
             project_config = projects.get(key)
             if isinstance(project_config, dict):
                 project_mcp = project_config.get("mcpServers")
@@ -186,6 +199,8 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
                         project_mcp, source=f"projects.{key}.mcpServers in {config_path.as_posix()}"
                     )
 
+            # Source 2: a ``.mcp.json`` file in the folder itself — checked at every
+            # project root and ancestor, so parent-folder files are discovered too.
             mcp_file = path / ".mcp.json"
             parsed = self._parse_mcp_file(mcp_file, formats=_CLAUDE_MCP_FORMATS)
             # Skip on None (missing/empty file) or an empty server list; a parse
@@ -221,13 +236,17 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         """Plugin *root* directories — each holds the ``cache``/``marketplaces``/
         ``repos`` subtrees (see :attr:`_plugin_subdirs`).
 
-        The default is ``<base>/plugins`` for each global folder (``base`` already
-        honors ``CLAUDE_CONFIG_DIR``). Two env vars relocate or extend it; like
-        ``CLAUDE_CONFIG_DIR`` they reflect the *scanning process's* environment, so
-        they are honored only on an own-home scan (see :meth:`_scans_own_home`) —
-        under ``--scan-all-users`` the scanner can't know another user's env:
+        The always-present root is ``<base>/plugins`` for each global folder
+        (``base`` already honors ``CLAUDE_CONFIG_DIR``). Two env vars add *further*
+        roots — they are appended to the default, not substituted for it, so the
+        default ``<base>/plugins`` is always scanned alongside them. Their values
+        are used as-is (already at the plugins-root level, so no ``/plugins`` is
+        appended). Like ``CLAUDE_CONFIG_DIR`` they reflect the *scanning process's*
+        environment, so they are honored only on an own-home scan (see
+        :meth:`_scans_own_home`) — under ``--scan-all-users`` the scanner can't
+        know another user's env:
 
-        * ``CLAUDE_CODE_PLUGIN_CACHE_DIR`` — overrides the plugins root (despite the
+        * ``CLAUDE_CODE_PLUGIN_CACHE_DIR`` — an additional plugins root (despite the
           name it is the parent dir; ``cache``/``marketplaces`` live beneath it).
         * ``CLAUDE_CODE_PLUGIN_SEED_DIR`` — ``os.pathsep``-separated read-only seed
           roots mirroring the plugins layout (container/CI pre-population).
@@ -275,7 +294,12 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         """Scan ``skills/`` subdirs under every plugin base dir."""
         return self._discover_skill_and_command_dirs(self._plugin_base_dirs(), "skills", inspect_skills_dir)
 
-    # --- private: commands discovery (commands are skills per current docs) ---
+    # --- private: commands discovery ---
+    # Commands are currently surfaced as skills (hence the ``SkillsDirsResult``
+    # return type and the shared ``inspect_*`` machinery), matching how the docs
+    # treat them today. This is a deliberate choice for now, not a permanent one:
+    # if commands gain a distinct identity we may need to map them as commands in
+    # their own right rather than folding them into skills.
 
     def _discover_global_commands(self) -> SkillsDirsResult:
         """Scan ``<install>/commands`` for command files under each global folder."""
@@ -339,15 +363,15 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
 
     # --- private: inline plugin manifest discovery ---
 
-    @cached_property
     def _plugin_manifests(self) -> list[tuple[Path, dict]]:
         """``(manifest_path, parsed_dict)`` for every readable ``plugin.json`` under
         the plugin base dirs.
 
-        Walked and loaded once and cached for the discoverer's lifetime — the
-        inline-MCP and skills manifest scans both consume it, so neither the walk
-        nor the JSON read is repeated. Malformed or non-dict manifests are
-        skipped (so a bad ``plugin.json`` is silently ignored, as before).
+        Recomputed on each call: the plugin base dirs are walked and every
+        ``plugin.json`` is read and JSON-decoded. The inline-MCP and skills
+        manifest scans each call it, so the walk runs once per consumer.
+        Malformed or non-dict manifests are skipped (so a bad ``plugin.json`` is
+        silently ignored, as before).
         """
         manifests: list[tuple[Path, dict]] = []
         for base in self._plugin_base_dirs():
@@ -371,7 +395,7 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         ``.mcp.json`` walk, so only the inline dict form is handled here.
         """
         result: McpConfigsResult = {}
-        for manifest, data in self._plugin_manifests:
+        for manifest, data in self._plugin_manifests():
             inline = data.get("mcpServers")
             if not isinstance(inline, dict) or not inline:
                 continue
@@ -386,7 +410,7 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         parent of the ``.claude-plugin`` dir). Only string entries are honored.
         """
         result: SkillsDirsResult = {}
-        for manifest, data in self._plugin_manifests:
+        for manifest, data in self._plugin_manifests():
             skills = data.get("skills")
             if not isinstance(skills, list):
                 continue
