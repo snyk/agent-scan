@@ -18,7 +18,6 @@ from pathlib import Path
 import pyjson5
 
 from agent_scan.models import (
-    ClaudeConfigFile,
     ClientToInspect,
     CouldNotParseMCPConfig,
     FileNotFoundConfig,
@@ -259,7 +258,7 @@ class AgentDiscoverer(ABC):
         self,
         path: Path,
         *,
-        formats: tuple[type[MCPConfig], ...] = (ClaudeConfigFile,),
+        formats: tuple[type[MCPConfig], ...],
         skip_unrecognized: bool = False,
     ) -> list[tuple[str, StdioServer | RemoteServer]] | CouldNotParseMCPConfig | None:
         """Load ``path``, try each ``MCPConfig`` subclass in order, return the first

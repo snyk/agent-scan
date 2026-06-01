@@ -650,6 +650,19 @@ def _parse_claude_dotmcp(tmp_path, content: str):
     return ClaudeCodeDiscoverer(tmp_path)._parse_mcp_file(mcp_file, formats=_CLAUDE_MCP_FORMATS)
 
 
+def test_parse_mcp_file_requires_explicit_formats(tmp_path):
+    """``formats`` is a required keyword-only argument: the shared base parser must
+    not privilege any single agent's config shape via a default. Each caller
+    declares the format-union it expects (ordering/membership are load-bearing)."""
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    mcp_file = tmp_path / ".mcp.json"
+    mcp_file.write_text('{"mcpServers": {"s": {"command": "echo"}}}')
+
+    with pytest.raises(TypeError):
+        ClaudeCodeDiscoverer(tmp_path)._parse_mcp_file(mcp_file)
+
+
 def test_claude_mcp_formats_flat_remote_server_named_mcpServers(tmp_path):
     """A flat-format payload with a single RemoteServer named "mcpServers" (``url``
     discriminator instead of ``command``) parses as flat — one server named

@@ -332,7 +332,7 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         path = self._managed_mcp_path()
         if path is None:
             return {}
-        parsed = self._parse_mcp_file(path)
+        parsed = self._parse_mcp_file(path, formats=(ClaudeConfigFile,))
         if parsed is None:
             return {}
         return {path.as_posix(): parsed}
