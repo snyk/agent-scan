@@ -124,7 +124,15 @@ class AgentDiscoverer(ABC):
     name: str = ""
 
     def __init__(self, home_directory: Path | None) -> None:
-        self.home_directory = home_directory
+        # ``None`` is the own-home sentinel; normalize it to ``Path.home()`` here so
+        # the stored home is always a concrete path. This keeps ``_scans_own_home``
+        # and every ``expand_path(..., self.home_directory)`` call site in agreement:
+        # ``expand_path`` treats ``None`` as "unknown home — don't expand" and would
+        # otherwise leave a ``~``-prefixed template literal (e.g. ``~/.claude``) on an
+        # own-home scan whose relocating env var is unset. Resolved at construction
+        # time, which is sound because the pipeline builds one discoverer per home
+        # immediately before scanning it.
+        self.home_directory = home_directory if home_directory is not None else Path.home()
         # Lazily-populated cache for _project_paths_with_ancestors. A discoverer
         # is constructed once per home and used for a single scan (see
         # find_discoverers), so the project list is stable for its lifetime and
@@ -137,15 +145,15 @@ class AgentDiscoverer(ABC):
 
         Env-var-relocated config paths (``CLAUDE_CONFIG_DIR``, ``VSCODE_PORTABLE``)
         reflect the *scanning process's* environment, so they may only be honored
-        when the home being scanned is that same user's. ``home_directory is None``
-        is the explicit own-home sentinel, but production never passes it: for the
-        current user ``get_readable_home_directories`` returns ``Path.home()`` (see
-        ``pipelines.discover_clients_to_inspect``), so an equal ``Path.home()`` must
-        also count as own-home — otherwise those env paths never activate in a real
-        scan. Other users' homes under ``--scan-all-users`` compare unequal and are
-        correctly excluded (the scanner can't know their env).
+        when the home being scanned is that same user's. ``__init__`` normalizes the
+        own-home sentinel (``home_directory=None``) to ``Path.home()``, and the
+        pipeline likewise constructs the current-user discoverer with ``Path.home()``
+        (``get_readable_home_directories`` returns it — see
+        ``pipelines.discover_clients_to_inspect``), so own-home reduces to a single
+        equality check. Other users' homes under ``--scan-all-users`` compare unequal
+        and are correctly excluded (the scanner can't know their env).
         """
-        return self.home_directory is None or self.home_directory == Path.home()
+        return self.home_directory == Path.home()
 
     def __init_subclass__(cls, *, abstract: bool = False, **kwargs: object) -> None:
         """Enforce a non-empty ``name`` on concrete subclasses.

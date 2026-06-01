@@ -3844,6 +3844,60 @@ def test_claude_code_honors_claude_config_dir_when_home_equals_real_home(tmp_pat
     assert mcp_configs[keys[0]][0][0] == "relocated"
 
 
+def test_discoverer_normalizes_none_home_to_real_home(tmp_path, monkeypatch):
+    """``home_directory=None`` (the own-home sentinel) is normalized to ``Path.home()``
+    at construction, so the stored home is always a concrete path and no ``~``-prefixed
+    template can leak unexpanded into ``expand_path``."""
+    from pathlib import Path
+
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    assert ClaudeCodeDiscoverer(None).home_directory == tmp_path
+
+
+def test_claude_base_dir_resolves_own_home_when_config_dir_unset(tmp_path, monkeypatch):
+    """Own-home scan (``home_directory=None``) with ``CLAUDE_CONFIG_DIR`` unset must
+    resolve ``~/.claude`` against the real home, not return a literal, unexpanded
+    ``~/.claude``.
+
+    Regression for the None-sentinel mismatch between ``_scans_own_home`` (where
+    ``None`` means own home → ``Path.home()``) and ``expand_path`` (where ``None``
+    means "don't expand" → return the path verbatim, leaving the ``~`` literal).
+    """
+    from pathlib import Path
+
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    base = ClaudeCodeDiscoverer(None)._claude_base_dir()
+
+    assert base == tmp_path / ".claude"
+    assert "~" not in base.as_posix()
+
+
+def test_vscode_user_data_dirs_resolve_own_home_when_not_portable(tmp_path, monkeypatch):
+    """The None-sentinel fix lives in the shared base ``__init__``, so the whole
+    VSCode family inherits it: an own-home scan (``None``) with ``VSCODE_PORTABLE``
+    unset resolves ``~``-prefixed user-data templates against the real home instead
+    of leaving a literal ``~``."""
+    from pathlib import Path
+
+    from agent_scan.agents import VSCodeDiscoverer
+
+    monkeypatch.delenv("VSCODE_PORTABLE", raising=False)
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    dirs = VSCodeDiscoverer(None)._user_data_dirs()
+
+    assert dirs, "expected at least one user-data dir on a supported platform"
+    assert all(str(d).startswith(str(tmp_path)) for d in dirs)
+    assert all("~" not in d.as_posix() for d in dirs)
+
+
 def test_claude_code_discovers_inline_plugin_manifest_mcp_servers(tmp_path):
     """A plugin's ``.claude-plugin/plugin.json`` with an inline ``mcpServers``
     map is surfaced from the plugin walk."""
