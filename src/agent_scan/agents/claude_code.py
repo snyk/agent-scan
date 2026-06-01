@@ -12,16 +12,24 @@ from agent_scan.agents.base import (
     AgentDiscoverer,
     McpConfigsResult,
     SkillsDirsResult,
-    _select_servers_payload,
     _walk_under_depth,
 )
 from agent_scan.models import (
+    ClaudeConfigFile,
     CouldNotParseMCPConfig,
+    MCPConfig,
+    PluginMCPConfigFile,
 )
 from agent_scan.skill_client import inspect_commands_dir, inspect_skills_dir
 from agent_scan.well_known_clients import CLAUDE_CODE_NAME, expand_path
 
 logger = logging.getLogger(__name__)
+
+# Format-union for Claude Code ``.mcp.json`` files (project + plugin scope), tried
+# in order by ``_parse_mcp_file``: the wrapped ``{"mcpServers": {...}}`` shape
+# (``ClaudeConfigFile``) first, then the wrapper-less flat ``{name: serverConfig}``
+# shape (``PluginMCPConfigFile``). Mirrors ``vscode.base._VSCODE_FAMILY_FORMATS``.
+_CLAUDE_MCP_FORMATS: tuple[type[MCPConfig], ...] = (ClaudeConfigFile, PluginMCPConfigFile)
 
 
 class ClaudeCodeDiscoverer(AgentDiscoverer):
@@ -179,20 +187,12 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
                     )
 
             mcp_file = path / ".mcp.json"
-            file_data = self._load_json_file(mcp_file)
-            if file_data is None:
+            parsed = self._parse_mcp_file(mcp_file, formats=_CLAUDE_MCP_FORMATS)
+            # Skip on None (missing/empty file) or an empty server list; a parse
+            # failure is a truthy ``CouldNotParseMCPConfig`` and is still recorded.
+            if not parsed:
                 continue
-            if isinstance(file_data, CouldNotParseMCPConfig):
-                result[mcp_file.as_posix()] = file_data
-                continue
-            if not isinstance(file_data, dict) or not file_data:
-                continue
-            file_mcp = _select_servers_payload(file_data)
-            if not isinstance(file_mcp, dict) or not file_mcp:
-                continue
-            result[mcp_file.as_posix()] = self._validate_servers(
-                file_mcp, source=f"mcpServers in {mcp_file.as_posix()}"
-            )
+            result[mcp_file.as_posix()] = parsed
         return result
 
     # --- private: skills discovery ---
@@ -263,20 +263,12 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
             for mcp_file in _walk_under_depth(base, ".mcp.json", _MAX_PLUGIN_RGLOB_DEPTH, want_file=True):
                 if not mcp_file.is_file():
                     continue
-                file_data = self._load_json_file(mcp_file)
-                if file_data is None:
+                parsed = self._parse_mcp_file(mcp_file, formats=_CLAUDE_MCP_FORMATS)
+                # Skip on None (missing/empty file) or an empty server list; a parse
+                # failure is a truthy ``CouldNotParseMCPConfig`` and is still recorded.
+                if not parsed:
                     continue
-                if isinstance(file_data, CouldNotParseMCPConfig):
-                    result[mcp_file.as_posix()] = file_data
-                    continue
-                if not isinstance(file_data, dict) or not file_data:
-                    continue
-                raw_servers = _select_servers_payload(file_data)
-                if not isinstance(raw_servers, dict) or not raw_servers:
-                    continue
-                result[mcp_file.as_posix()] = self._validate_servers(
-                    raw_servers, source=f"plugin {mcp_file.as_posix()}"
-                )
+                result[mcp_file.as_posix()] = parsed
         return result
 
     def _discover_plugin_skills(self) -> SkillsDirsResult:

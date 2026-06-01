@@ -4,8 +4,7 @@ This package sits alongside the data-driven discovery pipeline
 (`well_known_clients.py` + `inspect.py`). ``AgentDiscoverer`` is the abstract
 base every concrete discoverer extends; each subclass owns the agent-specific
 knowledge of where to look for config files and skills directories. The
-module-level helpers here (type aliases, the depth-bounded ``_walk_under_depth``
-walk, and the ``.mcp.json`` payload picker) are shared infrastructure consumed
+module-level helpers here are shared infrastructure consumed
 by the concrete discoverers in sibling modules.
 """
 
@@ -43,15 +42,13 @@ SkillsDirsResult = dict[str, list[tuple[str, SkillServer]] | FileNotFoundConfig]
 # when the file is absent/empty/not-MCP.
 McpScanResult = list[tuple[str, StdioServer | RemoteServer]] | CouldNotParseMCPConfig | None
 
-# Cap traversal into ``~/.claude/plugins/{cache,repos}`` to mirror the legacy
-# glob-based discovery, which uses ``CandidateClient.max_glob_depth=6``. We pick
-# a slightly larger budget here because plugin install layouts vary.
+# Cap traversal into ``~/.claude/plugins/{cache,repos}``
 _MAX_PLUGIN_RGLOB_DEPTH = 10
 
 # Top-level keys that only ever appear on a single server config (StdioServer.command,
-# RemoteServer.url/serverUrl/httpUrl). Used to disambiguate wrapped vs flat .mcp.json
-# payloads. Must stay in sync with RemoteServer's URL AliasChoices and the
-# PluginMCPConfigFile flat-format gate in models.py.
+# RemoteServer.url/serverUrl/httpUrl). Used by ``_looks_like_mcp_payload`` to recognize a
+# wrapper-less flat ``{name: serverConfig}`` MCP payload. Must stay in sync with
+# RemoteServer's URL AliasChoices and the PluginMCPConfigFile flat-format gate in models.py.
 _SERVER_CONFIG_DISCRIMINATOR_KEYS = frozenset({"command", "url", "serverUrl", "httpUrl"})
 
 
@@ -74,32 +71,6 @@ def _walk_under_depth(base: Path, name: str, max_path_depth: int, *, want_file: 
         # depth+1. Prune once depth+1 reaches the cap so we don't descend further.
         if dir_depth + 1 >= max_path_depth:
             dirs.clear()
-
-
-def _select_servers_payload(file_data: dict) -> dict:
-    """Pick the server-map payload from a ``.mcp.json`` file (plugin or project scope).
-
-    Files come in two shapes:
-
-    * Wrapped: ``{"mcpServers": {<name>: <server-config>, ...}}``
-    * Flat:    ``{<name>: <server-config>, ...}``
-
-    Disambiguation by *value type*, not just key presence: ``file_data["mcpServers"]``
-    is treated as a flat-format server config only if one of the discriminator keys
-    (``command``/``url``/``serverUrl``/``httpUrl``) is present with a string value —
-    those are always strings on a real server config. A wrapped server *named* "command" maps
-    to a dict (the server's own config), so it correctly stays wrapped.
-
-    Note: only applied to plugin and per-project ``.mcp.json`` files. The global
-    ``~/.claude.json`` is machine-managed by Claude Code and never flat; its
-    parser short-circuits on a missing top-level ``mcpServers`` key.
-    """
-    candidate = file_data.get("mcpServers")
-    if isinstance(candidate, dict) and not any(
-        isinstance(candidate.get(key), str) for key in _SERVER_CONFIG_DISCRIMINATOR_KEYS
-    ):
-        return candidate
-    return file_data
 
 
 def _looks_like_mcp_payload(data: dict) -> bool:
@@ -396,10 +367,7 @@ class AgentDiscoverer(ABC):
         living in any parent folder of an opened project (e.g. a monorepo root
         that contains many project subdirectories).
 
-        The result is cached for the discoverer's lifetime — every project-scope
-        discovery method calls this, and recomputing would re-walk
-        workspaceStorage (VSCode family) or re-read ``~/.claude.json`` (Claude
-        Code) on each call.
+        The result is cached for the discoverer's lifetime
         """
         if self._project_paths_cache is not None:
             return self._project_paths_cache

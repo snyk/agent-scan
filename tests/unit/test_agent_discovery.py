@@ -437,10 +437,11 @@ def test_claude_code_discoverer_project_mcp_servers_records_could_not_parse_for_
 
 
 def test_claude_code_discoverer_project_mcp_servers_reads_flat_format_dotmcp(tmp_path):
-    """A flat-format ``<project>/.mcp.json`` is also parsed via _select_servers_payload.
+    """A flat-format ``<project>/.mcp.json`` is also parsed via the format-union
+    (``ClaudeConfigFile``/``PluginMCPConfigFile``).
 
     Previously a flat-format project file was silently dropped (no top-level
-    "mcpServers" key). The shared payload selector now recognises it.
+    "mcpServers" key). The ``PluginMCPConfigFile`` fallback now recognises it.
     """
     from agent_scan.agents import ClaudeCodeDiscoverer
 
@@ -638,64 +639,83 @@ def test_claude_code_discoverer_plugin_mcp_wrapped_format_still_works(tmp_path):
     assert server.command == "echo"
 
 
-def test_select_servers_payload_flat_remote_server_named_mcpServers():
-    """A flat-format payload with a single RemoteServer named "mcpServers"
-    (``url`` discriminator instead of ``command``) is also detected as flat."""
-    from agent_scan.agents.base import _select_servers_payload
+def _parse_claude_dotmcp(tmp_path, content: str):
+    """Parse a ``.mcp.json`` body the way discovery does: through Claude Code's
+    format-union (``_parse_mcp_file`` with ``_CLAUDE_MCP_FORMATS``)."""
+    from agent_scan.agents import ClaudeCodeDiscoverer
+    from agent_scan.agents.claude_code import _CLAUDE_MCP_FORMATS
 
-    file_data = {"mcpServers": {"url": "https://example.com/mcp", "type": "http"}}
-
-    payload = _select_servers_payload(file_data)
-
-    # Whole file returned (flat); the inner dict is the RemoteServer config.
-    assert payload is file_data
+    mcp_file = tmp_path / ".mcp.json"
+    mcp_file.write_text(content)
+    return ClaudeCodeDiscoverer(tmp_path)._parse_mcp_file(mcp_file, formats=_CLAUDE_MCP_FORMATS)
 
 
-def test_select_servers_payload_wrapped_when_inner_has_no_discriminators():
-    """When file_data["mcpServers"] has no server-config discriminator keys at its
-    top level, it's a server map → wrapped."""
-    from agent_scan.agents.base import _select_servers_payload
+def test_claude_mcp_formats_flat_remote_server_named_mcpServers(tmp_path):
+    """A flat-format payload with a single RemoteServer named "mcpServers" (``url``
+    discriminator instead of ``command``) parses as flat — one server named
+    "mcpServers" — not as a wrapped map."""
+    entries = _parse_claude_dotmcp(tmp_path, '{"mcpServers": {"url": "https://example.com/mcp", "type": "http"}}')
 
-    file_data = {"mcpServers": {"srv-a": {"command": "a"}, "srv-b": {"url": "https://b"}}}
+    assert isinstance(entries, list) and len(entries) == 1
+    name, server = entries[0]
+    assert name == "mcpServers"
+    assert isinstance(server, RemoteServer)
+    assert server.url == "https://example.com/mcp"
 
-    payload = _select_servers_payload(file_data)
 
-    assert payload is file_data["mcpServers"]
+def test_claude_mcp_formats_wrapped_when_inner_has_no_discriminators(tmp_path):
+    """When the ``mcpServers`` value has no server-config discriminator keys at its
+    top level, it is a server map → wrapped (both servers surface)."""
+    entries = _parse_claude_dotmcp(
+        tmp_path, '{"mcpServers": {"srv-a": {"command": "a"}, "srv-b": {"url": "https://b"}}}'
+    )
+
+    assert isinstance(entries, list)
+    assert {name for name, _ in entries} == {"srv-a", "srv-b"}
 
 
-def test_select_servers_payload_wrapped_when_server_is_named_after_discriminator():
+def test_claude_mcp_formats_wrapped_when_server_is_named_after_discriminator(tmp_path):
     """A wrapped-format payload whose server is *named* "command" / "url" / "serverUrl"
     must NOT be misread as flat. The inner discriminator key maps to a dict (the server
     config), never a string (which only a real top-level server config would have).
     """
-    from agent_scan.agents.base import _select_servers_payload
-
     for discriminator in ("command", "url", "serverUrl"):
-        file_data = {"mcpServers": {discriminator: {"command": "/bin/echo"}}}
+        entries = _parse_claude_dotmcp(tmp_path, f'{{"mcpServers": {{"{discriminator}": {{"command": "/bin/echo"}}}}}}')
 
-        payload = _select_servers_payload(file_data)
+        assert isinstance(entries, list) and len(entries) == 1, discriminator
+        name, server = entries[0]
+        assert name == discriminator
+        assert isinstance(server, StdioServer)
+        assert server.command == "/bin/echo"
 
-        assert payload is file_data["mcpServers"], (
-            f"Wrapped server named {discriminator!r} was misread as flat — "
-            f"detector must inspect value types, not just key presence"
-        )
 
-
-def test_select_servers_payload_wrapped_multiple_servers_one_named_after_discriminator():
+def test_claude_mcp_formats_wrapped_multiple_servers_one_named_after_discriminator(tmp_path):
     """A wrapped-format payload with multiple servers, one of which happens to be
     named "command", still parses as wrapped (the inner "command" value is a dict)."""
-    from agent_scan.agents.base import _select_servers_payload
+    entries = _parse_claude_dotmcp(
+        tmp_path,
+        '{"mcpServers": {"command": {"command": "/bin/cmd"}, "other": {"command": "/bin/other"}}}',
+    )
 
-    file_data = {
-        "mcpServers": {
-            "command": {"command": "/bin/cmd"},
-            "other": {"command": "/bin/other"},
-        }
-    }
+    assert isinstance(entries, list)
+    assert {name for name, _ in entries} == {"command", "other"}
 
-    payload = _select_servers_payload(file_data)
 
-    assert payload is file_data["mcpServers"]
+def test_claude_mcp_formats_empty_mcpservers_map_skipped(tmp_path):
+    """A ``.mcp.json`` with an empty ``mcpServers`` map yields no servers and is
+    omitted from results rather than recorded as an empty entry. Guards the
+    ``if not parsed`` skip that replaces the old empty-payload check."""
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    (tmp_path / ".claude").mkdir()
+    project_root = tmp_path / "work" / "repo"
+    project_root.mkdir(parents=True)
+    (project_root / ".mcp.json").write_text('{"mcpServers": {}}')
+    (tmp_path / ".claude.json").write_text(f'{{"projects": {{"{project_root.as_posix()}": {{"mcpServers": {{}}}}}}}}')
+
+    mcp_configs = ClaudeCodeDiscoverer(tmp_path)._discover_project_mcp_servers()
+
+    assert [k for k in mcp_configs if k.endswith("/.mcp.json")] == []
 
 
 def test_claude_code_discoverer_plugin_mcp_wrapped_server_named_command(tmp_path):
@@ -1345,11 +1365,11 @@ def test_server_config_discriminator_keys_match_model_required_fields():
     """_SERVER_CONFIG_DISCRIMINATOR_KEYS must stay in sync with the required
     top-level fields of StdioServer + RemoteServer (including validation aliases).
 
-    The flat-vs-wrapped detector in ``_select_servers_payload`` relies on these
-    keys to tell a single server config apart from a server-name map. If a new
-    required field lands on either model (e.g. a new ``protocol`` discriminator)
-    and isn't added to the constant, the detector goes blind to that shape and
-    silently misreads adversarial inputs as wrapped maps.
+    The flat-payload gate in ``_looks_like_mcp_payload`` (and ``PluginMCPConfigFile``)
+    relies on these keys to tell a single server config apart from a server-name map.
+    If a new required field lands on either model (e.g. a new ``protocol`` discriminator)
+    and isn't added to the constant, the gate goes blind to that shape and silently
+    misreads adversarial inputs.
     """
     from pydantic import AliasChoices
 
