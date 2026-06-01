@@ -227,8 +227,12 @@ class AgentDiscoverer(ABC):
 
         Shared by :meth:`_validate_servers` and :meth:`_parse_mcp_file` so the
         signature-check step stays in one place.
+
+        Operates on a shallow copy: ``get_servers()`` may return the validated
+        model's live dict (e.g. ``MCPServerMap.servers``), and this helper must not
+        mutate the model the caller passed in.
         """
-        servers = validated.get_servers()
+        servers = dict(validated.get_servers())
         for name, server_config in servers.items():
             if isinstance(server_config, StdioServer):
                 servers[name] = check_server_signature(server_config)
@@ -304,8 +308,12 @@ class AgentDiscoverer(ABC):
                 continue
             return self._servers_to_signed_list(validated)
 
-        # None of the formats validated — record as parse failure.
-        logger.exception("No MCP format matched %s; last error: %s", path.as_posix(), last_error)
+        # None of the formats validated — record as parse failure. Use logger.error
+        # (not logger.exception): this runs outside any active except handler, so
+        # exc_info would resolve to an empty (None, None, None) and tack a bogus
+        # "NoneType: None" traceback onto the line. The real traceback is captured
+        # from last_error into the returned object's ``traceback`` field below.
+        logger.error("No MCP format matched %s; last error: %s", path.as_posix(), last_error)
         return CouldNotParseMCPConfig(
             message=f"could not parse {path.as_posix()} as any of {[m.__name__ for m in formats]}",
             traceback="".join(traceback.format_exception(type(last_error), last_error, last_error.__traceback__))
@@ -325,7 +333,7 @@ class AgentDiscoverer(ABC):
             return None
         return inspect_skills_dir(str(path))
 
-    def _discover_dirs_under(
+    def _discover_skill_and_command_dirs(
         self,
         bases: list[Path],
         subdir_name: str,

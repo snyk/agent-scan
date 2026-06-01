@@ -273,7 +273,7 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
 
     def _discover_plugin_skills(self) -> SkillsDirsResult:
         """Scan ``skills/`` subdirs under every plugin base dir."""
-        return self._discover_dirs_under(self._plugin_base_dirs(), "skills", inspect_skills_dir)
+        return self._discover_skill_and_command_dirs(self._plugin_base_dirs(), "skills", inspect_skills_dir)
 
     # --- private: commands discovery (commands are skills per current docs) ---
 
@@ -297,7 +297,7 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
 
     def _discover_plugin_commands(self) -> SkillsDirsResult:
         """Scan ``commands/`` subdirs under every plugin base dir."""
-        return self._discover_dirs_under(self._plugin_base_dirs(), "commands", inspect_commands_dir)
+        return self._discover_skill_and_command_dirs(self._plugin_base_dirs(), "commands", inspect_commands_dir)
 
     # --- private: enterprise/managed MCP discovery ---
 

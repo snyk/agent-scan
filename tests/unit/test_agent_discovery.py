@@ -663,6 +663,28 @@ def test_parse_mcp_file_requires_explicit_formats(tmp_path):
         ClaudeCodeDiscoverer(tmp_path)._parse_mcp_file(mcp_file)
 
 
+def test_parse_mcp_file_no_matching_format_records_parse_failure(tmp_path, caplog):
+    """Valid JSON that matches none of the supplied ``formats`` surfaces as a
+    ``CouldNotParseMCPConfig`` (not silently dropped). The accompanying log must be
+    a plain error: ``logger.exception`` here runs *outside* any active handler, so it
+    would tack a bogus ``NoneType: None`` traceback onto the line."""
+    import logging
+
+    with caplog.at_level(logging.ERROR, logger="agent_scan.agents.base"):
+        # The ``mcpServers`` wrapper is present (so the file is recognized), but the
+        # inner server has neither a ``command`` nor a URL — it validates as no format.
+        entry = _parse_claude_dotmcp(tmp_path, '{"mcpServers": {"srv": {"not": "a server"}}}')
+
+    assert isinstance(entry, CouldNotParseMCPConfig)
+    assert entry.is_failure
+
+    no_match = [r for r in caplog.records if "No MCP format matched" in r.getMessage()]
+    assert len(no_match) == 1
+    # The branch is not inside an ``except``; exc_info must be unset rather than the
+    # empty ``(None, None, None)`` tuple that ``logger.exception`` would attach.
+    assert no_match[0].exc_info is None
+
+
 def test_claude_mcp_formats_flat_remote_server_named_mcpServers(tmp_path):
     """A flat-format payload with a single RemoteServer named "mcpServers" (``url``
     discriminator instead of ``command``) parses as flat — one server named

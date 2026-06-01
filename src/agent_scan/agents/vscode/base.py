@@ -652,7 +652,7 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
 
     def _discover_extension_skills(self) -> SkillsDirsResult:
         """Walk each extension root for ``skills/`` subdirectories."""
-        return self._discover_dirs_under(self._extension_base_dirs(), "skills", inspect_skills_dir)
+        return self._discover_skill_and_command_dirs(self._extension_base_dirs(), "skills", inspect_skills_dir)
 
     # --- private: chat.agentSkillsLocations ---
 
