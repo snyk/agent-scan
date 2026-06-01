@@ -116,8 +116,31 @@ class RemoteServer(BaseModel):
     # ``serverUrl`` (Figma/Antigravity) and ``httpUrl`` (Gemini CLI Streamable HTTP)
     # are vendor aliases for the same remote-server URL. First present wins.
     url: str = Field(validation_alias=AliasChoices("url", "serverUrl", "httpUrl"))
-    type: Literal["sse", "http"] | None = None
+    # ``sse``/``http`` are the transports the client implements. ``ws`` is
+    # accepted so a documented WebSocket server is still *discovered* (the connect
+    # path can't speak it, but the file must not be lost on its account).
+    type: Literal["sse", "http", "ws"] | None = None
     headers: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("type", mode="before")
+    @classmethod
+    def _normalize_transport(cls, v: Any) -> Any:
+        """Fold documented transport spellings onto the values the client speaks.
+
+        Claude Code documents ``type: "streamable-http"`` (and the ``-https``
+        spelling) and ``type: "ws"``. ``streamable-http`` is the same HTTP
+        Streamable transport already implemented under ``http``, so it is folded
+        on; matching is case-insensitive. Without this, a single such server
+        raised a ``ValidationError`` that sank the whole ``mcpServers`` map into
+        ``CouldNotParseMCPConfig`` -- losing every valid sibling (coverage
+        analysis §7.1).
+        """
+        if not isinstance(v, str):
+            return v
+        normalized = v.strip().lower()
+        if normalized in ("streamable-http", "streamable-https"):
+            return "http"
+        return normalized
 
 
 def _coerce_none_to_empty_list(v: Any) -> Any:

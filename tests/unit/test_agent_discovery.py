@@ -8,6 +8,7 @@ import pytest
 from agent_scan.models import (
     ClientToInspect,
     CouldNotParseMCPConfig,
+    RemoteServer,
     SkillServer,
     StdioServer,
 )
@@ -55,6 +56,40 @@ def test_claude_code_discoverer_parses_mcp_servers(tmp_path):
     assert name == "my-server"
     assert isinstance(server, StdioServer)
     assert server.command == "echo"
+
+
+def test_claude_code_discoverer_streamable_and_ws_servers_do_not_sink_file(tmp_path):
+    """A documented ``streamable-http``/``ws`` remote must not sink its whole file.
+
+    Coverage analysis §7.1: previously one server whose ``type`` wasn't
+    ``sse``/``http`` raised a ValidationError that turned the entire
+    ``mcpServers`` map into ``CouldNotParseMCPConfig`` -- losing every valid
+    sibling server. All three servers below must survive, with
+    ``streamable-http`` normalized onto ``http``.
+    """
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude.json").write_text(
+        '{"mcpServers": {'
+        '"good-stdio": {"command": "echo", "args": ["hi"]}, '
+        '"streamable": {"url": "https://mcp.example.com/mcp", "type": "streamable-http"}, '
+        '"socket": {"url": "wss://mcp.example.com/ws", "type": "ws"}'
+        "}}"
+    )
+
+    mcp_configs = ClaudeCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    config_path = next(iter(mcp_configs))
+    entries = mcp_configs[config_path]
+    assert isinstance(entries, list), f"file was sunk: {entries!r}"
+    by_name = dict(entries)
+    assert set(by_name) == {"good-stdio", "streamable", "socket"}
+    assert isinstance(by_name["good-stdio"], StdioServer)
+    assert isinstance(by_name["streamable"], RemoteServer)
+    assert by_name["streamable"].type == "http"
+    assert isinstance(by_name["socket"], RemoteServer)
+    assert by_name["socket"].type == "ws"
 
 
 def test_claude_code_discoverer_returns_empty_when_json_has_no_mcp_fields(tmp_path):
