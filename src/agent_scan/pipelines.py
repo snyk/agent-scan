@@ -5,7 +5,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from agent_scan.agent_discovery import find_discoverers
+from agent_scan.agents import find_discoverers
 from agent_scan.direct_scanner import direct_scan_to_server_config, is_direct_scan
 from agent_scan.inspect import (
     get_mcp_config_per_client,

@@ -113,9 +113,34 @@ class ScalarToolLabels(BaseModel):
 
 class RemoteServer(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
-    url: str = Field(validation_alias=AliasChoices("url", "serverUrl"))
-    type: Literal["sse", "http"] | None = None
+    # ``serverUrl`` (Figma/Antigravity) and ``httpUrl`` (Gemini CLI Streamable HTTP)
+    # are vendor aliases for the same remote-server URL. First present wins.
+    url: str = Field(validation_alias=AliasChoices("url", "serverUrl", "httpUrl"))
+    # ``sse``/``http`` are the transports the client implements. ``ws`` is
+    # accepted so a documented WebSocket server is still *discovered* (the connect
+    # path can't speak it, but the file must not be lost on its account).
+    type: Literal["sse", "http", "ws"] | None = None
     headers: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("type", mode="before")
+    @classmethod
+    def _normalize_transport(cls, v: Any) -> Any:
+        """Fold documented transport spellings onto the values the client speaks.
+
+        Claude Code documents ``type: "streamable-http"`` (and the ``-https``
+        spelling) and ``type: "ws"``. ``streamable-http`` is the same HTTP
+        Streamable transport already implemented under ``http``, so it is folded
+        on; matching is case-insensitive. Without this, a single such server
+        raised a ``ValidationError`` that sank the whole ``mcpServers`` map into
+        ``CouldNotParseMCPConfig`` -- losing every valid sibling (coverage
+        analysis §7.1).
+        """
+        if not isinstance(v, str):
+            return v
+        normalized = v.strip().lower()
+        if normalized in ("streamable-http", "streamable-https"):
+            return "http"
+        return normalized
 
 
 def _coerce_none_to_empty_list(v: Any) -> Any:
@@ -155,6 +180,26 @@ class MCPConfig(BaseModel):
 
     def set_servers(self, servers: dict[str, StdioServer | RemoteServer]) -> None:
         raise NotImplementedError("Subclasses must implement this method")
+
+
+class MCPServerMap(MCPConfig):
+    """Agent-neutral model for an *already-extracted* ``{name: serverConfig}`` map.
+
+    Unlike the file-format models (``ClaudeConfigFile``/``VSCodeMCPConfig``/…) whose
+    field names match a literal top-level wrapper key in the on-disk file, this model
+    is built directly from a server map the caller has already pulled out of whatever
+    wrapper it lived under. It is therefore never placed in a ``_parse_mcp_file``
+    format-union — only constructed directly (see ``AgentDiscoverer._validate_servers``).
+    """
+
+    model_config = ConfigDict()
+    servers: dict[str, StdioServer | RemoteServer]
+
+    def get_servers(self) -> dict[str, StdioServer | RemoteServer]:
+        return self.servers
+
+    def set_servers(self, servers: dict[str, StdioServer | RemoteServer]) -> None:
+        self.servers = servers
 
 
 class ClaudeConfigFile(MCPConfig):
@@ -220,7 +265,7 @@ class PluginMCPConfigFile(MCPConfig):
         for v in data.values():
             if not isinstance(v, dict):
                 raise ValueError("values must be dicts")
-            if not ("command" in v or "url" in v or "serverUrl" in v):
+            if not ("command" in v or "url" in v or "serverUrl" in v or "httpUrl" in v):
                 raise ValueError("values must look like server configs")
         return {"servers": data}
 
