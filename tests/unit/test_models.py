@@ -273,3 +273,26 @@ class TestStdioServerArgsCoercion:
         s = StdioServer.model_validate({"command": str(script), "args": ["--foo", "bar"]})
         assert s.command == str(script)
         assert s.args == ["--foo", "bar"]
+
+
+class TestMCPServerMap:
+    """MCPServerMap is the agent-neutral model for an already-extracted
+    ``{name: serverConfig}`` map (no wrapper key), used by ``_validate_servers``."""
+
+    def test_validates_mixed_stdio_and_remote(self):
+        from agent_scan.models import MCPServerMap
+
+        m = MCPServerMap(servers={"a": {"command": "x"}, "b": {"url": "https://y"}})
+        servers = m.get_servers()
+        assert isinstance(servers["a"], StdioServer)
+        assert isinstance(servers["b"], RemoteServer)
+        assert servers["a"].command == "x"
+        assert servers["b"].url == "https://y"
+
+    def test_rejects_value_that_is_not_a_server_config(self):
+        from pydantic import ValidationError
+
+        from agent_scan.models import MCPServerMap
+
+        with pytest.raises(ValidationError):
+            MCPServerMap(servers={"bad": {"not_a": "server"}})

@@ -182,6 +182,26 @@ class MCPConfig(BaseModel):
         raise NotImplementedError("Subclasses must implement this method")
 
 
+class MCPServerMap(MCPConfig):
+    """Agent-neutral model for an *already-extracted* ``{name: serverConfig}`` map.
+
+    Unlike the file-format models (``ClaudeConfigFile``/``VSCodeMCPConfig``/…) whose
+    field names match a literal top-level wrapper key in the on-disk file, this model
+    is built directly from a server map the caller has already pulled out of whatever
+    wrapper it lived under. It is therefore never placed in a ``_parse_mcp_file``
+    format-union — only constructed directly (see ``AgentDiscoverer._validate_servers``).
+    """
+
+    model_config = ConfigDict()
+    servers: dict[str, StdioServer | RemoteServer]
+
+    def get_servers(self) -> dict[str, StdioServer | RemoteServer]:
+        return self.servers
+
+    def set_servers(self, servers: dict[str, StdioServer | RemoteServer]) -> None:
+        self.servers = servers
+
+
 class ClaudeConfigFile(MCPConfig):
     model_config = ConfigDict()
     mcpServers: dict[str, StdioServer | RemoteServer]

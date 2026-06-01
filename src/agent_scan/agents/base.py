@@ -23,6 +23,7 @@ from agent_scan.models import (
     CouldNotParseMCPConfig,
     FileNotFoundConfig,
     MCPConfig,
+    MCPServerMap,
     RemoteServer,
     SkillServer,
     StdioServer,
@@ -244,7 +245,7 @@ class AgentDiscoverer(ABC):
         layout differs across agents), use :meth:`_parse_mcp_file` instead.
         """
         try:
-            validated = ClaudeConfigFile(mcpServers=raw)
+            validated = MCPServerMap(servers=raw)
         except Exception as e:
             logger.exception("Invalid %s: %s", source, e)
             return CouldNotParseMCPConfig(
