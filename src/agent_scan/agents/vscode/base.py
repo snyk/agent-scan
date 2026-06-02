@@ -12,7 +12,7 @@ import os
 import sys
 from functools import cached_property
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
@@ -242,6 +242,16 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
     _workspace_skills_relative: tuple[str, ...] = ()
     _skills_dir_paths: tuple[str, ...] = ()
     _extension_paths: tuple[str, ...] = ()
+    # Per-OS templates for the editor's *built-in* (bundled) extensions dir — the
+    # ``extensions`` folder shipped inside the application install, NOT the
+    # user-installed ``_extension_paths`` tree. Keyed by the normalized platform
+    # ("darwin"/"win32"/"linux"); ``~``-prefixed entries expand against the
+    # scanned user's home, absolute entries are used as-is. Empty by default so
+    # each fork opts in; a platform absent from a fork's map is a documented
+    # coverage gap. Only macOS ``/Applications/<app>.app`` paths for VS Code,
+    # Cursor and Windsurf are verified on disk — every other entry is INFERRED
+    # and tagged ``inferred — verify`` at its definition. See ADS-367.
+    _builtin_extension_dir_templates: ClassVar[dict[str, tuple[str, ...]]] = {}
     # Home-relative ``settings.json`` files that may carry MCP under a top-level
     # ``mcpServers``/``mcp`` key (e.g. Antigravity's ``~/.gemini/settings.json``).
     # Parsed with the same presence-gate as ``_discover_user_settings_mcp``.
@@ -619,7 +629,28 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         if portable is not None:
             # Portable layout: ``<portable>/extensions`` is a sibling of ``user-data``.
             dirs.append(portable.parent / "extensions")
+        # Built-in (bundled) extensions shipped inside the application install.
+        # Appended here so both the extension-MCP and extension-skills walks
+        # cover them with no further wiring.
+        dirs.extend(self._builtin_extension_dirs())
         return dirs
+
+    def _builtin_extension_dirs(self) -> list[Path]:
+        """Absolute paths to the editor's *built-in* (bundled) extensions dir(s).
+
+        These live inside the application install (macOS
+        ``…/Contents/Resources/app/extensions``; ``…/resources/app/extensions``
+        elsewhere), so they are machine-global rather than home-relative — though
+        the per-user install variants (e.g. macOS ``~/Applications``, Windows
+        ``%LOCALAPPDATA%``) are expressed ``~``-relative and expand against the
+        scanned user's home. Resolved from :attr:`_builtin_extension_dir_templates`
+        for the current platform; empty when the fork declares nothing for it
+        (a documented coverage gap, e.g. Linux tarball/AppImage installs).
+        """
+        key = "linux" if sys.platform in ("linux", "linux2") else sys.platform
+        return [
+            expand_path(Path(raw), self.home_directory) for raw in self._builtin_extension_dir_templates.get(key, ())
+        ]
 
     def _discover_extension_mcp_servers(self) -> McpConfigsResult:
         """Walk each extension root for ``mcp.json`` (no leading dot — matches the

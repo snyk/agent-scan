@@ -1,5 +1,7 @@
 """Cursor discoverer."""
 
+from typing import ClassVar
+
 from agent_scan.agents.vscode.base import VSCodeFamilyDiscoverer
 
 
@@ -33,3 +35,16 @@ class CursorDiscoverer(VSCodeFamilyDiscoverer):
         "~/.codex/skills",
     )
     _extension_paths = ("~/.cursor/extensions",)
+    # Built-in (bundled) extensions shipped inside the Cursor application.
+    _builtin_extension_dir_templates: ClassVar[dict[str, tuple[str, ...]]] = {
+        "darwin": (
+            "/Applications/Cursor.app/Contents/Resources/app/extensions",  # VERIFIED on disk
+            "~/Applications/Cursor.app/Contents/Resources/app/extensions",  # inferred — verify (user-local install)
+        ),
+        # inferred — verify: per-user NSIS install; Cursor docs give no path.
+        "win32": ("~/AppData/Local/Programs/Cursor/resources/app/extensions",),
+        # inferred — verify: deb install root. The Linux AppImage build has no
+        # stable filesystem path (extensions live inside the mounted image) and
+        # is omitted.
+        "linux": ("/usr/share/cursor/resources/app/extensions",),
+    }

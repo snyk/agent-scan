@@ -2,6 +2,7 @@
 
 import sys
 from pathlib import Path
+from typing import ClassVar
 
 from agent_scan.agents.vscode.base import VSCodeFamilyDiscoverer
 
@@ -38,6 +39,18 @@ class WindsurfDiscoverer(VSCodeFamilyDiscoverer):
         "~/.claude/skills",
     )
     _extension_paths = ("~/.codeium/windsurf/extensions",)
+    # Built-in (bundled) extensions shipped inside the Windsurf application.
+    _builtin_extension_dir_templates: ClassVar[dict[str, tuple[str, ...]]] = {
+        "darwin": (
+            "/Applications/Windsurf.app/Contents/Resources/app/extensions",  # VERIFIED on disk
+            "~/Applications/Windsurf.app/Contents/Resources/app/extensions",  # inferred — verify (user-local install)
+        ),
+        # inferred — verify: per-user install; Windsurf docs give no path.
+        "win32": ("~/AppData/Local/Programs/Windsurf/resources/app/extensions",),
+        # linux: NO STABLE PATH — Windsurf ships a .tar.gz the user extracts to
+        # an arbitrary location (no deb/rpm), so there is no fixed install root
+        # to scan. Intentionally omitted; revisit if a packaged build ships.
+    }
 
     def _platform_system_skills_dirs(self) -> list[Path]:
         """Machine-wide skills dirs documented at

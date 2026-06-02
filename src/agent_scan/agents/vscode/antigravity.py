@@ -1,5 +1,7 @@
 """Antigravity discoverer."""
 
+from typing import ClassVar
+
 from agent_scan.agents.vscode.base import VSCodeFamilyDiscoverer
 
 
@@ -68,3 +70,24 @@ class AntigravityDiscoverer(VSCodeFamilyDiscoverer):
     # Installed extensions live under ``~/.gemini/extensions/`` (shared with
     # the Gemini CLI; not under the ``antigravity/`` subdir).
     _extension_paths = ("~/.gemini/extensions",)
+    # Built-in (bundled) extensions shipped inside the Antigravity application.
+    # ENTIRELY INFERRED — verify: Antigravity was not available to verify on
+    # disk, and Google has not published install paths. The macOS bundle name is
+    # assumed to follow the product name; Google states the Windows installer is
+    # user-level (%LOCALAPPDATA%) but not the exact folder; the Linux installer
+    # currently extracts to /opt/antigravity (community-reported, version-
+    # dependent) and may pack extensions inside app.asar, in which case the dir
+    # below is absent. Re-check each entry against a real install.
+    _builtin_extension_dir_templates: ClassVar[dict[str, tuple[str, ...]]] = {
+        "darwin": (
+            "/Applications/Antigravity.app/Contents/Resources/app/extensions",  # inferred — verify
+            "~/Applications/Antigravity.app/Contents/Resources/app/extensions",  # inferred — verify
+        ),
+        "win32": (
+            # inferred — verify: user-level install confirmed by Google, exact folder name NOT.
+            "~/AppData/Local/Programs/Antigravity/resources/app/extensions",
+        ),
+        "linux": (
+            "/opt/antigravity/resources/app/extensions",  # inferred — verify (may be packed in app.asar)
+        ),
+    }

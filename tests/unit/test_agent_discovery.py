@@ -2872,10 +2872,15 @@ def test_vscode_extension_mcp_discovers_vscode_flat_servers_shape(tmp_path):
     assert name == "flat-srv"
 
 
-def test_vscode_extension_mcp_empty_when_extensions_dir_missing(tmp_path):
-    """No ``extensions/`` tree means no extension-scope keys in the result."""
+def test_vscode_extension_mcp_empty_when_extensions_dir_missing(tmp_path, monkeypatch):
+    """No *user* ``extensions/`` tree means no extension-scope keys in the result.
+
+    Built-in (bundled) extension dirs are neutralized so the assertion stays
+    hermetic on machines where VS Code is actually installed.
+    """
     from agent_scan.agents import VSCodeDiscoverer
 
+    monkeypatch.setattr(VSCodeDiscoverer, "_builtin_extension_dirs", lambda self: [])
     (tmp_path / ".vscode").mkdir()
 
     mcp_configs = VSCodeDiscoverer(tmp_path).discover_mcp_servers()
@@ -2967,10 +2972,16 @@ def test_vscode_extension_skills_discovers_skills_dir(tmp_path):
     assert isinstance(skill, SkillServer)
 
 
-def test_vscode_extension_skills_empty_when_extensions_dir_missing(tmp_path):
-    """No ``extensions/`` tree means no extension-scope skill keys."""
+def test_vscode_extension_skills_empty_when_extensions_dir_missing(tmp_path, monkeypatch):
+    """No *user* ``extensions/`` tree means no extension-scope skill keys.
+
+    Built-in (bundled) extension dirs are neutralized so the assertion stays
+    hermetic on machines where VS Code is actually installed (it bundles Copilot
+    Chat, whose skills would otherwise surface here).
+    """
     from agent_scan.agents import VSCodeDiscoverer
 
+    monkeypatch.setattr(VSCodeDiscoverer, "_builtin_extension_dirs", lambda self: [])
     (tmp_path / ".vscode").mkdir()
 
     skills_dirs = VSCodeDiscoverer(tmp_path).discover_skills()
@@ -4397,3 +4408,133 @@ def test_vscode_devcontainer_non_dict_intermediate_does_not_crash(tmp_path):
     mcp_configs = discoverer.discover_mcp_servers()  # must not raise
 
     assert not any("devcontainer.json" in k for k in mcp_configs)
+
+
+# ---------------------------------------------------------------------------
+# Built-in (bundled) extension discovery
+#
+# VS Code-family editors ship "built-in" extensions INSIDE the application
+# install (``<app>/…/resources/app/extensions``), not under the user
+# ``~/.../extensions`` tree. These can contribute ``skills/`` and ``mcp.json``
+# (e.g. VS Code now bundles Copilot Chat, whose skills regressed out of scans
+# when the extension moved from user-installed to built-in). The family base
+# exposes ``_builtin_extension_dir_templates`` (per-OS) → ``_builtin_extension_dirs()``,
+# wired through ``_extension_base_dirs()`` so both the skills and MCP extension
+# walks cover them.
+# ---------------------------------------------------------------------------
+
+
+def test_vscode_builtin_extension_skills_discovered(tmp_path, monkeypatch):
+    """Skills shipped by a built-in (bundled) extension are surfaced by
+    ``discover_skills`` — the layout that regressed when Copilot Chat became a
+    built-in (skills at ``…/extensions/<ext>/assets/prompts/skills``)."""
+    from agent_scan.agents import VSCodeDiscoverer
+
+    builtin_extensions = tmp_path / "app" / "extensions"
+    skill_dir = builtin_extensions / "github.copilot-chat" / "assets" / "prompts" / "skills" / "create-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("---\nname: create-skill\ndescription: t\n---\n\nbody\n")
+    (tmp_path / ".vscode").mkdir()
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    monkeypatch.setattr(discoverer, "_builtin_extension_dirs", lambda: [builtin_extensions])
+
+    skills_dirs = discoverer.discover_skills()
+
+    matching = [k for k in skills_dirs if k.endswith("/github.copilot-chat/assets/prompts/skills")]
+    assert len(matching) == 1, f"built-in extension skills must surface; got: {list(skills_dirs)}"
+    name, skill = skills_dirs[matching[0]][0]
+    assert name == "create-skill"
+    assert isinstance(skill, SkillServer)
+
+
+def test_vscode_builtin_extension_mcp_discovered(tmp_path, monkeypatch):
+    """A built-in (bundled) extension shipping ``mcp.json`` is parsed by
+    ``discover_mcp_servers`` (the same walk as user extensions)."""
+    from agent_scan.agents import VSCodeDiscoverer
+
+    builtin_extensions = tmp_path / "app" / "extensions"
+    ext_dir = builtin_extensions / "vendor.builtin-1.0.0"
+    ext_dir.mkdir(parents=True)
+    (ext_dir / "mcp.json").write_text('{"mcpServers": {"builtin-srv": {"command": "c"}}}')
+    (tmp_path / ".vscode").mkdir()
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    monkeypatch.setattr(discoverer, "_builtin_extension_dirs", lambda: [builtin_extensions])
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    matching = [k for k in mcp_configs if k.endswith("/vendor.builtin-1.0.0/mcp.json")]
+    assert len(matching) == 1, f"built-in extension mcp.json must surface; got: {list(mcp_configs)}"
+    name, _ = mcp_configs[matching[0]][0]
+    assert name == "builtin-srv"
+
+
+def test_builtin_extension_dir_templates_default_empty():
+    """The family base declares no built-in templates; each fork opts in. This
+    guards against a newly-added fork silently inheriting another fork's paths."""
+    from agent_scan.agents.vscode.base import VSCodeFamilyDiscoverer
+
+    assert VSCodeFamilyDiscoverer._builtin_extension_dir_templates == {}
+
+
+def test_builtin_extension_dirs_empty_on_unsupported_platform(tmp_path, monkeypatch):
+    """An unrecognized platform yields no built-in dirs (documented coverage gap)."""
+    import agent_scan.agents.vscode.base as base
+    from agent_scan.agents import VSCodeDiscoverer
+
+    monkeypatch.setattr(base.sys, "platform", "sunos5")
+
+    assert VSCodeDiscoverer(tmp_path)._builtin_extension_dirs() == []
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="verified .app paths are macOS-specific")
+@pytest.mark.parametrize(
+    "discoverer_name, app_name",
+    [
+        ("VSCodeDiscoverer", "Visual Studio Code.app"),
+        ("CursorDiscoverer", "Cursor.app"),
+        ("WindsurfDiscoverer", "Windsurf.app"),
+    ],
+)
+def test_builtin_extension_dirs_macos_verified_app_paths(tmp_path, discoverer_name, app_name):
+    """On macOS the ``/Applications/<app>.app/Contents/Resources/app/extensions``
+    paths for VS Code, Cursor and Windsurf are verified on disk (not inferred)."""
+    import agent_scan.agents as agents
+
+    discoverer = getattr(agents, discoverer_name)(tmp_path)
+    dirs = [p.as_posix() for p in discoverer._builtin_extension_dirs()]
+
+    expected = f"/Applications/{app_name}/Contents/Resources/app/extensions"
+    assert any(d == expected for d in dirs), f"{discoverer_name} must scan {expected}; got: {dirs}"
+
+
+@pytest.mark.parametrize("linux_platform", ["linux", "linux2"])
+def test_windsurf_builtin_extension_no_linux_path(tmp_path, monkeypatch, linux_platform):
+    """Windsurf ships on Linux only as a tarball with no fixed install root, so
+    built-in discovery is intentionally a documented gap there (not a guess)."""
+    import agent_scan.agents.vscode.base as base
+    from agent_scan.agents import WindsurfDiscoverer
+
+    monkeypatch.setattr(base.sys, "platform", linux_platform)
+
+    assert WindsurfDiscoverer(tmp_path)._builtin_extension_dirs() == []
+
+
+@pytest.mark.skipif(
+    sys.platform not in ("darwin", "linux", "linux2", "win32"),
+    reason="built-in paths only defined for macOS/Linux/Windows",
+)
+def test_vscode_builtin_extension_dirs_per_platform(tmp_path):
+    """VS Code's built-in extensions dir resolves to the documented per-OS
+    install root (macOS .app verified; Windows documented; Linux deb/rpm)."""
+    from agent_scan.agents import VSCodeDiscoverer
+
+    dirs = [p.as_posix() for p in VSCodeDiscoverer(tmp_path)._builtin_extension_dirs()]
+
+    if sys.platform == "darwin":
+        assert any(d.endswith("/Applications/Visual Studio Code.app/Contents/Resources/app/extensions") for d in dirs)
+    elif sys.platform in ("linux", "linux2"):
+        assert any("/usr/share/code/resources/app/extensions" in d for d in dirs)
+    elif sys.platform == "win32":
+        assert any(d.endswith("Microsoft VS Code/resources/app/extensions") for d in dirs)

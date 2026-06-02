@@ -1,5 +1,7 @@
 """Kiro discoverer."""
 
+from typing import ClassVar
+
 from agent_scan.agents.vscode.base import VSCodeFamilyDiscoverer
 
 
@@ -36,3 +38,18 @@ class KiroDiscoverer(VSCodeFamilyDiscoverer):
         "~/.kiro/extensions",
         "~/.kiro/powers/installed",
     )
+    # Built-in (bundled) extensions shipped inside the Kiro application.
+    # ENTIRELY INFERRED — verify: Kiro was not available to verify on disk and
+    # its docs only say "follow the installer". The macOS bundle name and the
+    # Windows per-user Programs folder follow the VS Code-fork convention.
+    _builtin_extension_dir_templates: ClassVar[dict[str, tuple[str, ...]]] = {
+        "darwin": (
+            "/Applications/Kiro.app/Contents/Resources/app/extensions",  # inferred — verify
+            "~/Applications/Kiro.app/Contents/Resources/app/extensions",  # inferred — verify
+        ),
+        "win32": (
+            "~/AppData/Local/Programs/Kiro/resources/app/extensions",  # inferred — verify
+        ),
+        # linux: NO STABLE PATH — Kiro distributes an AppImage/tarball with no
+        # documented fixed install root, so Linux built-in discovery is omitted.
+    }

@@ -1,5 +1,7 @@
 """VSCode (stable + Insiders) discoverer."""
 
+from typing import ClassVar
+
 from agent_scan.agents.vscode.base import VSCodeFamilyDiscoverer
 
 
@@ -34,6 +36,35 @@ class VSCodeDiscoverer(VSCodeFamilyDiscoverer):
         ".agents/skills",
     )
     _extension_paths = ("~/.vscode/extensions", "~/.vscode-insiders/extensions")
+    # Built-in (bundled) extensions shipped inside the VS Code application — the
+    # location Copilot Chat moved to once it became a built-in (its skills live
+    # at ``…/extensions/copilot/assets/prompts/skills``).
+    _builtin_extension_dir_templates: ClassVar[dict[str, tuple[str, ...]]] = {
+        "darwin": (
+            # VERIFIED on disk (macOS app bundle).
+            "/Applications/Visual Studio Code.app/Contents/Resources/app/extensions",
+            # inferred — verify: user-local /Applications install (standard macOS).
+            "~/Applications/Visual Studio Code.app/Contents/Resources/app/extensions",
+            # inferred — verify: Insiders channel mirrors the stable layout.
+            "/Applications/Visual Studio Code - Insiders.app/Contents/Resources/app/extensions",
+            "~/Applications/Visual Studio Code - Insiders.app/Contents/Resources/app/extensions",
+        ),
+        "win32": (
+            # Documented install roots — code.visualstudio.com/docs/setup/windows
+            # (per-user setup under %LOCALAPPDATA%\Programs, system setup under Program Files).
+            "~/AppData/Local/Programs/Microsoft VS Code/resources/app/extensions",
+            "C:/Program Files/Microsoft VS Code/resources/app/extensions",
+            # inferred — verify: Insiders program-dir name mirrors stable.
+            "~/AppData/Local/Programs/Microsoft VS Code Insiders/resources/app/extensions",
+            "C:/Program Files/Microsoft VS Code Insiders/resources/app/extensions",
+        ),
+        "linux": (
+            # inferred — verify: deb/rpm install root. snap/flatpak live under
+            # versioned sandbox mounts with no stable path and are omitted.
+            "/usr/share/code/resources/app/extensions",
+            "/usr/share/code-insiders/resources/app/extensions",
+        ),
+    }
     # VSCode/Copilot-specific features (not assumed for forks).
     _settings_skill_locations_enabled = True
     _devcontainer_mcp_enabled = True
