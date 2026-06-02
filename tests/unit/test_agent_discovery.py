@@ -3188,18 +3188,24 @@ def test_kiro_user_data_dir_resolves_to_capital_kiro(tmp_path):
     assert userdata.name == "Kiro"
 
 
-def test_kiro_discovers_workspace_skills_at_kiro_relative(tmp_path):
-    """Per Kiro docs, workspace skills live at ``<project>/.kiro/skills/``."""
+@pytest.mark.parametrize(
+    "relative",
+    [".kiro/skills", ".agents/skills"],
+)
+def test_kiro_discovers_workspace_skills_at_each_supported_relative_path(tmp_path, relative):
+    """Kiro docs list workspace skills at ``<project>/.kiro/skills/``; ``.agents/skills``
+    is an inferred (undocumented) cross-tool compat path mirroring its VSCode-family
+    siblings (Cursor/VSCode/Windsurf)."""
     from agent_scan.agents import KiroDiscoverer
 
     (tmp_path / ".kiro").mkdir()
     discoverer = KiroDiscoverer(tmp_path)
     workspace = _setup_workspace(discoverer, tmp_path, "myproj")
-    _write_skill(workspace / ".kiro" / "skills", "kr-ws-skill")
+    _write_skill(workspace / relative, "kr-ws-skill")
 
     skills_dirs = discoverer.discover_skills()
 
-    matching = [k for k in skills_dirs if k.endswith("/myproj/.kiro/skills")]
+    matching = [k for k in skills_dirs if k.endswith(f"/myproj/{relative}")]
     assert len(matching) == 1
     entries = skills_dirs[matching[0]]
     assert any(name == "kr-ws-skill" for name, _ in entries)

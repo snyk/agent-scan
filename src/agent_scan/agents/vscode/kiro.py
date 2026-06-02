@@ -45,8 +45,15 @@ class KiroDiscoverer(VSCodeFamilyDiscoverer):
     _workspace_agent_config_relative = (".kiro/agents",)
     # Per Kiro docs (https://kiro.dev/docs/skills/): user-global at
     # ``~/.kiro/skills/`` and workspace at ``<root>/.kiro/skills/``.
+    # The second workspace entry, ``.agents/skills``, is INFERRED — NOT documented
+    # for Kiro; added as a best-effort catch for the cross-tool project-root skills
+    # convention its VSCode-family siblings (Cursor/VSCode/Windsurf) already honor.
+    # If Kiro never uses it the path is a harmless no-op (the dir simply won't exist).
     _skills_dir_paths = ("~/.kiro/skills",)
-    _workspace_skills_relative = (".kiro/skills",)
+    _workspace_skills_relative = (
+        ".kiro/skills",
+        ".agents/skills",  # inferred — verify (undocumented for Kiro)
+    )
     # Kiro is a VSCode fork using OpenVSX — installed extensions live under
     # ``~/.kiro/extensions/`` and can contribute ``mcp.json`` / ``skills/``.
     # Installed Kiro Powers live under ``~/.kiro/powers/installed/<name>/``,
