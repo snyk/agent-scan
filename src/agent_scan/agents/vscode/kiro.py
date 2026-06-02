@@ -25,7 +25,24 @@ class KiroDiscoverer(VSCodeFamilyDiscoverer):
     _user_mcp_file_paths = ("~/.kiro/settings/mcp.json",)
     # Per kiro.dev/docs/mcp/configuration/: workspace MCP at
     # ``<root>/.kiro/settings/mcp.json`` mirrors the user-global path.
-    _workspace_mcp_relative = (".kiro/settings/mcp.json",)
+    # The second entry, ``<root>/.mcp.json``, is SPECULATIVE — NOT documented for
+    # Kiro (its only documented MCP files are the ``.kiro/settings/mcp.json``
+    # pair); added at user request as a best-effort catch for the cross-tool
+    # project-root convention (Claude Code / Cline). If Kiro never ships one the
+    # path is a harmless no-op (the file simply won't exist).
+    _workspace_mcp_relative = (
+        ".kiro/settings/mcp.json",
+        ".mcp.json",  # inferred — verify (undocumented for Kiro)
+    )
+    # Kiro custom agents / subagents live one file per agent under
+    # ``~/.kiro/agents/`` (global) and ``<root>/.kiro/agents/`` (workspace).
+    # CLI agents are JSON and may define MCP servers inline via an ``mcpServers``
+    # block — the highest-priority MCP source per kiro.dev/docs/cli/mcp/configuration/
+    # — so those files are scanned for inline servers (see
+    # ``_discover_agent_config_mcp``). IDE agents are markdown that only reference
+    # servers defined elsewhere, so they contribute no new server definitions.
+    _agent_config_dir_paths = ("~/.kiro/agents",)
+    _workspace_agent_config_relative = (".kiro/agents",)
     # Per Kiro docs (https://kiro.dev/docs/skills/): user-global at
     # ``~/.kiro/skills/`` and workspace at ``<root>/.kiro/skills/``.
     _skills_dir_paths = ("~/.kiro/skills",)

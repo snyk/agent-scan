@@ -3683,6 +3683,120 @@ def test_kiro_powers_walk_finds_multiple_installed_powers(tmp_path):
     assert len(keys) == 2
 
 
+# --- Kiro: custom agents / subagents with inline mcpServers ---
+#
+# Kiro custom agents live one-file-per-agent under ``~/.kiro/agents/`` (global)
+# and ``<workspace>/.kiro/agents/`` (workspace). The CLI agent format is JSON and
+# may define MCP servers *inline* via an ``mcpServers`` block — documented as the
+# highest-priority MCP source (kiro.dev/docs/cli/mcp/configuration/) — so a server
+# can be declared here and nowhere else. Files are named ``<agent>.json`` (not
+# ``mcp.json``), so the whole dir is scanned for ``*.json`` and gated on MCP shape.
+
+
+def test_kiro_agent_config_inline_mcp_discovered(tmp_path):
+    """A ``~/.kiro/agents/<agent>.json`` carrying an inline ``mcpServers`` block surfaces."""
+    from agent_scan.agents import KiroDiscoverer
+
+    agents_dir = tmp_path / ".kiro" / "agents"
+    agents_dir.mkdir(parents=True)
+    (agents_dir / "reviewer.json").write_text('{"mcpServers": {"agent-srv": {"command": "k"}}}')
+
+    mcp_configs = KiroDiscoverer(tmp_path).discover_mcp_servers()
+
+    matching = [k for k in mcp_configs if k.endswith("/.kiro/agents/reviewer.json")]
+    assert len(matching) == 1
+    entries = mcp_configs[matching[0]]
+    assert isinstance(entries, list)
+    name, server = entries[0]
+    assert name == "agent-srv"
+    assert isinstance(server, StdioServer)
+
+
+def test_kiro_agent_config_ignores_non_mcp_keys(tmp_path):
+    """An agent file mixes MCP with non-MCP keys (``name``/``description``/``tools``)
+    and per-server extras (``timeout``); only the ``mcpServers`` block is lifted and
+    the unknown keys are ignored rather than failing validation."""
+    from agent_scan.agents import KiroDiscoverer
+
+    agents_dir = tmp_path / ".kiro" / "agents"
+    agents_dir.mkdir(parents=True)
+    (agents_dir / "code-reviewer.json").write_text(
+        '{"name": "code-reviewer", "description": "Reviews code", '
+        '"tools": ["@figma/*", "fsRead"], '
+        '"mcpServers": {"figma": {"command": "figma-mcp", "args": ["--stdio"], "timeout": 120000}}}'
+    )
+
+    mcp_configs = KiroDiscoverer(tmp_path).discover_mcp_servers()
+
+    matching = [k for k in mcp_configs if k.endswith("/.kiro/agents/code-reviewer.json")]
+    assert len(matching) == 1
+    entries = mcp_configs[matching[0]]
+    assert isinstance(entries, list)
+    name, server = entries[0]
+    assert name == "figma"
+    assert isinstance(server, StdioServer)
+    assert server.command == "figma-mcp"
+
+
+def test_kiro_agent_config_without_mcp_servers_skipped(tmp_path):
+    """An agent file with no inline ``mcpServers`` (the common case — it only
+    references servers defined elsewhere) is skipped: no entry for it, and it is
+    NOT reported as a ``CouldNotParseMCPConfig`` parse failure."""
+    from agent_scan.agents import KiroDiscoverer
+
+    agents_dir = tmp_path / ".kiro" / "agents"
+    agents_dir.mkdir(parents=True)
+    (agents_dir / "plain.json").write_text('{"name": "plain", "tools": ["@figma/*"]}')
+
+    mcp_configs = KiroDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert not [k for k in mcp_configs if k.endswith("/.kiro/agents/plain.json")]
+    assert not any(isinstance(v, CouldNotParseMCPConfig) for v in mcp_configs.values())
+
+
+def test_kiro_workspace_agent_config_inline_mcp_discovered(tmp_path):
+    """A ``<workspace>/.kiro/agents/<agent>.json`` with inline ``mcpServers`` surfaces."""
+    from agent_scan.agents import KiroDiscoverer
+
+    (tmp_path / ".kiro").mkdir()
+    discoverer = KiroDiscoverer(tmp_path)
+    workspace = _setup_workspace(discoverer, tmp_path, "kproj")
+    ws_agents = workspace / ".kiro" / "agents"
+    ws_agents.mkdir(parents=True)
+    (ws_agents / "ws-agent.json").write_text('{"mcpServers": {"ws-agent-srv": {"command": "k"}}}')
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    matching = [k for k in mcp_configs if k.endswith("/kproj/.kiro/agents/ws-agent.json")]
+    assert len(matching) == 1
+    entries = mcp_configs[matching[0]]
+    assert isinstance(entries, list)
+    name, server = entries[0]
+    assert name == "ws-agent-srv"
+    assert isinstance(server, StdioServer)
+
+
+def test_kiro_workspace_root_mcp_json_discovered(tmp_path):
+    """SPECULATIVE (undocumented for Kiro): a workspace-root ``.mcp.json`` is read,
+    mirroring the cross-tool project-root convention."""
+    from agent_scan.agents import KiroDiscoverer
+
+    (tmp_path / ".kiro").mkdir()
+    discoverer = KiroDiscoverer(tmp_path)
+    workspace = _setup_workspace(discoverer, tmp_path, "kproj")
+    (workspace / ".mcp.json").write_text('{"mcpServers": {"root-srv": {"command": "k"}}}')
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    matching = [k for k in mcp_configs if k.endswith("/kproj/.mcp.json")]
+    assert len(matching) == 1
+    entries = mcp_configs[matching[0]]
+    assert isinstance(entries, list)
+    name, server = entries[0]
+    assert name == "root-srv"
+    assert isinstance(server, StdioServer)
+
+
 # --- ClaudeCodeDiscoverer: NEW gaps (managed-mcp, commands, CLAUDE_CONFIG_DIR, plugin manifest) ---
 
 

@@ -242,6 +242,15 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
     _workspace_skills_relative: tuple[str, ...] = ()
     _skills_dir_paths: tuple[str, ...] = ()
     _extension_paths: tuple[str, ...] = ()
+    # Directories holding custom-agent / subagent definitions, one file per
+    # agent (e.g. Kiro's ``~/.kiro/agents/<agent>.json``). The CLI agent format
+    # is JSON and may declare MCP servers *inline* via an ``mcpServers`` block,
+    # so each such file is a potential standalone MCP source. Files are named
+    # per-agent (not ``mcp.json``), so the whole dir is scanned for ``*.json``
+    # and gated on MCP shape (see ``_discover_agent_config_mcp``). Empty by
+    # default so only forks that ship this layout opt in.
+    _agent_config_dir_paths: tuple[str, ...] = ()  # home-relative, e.g. "~/.kiro/agents"
+    _workspace_agent_config_relative: tuple[str, ...] = ()  # workspace-relative, e.g. ".kiro/agents"
     # Per-OS templates for the editor's *built-in* (bundled) extensions dir — the
     # ``extensions`` folder shipped inside the application install, NOT the
     # user-installed ``_extension_paths`` tree. Keyed by the normalized platform
@@ -291,6 +300,7 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         result.update(self._discover_gated_home_settings_mcp())
         result.update(self._discover_profile_mcp_files())
         result.update(self._discover_workspace_mcp())
+        result.update(self._discover_agent_config_mcp())
         result.update(self._discover_extension_mcp_servers())
         result.update(self._discover_devcontainer_mcp())
         result.update(self._discover_code_workspace_mcp())
@@ -599,6 +609,54 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
                 if parsed is None:
                     continue
                 result[mcp_path.as_posix()] = parsed
+        return result
+
+    def _discover_agent_config_mcp(self) -> McpConfigsResult:
+        """Scan custom-agent / subagent definition files for *inline* ``mcpServers``.
+
+        Some forks store agents one-file-per-agent under a dedicated directory —
+        Kiro: ``~/.kiro/agents/`` (home-global, ``_agent_config_dir_paths``) and
+        ``<workspace>/.kiro/agents/`` (per-workspace,
+        ``_workspace_agent_config_relative``). The CLI agent format is JSON and
+        may declare MCP servers inline via an ``mcpServers`` block — documented
+        as the highest-priority MCP source (kiro.dev/docs/cli/mcp/configuration/)
+        — so a server can be defined here and nowhere else.
+
+        Agent files are named ``<agent-name>.json`` (not ``mcp.json``), so the
+        whole directory is globbed for ``*.json`` and each file parsed with
+        ``skip_unrecognized=True``: an agent file with no inline ``mcpServers``
+        (the common case — most only *reference* servers defined elsewhere)
+        returns ``None`` and is skipped rather than surfaced as a
+        ``CouldNotParseMCPConfig`` false positive. ``ClaudeConfigFile`` (first in
+        the family format tuple) lifts the ``mcpServers`` block while ignoring the
+        file's non-MCP keys (``name``/``description``/``tools``/…) via the models'
+        default ``extra="ignore"``.
+
+        The workspace dirs are resolved against every opened project root *and its
+        ancestors* (like :meth:`_discover_workspace_mcp`) so a monorepo root's
+        ``.kiro/agents`` is found even when a subdirectory is the opened folder.
+        The scan is flat (non-recursive), matching the documented one-file-per-
+        agent layout. IDE agents are markdown (``.md``) whose frontmatter only
+        *references* servers, defining none, so they are intentionally not read.
+        """
+        if not self._agent_config_dir_paths and not self._workspace_agent_config_relative:
+            return {}
+        dirs: list[Path] = [expand_path(Path(raw), self.home_directory) for raw in self._agent_config_dir_paths]
+        for root in self._project_paths_with_ancestors():
+            dirs.extend(root / rel for rel in self._workspace_agent_config_relative)
+        result: McpConfigsResult = {}
+        for base in dirs:
+            try:
+                json_files = list(base.glob("*.json"))
+            except (PermissionError, OSError):
+                continue
+            for json_file in json_files:
+                if not json_file.is_file():
+                    continue
+                parsed = self._parse_mcp_file(json_file, formats=_VSCODE_FAMILY_FORMATS, skip_unrecognized=True)
+                if parsed is None:
+                    continue
+                result[json_file.as_posix()] = parsed
         return result
 
     # --- private: workspace skills discovery ---
