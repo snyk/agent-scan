@@ -58,23 +58,6 @@ _VSCODE_FAMILY_FORMATS: tuple[type[MCPConfig], ...] = (
 )
 
 
-def _claude_desktop_config_path(home_directory: Path | None) -> Path | None:
-    """Per-OS path to Claude Desktop's ``claude_desktop_config.json``.
-
-    VSCode can import these servers when ``chat.mcp.discovery.enabled`` is on.
-    Returns ``None`` on unsupported platforms.
-    """
-    if sys.platform == "darwin":
-        rel = "~/Library/Application Support/Claude/claude_desktop_config.json"
-    elif sys.platform in ("linux", "linux2"):
-        rel = "~/.config/Claude/claude_desktop_config.json"
-    elif sys.platform == "win32":
-        rel = "~/AppData/Roaming/Claude/claude_desktop_config.json"
-    else:
-        return None
-    return expand_path(Path(rel), home_directory)
-
-
 def _file_uri_to_path(uri: object) -> Path | None:
     """Convert a ``file://`` URI to a ``Path``, or ``None`` for a non-string or
     non-``file://`` value (e.g. ``vscode-remote://`` points at a filesystem we
@@ -163,23 +146,6 @@ def _enabled_skill_location_paths(locations: object) -> list[str]:
     return []
 
 
-def _claude_desktop_discovery_on(value: object) -> bool:
-    """True if ``chat.mcp.discovery.enabled`` enables the Claude Desktop import.
-
-    VS Code registers this setting as an *object* keyed by discovery source
-    (``claude-desktop``/``windsurf``/``cursor-global``/``cursor-workspace``) →
-    boolean; a legacy bare ``true`` is migrated to "all sources on". So the
-    Claude Desktop import is on when the value is the legacy boolean ``true`` or
-    an object whose ``claude-desktop`` entry is truthy. Other sources don't gate
-    the Claude Desktop import.
-    """
-    if value is True:
-        return True
-    if isinstance(value, dict):
-        return _setting_flag_enabled(value.get("claude-desktop"))
-    return False
-
-
 def _resolve_code_workspace_folder(entry: object, base_dir: Path) -> Path | None:
     """Resolve one ``.code-workspace`` ``folders[]`` entry to a Path.
 
@@ -242,6 +208,26 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
     :attr:`_VSCODE_FAMILY_FORMATS` (passed to :meth:`_parse_mcp_file`), so a
     single subclass can mix wrapped and flat config files without special
     casing.
+
+    TODO (not yet supported, applies family-wide) — two VS Code "discovery"
+    toggles that import config from *other* tools. We should add support for
+    both:
+
+    * ``chat.mcp.discovery.enabled`` — auto-discovers and reuses MCP servers
+      from other apps (e.g. Claude Desktop). Documented under "Automatically
+      discover MCP servers":
+      https://code.visualstudio.com/docs/copilot/customization/mcp-servers
+    * ``chat.skills.discovery.enabled`` — the skills analogue (auto-discover
+      skills from other tools). NOTE: this exact setting name could NOT be
+      confirmed in the current VS Code docs; the closest documented surface is
+      the Agent Skills page (``chat.agentSkillsLocations`` + auto-detection):
+      https://code.visualstudio.com/docs/copilot/customization/agent-skills
+      Verify the real setting name and value shape before implementing.
+
+    Which forks actually honor these (and which source keys apply) may vary per
+    fork — verify per subclass when implementing.
+
+    Follow-up: ADS-367.
     """
 
     name: str = ""
@@ -264,7 +250,6 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
     _settings_skill_locations_enabled: bool = False  # honor chat.agentSkillsLocations
     _devcontainer_mcp_enabled: bool = False  # honor .devcontainer/devcontainer.json
     _code_workspace_enabled: bool = False  # honor .code-workspace settings block
-    _claude_desktop_import_enabled: bool = False  # honor chat.mcp.discovery.enabled
     # Path under $VSCODE_PORTABLE that holds the relocated userdata tree.
     _portable_env_var: str = ""
 
@@ -299,24 +284,36 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         result.update(self._discover_extension_mcp_servers())
         result.update(self._discover_devcontainer_mcp())
         result.update(self._discover_code_workspace_mcp())
-        result.update(self._discover_claude_desktop_import())
         return result
 
     def discover_skills(self) -> SkillsDirsResult:
+        result: SkillsDirsResult = {}
+        result.update(self._discover_home_skills_dirs())
+        result.update(self._discover_system_skills_dirs())
+        result.update(self._discover_workspace_skills())
+        result.update(self._discover_extension_skills())
+        result.update(self._discover_settings_skill_locations())
+        result.update(self._discover_code_workspace_skills())
+        return result
+
+    def _discover_home_skills_dirs(self) -> SkillsDirsResult:
+        """Scan the home-relative skill directories declared in ``_skills_dir_paths``."""
         result: SkillsDirsResult = {}
         for raw in self._skills_dir_paths:
             path = expand_path(Path(raw), self.home_directory)
             entries = self._scan_skills_dir(path)
             if entries is not None:
                 result[path.as_posix()] = entries
+        return result
+
+    def _discover_system_skills_dirs(self) -> SkillsDirsResult:
+        """Scan the machine-wide system skill directories from
+        :meth:`_platform_system_skills_dirs` (empty unless a subclass overrides)."""
+        result: SkillsDirsResult = {}
         for path in self._platform_system_skills_dirs():
             entries = self._scan_skills_dir(path)
             if entries is not None:
                 result[path.as_posix()] = entries
-        result.update(self._discover_workspace_skills())
-        result.update(self._discover_extension_skills())
-        result.update(self._discover_settings_skill_locations())
-        result.update(self._discover_code_workspace_skills())
         return result
 
     # --- system-level (machine-wide) skills hook ---
@@ -389,8 +386,8 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
 
         VSCode and its forks store each named profile as its own subdir there,
         each able to ship its own ``mcp.json`` / ``settings.json``. Used by the
-        profile MCP, skill-locations, and Claude-Desktop-discovery scans, which
-        all enumerate these the same way.
+        profile MCP and skill-locations scans, which all enumerate these the
+        same way.
         """
         profiles_dir = userdata / "User" / "profiles"
         try:
@@ -848,33 +845,3 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
                 continue
             result.update(self._skill_locations_from_settings(settings, ws_file.parent))
         return result
-
-    # --- private: Claude Desktop config import (chat.mcp.discovery.enabled) ---
-
-    def _claude_desktop_discovery_enabled(self) -> bool:
-        """True if any scanned ``settings.json`` enables ``chat.mcp.discovery.enabled``."""
-        if not self._user_settings_file:
-            return False
-        for userdata in self._user_data_dirs():
-            candidates = [userdata / self._user_settings_file]
-            candidates.extend(profile / "settings.json" for profile in self._profile_dirs(userdata))
-            for path in candidates:
-                data = self._load_json_file(path)
-                if isinstance(data, dict) and _claude_desktop_discovery_on(
-                    _read_chat_setting(data, "mcp.discovery.enabled")
-                ):
-                    return True
-        return False
-
-    def _discover_claude_desktop_import(self) -> McpConfigsResult:
-        """Parse Claude Desktop's ``claude_desktop_config.json`` when VSCode's
-        ``chat.mcp.discovery.enabled`` is on (servers are reused by VSCode)."""
-        if not self._claude_desktop_import_enabled or not self._claude_desktop_discovery_enabled():
-            return {}
-        path = _claude_desktop_config_path(self.home_directory)
-        if path is None:
-            return {}
-        parsed = self._parse_mcp_file(path, formats=_VSCODE_FAMILY_FORMATS)
-        if parsed is None:
-            return {}
-        return {path.as_posix(): parsed}

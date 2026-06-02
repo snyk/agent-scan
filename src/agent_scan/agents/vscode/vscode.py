@@ -38,5 +38,4 @@ class VSCodeDiscoverer(VSCodeFamilyDiscoverer):
     _settings_skill_locations_enabled = True
     _devcontainer_mcp_enabled = True
     _code_workspace_enabled = True
-    _claude_desktop_import_enabled = True
     _portable_env_var = "VSCODE_PORTABLE"
