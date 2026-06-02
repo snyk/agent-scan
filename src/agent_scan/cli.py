@@ -59,6 +59,10 @@ def setup_logging(verbose=False, log_to_stderr=False):
         # Remove any existing handlers (including the NullHandler)
         for hdlr in root_logger.handlers:
             root_logger.removeHandler(hdlr)
+        # markup=False on both handlers: log messages carry arbitrary scanned
+        # data (payloads, file paths, server output) that can contain "[...]"
+        # which Rich would otherwise parse as console markup and raise
+        # MarkupError. Intentional styling goes through rich.print, not logging.
         if log_to_stderr:
             # stderr logging
             stderr_console = rich.console.Console(stderr=True)
