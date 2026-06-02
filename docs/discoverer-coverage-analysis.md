@@ -111,6 +111,7 @@ Docs: [mcp-servers](https://code.visualstudio.com/docs/copilot/customization/mcp
 | Documented surface | Key | Discoverer | Status |
 |---|---|---|---|
 | Workspace `.vscode/mcp.json` | `servers` (+`inputs`) | `_discover_workspace_mcp` | ✅ (`VSCodeMCPConfig`) |
+| Workspace-root `.mcp.json` | `servers` | `_discover_workspace_mcp` | ✅ (undocumented; verified empirically that VS Code loads it) |
 | User `<userdata>/User/mcp.json` | `servers` | `_discover_user_mcp_files` | ✅ |
 | `~/.vscode/mcp.json` | `servers` | `_discover_user_mcp_files` | ✅ |
 | `settings.json` `mcp.servers` (nested **and** dotted `"mcp.servers"`) | nested/dotted | `_discover_user_settings_mcp` → `_parse_settings_mcp_gated` | ✅ |

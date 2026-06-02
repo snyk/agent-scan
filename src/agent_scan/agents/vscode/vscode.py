@@ -14,7 +14,12 @@ class VSCodeDiscoverer(VSCodeFamilyDiscoverer):
     _user_mcp_file_paths = ("~/.vscode/mcp.json",)
     _userdata_user_mcp_file = "User/mcp.json"
     _user_settings_file = "User/settings.json"
-    _workspace_mcp_relative = (".vscode/mcp.json",)
+    # ``.vscode/mcp.json`` is the documented workspace MCP file. ``.mcp.json``
+    # at the project root is undocumented (the VS Code docs list only
+    # ``.vscode/mcp.json`` and the user-profile ``mcp.json``) but verified
+    # empirically that VS Code loads it — same cross-tool convention the
+    # Windsurf/Kiro forks already rely on.
+    _workspace_mcp_relative = (".vscode/mcp.json", ".mcp.json")
     # Per the official VS Code Agent Skills docs
     # (https://code.visualstudio.com/docs/copilot/customization/agent-skills):
     # user-level skills live at ``~/.copilot/skills`` (Copilot's canonical

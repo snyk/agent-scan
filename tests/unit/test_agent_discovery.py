@@ -2252,6 +2252,35 @@ def test_vscode_discoverer_walks_workspace_storage_to_find_mcp(tmp_path):
     assert name == "ws-mcp"
 
 
+def test_vscode_discoverer_discovers_workspace_root_mcp_json(tmp_path):
+    """VS Code reads a project-root ``.mcp.json`` in an opened workspace.
+
+    Verified empirically; undocumented — the VS Code MCP docs list only the
+    workspace ``.vscode/mcp.json`` and the user-profile ``mcp.json``.
+    """
+    from agent_scan.agents import VSCodeDiscoverer
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    workspace_storage = _userdata(discoverer) / "User" / "workspaceStorage"
+    workspace_hash = workspace_storage / "ws"
+    workspace_hash.mkdir(parents=True)
+
+    workspace = tmp_path / "proj"
+    workspace.mkdir()
+    (workspace / ".mcp.json").write_text('{"servers": {"ws-root-srv": {"command": "w"}}}')
+
+    (workspace_hash / "workspace.json").write_text(f'{{"folder": "{workspace.as_uri()}"}}')
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    workspace_keys = [k for k in mcp_configs if k.endswith("/proj/.mcp.json")]
+    assert len(workspace_keys) == 1
+    entries = mcp_configs[workspace_keys[0]]
+    assert isinstance(entries, list) and len(entries) == 1
+    name, _ = entries[0]
+    assert name == "ws-root-srv"
+
+
 def test_vscode_discoverer_workspace_storage_skips_malformed_workspace_json(tmp_path):
     """A malformed ``workspace.json`` is logged + skipped — does NOT surface as a CouldNotParseMCPConfig."""
     from agent_scan.agents import VSCodeDiscoverer
