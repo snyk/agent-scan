@@ -623,7 +623,9 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
 
     def _extension_base_dirs(self) -> list[Path]:
         """Resolve every entry in ``_extension_paths`` against this discoverer's
-        home, plus the portable-mode extensions dir when active."""
+        home, plus the portable-mode extensions dir when active and the
+        application's built-in (bundled) extensions dir(s) (see
+        :meth:`_builtin_extension_dirs`)."""
         dirs = [expand_path(Path(raw), self.home_directory) for raw in self._extension_paths]
         portable = self._portable_user_data_dir()
         if portable is not None:
