@@ -3245,6 +3245,121 @@ def test_antigravity_discovers_workspace_skills_at_singular_agent_relative(tmp_p
 # ``test_antigravity_discovers_plural_agents_workspace_skills``.
 
 
+# --- Antigravity opened-workspace discovery via the ~/.gemini/config/projects
+# registry (NOT the VSCode workspaceStorage tree) ---------------------------------
+#
+# Antigravity's userdata dir is a bare Chromium profile with no ``User/`` subtree,
+# so the inherited VSCode ``workspaceStorage`` walk never fires on a real install.
+# The IDE instead records each opened workspace in
+# ``~/.gemini/config/projects/<id>.json`` under
+# ``projectResources.resources[].folderUri``. These tests pin that real source so
+# workspace-scoped skills surface for an actually-open project (the inherited
+# workspaceStorage path is still honored as a forward-compat fallback).
+
+
+def _setup_gemini_project(tmp_path, workspace_relpath, *, filename="proj.json", project_name="proj"):
+    """Register an opened Antigravity workspace the way the IDE actually does:
+    a ``~/.gemini/config/projects/<filename>`` file whose
+    ``projectResources.resources[].folderUri`` is the workspace's ``file://`` URI.
+
+    Returns the created workspace Path.
+    """
+    projects_dir = tmp_path / ".gemini" / "config" / "projects"
+    projects_dir.mkdir(parents=True, exist_ok=True)
+    workspace = tmp_path / workspace_relpath
+    workspace.mkdir(parents=True, exist_ok=True)
+    (projects_dir / filename).write_text(
+        f'{{"name": "{project_name}", "projectResources": {{"resources": [{{"folderUri": "{workspace.as_uri()}"}}]}}}}'
+    )
+    return workspace
+
+
+def test_antigravity_project_folders_from_gemini_projects_registry(tmp_path):
+    """Opened workspaces come from ``~/.gemini/config/projects/*.json`` (folderUri),
+    not the absent ``workspaceStorage`` tree."""
+    from agent_scan.agents import AntigravityDiscoverer
+
+    workspace = _setup_gemini_project(tmp_path, "myproj")
+
+    folders = AntigravityDiscoverer(tmp_path)._discover_project_folders()
+
+    assert workspace in folders
+
+
+def test_antigravity_workspace_skills_discovered_via_gemini_projects_registry(tmp_path):
+    """End-to-end regression: a ``.agents/skills`` dir in a project recorded only in
+    the ``~/.gemini/config/projects`` registry must surface (the reported bug)."""
+    from agent_scan.agents import AntigravityDiscoverer
+
+    (tmp_path / ".gemini" / "antigravity").mkdir(parents=True)
+    workspace = _setup_gemini_project(tmp_path, "myproj")
+    _write_skill(workspace / ".agents" / "skills", "ws-skill")
+
+    skills_dirs = AntigravityDiscoverer(tmp_path).discover_skills()
+
+    matching = [k for k in skills_dirs if k.endswith("/myproj/.agents/skills")]
+    assert len(matching) == 1
+    entries = skills_dirs[matching[0]]
+    assert any(name == "ws-skill" for name, _ in entries)
+
+
+def test_antigravity_project_folders_empty_when_projects_dir_missing(tmp_path):
+    """No ``~/.gemini/config/projects`` dir → no project folders (no crash)."""
+    from agent_scan.agents import AntigravityDiscoverer
+
+    (tmp_path / ".gemini" / "antigravity").mkdir(parents=True)
+
+    assert AntigravityDiscoverer(tmp_path)._discover_project_folders() == []
+
+
+def test_antigravity_project_folders_skips_malformed_project_json(tmp_path):
+    """A malformed project file is skipped silently; sibling valid files still resolve."""
+    from agent_scan.agents import AntigravityDiscoverer
+
+    workspace = _setup_gemini_project(tmp_path, "good", filename="good.json")
+    (tmp_path / ".gemini" / "config" / "projects" / "bad.json").write_text("{ not json")
+
+    folders = AntigravityDiscoverer(tmp_path)._discover_project_folders()
+
+    assert workspace in folders
+
+
+def test_antigravity_project_folders_handles_multiple_resources_in_one_file(tmp_path):
+    """Every resource within a single project file is surfaced; a resource missing a
+    ``folderUri`` is skipped without affecting the others."""
+    from agent_scan.agents import AntigravityDiscoverer
+
+    projects_dir = tmp_path / ".gemini" / "config" / "projects"
+    projects_dir.mkdir(parents=True)
+    ws_a = tmp_path / "a"
+    ws_a.mkdir()
+    ws_b = tmp_path / "b"
+    ws_b.mkdir()
+    (projects_dir / "multi.json").write_text(
+        f'{{"projectResources": {{"resources": ['
+        f'{{"folderUri": "{ws_a.as_uri()}"}}, {{"note": "no folderUri"}}, '
+        f'{{"folderUri": "{ws_b.as_uri()}"}}]}}}}'
+    )
+
+    folders = AntigravityDiscoverer(tmp_path)._discover_project_folders()
+
+    assert ws_a in folders
+    assert ws_b in folders
+
+
+def test_antigravity_project_folders_skips_non_file_uri(tmp_path):
+    """A non-``file://`` folderUri (e.g. a remote scheme) is skipped, not crashed on."""
+    from agent_scan.agents import AntigravityDiscoverer
+
+    projects_dir = tmp_path / ".gemini" / "config" / "projects"
+    projects_dir.mkdir(parents=True)
+    (projects_dir / "remote.json").write_text(
+        '{"projectResources": {"resources": [{"folderUri": "vscode-remote://ssh/home/me/repo"}]}}'
+    )
+
+    assert AntigravityDiscoverer(tmp_path)._discover_project_folders() == []
+
+
 # --- Antigravity v2.0: second userdata folder ("Antigravity IDE") ---
 #
 # v2.0 split the IDE into two AppData/Application-Support directories:

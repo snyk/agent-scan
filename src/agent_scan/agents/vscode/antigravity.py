@@ -1,8 +1,14 @@
 """Antigravity discoverer."""
 
+from pathlib import Path
 from typing import ClassVar
 
-from agent_scan.agents.vscode.base import VSCodeFamilyDiscoverer
+from agent_scan.agents.vscode.base import (
+    VSCodeFamilyDiscoverer,
+    _file_uri_to_path,
+    _nested_dict_get,
+)
+from agent_scan.well_known_clients import expand_path
 
 
 class AntigravityDiscoverer(VSCodeFamilyDiscoverer):
@@ -91,3 +97,60 @@ class AntigravityDiscoverer(VSCodeFamilyDiscoverer):
             "/opt/antigravity/resources/app/extensions",  # inferred — verify (may be packed in app.asar)
         ),
     }
+    # Antigravity's own opened-workspace registry. Each opened folder is recorded
+    # as a ``<id>.json`` file here, with the root under
+    # ``projectResources.resources[].folderUri`` (a ``file://`` URI). Shared by the
+    # Antigravity CLI + IDE (``~/.gemini/config`` is the unified config root).
+    _gemini_projects_dir = "~/.gemini/config/projects"
+
+    def _discover_project_folders(self) -> list[Path]:
+        """Opened-workspace roots for Antigravity.
+
+        Antigravity does NOT use the VSCode ``<userdata>/User/workspaceStorage``
+        tree the rest of the family relies on — its userdata dir is a bare
+        Chromium profile with no ``User/`` subtree, so the inherited walk finds
+        nothing on a real install. The IDE instead records each opened workspace
+        in its own registry at ``~/.gemini/config/projects/<id>.json``, under
+        ``projectResources.resources[].folderUri``. Without reading those, every
+        workspace-scoped scan (skills today, any workspace MCP later) comes up
+        empty even with a project open.
+
+        ``super()`` (the ``workspaceStorage`` walk) is still consulted so that if
+        a future Antigravity build does populate it, those workspaces surface too;
+        in practice it returns nothing today. Duplicates across the two sources are
+        collapsed downstream by :meth:`_project_paths_with_ancestors`.
+        """
+        folders = super()._discover_project_folders()
+        folders.extend(self._gemini_project_folders())
+        return folders
+
+    def _gemini_project_folders(self) -> list[Path]:
+        """Workspace roots from the ``~/.gemini/config/projects/*.json`` registry.
+
+        Each project file lists its opened root(s) under
+        ``projectResources.resources[].folderUri``. Files that are missing,
+        unreadable, malformed, or carry a non-``file://`` URI are skipped silently
+        — these are IDE-internal state, not user config, so a stray one must not
+        surface as a discovery error (mirrors how the base skips a malformed
+        ``workspace.json``).
+        """
+        projects_dir = expand_path(Path(self._gemini_projects_dir), self.home_directory)
+        try:
+            project_files = sorted(projects_dir.glob("*.json"))
+        except (PermissionError, OSError):
+            return []
+        folders: list[Path] = []
+        for project_file in project_files:
+            data = self._load_json_file(project_file)
+            if not isinstance(data, dict):
+                continue
+            resources = _nested_dict_get(data, "projectResources", "resources")
+            if not isinstance(resources, list):
+                continue
+            for resource in resources:
+                if not isinstance(resource, dict):
+                    continue
+                folder = _file_uri_to_path(resource.get("folderUri"))
+                if folder is not None:
+                    folders.append(folder)
+        return folders
