@@ -1911,17 +1911,21 @@ def test_cursor_discoverer_detects_installation(tmp_path):
     assert CursorDiscoverer(tmp_path).client_exists() is not None
 
 
-def test_windsurf_discoverer_requires_windsurf_subdir(tmp_path):
-    """``~/.codeium`` alone is the Codeium VSCode plugin — only ``~/.codeium/windsurf`` proves the Windsurf IDE is installed."""
+def test_windsurf_discoverer_detects_codeium_root(tmp_path):
+    """Both the Codeium root ``~/.codeium`` and the IDE subdir ``~/.codeium/windsurf``
+    count as installed (parity with legacy detection); the deeper, more specific
+    path is reported as the client path when it exists."""
     from agent_scan.agents import WindsurfDiscoverer
 
-    # Just ``~/.codeium`` (plugin-only) — must NOT detect as Windsurf.
+    # Bare ``~/.codeium`` (Codeium root) is enough to detect.
     (tmp_path / ".codeium").mkdir()
-    assert WindsurfDiscoverer(tmp_path).client_exists() is None
+    result = WindsurfDiscoverer(tmp_path).client_exists()
+    assert result is not None
+    assert result.endswith("/.codeium")
 
-    # Now the actual Windsurf IDE subdir exists — detect.
+    # With the IDE subdir present, the deeper path is reported (listed first).
     (tmp_path / ".codeium" / "windsurf").mkdir()
-    assert WindsurfDiscoverer(tmp_path).client_exists() is not None
+    assert WindsurfDiscoverer(tmp_path).client_exists().endswith("/.codeium/windsurf")
 
 
 def test_kiro_discoverer_detects_installation(tmp_path):

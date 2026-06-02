@@ -10,10 +10,13 @@ from agent_scan.agents.vscode.base import VSCodeFamilyDiscoverer
 class WindsurfDiscoverer(VSCodeFamilyDiscoverer):
     name = "windsurf"
     _user_data_dir_names = ("Windsurf",)
-    # ``~/.codeium`` alone is the Codeium VSCode *plugin*; the IDE proper
-    # lives under ``~/.codeium/windsurf``. Use the deeper path so we don't
-    # report Windsurf as installed for plugin-only users.
-    _install_paths = ("~/.codeium/windsurf",)
+    # Windsurf (the IDE) keeps its state under ``~/.codeium/windsurf``; the
+    # broader ``~/.codeium`` is the Codeium root, shared with the Codeium editor
+    # plugin. Both count as an install signal — the deeper path is listed first
+    # so a full IDE install reports it as the client path, while ``~/.codeium``
+    # keeps parity with legacy well-known-client detection. The windsurf-scoped
+    # MCP/skill paths below are unaffected either way.
+    _install_paths = ("~/.codeium/windsurf", "~/.codeium")
     _user_mcp_file_paths = ("~/.codeium/windsurf/mcp_config.json",)
     # Windsurf *documents* MCP at exactly one location — the global
     # ``~/.codeium/windsurf/mcp_config.json`` above. The remaining paths are
