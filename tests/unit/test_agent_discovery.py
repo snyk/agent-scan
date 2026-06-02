@@ -2159,27 +2159,35 @@ def test_looks_like_mcp_payload_recognizes_flat_http_url_map():
     assert _looks_like_mcp_payload({"srv": {"httpUrl": "https://example.com/mcp"}})
 
 
-def test_antigravity_discoverer_has_no_workspace_mcp_path():
-    """Antigravity intentionally has no ``_workspace_mcp_relative`` configured.
+def test_antigravity_discoverer_workspace_mcp_paths():
+    """Antigravity's workspace-scoped MCP paths.
 
-    Google's official Antigravity docs site is a client-rendered SPA whose
-    pages don't disclose a workspace-scoped ``mcp.json`` path, and the
-    canonical sitemap doesn't list one either. Community write-ups float
-    candidates (e.g. ``.agents/mcp_config.json``) but those aren't Google-
-    official. A wrong guess here would let a user-controlled file on disk
-    feed parse failures into every scan — so this test pins the empty value
-    and forces a deliberate code review before any path is added.
+    None of these is documented by Google: Antigravity's official docs site is a
+    client-rendered SPA that discloses no workspace ``mcp.json`` path, and its
+    canonical sitemap lists none. They are wired up at user request as
+    best-effort, speculative catches — each tagged ``inferred — verify`` at its
+    definition in ``AntigravityDiscoverer``:
 
-    If a future contributor needs to add a workspace path, they must:
-    (1) cite an official Google source documenting the exact path, and
-    (2) update both this test and the comment in ``AntigravityDiscoverer``.
+    * ``.mcp.json`` — the cross-tool project-root convention (Claude Code /
+      Cline), mirroring the speculative entry already on ``KiroDiscoverer``.
+    * ``.agents/mcp_config.json`` — community-floated Antigravity workspace
+      candidate; matches Antigravity's ``mcp_config.json`` file naming and its
+      ``.agents/`` workspace-dir convention (the same dir its workspace skills
+      live under).
+    * ``.gemini/mcp_config.json`` — a workspace mirror of the user-global
+      ``~/.gemini/config/mcp_config.json`` the Antigravity stack consults.
+
+    A wrong guess is a tolerated no-op (the file simply won't exist), but a path
+    that collides with an unrelated user file could feed parse failures into a
+    scan — so keep the set minimal and justified. If Google later publishes an
+    official path, reconcile it here and in the discoverer comment.
     """
     from agent_scan.agents import AntigravityDiscoverer
 
-    assert AntigravityDiscoverer._workspace_mcp_relative == (), (
-        "Antigravity must not declare a workspace MCP path without official "
-        "Google documentation confirming it. See the comment on "
-        "AntigravityDiscoverer for context."
+    assert AntigravityDiscoverer._workspace_mcp_relative == (
+        ".mcp.json",
+        ".agents/mcp_config.json",
+        ".gemini/mcp_config.json",
     )
 
 
@@ -3301,6 +3309,53 @@ def test_antigravity_workspace_skills_discovered_via_gemini_projects_registry(tm
     assert len(matching) == 1
     entries = skills_dirs[matching[0]]
     assert any(name == "ws-skill" for name, _ in entries)
+
+
+@pytest.mark.parametrize(
+    "relative",
+    [".mcp.json", ".agents/mcp_config.json", ".gemini/mcp_config.json"],
+)
+def test_antigravity_workspace_mcp_discovered_via_gemini_projects_registry(tmp_path, relative):
+    """End-to-end regression: a project MCP file at each supported workspace-relative
+    path, in a workspace recorded only in the ``~/.gemini/config/projects`` registry,
+    must surface (the reported bug — Antigravity never scanned project-scoped MCP
+    because ``_workspace_mcp_relative`` was empty)."""
+    from agent_scan.agents import AntigravityDiscoverer
+
+    (tmp_path / ".gemini" / "antigravity").mkdir(parents=True)
+    workspace = _setup_gemini_project(tmp_path, "myproj")
+    mcp_file = workspace / relative
+    mcp_file.parent.mkdir(parents=True, exist_ok=True)
+    mcp_file.write_text('{"mcpServers": {"ws-mcp": {"type": "http", "url": "https://ws-mcp.example/mcp"}}}')
+
+    mcp_configs = AntigravityDiscoverer(tmp_path).discover_mcp_servers()
+
+    matching = [k for k in mcp_configs if k.endswith(f"/myproj/{relative}")]
+    assert len(matching) == 1, f"workspace MCP at {relative} must surface; got keys: {list(mcp_configs)}"
+    entry = mcp_configs[matching[0]]
+    assert not isinstance(entry, CouldNotParseMCPConfig)
+    name, server = entry[0]
+    assert name == "ws-mcp"
+    assert getattr(server, "url", None) == "https://ws-mcp.example/mcp"
+
+
+def test_antigravity_workspace_mcp_picked_up_from_ancestor(tmp_path):
+    """A project MCP file at an *ancestor* of the opened workspace is included — the
+    ancestor walk (monorepo root holding the config) applies to Antigravity's
+    gemini-registry workspaces too, mirroring the Cursor/VSCode behavior."""
+    from agent_scan.agents import AntigravityDiscoverer
+
+    (tmp_path / ".gemini" / "antigravity").mkdir(parents=True)
+    _setup_gemini_project(tmp_path, "monorepo/packages/app")
+    (tmp_path / "monorepo" / ".mcp.json").write_text('{"mcpServers": {"root-mcp": {"command": "x"}}}')
+
+    mcp_configs = AntigravityDiscoverer(tmp_path).discover_mcp_servers()
+
+    matching = [k for k in mcp_configs if k.endswith("/monorepo/.mcp.json")]
+    assert len(matching) == 1, f"ancestor project MCP must surface; got keys: {list(mcp_configs)}"
+    # The file lives only at the ancestor, so the leaf's own .mcp.json must not
+    # appear — proves it is genuinely the ancestor being walked, not the leaf.
+    assert not any(k.endswith("/app/.mcp.json") for k in mcp_configs)
 
 
 def test_antigravity_project_folders_empty_when_projects_dir_missing(tmp_path):

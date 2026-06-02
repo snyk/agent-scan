@@ -60,19 +60,25 @@ class AntigravityDiscoverer(VSCodeFamilyDiscoverer):
         "~/.agent/skills",
     )
     _workspace_skills_relative = (".agent/skills", ".agents/skills")
-    # No per-workspace MCP path configured. Antigravity's official documentation
-    # site (``antigravity.google/docs/*``) is a client-rendered SPA whose pages
-    # don't disclose a workspace-scoped ``mcp.json`` file path. The official
-    # sitemap (``antigravity.google/sitemap.xml``) lists only
-    # ``/docs/{agent-features,editor-features,faq,features,get-started,rest-api}``
-    # and the ``/docs/mcp`` page that search engines index documents the
-    # user-global ``~/.gemini/antigravity/mcp_config.json`` (already in
-    # ``_user_mcp_file_paths`` above). Community write-ups float candidates
-    # like ``.agents/mcp_config.json``, but those are not Google-official.
-    # Leaving ``_workspace_mcp_relative`` empty is the conservative call:
-    # adding a guessed path would let a user-controlled file on disk feed
-    # parse failures into every scan and falsely advertise coverage we don't
-    # actually have. Revisit once Google publishes a path we can cite.
+    # Per-workspace MCP paths. NONE is Google-official: the Antigravity docs site
+    # (``antigravity.google/docs/*``) is a client-rendered SPA that discloses no
+    # workspace ``mcp.json`` path, and its sitemap lists none — the only documented
+    # MCP file is the user-global ``~/.gemini/antigravity/mcp_config.json`` (in
+    # ``_user_mcp_file_paths`` above). All three below are SPECULATIVE, added at
+    # user request as best-effort catches and individually tagged ``inferred —
+    # verify``. Each opened workspace and its ancestors are scanned for these (see
+    # :meth:`_discover_workspace_mcp` + :meth:`_gemini_project_folders`); a path
+    # that never exists is a harmless no-op. Reconcile if Google publishes one.
+    _workspace_mcp_relative = (
+        # Cross-tool project-root convention (Claude Code / Cline); mirrors the
+        # speculative entry on KiroDiscoverer.
+        ".mcp.json",  # inferred — verify (undocumented for Antigravity)
+        # Matches Antigravity's ``mcp_config.json`` naming + ``.agents/`` workspace
+        # dir (its workspace skills live under ``.agents/skills``); community-floated.
+        ".agents/mcp_config.json",  # inferred — verify (undocumented for Antigravity)
+        # Workspace mirror of the user-global ``~/.gemini/config/mcp_config.json``.
+        ".gemini/mcp_config.json",  # inferred — verify (undocumented for Antigravity)
+    )
     # Installed extensions live under ``~/.gemini/extensions/`` (shared with
     # the Gemini CLI; not under the ``antigravity/`` subdir).
     _extension_paths = ("~/.gemini/extensions",)
