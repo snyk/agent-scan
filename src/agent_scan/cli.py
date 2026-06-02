@@ -67,7 +67,7 @@ def setup_logging(verbose=False, log_to_stderr=False):
                 datefmt="[%X]",
                 force=True,
                 level=logging.DEBUG,
-                handlers=[RichHandler(markup=True, rich_tracebacks=True, console=stderr_console)],
+                handlers=[RichHandler(markup=False, rich_tracebacks=True, console=stderr_console)],
             )
             root_logger.debug("Verbose mode enabled, logging initialized to stderr")
         else:  # stdout logging
@@ -76,7 +76,7 @@ def setup_logging(verbose=False, log_to_stderr=False):
                 datefmt="[%X]",
                 force=True,
                 level=logging.DEBUG,
-                handlers=[RichHandler(markup=True, rich_tracebacks=True)],
+                handlers=[RichHandler(markup=False, rich_tracebacks=True)],
             )
             root_logger.debug("Logging initialized to stdout")
         root_logger.debug("Logging initialized")
