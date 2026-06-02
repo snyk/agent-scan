@@ -302,9 +302,21 @@ class AgentDiscoverer(ABC):
             return None
         if isinstance(data, CouldNotParseMCPConfig):
             return data
-        if not isinstance(data, dict) or not data:
+        if not isinstance(data, dict):
+            # A non-object root (JSON array/scalar) is not any known MCP shape.
+            # An opportunistic walk merely matched the filename, so skip it; an
+            # explicitly-named config file is unsupported/malformed and must
+            # surface as CouldNotParseMCPConfig (legacy ``scan_mcp_config_file``
+            # parity — there every model fails on a non-dict). It falls through to
+            # the format loop below, where each ``model_validate`` rejects the
+            # non-dict and the last error is reported.
+            if skip_unrecognized:
+                return None
+        elif not data:
+            # Empty object: no servers to scan, and not malformed — skip quietly
+            # (legacy returns a zero-server ``ConfigWithoutMCP`` for ``{}``).
             return None
-        if skip_unrecognized and not _looks_like_mcp_payload(data):
+        elif skip_unrecognized and not _looks_like_mcp_payload(data):
             return None
 
         last_error: Exception | None = None

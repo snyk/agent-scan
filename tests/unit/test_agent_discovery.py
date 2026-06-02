@@ -736,6 +736,46 @@ def test_parse_mcp_file_no_matching_format_records_parse_failure(tmp_path, caplo
     assert no_match[0].exc_info is None
 
 
+@pytest.mark.parametrize(
+    "content",
+    [
+        '[{"command": "echo"}]',  # JSON array root
+        '"just a string"',  # JSON string root
+        "[1, 2, 3]",  # JSON array of scalars
+    ],
+)
+def test_parse_mcp_file_non_dict_root_surfaces_parse_failure(tmp_path, content):
+    """An explicitly-named config file whose JSON *root* is a non-object (array /
+    scalar) is unsupported MCP and must surface as ``CouldNotParseMCPConfig`` — the
+    legacy ``scan_mcp_config_file`` path fails every model on a non-dict and reports
+    a parse error, so silently skipping it would lose that signal.
+    """
+    entry = _parse_claude_dotmcp(tmp_path, content)
+
+    assert isinstance(entry, CouldNotParseMCPConfig)
+    assert entry.is_failure
+
+
+def test_parse_mcp_file_non_dict_root_skipped_for_opportunistic_walk(tmp_path):
+    """Under ``skip_unrecognized=True`` (the extension/plugin walks that match every
+    file merely *named* ``mcp.json``), a non-object root is skipped (``None``), not
+    surfaced — an unrelated array/scalar file that happens to share the name must not
+    become a false-positive parse error, and the recognition check must not choke on
+    a non-dict.
+    """
+    from agent_scan.agents import ClaudeCodeDiscoverer
+    from agent_scan.agents.claude_code import _CLAUDE_MCP_FORMATS
+
+    mcp_file = tmp_path / "mcp.json"
+    mcp_file.write_text("[1, 2, 3]")
+
+    entry = ClaudeCodeDiscoverer(tmp_path)._parse_mcp_file(
+        mcp_file, formats=_CLAUDE_MCP_FORMATS, skip_unrecognized=True
+    )
+
+    assert entry is None
+
+
 def test_claude_mcp_formats_flat_remote_server_named_mcpServers(tmp_path):
     """A flat-format payload with a single RemoteServer named "mcpServers" (``url``
     discriminator instead of ``command``) parses as flat — one server named
