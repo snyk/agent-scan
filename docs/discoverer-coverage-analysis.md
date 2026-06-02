@@ -90,6 +90,7 @@ flagged for completeness.
 |---|---|---|---|
 | `~/.claude/skills/<name>/SKILL.md` | dir-per-skill | `_discover_global_skill` | ✅ |
 | `<project>/.claude/skills` (+ every ancestor to root) | dir-per-skill | `_discover_project_skills` | ✅ |
+| `<project>/.agents/skills` (+ every ancestor to root) | dir-per-skill | `_discover_project_skills` | ✅ (cross-agent convention; verified empirically that Claude Code loads it) |
 | Plugin `<root>/skills/` + `plugin.json` `skills[]` array | dir-per-skill | `_discover_plugin_skills` / `_discover_plugin_manifest_skills` | ✅ |
 | `~/.claude/commands/*.md`, `<project>/.claude/commands/*.md`, plugin `commands/` | flat `*.md` + namespacing | `_discover_global/project/plugin_commands` | ✅ |
 
@@ -159,6 +160,7 @@ Docs: [cursor.com/docs/mcp](https://cursor.com/docs/mcp),
 |---|---|---|---|
 | `~/.cursor/mcp.json` (global) | `mcpServers` | `_discover_user_mcp_files` | ✅ |
 | `<project>/.cursor/mcp.json` (workspace) | `mcpServers` | `_discover_workspace_mcp` | ✅ |
+| `<project>/.mcp.json` (workspace root) | `mcpServers` | `_discover_workspace_mcp` | ✅ (undocumented; verified empirically that Cursor loads it) |
 
 Remote servers use `url` (not `serverUrl`); `RemoteServer` accepts it. Cursor
 omits `type` on remotes — fine, the URL key drives detection. The inherited

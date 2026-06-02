@@ -17,7 +17,12 @@ class CursorDiscoverer(VSCodeFamilyDiscoverer):
     # it never surfaces a false parse failure.
     _userdata_user_mcp_file = "User/mcp.json"
     _user_settings_file = "User/settings.json"
-    _workspace_mcp_relative = (".cursor/mcp.json",)
+    # ``.cursor/mcp.json`` is the documented workspace MCP file. ``.mcp.json``
+    # at the project root is undocumented (the Cursor docs list only
+    # ``.cursor/mcp.json`` and the global ``~/.cursor/mcp.json``) but verified
+    # empirically that Cursor loads it — same cross-tool project-root convention
+    # the VS Code/Windsurf/Kiro siblings already carry.
+    _workspace_mcp_relative = (".cursor/mcp.json", ".mcp.json")
     # Cursor's docs list two primary workspace skill paths and two legacy
     # compatibility paths (Claude Code and Codex). See cursor.com/docs/skills.
     _workspace_skills_relative = (

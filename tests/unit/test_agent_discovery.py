@@ -537,6 +537,33 @@ def test_claude_code_discoverer_project_skills_scans_per_project_dotclaude(tmp_p
     assert isinstance(skill, SkillServer)
 
 
+def test_claude_code_discoverer_project_skills_scans_agents_skills(tmp_path):
+    """For each project in ~/.claude.json, also scan <project>/.agents/skills.
+
+    ``.agents/skills`` is the cross-agent compatibility convention (verified
+    that Claude Code loads it) alongside the canonical ``.claude/skills``.
+    """
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    (tmp_path / ".claude").mkdir()
+    project_root = tmp_path / "work" / "repo"
+    (project_root / ".agents" / "skills" / "agents-skill").mkdir(parents=True)
+    (project_root / ".agents" / "skills" / "agents-skill" / "SKILL.md").write_text(
+        "---\nname: agents-skill\ndescription: A cross-agent project skill\n---\n\nBody.\n"
+    )
+    (tmp_path / ".claude.json").write_text(f'{{"projects": {{"{project_root.as_posix()}": {{"mcpServers": {{}}}}}}}}')
+
+    skills_dirs = ClaudeCodeDiscoverer(tmp_path)._discover_project_skills()
+
+    keys = [k for k in skills_dirs if k.endswith("/.agents/skills")]
+    assert len(keys) == 1
+    entries = skills_dirs[keys[0]]
+    assert isinstance(entries, list) and len(entries) == 1
+    skill_name, skill = entries[0]
+    assert skill_name == "agents-skill"
+    assert isinstance(skill, SkillServer)
+
+
 def test_claude_code_discoverer_project_skills_skips_missing_project_folders(tmp_path):
     """Projects whose folders don't exist on disk are silently skipped."""
     from agent_scan.agents import ClaudeCodeDiscoverer
@@ -2497,6 +2524,35 @@ def test_windsurf_discoverer_discovers_workspace_root_mcp_json(tmp_path):
     entries = mcp_configs[workspace_keys[0]]
     assert isinstance(entries, list) and len(entries) == 1
     name, server = entries[0]
+    assert name == "ws-root-srv"
+
+
+def test_cursor_discoverer_discovers_workspace_root_mcp_json(tmp_path):
+    """Cursor reads a project-root ``.mcp.json`` in an opened workspace.
+
+    Verified empirically; undocumented — the Cursor MCP docs list only the
+    workspace ``.cursor/mcp.json`` and the global ``~/.cursor/mcp.json``.
+    """
+    from agent_scan.agents import CursorDiscoverer
+
+    discoverer = CursorDiscoverer(tmp_path)
+    workspace_storage = _userdata(discoverer) / "User" / "workspaceStorage"
+    workspace_hash = workspace_storage / "ws"
+    workspace_hash.mkdir(parents=True)
+
+    workspace = tmp_path / "proj"
+    workspace.mkdir()
+    (workspace / ".mcp.json").write_text('{"mcpServers": {"ws-root-srv": {"command": "w"}}}')
+
+    (workspace_hash / "workspace.json").write_text(f'{{"folder": "{workspace.as_uri()}"}}')
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    workspace_keys = [k for k in mcp_configs if k.endswith("/proj/.mcp.json")]
+    assert len(workspace_keys) == 1
+    entries = mcp_configs[workspace_keys[0]]
+    assert isinstance(entries, list) and len(entries) == 1
+    name, _ = entries[0]
     assert name == "ws-root-srv"
 
 

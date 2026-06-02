@@ -52,6 +52,12 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
     _mcp_config_path = "~/.claude.json"
     _skills_subdir = "skills"
     _project_dotclaude_subdir = ".claude"
+    # Project-scoped skill dirs scanned at every opened project root and its
+    # ancestors. ``.claude/skills`` is Claude Code's canonical project skills
+    # location; ``.agents/skills`` is the cross-agent compatibility convention
+    # (verified that Claude Code also loads it), shared with the VS Code-family
+    # discoverers.
+    _project_skills_relative: tuple[str, ...] = (".claude/skills", ".agents/skills")
     # Subtrees under a plugin *root* (see ``_plugin_root_dirs``) that stage
     # installed plugins. ``cache`` is the hydrated install tree and
     # ``marketplaces`` the cloned marketplace sources (the current layout, per
@@ -222,12 +228,14 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         return result
 
     def _discover_project_skills(self) -> SkillsDirsResult:
-        """For each project (and every ancestor up to root), scan ``<path>/.claude/skills`` if present."""
+        """For each project (and every ancestor up to root), scan each entry in
+        ``_project_skills_relative`` (``.claude/skills`` + ``.agents/skills``) if present."""
         result: SkillsDirsResult = {}
         for path in self._project_paths_with_ancestors():
-            skills_dir = path / self._project_dotclaude_subdir / self._skills_subdir
-            if skills_dir.exists():
-                result[skills_dir.as_posix()] = inspect_skills_dir(str(skills_dir))
+            for rel in self._project_skills_relative:
+                skills_dir = path / rel
+                if skills_dir.exists():
+                    result[skills_dir.as_posix()] = inspect_skills_dir(str(skills_dir))
         return result
 
     # --- private: plugin discovery ---
