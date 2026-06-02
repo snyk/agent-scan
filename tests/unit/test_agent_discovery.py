@@ -2442,6 +2442,35 @@ def test_cursor_discoverer_walks_workspace_storage(tmp_path):
     assert len(workspace_keys) == 1
 
 
+def test_windsurf_discoverer_discovers_workspace_root_mcp_json(tmp_path):
+    """Windsurf reads a project-root ``.mcp.json`` in an opened workspace.
+
+    Verified empirically; undocumented — the Windsurf MCP docs list only the
+    global ``~/.codeium/windsurf/mcp_config.json``.
+    """
+    from agent_scan.agents import WindsurfDiscoverer
+
+    discoverer = WindsurfDiscoverer(tmp_path)
+    workspace_storage = _userdata(discoverer) / "User" / "workspaceStorage"
+    workspace_hash = workspace_storage / "ws"
+    workspace_hash.mkdir(parents=True)
+
+    workspace = tmp_path / "proj"
+    workspace.mkdir()
+    (workspace / ".mcp.json").write_text('{"mcpServers": {"ws-root-srv": {"command": "w"}}}')
+
+    (workspace_hash / "workspace.json").write_text(f'{{"folder": "{workspace.as_uri()}"}}')
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    workspace_keys = [k for k in mcp_configs if k.endswith("/proj/.mcp.json")]
+    assert len(workspace_keys) == 1
+    entries = mcp_configs[workspace_keys[0]]
+    assert isinstance(entries, list) and len(entries) == 1
+    name, server = entries[0]
+    assert name == "ws-root-srv"
+
+
 # --- skills discovery ---
 
 
