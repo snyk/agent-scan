@@ -85,6 +85,13 @@ def _file_uri_to_path(uri: object) -> Path | None:
     local_path = url2pathname(parsed.path)
     host = parsed.netloc
     if not host or host.lower() == "localhost":
+        # A path-less local URI (``file://`` / ``file://localhost``) leaves
+        # ``local_path`` empty, and ``Path("")`` is ``Path(".")`` — the scanner's
+        # CWD, whose ancestors every workspace-relative scan would then walk
+        # (``.vscode/mcp.json``, ``.cursor/skills``, …). VSCode never writes a
+        # path-less folder URI; treat such a degenerate value as unresolvable.
+        if not local_path:
+            return None
         return Path(local_path)
     # ``os.sep`` keeps the UNC prefix correct per platform: ``\\server\share`` on
     # Windows, ``//server/share`` on POSIX.
@@ -512,15 +519,21 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         if servers:
             return self._validate_servers(servers, source=f"mcp.servers in {path.as_posix()}")
         # ``_settings_mcp_server_map`` already covers nested/dotted ``mcp.servers``
-        # (the shapes VSCode actually writes). The only remaining cases worth
-        # handing to the format tuple are a bare top-level ``mcpServers`` (a fork
-        # that diverges) or an ``mcp`` object that *has* a ``servers`` key in a
-        # malformed shape we still want flagged. An ``mcp`` object with no
-        # ``servers`` at all (e.g. only ``inputs`` or ``discovery``) carries no
-        # servers, so return ``None`` rather than letting every format fail and
-        # surface a false-positive parse error.
+        # in its valid dict shape (the shapes VSCode actually writes). The only
+        # remaining cases worth handing to the format tuple are a bare top-level
+        # ``mcpServers`` (a fork that diverges) or an ``mcp.servers`` in a
+        # *malformed* (non-dict) shape we still want flagged. Two cases must NOT
+        # fall through, or every format fails / coerces to a bogus entry:
+        #   * an ``mcp`` object with no ``servers`` at all (e.g. only ``inputs``
+        #     or ``discovery``) — nothing to surface; and
+        #   * an ``mcp.servers`` that is present but an *empty* dict — already
+        #     seen (and found empty) above, and ``VSCodeConfigFile`` would
+        #     validate it to a zero-server ``[]`` entry, surfacing an ordinary
+        #     editor settings file as an empty MCP config.
+        # Both return ``None`` instead.
         mcp = data.get("mcp")
-        if "mcpServers" not in data and not (isinstance(mcp, dict) and "servers" in mcp):
+        mcp_servers_malformed = isinstance(mcp, dict) and "servers" in mcp and not isinstance(mcp.get("servers"), dict)
+        if "mcpServers" not in data and not mcp_servers_malformed:
             return None
         return self._parse_mcp_file(path, formats=_VSCODE_FAMILY_FORMATS)
 

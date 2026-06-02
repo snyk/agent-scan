@@ -2052,6 +2052,53 @@ def test_vscode_discoverer_skips_settings_json_mcp_without_servers(tmp_path):
     )
 
 
+def test_vscode_discoverer_skips_settings_json_empty_mcp_servers(tmp_path):
+    """A ``settings.json`` whose ``mcp.servers`` is present but *empty* carries no
+    servers, so it must produce no entry — not a zero-server list keyed by the
+    settings file.
+
+    ``_settings_mcp_server_map`` already extracts a dict-shaped ``mcp.servers``;
+    an empty one is falsy and falls through. It must short-circuit to ``None``
+    rather than validating to ``[]`` via the format tuple (``VSCodeConfigFile``
+    happily validates an empty ``servers`` map), which would surface a bogus
+    zero-server entry for an ordinary editor settings file.
+    """
+    from agent_scan.agents import VSCodeDiscoverer
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    user_dir = _userdata(discoverer) / "User"
+    user_dir.mkdir(parents=True)
+    (user_dir / "settings.json").write_text('{"editor.fontSize": 14, "mcp": {"servers": {}}}')
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    settings_keys = [k for k in mcp_configs if k.endswith("/User/settings.json")]
+    assert settings_keys == [], (
+        f"settings.json with an empty mcp.servers map must not appear in mcp_configs, "
+        f"got entries: {[(k, mcp_configs[k]) for k in settings_keys]}"
+    )
+
+
+def test_vscode_discoverer_flags_malformed_mcp_servers(tmp_path):
+    """A *non-dict* ``mcp.servers`` (e.g. a JSON list) is malformed MCP and must
+    still be surfaced as ``CouldNotParseMCPConfig`` — the empty-servers
+    short-circuit must not also swallow genuinely malformed shapes.
+    """
+    from agent_scan.agents import VSCodeDiscoverer
+    from agent_scan.models import CouldNotParseMCPConfig
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    user_dir = _userdata(discoverer) / "User"
+    user_dir.mkdir(parents=True)
+    (user_dir / "settings.json").write_text('{"mcp": {"servers": [1, 2, 3]}}')
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    settings_keys = [k for k in mcp_configs if k.endswith("/User/settings.json")]
+    assert len(settings_keys) == 1
+    assert isinstance(mcp_configs[settings_keys[0]], CouldNotParseMCPConfig)
+
+
 def test_cursor_discoverer_parses_wrapped_mcp_servers(tmp_path):
     """``~/.cursor/mcp.json`` uses the wrapped ``{"mcpServers": {...}}`` shape."""
     from agent_scan.agents import CursorDiscoverer
@@ -2460,6 +2507,22 @@ def test_file_uri_to_path_treats_localhost_host_as_local(tmp_path):
 
     assert _file_uri_to_path("file://localhost/home/me/repo") == Path("/home/me/repo")
     assert _file_uri_to_path("file:///home/me/repo") == Path("/home/me/repo")
+
+
+def test_file_uri_to_path_returns_none_for_pathless_uri():
+    """A degenerate ``file://`` / ``file://localhost`` carrying no path must not
+    resolve to ``Path('')`` == ``Path('.')`` — the scanner's CWD, whose ancestors
+    would then be walked for ``.vscode/mcp.json`` / ``.cursor/skills`` etc. Such a
+    URI is unresolvable and must return ``None``.
+    """
+    from pathlib import Path
+
+    from agent_scan.agents.vscode.base import _file_uri_to_path
+
+    assert _file_uri_to_path("file://") is None
+    assert _file_uri_to_path("file://localhost") is None
+    # A genuine root path is still resolved — the guard only rejects an *empty* path.
+    assert _file_uri_to_path("file:///") == Path("/")
 
 
 def test_vscode_discoverer_workspace_storage_skips_remote_folder_uri(tmp_path):
