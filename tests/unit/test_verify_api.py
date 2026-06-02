@@ -406,6 +406,109 @@ class TestAnalyzeMachineScanMetadata:
             assert payload.get("scan_metadata") is None
 
 
+class TestAnalyzeMachineUserInfo:
+    """Test that analyze_machine populates scan_user_info correctly."""
+
+    @staticmethod
+    def _make_mock_session():
+        mock_session = MagicMock()
+        mock_response = AsyncMock()
+        mock_response.status = 200
+        mock_response.text = AsyncMock(
+            return_value='{"scan_path_results": [{"path": "/test/path", "issues": [], "labels": []}], "scan_user_info": {}}'
+        )
+        mock_response.raise_for_status = MagicMock()
+
+        mock_post = MagicMock()
+        mock_post.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_post.__aexit__ = AsyncMock(return_value=None)
+
+        mock_session.post = MagicMock(return_value=mock_post)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+        return mock_session
+
+    @pytest.mark.asyncio
+    async def test_uses_scanned_usernames_when_provided(self):
+        """When scanned_usernames is passed, the payload's username is that list."""
+        scan_paths = [ScanPathResult(path="/test/path")]
+        analysis_url = "https://test.example.com/api"
+        scanned_usernames = ["alice", "bob"]
+
+        with (
+            patch("agent_scan.verify_api.aiohttp.ClientSession") as mock_session_class,
+            patch("agent_scan.verify_api.get_username", return_value="local-user"),
+            patch("agent_scan.verify_api.get_hostname", return_value="test-host"),
+            patch.dict(os.environ, {"SNYK_TOKEN": "test-token"}),
+        ):
+            mock_session_class.return_value = self._make_mock_session()
+
+            await analyze_machine(
+                scan_paths=scan_paths,
+                analysis_url=analysis_url,
+                identifier=None,
+                scanned_usernames=scanned_usernames,
+            )
+
+            mock_session_class.return_value.post.assert_called_once()
+            call_kwargs = mock_session_class.return_value.post.call_args[1]
+            payload = json.loads(call_kwargs["data"])
+            assert payload["scan_user_info"]["username"] == scanned_usernames
+            assert payload["scan_user_info"]["hostname"] == "test-host"
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_local_username_when_scanned_usernames_not_provided(self):
+        """When scanned_usernames is not provided, username falls back to [get_username()]."""
+        scan_paths = [ScanPathResult(path="/test/path")]
+        analysis_url = "https://test.example.com/api"
+
+        with (
+            patch("agent_scan.verify_api.aiohttp.ClientSession") as mock_session_class,
+            patch("agent_scan.verify_api.get_username", return_value="local-user"),
+            patch("agent_scan.verify_api.get_hostname", return_value="test-host"),
+            patch.dict(os.environ, {"SNYK_TOKEN": "test-token"}),
+        ):
+            mock_session_class.return_value = self._make_mock_session()
+
+            await analyze_machine(
+                scan_paths=scan_paths,
+                analysis_url=analysis_url,
+                identifier=None,
+            )
+
+            mock_session_class.return_value.post.assert_called_once()
+            call_kwargs = mock_session_class.return_value.post.call_args[1]
+            payload = json.loads(call_kwargs["data"])
+            assert payload["scan_user_info"]["username"] == ["local-user"]
+            assert payload["scan_user_info"]["hostname"] == "test-host"
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_local_username_when_scanned_usernames_empty(self):
+        """When scanned_usernames is an empty list, username falls back to [get_username()]."""
+        scan_paths = [ScanPathResult(path="/test/path")]
+        analysis_url = "https://test.example.com/api"
+
+        with (
+            patch("agent_scan.verify_api.aiohttp.ClientSession") as mock_session_class,
+            patch("agent_scan.verify_api.get_username", return_value="local-user"),
+            patch("agent_scan.verify_api.get_hostname", return_value="test-host"),
+            patch.dict(os.environ, {"SNYK_TOKEN": "test-token"}),
+        ):
+            mock_session_class.return_value = self._make_mock_session()
+
+            await analyze_machine(
+                scan_paths=scan_paths,
+                analysis_url=analysis_url,
+                identifier=None,
+                scanned_usernames=[],
+            )
+
+            mock_session_class.return_value.post.assert_called_once()
+            call_kwargs = mock_session_class.return_value.post.call_args[1]
+            payload = json.loads(call_kwargs["data"])
+            assert payload["scan_user_info"]["username"] == ["local-user"]
+
+
 class TestAnalyzeMachineHttpErrors:
     """Test that analyze_machine handles various HTTP error status codes correctly."""
 
