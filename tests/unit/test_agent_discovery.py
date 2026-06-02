@@ -2410,6 +2410,53 @@ def test_vscode_discoverer_workspace_storage_skips_malformed_workspace_json(tmp_
     assert any(k.endswith("/good-repo/.vscode/mcp.json") for k in mcp_configs)
 
 
+def test_vscode_discoverer_workspace_storage_unreadable_does_not_abort_discovery(tmp_path, monkeypatch):
+    """An unreadable ``<userdata>/User/workspaceStorage`` must degrade gracefully,
+    not abort the whole discoverer.
+
+    On Python 3.12+, ``Path.exists()`` re-raises ``PermissionError`` when an
+    ancestor directory isn't traversable (rather than returning ``False``) — the
+    routine ``--scan-all-users`` case where an unprivileged scan hits another
+    user's home. An unguarded ``workspace_storage.exists()`` would propagate out
+    of ``discover_mcp_servers()``; the pipeline catches that and skips the entire
+    discoverer (``pipelines.py``), dropping every source for that IDE/user —
+    including reachable user-scope MCP. The walk must skip the unreadable tree the
+    same way ``_load_json_file`` and ``profiles_dir.iterdir`` already do.
+    """
+    from pathlib import Path
+
+    from agent_scan.agents import VSCodeDiscoverer
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+
+    # A reachable, home-relative user-scope MCP file (``~/.vscode/mcp.json``) that
+    # lives outside the userdata subtree — it must survive an unreadable
+    # workspaceStorage.
+    (tmp_path / ".vscode").mkdir()
+    (tmp_path / ".vscode" / "mcp.json").write_text('{"servers": {"user-srv": {"command": "u"}}}')
+
+    real_exists = Path.exists
+
+    def fake_exists(self, *args, **kwargs):
+        # Only the workspaceStorage probe is denied (parent not traversable);
+        # every other existence check behaves normally.
+        if self.name == "workspaceStorage":
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_exists(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "exists", fake_exists)
+
+    # Pre-fix this raises PermissionError and the discoverer is dropped wholesale.
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    # The reachable user-scope MCP is still surfaced; no workspaceStorage entry.
+    user_keys = [k for k in mcp_configs if k.endswith("/.vscode/mcp.json")]
+    assert len(user_keys) == 1, f"user-scope ~/.vscode/mcp.json must survive; got {list(mcp_configs)}"
+    name, _server = mcp_configs[user_keys[0]][0]
+    assert name == "user-srv"
+    assert not any("workspaceStorage" in k for k in mcp_configs)
+
+
 def test_vscode_discoverer_workspace_storage_url_decodes_folder_path(tmp_path):
     """VSCode stores ``folder`` percent-encoded (e.g. ``My%20Projects``); the discoverer must
     decode before resolving, otherwise workspaces with spaces or special chars are silently missed."""
