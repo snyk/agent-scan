@@ -7,12 +7,15 @@ from agent_scan.agents.vscode.base import VSCodeFamilyDiscoverer
 
 class KiroDiscoverer(VSCodeFamilyDiscoverer):
     name = "kiro"
-    # Kiro stores chat history and globalStorage under
-    # ``~/Library/Application Support/kiro/`` (lowercase, observed in the IDE
-    # at ``…/kiro/User/globalStorage/kiro.kiroagent``), so it does follow the
-    # VSCode userdata convention — necessary for workspaceStorage walks that
-    # power per-workspace skill discovery.
-    _user_data_dir_names = ("kiro",)
+    # Kiro stores its userdata tree under ``~/Library/Application Support/Kiro/``
+    # (capital K, verified on disk at ``…/Kiro/User/workspaceStorage/``), matching
+    # the rest of the VSCode family (``Code``/``Cursor``/``Windsurf``). The
+    # lowercase ``kiro.kiroagent`` seen under ``…/User/globalStorage/`` is the
+    # extension id, NOT the userdata folder. The case is load-bearing: the
+    # workspaceStorage walk that powers per-workspace (project) MCP/skill
+    # discovery hangs off this name, so a lowercase ``kiro`` would miss the tree
+    # on case-sensitive filesystems and under ``--scan-all-users``.
+    _user_data_dir_names = ("Kiro",)
     _install_paths = ("~/.kiro",)
     # User-global MCP. Powers do not write a separate merged file: on install
     # Kiro namespaces each Power's servers into a ``powers.mcpServers`` block

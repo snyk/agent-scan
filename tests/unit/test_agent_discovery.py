@@ -3107,7 +3107,7 @@ def test_antigravity_discoverer_walks_gemini_extensions_dir(tmp_path):
 #   - Windsurf: workspace skills at ``.windsurf/skills/`` + cross-agent compat
 #     paths ``.agents/skills/`` and ``.claude/skills/``
 #   - Kiro:    user-global ``~/.kiro/skills/`` and workspace ``.kiro/skills/``;
-#     userdata lives at ``~/Library/Application Support/kiro/`` (lowercase).
+#     userdata lives at ``~/Library/Application Support/Kiro/`` (capital K).
 #   - Antigravity: user-global ``~/.gemini/antigravity/skills/`` and workspace
 #     ``.agent/skills/`` (singular ``.agent``, not ``.agents``); userdata at
 #     ``~/Library/Application Support/Antigravity/``.
@@ -3165,15 +3165,19 @@ def test_kiro_user_global_skills_discovered(tmp_path):
     assert any(name == "kiro-user-skill" for name, _ in entries)
 
 
-def test_kiro_user_data_dir_resolves_to_lowercase_kiro(tmp_path):
-    """Kiro's userdata folder is named ``kiro`` (lowercase) — observed in IDE storage at
-    ``~/Library/Application Support/kiro/User/globalStorage/``."""
+def test_kiro_user_data_dir_resolves_to_capital_kiro(tmp_path):
+    """Kiro's userdata folder is named ``Kiro`` (capital K) — observed on disk at
+    ``~/Library/Application Support/Kiro/User/workspaceStorage/``. The lowercase
+    ``kiro.kiroagent`` seen under ``globalStorage/`` is the extension id, not the
+    userdata folder. The capitalized name matters on case-sensitive filesystems
+    and under ``--scan-all-users``, where a lowercase name would miss the tree
+    and silently drop all per-workspace (project) MCP/skills discovery."""
     from agent_scan.agents import KiroDiscoverer
 
     userdata = KiroDiscoverer(tmp_path)._user_data_dir()
 
     assert userdata is not None
-    assert userdata.name == "kiro"
+    assert userdata.name == "Kiro"
 
 
 def test_kiro_discovers_workspace_skills_at_kiro_relative(tmp_path):
