@@ -1,4 +1,5 @@
 import pytest
+from pydantic import ValidationError
 
 from agent_scan.models import CommandParsingError, RemoteServer, StdioServer
 
@@ -61,12 +62,13 @@ class TestRemoteServerUrlAlias:
 
 
 class TestRemoteServerTransportType:
-    """Documented Claude Code remote transports must validate.
+    """``streamable-http`` folds onto ``http``; ``ws`` is not yet supported.
 
-    ``type: "streamable-http"`` and ``type: "ws"`` are documented Claude Code
-    transports. Before, ``RemoteServer.type`` only accepted ``sse``/``http``, so
-    a single such server raised a ``ValidationError`` that sank the *entire*
-    ``mcpServers`` map into ``CouldNotParseMCPConfig`` (coverage analysis §7.1).
+    ``type: "streamable-http"`` is a documented Claude Code spelling of the HTTP
+    Streamable transport, so it normalizes to ``http``. ``type: "ws"`` is also a
+    documented Claude Code transport but is intentionally rejected for now
+    (TODO(ADS-384)) because the downstream backend/platform only accept
+    ``{sse, http}``.
     """
 
     def test_existing_sse_type_unchanged(self):
@@ -92,11 +94,13 @@ class TestRemoteServerTransportType:
         server = RemoteServer.model_validate({"url": "https://mcp.example.com/mcp", "type": "streamable-https"})
         assert server.type == "http"
 
-    def test_ws_type_accepted(self):
-        # WebSocket isn't connectable by the scanner, but it must still parse so
-        # the server is *discovered* rather than sinking its whole config file.
-        server = RemoteServer.model_validate({"url": "wss://mcp.example.com/ws", "type": "ws"})
-        assert server.type == "ws"
+    def test_ws_type_rejected(self):
+        # ``ws`` is a documented Claude Code transport, but it is intentionally
+        # NOT accepted yet -- emitting it breaks the downstream backend/platform
+        # (which validate against {sse, http} only). Re-add it end-to-end via
+        # TODO(ADS-384): https://snyksec.atlassian.net/browse/ADS-384
+        with pytest.raises(ValidationError):
+            RemoteServer.model_validate({"url": "wss://mcp.example.com/ws", "type": "ws"})
 
     def test_type_is_case_insensitive(self):
         server = RemoteServer.model_validate({"url": "https://mcp.example.com/mcp", "type": "HTTP"})

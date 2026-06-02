@@ -58,14 +58,14 @@ def test_claude_code_discoverer_parses_mcp_servers(tmp_path):
     assert server.command == "echo"
 
 
-def test_claude_code_discoverer_streamable_and_ws_servers_do_not_sink_file(tmp_path):
-    """A documented ``streamable-http``/``ws`` remote must not sink its whole file.
+def test_claude_code_discoverer_streamable_http_server_does_not_sink_file(tmp_path):
+    """A documented ``streamable-http`` remote must not sink its whole file.
 
     Coverage analysis §7.1: previously one server whose ``type`` wasn't
     ``sse``/``http`` raised a ValidationError that turned the entire
     ``mcpServers`` map into ``CouldNotParseMCPConfig`` -- losing every valid
-    sibling server. All three servers below must survive, with
-    ``streamable-http`` normalized onto ``http``.
+    sibling server. Both servers below must survive, with ``streamable-http``
+    normalized onto ``http``.
     """
     from agent_scan.agents import ClaudeCodeDiscoverer
 
@@ -73,8 +73,7 @@ def test_claude_code_discoverer_streamable_and_ws_servers_do_not_sink_file(tmp_p
     (tmp_path / ".claude.json").write_text(
         '{"mcpServers": {'
         '"good-stdio": {"command": "echo", "args": ["hi"]}, '
-        '"streamable": {"url": "https://mcp.example.com/mcp", "type": "streamable-http"}, '
-        '"socket": {"url": "wss://mcp.example.com/ws", "type": "ws"}'
+        '"streamable": {"url": "https://mcp.example.com/mcp", "type": "streamable-http"}'
         "}}"
     )
 
@@ -84,12 +83,37 @@ def test_claude_code_discoverer_streamable_and_ws_servers_do_not_sink_file(tmp_p
     entries = mcp_configs[config_path]
     assert isinstance(entries, list), f"file was sunk: {entries!r}"
     by_name = dict(entries)
-    assert set(by_name) == {"good-stdio", "streamable", "socket"}
+    assert set(by_name) == {"good-stdio", "streamable"}
     assert isinstance(by_name["good-stdio"], StdioServer)
     assert isinstance(by_name["streamable"], RemoteServer)
     assert by_name["streamable"].type == "http"
-    assert isinstance(by_name["socket"], RemoteServer)
-    assert by_name["socket"].type == "ws"
+
+
+def test_claude_code_discoverer_ws_server_sinks_file_pending_ads_384(tmp_path):
+    """A ``type: "ws"`` server is not yet supported and currently sinks its file.
+
+    ``ws`` is a documented Claude Code WebSocket transport, but emitting it
+    breaks the downstream backend/platform (which accept ``{sse, http}`` only),
+    so ``RemoteServer`` rejects it for now. Because a config's ``mcpServers`` map
+    validates as a single unit, one ``ws`` server turns the whole file into
+    ``CouldNotParseMCPConfig`` -- losing its valid siblings too. Re-adding ``ws``
+    end-to-end (and/or per-server validation so siblings survive) is tracked in
+    TODO(ADS-384): https://snyksec.atlassian.net/browse/ADS-384
+    """
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude.json").write_text(
+        '{"mcpServers": {'
+        '"good-stdio": {"command": "echo", "args": ["hi"]}, '
+        '"socket": {"url": "wss://mcp.example.com/ws", "type": "ws"}'
+        "}}"
+    )
+
+    mcp_configs = ClaudeCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    config_path = next(iter(mcp_configs))
+    assert isinstance(mcp_configs[config_path], CouldNotParseMCPConfig)
 
 
 def test_claude_code_discoverer_returns_empty_when_json_has_no_mcp_fields(tmp_path):

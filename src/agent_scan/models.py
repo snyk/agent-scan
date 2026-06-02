@@ -116,10 +116,17 @@ class RemoteServer(BaseModel):
     # ``serverUrl`` (Figma/Antigravity) and ``httpUrl`` (Gemini CLI Streamable HTTP)
     # are vendor aliases for the same remote-server URL. First present wins.
     url: str = Field(validation_alias=AliasChoices("url", "serverUrl", "httpUrl"))
-    # ``sse``/``http`` are the transports the client implements. ``ws`` is
-    # accepted so a documented WebSocket server is still *discovered* (the connect
-    # path can't speak it, but the file must not be lost on its account).
-    type: Literal["sse", "http", "ws"] | None = None
+    # ``sse``/``http`` are the transports the client implements
+    # (``streamable-http`` folds onto ``http`` below). ``ws`` -- a documented
+    # Claude Code WebSocket transport -- is intentionally NOT accepted here yet:
+    # the scanner can't connect to it, and emitting ``type: "ws"`` breaks the
+    # downstream consumers (invariant-mcp-scan-backend / invariant-platform),
+    # which validate against ``{sse, http}`` only and would reject the payload.
+    # Until ``ws`` is supported end-to-end across those repos, a ``ws`` server
+    # fails validation (sinking its config file) rather than being emitted.
+    # TODO(ADS-384): re-add ``"ws"`` once the backend + platform accept it.
+    # https://snyksec.atlassian.net/browse/ADS-384
+    type: Literal["sse", "http"] | None = None
     headers: dict[str, str] = Field(default_factory=dict)
 
     @field_validator("type", mode="before")
@@ -128,12 +135,16 @@ class RemoteServer(BaseModel):
         """Fold documented transport spellings onto the values the client speaks.
 
         Claude Code documents ``type: "streamable-http"`` (and the ``-https``
-        spelling) and ``type: "ws"``. ``streamable-http`` is the same HTTP
-        Streamable transport already implemented under ``http``, so it is folded
-        on; matching is case-insensitive. Without this, a single such server
-        raised a ``ValidationError`` that sank the whole ``mcpServers`` map into
+        spelling), which is the same HTTP Streamable transport already
+        implemented under ``http``, so it is folded on here; matching is
+        case-insensitive. Without this, a single such server raised a
+        ``ValidationError`` that sank the whole ``mcpServers`` map into
         ``CouldNotParseMCPConfig`` -- losing every valid sibling (coverage
         analysis §7.1).
+
+        Note: Claude Code also documents a ``type: "ws"`` WebSocket transport,
+        but it is deliberately left unsupported for now -- see the TODO(ADS-384)
+        on the ``type`` field above.
         """
         if not isinstance(v, str):
             return v
