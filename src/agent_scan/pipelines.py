@@ -206,6 +206,7 @@ async def inspect_analyze_push_pipeline(
         max_retries=analyze_args.max_retries,
         skip_ssl_verify=analyze_args.skip_ssl_verify,
         scan_context=scan_context,
+        scanned_usernames=scanned_usernames,
     )
     # push
     for control_server in push_args.control_servers:

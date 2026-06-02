@@ -141,6 +141,7 @@ async def analyze_machine(
     skip_ssl_verify: bool = False,
     raise_on_error: bool = False,
     scan_context: dict | None = None,
+    scanned_usernames: list[str] | None = None,
 ) -> list[ScanPathResult]:
     """
     Analyze the scan paths with the analysis server.
@@ -160,8 +161,8 @@ async def analyze_machine(
 
     # for analysis server we never push personal information
     user_info = ScanUserInfo(
-        hostname=None,
-        username=None,
+        hostname=get_hostname(),
+        username=scanned_usernames if scanned_usernames else [get_username()],
         identifier=identifier,
         ip_address=None,
         anonymous_identifier=None,
