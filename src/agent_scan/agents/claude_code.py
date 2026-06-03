@@ -11,7 +11,7 @@ from agent_scan.agents.base import (
     AgentDiscoverer,
     McpConfigsResult,
     SkillsDirsResult,
-    _walk_under_depth_guarded,
+    _walk_under_depth,
 )
 from agent_scan.models import (
     ClaudeConfigFile,
@@ -285,7 +285,7 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         """
         result: McpConfigsResult = {}
         for base in self._plugin_base_dirs():
-            for mcp_file in _walk_under_depth_guarded(base, ".mcp.json", _MAX_PLUGIN_RGLOB_DEPTH, want_file=True):
+            for mcp_file in _walk_under_depth(base, ".mcp.json", _MAX_PLUGIN_RGLOB_DEPTH, want_file=True):
                 if not mcp_file.is_file():
                     continue
                 parsed = self._parse_mcp_file(mcp_file, formats=_CLAUDE_MCP_FORMATS)
@@ -381,7 +381,7 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         """
         manifests: list[tuple[Path, dict]] = []
         for base in self._plugin_base_dirs():
-            for manifest in _walk_under_depth_guarded(base, "plugin.json", _MAX_PLUGIN_RGLOB_DEPTH, want_file=True):
+            for manifest in _walk_under_depth(base, "plugin.json", _MAX_PLUGIN_RGLOB_DEPTH, want_file=True):
                 if not manifest.is_file():
                     continue
                 data = self._load_json_file(manifest)

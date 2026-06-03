@@ -5126,22 +5126,22 @@ def test_vscode_builtin_extension_dirs_per_platform(tmp_path):
         assert any(d.endswith("Microsoft VS Code/resources/app/extensions") for d in dirs)
 
 
-# --- guarded walk helper: PermissionError tolerance (--scan-all-users) ---
-# Every depth-bounded directory walk routes through ``_walk_under_depth_guarded``
-# so an unreadable base (the routine ``--scan-all-users`` case where an
+# --- _walk_under_depth: PermissionError tolerance (--scan-all-users) ---
+# Every depth-bounded directory walk goes through ``_walk_under_depth``, which
+# skips an unreadable base (the routine ``--scan-all-users`` case where an
 # unprivileged scan hits another user's home, making ``Path.exists()`` re-raise
-# ``PermissionError`` on Python 3.12+) is skipped rather than propagated out of
+# ``PermissionError`` on Python 3.12+) rather than propagating out of
 # ``discover()`` — which the pipeline would catch and use to drop the *whole*
 # discoverer, losing every already-collected reachable source. Mirrors the
 # precedent test ``..._workspace_storage_unreadable_does_not_abort_discovery``.
 
 
-def test_walk_under_depth_guarded_skips_unreadable_base_permission_error(tmp_path, monkeypatch, caplog):
+def test_walk_under_depth_skips_unreadable_base_permission_error(tmp_path, monkeypatch, caplog):
     """An ``exists()`` probe that raises ``PermissionError`` yields nothing and warns,
     rather than propagating."""
     from pathlib import Path
 
-    from agent_scan.agents.base import _walk_under_depth_guarded
+    from agent_scan.agents.base import _walk_under_depth
 
     denied = tmp_path / "denied"
     denied.mkdir()
@@ -5155,17 +5155,17 @@ def test_walk_under_depth_guarded_skips_unreadable_base_permission_error(tmp_pat
     monkeypatch.setattr(Path, "exists", fake_exists)
 
     with caplog.at_level("WARNING"):
-        hits = list(_walk_under_depth_guarded(denied, "mcp.json", 5, want_file=True))
+        hits = list(_walk_under_depth(denied, "mcp.json", 5, want_file=True))
 
     assert hits == []
     assert "Permission error walking" in caplog.text
 
 
-def test_walk_under_depth_guarded_skips_unreadable_base_os_error(tmp_path, monkeypatch):
+def test_walk_under_depth_skips_unreadable_base_os_error(tmp_path, monkeypatch):
     """A generic ``OSError`` from the walk is tolerated the same way."""
     from pathlib import Path
 
-    from agent_scan.agents.base import _walk_under_depth_guarded
+    from agent_scan.agents.base import _walk_under_depth
 
     denied = tmp_path / "denied"
     denied.mkdir()
@@ -5178,18 +5178,18 @@ def test_walk_under_depth_guarded_skips_unreadable_base_os_error(tmp_path, monke
 
     monkeypatch.setattr(Path, "exists", fake_exists)
 
-    assert list(_walk_under_depth_guarded(denied, "mcp.json", 5, want_file=True)) == []
+    assert list(_walk_under_depth(denied, "mcp.json", 5, want_file=True)) == []
 
 
-def test_walk_under_depth_guarded_yields_hits_for_readable_tree(tmp_path):
-    """A readable tree yields the same hits as the raw walk (no behavior change)."""
-    from agent_scan.agents.base import _walk_under_depth_guarded
+def test_walk_under_depth_yields_hits_for_readable_tree(tmp_path):
+    """A readable tree yields its matching paths (the guard is transparent)."""
+    from agent_scan.agents.base import _walk_under_depth
 
     target = tmp_path / "ext" / "nested"
     target.mkdir(parents=True)
     (target / "mcp.json").write_text("{}")
 
-    hits = list(_walk_under_depth_guarded(tmp_path, "mcp.json", 10, want_file=True))
+    hits = list(_walk_under_depth(tmp_path, "mcp.json", 10, want_file=True))
 
     assert [h.name for h in hits] == ["mcp.json"]
     assert hits[0] == target / "mcp.json"

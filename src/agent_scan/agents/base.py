@@ -60,40 +60,33 @@ def _walk_under_depth(base: Path, name: str, max_path_depth: int, *, want_file: 
     than walking the full subtree first — so a pathologically deep plugin layout
     cannot blow up the walk. When ``want_file`` is True, only file entries are
     yielded; otherwise directory entries.
-    """
-    for root_str, dirs, files in os.walk(base):
-        root = Path(root_str)
-        dir_depth = len(root.relative_to(base).parts)
-        candidates = files if want_file else dirs
-        if name in candidates:
-            yield root / name
-        # The dir we're in is at depth `dir_depth`; an entry inside it sits at
-        # depth+1. Prune once depth+1 reaches the cap so we don't descend further.
-        if dir_depth + 1 >= max_path_depth:
-            dirs.clear()
 
-
-def _walk_under_depth_guarded(base: Path, name: str, max_path_depth: int, *, want_file: bool) -> Iterator[Path]:
-    """Tolerant wrapper around :func:`_walk_under_depth`: skip ``base`` entirely
-    when its existence probe or walk raises ``PermissionError``/``OSError``.
-
-    Centralizes the ``--scan-all-users`` guard for every home-relative directory
-    walk. On Python 3.12+ ``Path.exists()`` re-raises ``PermissionError`` (rather
-    than returning ``False``) when an ancestor isn't traversable — the routine
-    case of an unprivileged scan hitting another user's home. Unguarded, that
-    propagates out of ``discover()`` and the pipeline drops the *whole*
-    discoverer, discarding every already-collected reachable source (user
-    ``mcp.json``, ``settings.json``, workspace MCP, …) for that IDE/user — a
-    silent false negative. Skipping the unreadable base mirrors the tolerance
-    ``_load_json_file`` and ``profiles_dir.iterdir`` already apply.
-
-    The walk is materialized inside the guard so a ``PermissionError`` surfacing
-    mid-traversal is tolerated too, not just the leading ``exists()`` probe.
+    An unreadable ``base`` is skipped (yielding nothing), not propagated: on
+    Python 3.12+ ``Path.exists()`` re-raises ``PermissionError`` (rather than
+    returning ``False``) when an ancestor isn't traversable — the routine
+    ``--scan-all-users`` case of an unprivileged scan hitting another user's
+    home. Unguarded, that would propagate out of ``discover()`` and the pipeline
+    would drop the *whole* discoverer, discarding every already-collected
+    reachable source (user ``mcp.json``, ``settings.json``, workspace MCP, …) for
+    that IDE/user — a silent false negative. The walk is materialized inside the
+    guard so an error surfacing mid-traversal is tolerated too, not just the
+    leading ``exists()`` probe. Mirrors the tolerance ``_load_json_file`` and
+    ``profiles_dir.iterdir`` already apply.
     """
     try:
         if not base.exists():
             return
-        hits = list(_walk_under_depth(base, name, max_path_depth, want_file=want_file))
+        hits: list[Path] = []
+        for root_str, dirs, files in os.walk(base):
+            root = Path(root_str)
+            dir_depth = len(root.relative_to(base).parts)
+            candidates = files if want_file else dirs
+            if name in candidates:
+                hits.append(root / name)
+            # The dir we're in is at depth `dir_depth`; an entry inside it sits at
+            # depth+1. Prune once depth+1 reaches the cap so we don't descend further.
+            if dir_depth + 1 >= max_path_depth:
+                dirs.clear()
     except (PermissionError, OSError):
         logger.warning("Permission error walking %s", base.as_posix())
         return
@@ -390,13 +383,13 @@ class AgentDiscoverer(ABC):
 
         Shared by the Claude Code plugin ``skills``/``commands`` walks and the
         VSCode-family extension ``skills`` walk — all iterate identically:
-        ``_walk_under_depth_guarded`` for the named directory under each base
-        (skipping unreadable bases, see its docstring), then run ``inspect_fn``
+        ``_walk_under_depth`` for the named directory under each base (skipping
+        unreadable bases, see its docstring), then run ``inspect_fn``
         (``inspect_skills_dir`` or ``inspect_commands_dir``) on each match.
         """
         result: SkillsDirsResult = {}
         for base in bases:
-            for found in _walk_under_depth_guarded(base, subdir_name, _MAX_PLUGIN_RGLOB_DEPTH, want_file=False):
+            for found in _walk_under_depth(base, subdir_name, _MAX_PLUGIN_RGLOB_DEPTH, want_file=False):
                 if found.is_dir():
                     result[found.as_posix()] = inspect_fn(str(found))
         return result
