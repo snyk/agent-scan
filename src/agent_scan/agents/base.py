@@ -51,6 +51,13 @@ _MAX_PLUGIN_RGLOB_DEPTH = 10
 # RemoteServer's URL AliasChoices and the PluginMCPConfigFile flat-format gate in models.py.
 _SERVER_CONFIG_DISCRIMINATOR_KEYS = frozenset({"command", "url", "serverUrl", "httpUrl"})
 
+# Cap the size of a config/skill JSON file read whole into memory. Real MCP /
+# settings files are KB-scale; without a cap a multi-GB file planted under an
+# attacker-influenceable tree (the extension / workspace dirs walked under
+# ``--scan-all-users``) would be read entirely into memory. Files over the cap
+# are treated as unreadable (skipped) rather than parsed.
+_MAX_CONFIG_FILE_BYTES = 20 * 1024 * 1024  # 20 MiB
+
 
 def _walk_under_depth(base: Path, name: str, max_path_depth: int, *, want_file: bool) -> Iterator[Path]:
     """Yield paths named ``name`` under ``base``, pruning traversal so each yielded
@@ -165,15 +172,37 @@ class AgentDiscoverer(ABC):
 
         Env-var-relocated config paths (``CLAUDE_CONFIG_DIR``, ``VSCODE_PORTABLE``)
         reflect the *scanning process's* environment, so they may only be honored
-        when the home being scanned is that same user's. ``__init__`` normalizes the
-        own-home sentinel (``home_directory=None``) to ``Path.home()``, and the
-        pipeline likewise constructs the current-user discoverer with ``Path.home()``
-        (``get_readable_home_directories`` returns it — see
-        ``pipelines.discover_clients_to_inspect``), so own-home reduces to a single
-        equality check. Other users' homes under ``--scan-all-users`` compare unequal
-        and are correctly excluded (the scanner can't know their env).
+        when the home being scanned is that same user's. Other users' homes under
+        ``--scan-all-users`` must compare unequal (the scanner can't know their env).
+
+        The scanning user's own home is spelled two ways depending on mode, so we
+        accept either:
+
+        * Single-user mode builds the discoverer with ``Path.home()`` (``$HOME``).
+        * ``--scan-all-users`` sources every home — including the current user's
+          own entry — from ``pwd.getpwall()`` (``Path(pw_dir)``), which can differ
+          from ``$HOME`` (a sudo-rewritten ``$HOME``, a symlinked / relocated /
+          container home). Comparing only against ``Path.home()`` there would drop
+          env-relocated config for the scanning user's own home. So we also accept
+          this uid's passwd ``pw_dir`` and resolve both sides to absorb symlinks.
+
+        ``pwd``/``os.getuid`` are POSIX-only; the guarded import simply skips that
+        extra candidate on Windows.
         """
-        return self.home_directory == Path.home()
+        candidates = {Path.home()}
+        try:
+            import pwd
+
+            candidates.add(Path(pwd.getpwuid(os.getuid()).pw_dir))
+        except (ImportError, AttributeError, KeyError, OSError):
+            pass
+        if self.home_directory in candidates:
+            return True
+        try:
+            resolved_home = self.home_directory.resolve()
+            return any(resolved_home == candidate.resolve() for candidate in candidates)
+        except OSError:
+            return False
 
     def __init_subclass__(cls, *, abstract: bool = False, **kwargs: object) -> None:
         """Enforce a non-empty ``name`` on concrete subclasses.
@@ -233,6 +262,15 @@ class AgentDiscoverer(ABC):
         """
         try:
             if not path.exists():
+                return None
+            size = path.stat().st_size
+            if size > _MAX_CONFIG_FILE_BYTES:
+                logger.warning(
+                    "Skipping oversized config %s (%d bytes > %d-byte cap)",
+                    path.as_posix(),
+                    size,
+                    _MAX_CONFIG_FILE_BYTES,
+                )
                 return None
             content = path.read_text(encoding="utf-8")
             if content.strip() == "":

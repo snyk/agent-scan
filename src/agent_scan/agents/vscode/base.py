@@ -4,7 +4,8 @@
 user-scope and per-workspace MCP files, ``settings.json`` with nested/dotted
 ``mcp.servers``, named profiles, a ``workspaceStorage`` tree that points at
 opened workspaces, extension bundles, and skill directories. Concrete forks in
-``discoverers.py`` override only path constants and feature flags.
+sibling modules (``cursor.py``, ``windsurf.py``, ``kiro.py``, ``antigravity.py``,
+``vscode.py``) override only path constants and feature flags.
 """
 
 import logging

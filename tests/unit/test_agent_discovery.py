@@ -4866,6 +4866,50 @@ def test_vscode_honors_vscode_portable_when_home_equals_real_home(tmp_path, monk
     )
 
 
+def test_vscode_ignores_vscode_portable_under_multiuser_scan(tmp_path, monkeypatch):
+    """Under a multi-user scan (an explicit *other*-user home is passed), the
+    scanning process's ``VSCODE_PORTABLE`` must NOT relocate the target user's
+    userdata or extensions — the env var reflects the scanner's environment, not
+    the scanned user's. Mirrors ``test_claude_code_ignores_plugin_env_dirs_under_multiuser_scan``;
+    pins the ``_scans_own_home()`` gate on the portable path so a future refactor
+    can't silently leak the scanner's portable tree into another user's scan.
+    """
+    from pathlib import Path
+
+    from agent_scan.agents import VSCodeDiscoverer
+
+    # The scanning process's own home is someone else's, so _scans_own_home() is
+    # False for the alice discoverer below regardless of the host environment.
+    own_home = tmp_path / "scanner_home"
+    own_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: own_home)
+
+    portable = tmp_path / "VSCode-portable"
+    monkeypatch.setenv("VSCODE_PORTABLE", str(portable))
+    # Both portable surfaces an own-home scan WOULD pick up: relocated userdata
+    # mcp.json and a relocated extension's mcp.json.
+    user_mcp = portable / "user-data" / "User" / "mcp.json"
+    user_mcp.parent.mkdir(parents=True)
+    user_mcp.write_text('{"servers": {"portable-srv": {"command": "p"}}}')
+    ext_mcp = portable / "extensions" / "vendor.ext-1.0.0" / "mcp.json"
+    ext_mcp.parent.mkdir(parents=True)
+    ext_mcp.write_text('{"mcpServers": {"portable-ext-srv": {"command": "e"}}}')
+
+    alice = tmp_path / "alice"
+    (alice / ".vscode").mkdir(parents=True)
+    discoverer = VSCodeDiscoverer(alice)
+    assert not discoverer._scans_own_home()
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    assert not any("/VSCode-portable/" in k for k in mcp_configs), (
+        f"VSCODE_PORTABLE must not leak into another user's scan; got keys: {list(mcp_configs)}"
+    )
+    names = {n for v in mcp_configs.values() if isinstance(v, list) for n, _ in v}
+    assert "portable-srv" not in names
+    assert "portable-ext-srv" not in names
+
+
 # --- Windsurf + Antigravity: NEW gaps ---
 
 
@@ -5267,3 +5311,305 @@ def test_claude_code_plugin_walks_unreadable_do_not_abort_discovery(tmp_path, mo
     assert len(user_keys) == 1, f"user-scope ~/.claude.json must survive; got {list(mcp_configs)}"
     name, _server = mcp_configs[user_keys[0]][0]
     assert name == "my-server"
+
+
+# =====================================================================================
+# Low / test-gap / nit follow-ups (PR #337 review)
+# =====================================================================================
+
+
+# --- #11: Claude Code skill scans tolerate a non-dir / unreadable path ---
+
+
+def test_claude_code_global_skills_path_that_is_a_file_is_skipped(tmp_path):
+    """If ``~/.claude/skills`` is a regular file (not a directory), discovery skips
+    it instead of crashing — routed through ``_scan_skills_dir``'s is-dir guard."""
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    claude = tmp_path / ".claude"
+    claude.mkdir()
+    (claude / "skills").write_text("i am a file, not a directory")
+
+    skills = ClaudeCodeDiscoverer(tmp_path).discover_skills()
+
+    assert not any(k.endswith("/.claude/skills") for k in skills)
+
+
+def test_claude_code_project_skills_path_that_is_a_file_is_skipped(tmp_path):
+    """A project ``.claude/skills`` that is a file is skipped, not fatal."""
+    import json
+
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    project = tmp_path / "proj"
+    project.mkdir()
+    dotclaude = project / ".claude"
+    dotclaude.mkdir()
+    (dotclaude / "skills").write_text("not a dir")
+    claude = tmp_path / ".claude"
+    claude.mkdir()
+    (claude / ".claude.json").write_text("{}")  # placeholder; projects read from ~/.claude.json
+    (tmp_path / ".claude.json").write_text(json.dumps({"projects": {project.as_posix(): {}}}))
+
+    # Must not raise.
+    skills = ClaudeCodeDiscoverer(tmp_path).discover_skills()
+    assert not any(k.endswith("/proj/.claude/skills") for k in skills)
+
+
+# --- #8: _scans_own_home resolves symlinks and accepts the uid's passwd home ---
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink semantics")
+def test_scans_own_home_true_for_symlinked_home(tmp_path, monkeypatch):
+    """A ``home_directory`` that is a symlink to the real home is still recognized
+    as own-home (both sides are resolved before comparing)."""
+    from pathlib import Path
+
+    from agent_scan.agents import VSCodeDiscoverer
+
+    real_home = tmp_path / "real_home"
+    real_home.mkdir()
+    link_home = tmp_path / "link_home"
+    link_home.symlink_to(real_home)
+    monkeypatch.setattr(Path, "home", lambda: real_home)
+
+    assert VSCodeDiscoverer(link_home)._scans_own_home() is True
+    assert VSCodeDiscoverer(tmp_path / "someone_else")._scans_own_home() is False
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="pwd is POSIX-only")
+def test_scans_own_home_accepts_passwd_home_when_env_home_differs(tmp_path, monkeypatch):
+    """Under ``--scan-all-users`` the current user's own home comes from ``pwd``
+    (``pw_dir``), which can differ from ``$HOME`` (sudo-rewritten/relocated). The
+    uid's passwd home is accepted as own-home too, so env relocations stay honored."""
+    import os
+    import pwd
+    from pathlib import Path
+
+    from agent_scan.agents import VSCodeDiscoverer
+
+    pw_home = tmp_path / "pw_home"
+    pw_home.mkdir()
+    env_home = tmp_path / "env_home"
+    env_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: env_home)
+    fake = pwd.struct_passwd(("u", "x", os.getuid(), os.getgid(), "g", str(pw_home), "/bin/sh"))
+    monkeypatch.setattr(pwd, "getpwuid", lambda _uid: fake)
+
+    assert VSCodeDiscoverer(pw_home)._scans_own_home() is True  # passwd pw_dir
+    assert VSCodeDiscoverer(env_home)._scans_own_home() is True  # $HOME (single-user mode)
+    assert VSCodeDiscoverer(tmp_path / "bob")._scans_own_home() is False
+
+
+# --- D3: oversized config files are skipped rather than read whole into memory ---
+
+
+def test_load_json_file_skips_oversized_config(tmp_path, monkeypatch):
+    """A file larger than the size cap is treated as unreadable (skipped)."""
+    import agent_scan.agents.base as base_mod
+    from agent_scan.agents import VSCodeDiscoverer
+
+    monkeypatch.setattr(base_mod, "_MAX_CONFIG_FILE_BYTES", 10)
+    discoverer = VSCodeDiscoverer(tmp_path)
+
+    big = tmp_path / "big.json"
+    big.write_text('{"mcpServers": {"s": {"command": "x"}}}')  # > 10 bytes
+    assert discoverer._load_json_file(big) is None
+
+    small = tmp_path / "small.json"
+    small.write_text("{}")  # < 10 bytes
+    assert discoverer._load_json_file(small) == {}
+
+
+# --- #5: VSCode-only feature flags default off and forks don't silently inherit them ---
+
+
+def test_vscode_family_feature_flags_default_false():
+    """The VSCode-only feature flags default off on the family base, so a fork that
+    doesn't opt in cannot silently inherit a True (which would widen discovery)."""
+    from agent_scan.agents.vscode.base import VSCodeFamilyDiscoverer
+
+    assert VSCodeFamilyDiscoverer._devcontainer_mcp_enabled is False
+    assert VSCodeFamilyDiscoverer._code_workspace_enabled is False
+    assert VSCodeFamilyDiscoverer._settings_skill_locations_enabled is False
+
+
+@pytest.mark.parametrize("fork", ["cursor", "windsurf", "kiro", "antigravity"])
+def test_vscode_forks_do_not_enable_vscode_only_features(fork):
+    """Only VSCodeDiscoverer enables devcontainer / .code-workspace / agentSkillsLocations.
+    A fork copy-pasting those flags would silently widen its file-read surface."""
+    from agent_scan.agents import DISCOVERERS
+
+    cls = DISCOVERERS[fork]
+    assert cls._devcontainer_mcp_enabled is False
+    assert cls._code_workspace_enabled is False
+    assert cls._settings_skill_locations_enabled is False
+
+
+def test_cursor_does_not_scan_devcontainer(tmp_path):
+    """Behavioral check: Cursor (devcontainer flag off) yields no entry even when a
+    devcontainer.json with MCP servers exists in an opened workspace."""
+    discoverer, workspace = _setup_cursor_workspace(tmp_path, "proj")
+    devc = workspace / ".devcontainer"
+    devc.mkdir()
+    (devc / "devcontainer.json").write_text(
+        '{"customizations": {"vscode": {"mcp": {"servers": {"dc": {"command": "d"}}}}}}'
+    )
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    assert not any("devcontainer.json" in k for k in mcp_configs)
+
+
+# --- #6: _setting_flag_enabled string-boolean ("true"/"false") semantics ---
+
+
+def test_vscode_agent_skills_locations_string_true_enabled(tmp_path):
+    """VS Code's asBoolean accepts the string ``"true"``; such a location is scanned."""
+    import json
+
+    from agent_scan.agents import VSCodeDiscoverer
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    (tmp_path / ".vscode").mkdir()
+    custom = tmp_path / "str-true-skills"
+    _write_skill(custom, "str-true-skill")
+    settings = _userdata(discoverer) / "User" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(json.dumps({"chat.agentSkillsLocations": {custom.as_posix(): "true"}}))
+
+    skills_dirs = discoverer.discover_skills()
+
+    assert any(k.endswith("/str-true-skills") for k in skills_dirs)
+
+
+@pytest.mark.parametrize("flag", ["false", "FALSE", "False"])
+def test_vscode_agent_skills_locations_string_false_excluded(tmp_path, flag):
+    """A location mapped to the case-insensitive string ``"false"`` is NOT scanned."""
+    import json
+
+    from agent_scan.agents import VSCodeDiscoverer
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    (tmp_path / ".vscode").mkdir()
+    custom = tmp_path / "str-false-skills"
+    _write_skill(custom, "str-false-skill")
+    settings = _userdata(discoverer) / "User" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(json.dumps({"chat.agentSkillsLocations": {custom.as_posix(): flag}}))
+
+    skills_dirs = discoverer.discover_skills()
+
+    assert not any(k.endswith("/str-false-skills") for k in skills_dirs)
+
+
+# --- #7: ``~``-prefixed and relative-in-userdata agentSkillsLocations branches ---
+
+
+def test_vscode_agent_skills_locations_tilde_home_path(tmp_path):
+    """A ``~``-prefixed agentSkillsLocations entry resolves against the scanned
+    user's home and is scanned (the previously-untested ``~`` branch)."""
+    import json
+
+    from agent_scan.agents import VSCodeDiscoverer
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    (tmp_path / ".vscode").mkdir()
+    _write_skill(tmp_path / "home-skills", "home-skill")
+    settings = _userdata(discoverer) / "User" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(json.dumps({"chat.agentSkillsLocations": ["~/home-skills"]}))
+
+    skills_dirs = discoverer.discover_skills()
+
+    assert any(k.endswith("/home-skills") for k in skills_dirs)
+
+
+def test_vscode_agent_skills_locations_relative_in_userdata_settings_dropped(tmp_path):
+    """A *relative* agentSkillsLocations entry in a userdata settings.json has no
+    base dir to resolve against, so it is dropped (no entry, no error)."""
+    import json
+
+    from agent_scan.agents import VSCodeDiscoverer
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    (tmp_path / ".vscode").mkdir()
+    _write_skill(tmp_path / "rel-skills", "rel-skill")
+    settings = _userdata(discoverer) / "User" / "settings.json"
+    settings.parent.mkdir(parents=True)
+    settings.write_text(json.dumps({"chat.agentSkillsLocations": ["rel-skills"]}))
+
+    skills_dirs = discoverer.discover_skills()
+
+    assert not any(k.endswith("/rel-skills") for k in skills_dirs)
+
+
+# --- #9: profile-scoped agentSkillsLocations ---
+
+
+def test_vscode_profile_agent_skills_locations(tmp_path):
+    """A named profile's ``settings.json`` ``chat.agentSkillsLocations`` is scanned."""
+    import json
+
+    from agent_scan.agents import VSCodeDiscoverer
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    (tmp_path / ".vscode").mkdir()
+    custom = tmp_path / "profile-skills"
+    _write_skill(custom, "profile-skill")
+    profile_dir = _userdata(discoverer) / "User" / "profiles" / "work"
+    profile_dir.mkdir(parents=True)
+    (profile_dir / "settings.json").write_text(json.dumps({"chat.agentSkillsLocations": {custom.as_posix(): True}}))
+
+    skills_dirs = discoverer.discover_skills()
+
+    assert any(k.endswith("/profile-skills") for k in skills_dirs)
+
+
+# --- D6: the root-level ``.devcontainer.json`` variant ---
+
+
+def test_vscode_discovers_root_dotted_devcontainer_mcp(tmp_path):
+    """The root-level ``.devcontainer.json`` form (not the ``.devcontainer/`` subdir)
+    is also scanned for ``customizations.vscode.mcp.servers``."""
+    discoverer, workspace = _setup_vscode_workspace(tmp_path, "proj")
+    (workspace / ".devcontainer.json").write_text(
+        '{"customizations": {"vscode": {"mcp": {"servers": {"root-dc": {"command": "d"}}}}}}'
+    )
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    keys = [k for k in mcp_configs if k.endswith("/proj/.devcontainer.json")]
+    assert len(keys) == 1
+    assert mcp_configs[keys[0]][0][0] == "root-dc"
+
+
+# --- D7: a malformed ``.code-workspace`` is skipped, not surfaced as a parse failure ---
+
+
+def test_vscode_code_workspace_malformed_file_skipped(tmp_path):
+    """A malformed ``.code-workspace`` referenced via the workspace.json ``workspace``
+    pointer is skipped silently; a sibling single-root window still resolves."""
+    from agent_scan.agents import VSCodeDiscoverer
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    (tmp_path / ".vscode").mkdir()
+    storage = _userdata(discoverer) / "User" / "workspaceStorage"
+
+    bad_ws = tmp_path / "broken.code-workspace"
+    bad_ws.write_text("{ not valid json")
+    bad_hash = storage / "bad"
+    bad_hash.mkdir(parents=True)
+    (bad_hash / "workspace.json").write_text(f'{{"workspace": "{bad_ws.as_uri()}"}}')
+
+    good_hash = storage / "good"
+    good_hash.mkdir()
+    good_repo = tmp_path / "good-repo"
+    (good_repo / ".vscode").mkdir(parents=True)
+    (good_repo / ".vscode" / "mcp.json").write_text('{"servers": {"good": {"command": "g"}}}')
+    (good_hash / "workspace.json").write_text(f'{{"folder": "{good_repo.as_uri()}"}}')
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    assert not any("broken.code-workspace" in k for k in mcp_configs)
+    assert any(k.endswith("/good-repo/.vscode/mcp.json") for k in mcp_configs)

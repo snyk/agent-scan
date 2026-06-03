@@ -219,23 +219,36 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
     # --- private: skills discovery ---
 
     def _discover_global_skill(self) -> SkillsDirsResult:
-        """Scan ``<install>/skills`` under each user-global folder for skills."""
+        """Scan ``<install>/skills`` under each user-global folder for skills.
+
+        Routes through :meth:`AgentDiscoverer._scan_skills_dir` so a path that is
+        a regular file (``NotADirectoryError``) or an unreadable dir under another
+        user's home (``PermissionError`` on ``--scan-all-users``) is skipped rather
+        than aborting the whole discoverer — the same tolerance the VSCode-family
+        skill scans already use.
+        """
         result: SkillsDirsResult = {}
         for folder in self._discover_global_folders():
             skills_dir = folder / self._skills_subdir
-            if skills_dir.exists():
-                result[skills_dir.as_posix()] = inspect_skills_dir(str(skills_dir))
+            entries = self._scan_skills_dir(skills_dir)
+            if entries is not None:
+                result[skills_dir.as_posix()] = entries
         return result
 
     def _discover_project_skills(self) -> SkillsDirsResult:
         """For each project (and every ancestor up to root), scan each entry in
-        ``_project_skills_relative`` (``.claude/skills`` + ``.agents/skills``) if present."""
+        ``_project_skills_relative`` (``.claude/skills`` + ``.agents/skills``) if present.
+
+        Uses :meth:`AgentDiscoverer._scan_skills_dir` for the same is-dir /
+        ``PermissionError`` tolerance as :meth:`_discover_global_skill`.
+        """
         result: SkillsDirsResult = {}
         for path in self._project_paths_with_ancestors():
             for rel in self._project_skills_relative:
                 skills_dir = path / rel
-                if skills_dir.exists():
-                    result[skills_dir.as_posix()] = inspect_skills_dir(str(skills_dir))
+                entries = self._scan_skills_dir(skills_dir)
+                if entries is not None:
+                    result[skills_dir.as_posix()] = entries
         return result
 
     # --- private: plugin discovery ---
