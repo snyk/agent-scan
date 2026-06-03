@@ -111,11 +111,58 @@ class ScalarToolLabels(BaseModel):
     private_data: int | float
 
 
+# Top-level keys that mark a JSON object as a single MCP *server config* rather
+# than a ``{name: serverConfig}`` map: ``command`` (StdioServer) and the remote
+# URL aliases (RemoteServer). Single source of truth reused by RemoteServer's
+# ``validation_alias``, the ``PluginMCPConfigFile`` flat-format gate, and
+# ``base._looks_like_mcp_payload``. A drift guard
+# (test_server_config_discriminator_keys_match_model_required_fields) keeps it in
+# sync with the models' required fields.
+_REMOTE_URL_ALIASES = ("url", "serverUrl", "httpUrl")
+SERVER_CONFIG_DISCRIMINATOR_KEYS = frozenset({"command", *_REMOTE_URL_ALIASES})
+
+
 class RemoteServer(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
-    url: str = Field(validation_alias=AliasChoices("url", "serverUrl"))
+    # ``serverUrl`` (Figma/Antigravity) and ``httpUrl`` (Gemini CLI Streamable HTTP)
+    # are vendor aliases for the same remote-server URL. First present wins.
+    url: str = Field(validation_alias=AliasChoices(*_REMOTE_URL_ALIASES))
+    # ``sse``/``http`` are the transports the client implements
+    # (``streamable-http`` folds onto ``http`` below). ``ws`` -- a documented
+    # Claude Code WebSocket transport -- is intentionally NOT accepted here yet:
+    # the scanner can't connect to it, and emitting ``type: "ws"`` breaks the
+    # downstream consumers (invariant-mcp-scan-backend / invariant-platform),
+    # which validate against ``{sse, http}`` only and would reject the payload.
+    # Until ``ws`` is supported end-to-end across those repos, a ``ws`` server
+    # fails validation (sinking its config file) rather than being emitted.
+    # TODO(ADS-384): re-add ``"ws"`` once the backend + platform accept it.
+    # https://snyksec.atlassian.net/browse/ADS-384
     type: Literal["sse", "http"] | None = None
     headers: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("type", mode="before")
+    @classmethod
+    def _normalize_transport(cls, v: Any) -> Any:
+        """Fold documented transport spellings onto the values the client speaks.
+
+        Claude Code documents ``type: "streamable-http"`` (and the ``-https``
+        spelling), which is the same HTTP Streamable transport already
+        implemented under ``http``, so it is folded on here; matching is
+        case-insensitive. Without this, a single such server raised a
+        ``ValidationError`` that sank the whole ``mcpServers`` map into
+        ``CouldNotParseMCPConfig`` -- losing every valid sibling (coverage
+        analysis §7.1).
+
+        Note: Claude Code also documents a ``type: "ws"`` WebSocket transport,
+        but it is deliberately left unsupported for now -- see the TODO(ADS-384)
+        on the ``type`` field above.
+        """
+        if not isinstance(v, str):
+            return v
+        normalized = v.strip().lower()
+        if normalized in ("streamable-http", "streamable-https"):
+            return "http"
+        return normalized
 
 
 def _coerce_none_to_empty_list(v: Any) -> Any:
@@ -155,6 +202,26 @@ class MCPConfig(BaseModel):
 
     def set_servers(self, servers: dict[str, StdioServer | RemoteServer]) -> None:
         raise NotImplementedError("Subclasses must implement this method")
+
+
+class MCPServerMap(MCPConfig):
+    """Agent-neutral model for an *already-extracted* ``{name: serverConfig}`` map.
+
+    Unlike the file-format models (``ClaudeConfigFile``/``VSCodeMCPConfig``/…) whose
+    field names match a literal top-level wrapper key in the on-disk file, this model
+    is built directly from a server map the caller has already pulled out of whatever
+    wrapper it lived under. It is therefore never placed in a ``_parse_mcp_file``
+    format-union — only constructed directly (see ``AgentDiscoverer._validate_servers``).
+    """
+
+    model_config = ConfigDict()
+    servers: dict[str, StdioServer | RemoteServer]
+
+    def get_servers(self) -> dict[str, StdioServer | RemoteServer]:
+        return self.servers
+
+    def set_servers(self, servers: dict[str, StdioServer | RemoteServer]) -> None:
+        self.servers = servers
 
 
 class ClaudeConfigFile(MCPConfig):
@@ -220,7 +287,7 @@ class PluginMCPConfigFile(MCPConfig):
         for v in data.values():
             if not isinstance(v, dict):
                 raise ValueError("values must be dicts")
-            if not ("command" in v or "url" in v or "serverUrl" in v):
+            if not any(key in v for key in SERVER_CONFIG_DISCRIMINATOR_KEYS):
                 raise ValueError("values must look like server configs")
         return {"servers": data}
 
