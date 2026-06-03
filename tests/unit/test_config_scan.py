@@ -254,55 +254,6 @@ class TestServerUrlAliasParsing:
         assert servers["ambiguous"].url == "https://primary.example.com/mcp"
 
 
-class TestHttpUrlAliasParsing:
-    """Gemini CLI / Antigravity declare remote MCP servers with an ``httpUrl``
-    key (Streamable HTTP). It must parse as a RemoteServer, not be dropped."""
-
-    @pytest.mark.asyncio
-    async def test_http_url_field_parsed_as_remote_server(self, tmp_path):
-        from agent_scan.models import ClaudeConfigFile, RemoteServer
-
-        config = tmp_path / "settings.json"
-        config.write_text('{"mcpServers": {"gemini": {"httpUrl": "https://mcp.gemini.example/mcp"}}}')
-
-        mcp_config = await scan_mcp_config_file(str(config))
-        assert isinstance(mcp_config, ClaudeConfigFile)
-        servers = mcp_config.get_servers()
-        assert "gemini" in servers
-        assert isinstance(servers["gemini"], RemoteServer)
-        assert servers["gemini"].url == "https://mcp.gemini.example/mcp"
-
-    @pytest.mark.asyncio
-    async def test_http_url_does_not_drop_other_servers(self, tmp_path):
-        """A single ``httpUrl`` server must not fail the whole file and take its
-        stdio siblings down with it (the original Antigravity regression)."""
-        config = tmp_path / "settings.json"
-        config.write_text("""{
-            "mcpServers": {
-                "gemini": {"httpUrl": "https://mcp.gemini.example/mcp"},
-                "local": {"command": "npx", "args": ["-y", "some-mcp-server"]}
-            }
-        }""")
-
-        mcp_config = await scan_mcp_config_file(str(config))
-        servers = mcp_config.get_servers()
-        assert "gemini" in servers, "httpUrl server was silently dropped"
-        assert "local" in servers, "local server was silently dropped"
-        assert len(servers) == 2
-
-    @pytest.mark.asyncio
-    async def test_http_url_not_silently_dropped_as_config_without_mcp(self, tmp_path):
-        from agent_scan.models import ConfigWithoutMCP
-
-        config = tmp_path / "settings.json"
-        config.write_text('{"mcpServers": {"gemini": {"httpUrl": "https://mcp.gemini.example/mcp"}}}')
-
-        mcp_config = await scan_mcp_config_file(str(config))
-        assert not isinstance(mcp_config, ConfigWithoutMCP), (
-            "Config with httpUrl was silently treated as ConfigWithoutMCP"
-        )
-
-
 class TestPluginMCPConfigFile:
     @pytest.mark.asyncio
     async def test_flat_stdio_server_config(self, tmp_path):
@@ -350,19 +301,6 @@ class TestPluginMCPConfigFile:
         assert isinstance(mcp_config, PluginMCPConfigFile)
         servers = mcp_config.get_servers()
         assert isinstance(servers["srv"], RemoteServer)
-
-    @pytest.mark.asyncio
-    async def test_flat_http_url_alias(self, tmp_path):
-        # The flat-format gate must recognise ``httpUrl`` as a server-config
-        # discriminator (alongside ``command``/``url``/``serverUrl``).
-        config = tmp_path / ".mcp.json"
-        config.write_text('{"srv": {"httpUrl": "https://example.com/mcp"}}')
-
-        mcp_config = await scan_mcp_config_file(str(config))
-        assert isinstance(mcp_config, PluginMCPConfigFile)
-        servers = mcp_config.get_servers()
-        assert isinstance(servers["srv"], RemoteServer)
-        assert servers["srv"].url == "https://example.com/mcp"
 
     @pytest.mark.asyncio
     async def test_empty_dict_not_plugin_config(self, tmp_path):

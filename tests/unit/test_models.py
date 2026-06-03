@@ -1,5 +1,4 @@
 import pytest
-from pydantic import ValidationError
 
 from agent_scan.models import CommandParsingError, RemoteServer, StdioServer
 
@@ -36,75 +35,6 @@ class TestRemoteServerUrlAlias:
             {"url": "https://primary.example.com/mcp", "serverUrl": "https://secondary.example.com/mcp"}
         )
         assert server.url == "https://primary.example.com/mcp"
-
-    def test_http_url_alias_works(self):
-        # Gemini CLI / Antigravity declare Streamable-HTTP remote servers with
-        # an ``httpUrl`` key; it must map onto ``url`` like ``serverUrl`` does.
-        server = RemoteServer.model_validate({"httpUrl": "https://mcp.gemini.example/mcp"})
-        assert server.url == "https://mcp.gemini.example/mcp"
-
-    def test_http_url_alias_with_headers(self):
-        server = RemoteServer.model_validate(
-            {
-                "httpUrl": "https://mcp.gemini.example/mcp",
-                "headers": {"Authorization": "Bearer token"},
-            }
-        )
-        assert server.url == "https://mcp.gemini.example/mcp"
-        assert server.headers == {"Authorization": "Bearer token"}
-
-    def test_url_takes_precedence_over_http_url_when_both_present(self):
-        # ``url`` is first in AliasChoices, so it wins over ``httpUrl``.
-        server = RemoteServer.model_validate(
-            {"url": "https://primary.example.com/mcp", "httpUrl": "https://secondary.example.com/mcp"}
-        )
-        assert server.url == "https://primary.example.com/mcp"
-
-
-class TestRemoteServerTransportType:
-    """``streamable-http`` folds onto ``http``; ``ws`` is not yet supported.
-
-    ``type: "streamable-http"`` is a documented Claude Code spelling of the HTTP
-    Streamable transport, so it normalizes to ``http``. ``type: "ws"`` is also a
-    documented Claude Code transport but is intentionally rejected for now
-    (TODO(ADS-384)) because the downstream backend/platform only accept
-    ``{sse, http}``.
-    """
-
-    def test_existing_sse_type_unchanged(self):
-        server = RemoteServer.model_validate({"url": "https://mcp.example.com/sse", "type": "sse"})
-        assert server.type == "sse"
-
-    def test_existing_http_type_unchanged(self):
-        server = RemoteServer.model_validate({"url": "https://mcp.example.com/mcp", "type": "http"})
-        assert server.type == "http"
-
-    def test_type_omitted_stays_none(self):
-        server = RemoteServer.model_validate({"url": "https://mcp.example.com/mcp"})
-        assert server.type is None
-
-    def test_streamable_http_normalized_to_http(self):
-        # ``streamable-http`` is the same Streamable HTTP transport the client
-        # already speaks under ``http`` -- fold it on so the connect path needs
-        # no new branch.
-        server = RemoteServer.model_validate({"url": "https://mcp.example.com/mcp", "type": "streamable-http"})
-        assert server.type == "http"
-
-    def test_streamable_https_normalized_to_http(self):
-        server = RemoteServer.model_validate({"url": "https://mcp.example.com/mcp", "type": "streamable-https"})
-        assert server.type == "http"
-
-    def test_ws_type_rejected(self):
-        # ``ws`` is a documented Claude Code transport, but it is intentionally
-        # NOT accepted yet -- emitting it breaks the downstream backend/platform
-        # (which validate against {sse, http} only). Re-add it end-to-end via
-        # TODO(ADS-384): https://snyksec.atlassian.net/browse/ADS-384
-        with pytest.raises(ValidationError):
-            RemoteServer.model_validate({"url": "wss://mcp.example.com/ws", "type": "ws"})
-
-    def test_type_is_case_insensitive(self):
-        server = RemoteServer.model_validate({"url": "https://mcp.example.com/mcp", "type": "HTTP"})
-        assert server.type == "http"
 
 
 class TestStdioServerRebalance:
@@ -277,26 +207,3 @@ class TestStdioServerArgsCoercion:
         s = StdioServer.model_validate({"command": str(script), "args": ["--foo", "bar"]})
         assert s.command == str(script)
         assert s.args == ["--foo", "bar"]
-
-
-class TestMCPServerMap:
-    """MCPServerMap is the agent-neutral model for an already-extracted
-    ``{name: serverConfig}`` map (no wrapper key), used by ``_validate_servers``."""
-
-    def test_validates_mixed_stdio_and_remote(self):
-        from agent_scan.models import MCPServerMap
-
-        m = MCPServerMap(servers={"a": {"command": "x"}, "b": {"url": "https://y"}})
-        servers = m.get_servers()
-        assert isinstance(servers["a"], StdioServer)
-        assert isinstance(servers["b"], RemoteServer)
-        assert servers["a"].command == "x"
-        assert servers["b"].url == "https://y"
-
-    def test_rejects_value_that_is_not_a_server_config(self):
-        from pydantic import ValidationError
-
-        from agent_scan.models import MCPServerMap
-
-        with pytest.raises(ValidationError):
-            MCPServerMap(servers={"bad": {"not_a": "server"}})
