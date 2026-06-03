@@ -73,6 +73,33 @@ def _walk_under_depth(base: Path, name: str, max_path_depth: int, *, want_file: 
             dirs.clear()
 
 
+def _walk_under_depth_guarded(base: Path, name: str, max_path_depth: int, *, want_file: bool) -> Iterator[Path]:
+    """Tolerant wrapper around :func:`_walk_under_depth`: skip ``base`` entirely
+    when its existence probe or walk raises ``PermissionError``/``OSError``.
+
+    Centralizes the ``--scan-all-users`` guard for every home-relative directory
+    walk. On Python 3.12+ ``Path.exists()`` re-raises ``PermissionError`` (rather
+    than returning ``False``) when an ancestor isn't traversable — the routine
+    case of an unprivileged scan hitting another user's home. Unguarded, that
+    propagates out of ``discover()`` and the pipeline drops the *whole*
+    discoverer, discarding every already-collected reachable source (user
+    ``mcp.json``, ``settings.json``, workspace MCP, …) for that IDE/user — a
+    silent false negative. Skipping the unreadable base mirrors the tolerance
+    ``_load_json_file`` and ``profiles_dir.iterdir`` already apply.
+
+    The walk is materialized inside the guard so a ``PermissionError`` surfacing
+    mid-traversal is tolerated too, not just the leading ``exists()`` probe.
+    """
+    try:
+        if not base.exists():
+            return
+        hits = list(_walk_under_depth(base, name, max_path_depth, want_file=want_file))
+    except (PermissionError, OSError):
+        logger.warning("Permission error walking %s", base.as_posix())
+        return
+    yield from hits
+
+
 def _looks_like_mcp_payload(data: dict) -> bool:
     """True if a parsed JSON dict has a recognizable MCP shape.
 
@@ -362,16 +389,14 @@ class AgentDiscoverer(ABC):
         """Walk each base dir for ``subdir_name`` directories and inspect each hit.
 
         Shared by the Claude Code plugin ``skills``/``commands`` walks and the
-        VSCode-family extension ``skills`` walk — all iterate identically: for
-        each existing base, ``_walk_under_depth`` for the named directory, then
-        run ``inspect_fn`` (``inspect_skills_dir`` or ``inspect_commands_dir``)
-        on each match.
+        VSCode-family extension ``skills`` walk — all iterate identically:
+        ``_walk_under_depth_guarded`` for the named directory under each base
+        (skipping unreadable bases, see its docstring), then run ``inspect_fn``
+        (``inspect_skills_dir`` or ``inspect_commands_dir``) on each match.
         """
         result: SkillsDirsResult = {}
         for base in bases:
-            if not base.exists():
-                continue
-            for found in _walk_under_depth(base, subdir_name, _MAX_PLUGIN_RGLOB_DEPTH, want_file=False):
+            for found in _walk_under_depth_guarded(base, subdir_name, _MAX_PLUGIN_RGLOB_DEPTH, want_file=False):
                 if found.is_dir():
                     result[found.as_posix()] = inspect_fn(str(found))
         return result

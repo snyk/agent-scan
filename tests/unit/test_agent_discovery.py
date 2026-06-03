@@ -5124,3 +5124,146 @@ def test_vscode_builtin_extension_dirs_per_platform(tmp_path):
         assert any("/usr/share/code/resources/app/extensions" in d for d in dirs)
     elif sys.platform == "win32":
         assert any(d.endswith("Microsoft VS Code/resources/app/extensions") for d in dirs)
+
+
+# --- guarded walk helper: PermissionError tolerance (--scan-all-users) ---
+# Every depth-bounded directory walk routes through ``_walk_under_depth_guarded``
+# so an unreadable base (the routine ``--scan-all-users`` case where an
+# unprivileged scan hits another user's home, making ``Path.exists()`` re-raise
+# ``PermissionError`` on Python 3.12+) is skipped rather than propagated out of
+# ``discover()`` — which the pipeline would catch and use to drop the *whole*
+# discoverer, losing every already-collected reachable source. Mirrors the
+# precedent test ``..._workspace_storage_unreadable_does_not_abort_discovery``.
+
+
+def test_walk_under_depth_guarded_skips_unreadable_base_permission_error(tmp_path, monkeypatch, caplog):
+    """An ``exists()`` probe that raises ``PermissionError`` yields nothing and warns,
+    rather than propagating."""
+    from pathlib import Path
+
+    from agent_scan.agents.base import _walk_under_depth_guarded
+
+    denied = tmp_path / "denied"
+    denied.mkdir()
+    real_exists = Path.exists
+
+    def fake_exists(self, *args, **kwargs):
+        if self == denied:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_exists(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "exists", fake_exists)
+
+    with caplog.at_level("WARNING"):
+        hits = list(_walk_under_depth_guarded(denied, "mcp.json", 5, want_file=True))
+
+    assert hits == []
+    assert "Permission error walking" in caplog.text
+
+
+def test_walk_under_depth_guarded_skips_unreadable_base_os_error(tmp_path, monkeypatch):
+    """A generic ``OSError`` from the walk is tolerated the same way."""
+    from pathlib import Path
+
+    from agent_scan.agents.base import _walk_under_depth_guarded
+
+    denied = tmp_path / "denied"
+    denied.mkdir()
+    real_exists = Path.exists
+
+    def fake_exists(self, *args, **kwargs):
+        if self == denied:
+            raise OSError(5, "I/O error", str(self))
+        return real_exists(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "exists", fake_exists)
+
+    assert list(_walk_under_depth_guarded(denied, "mcp.json", 5, want_file=True)) == []
+
+
+def test_walk_under_depth_guarded_yields_hits_for_readable_tree(tmp_path):
+    """A readable tree yields the same hits as the raw walk (no behavior change)."""
+    from agent_scan.agents.base import _walk_under_depth_guarded
+
+    target = tmp_path / "ext" / "nested"
+    target.mkdir(parents=True)
+    (target / "mcp.json").write_text("{}")
+
+    hits = list(_walk_under_depth_guarded(tmp_path, "mcp.json", 10, want_file=True))
+
+    assert [h.name for h in hits] == ["mcp.json"]
+    assert hits[0] == target / "mcp.json"
+
+
+def test_vscode_extension_walks_unreadable_do_not_abort_discovery(tmp_path, monkeypatch):
+    """An unreadable ``~/.vscode/extensions`` base (shared by the extension-MCP and
+    extension-skills walks) must degrade gracefully, not abort the whole discoverer.
+
+    Pre-fix the unguarded ``base.exists()`` raised ``PermissionError`` out of
+    ``discover_mcp_servers()`` / ``discover_skills()`` and the pipeline dropped the
+    entire discoverer, losing the reachable user-scope ``~/.vscode/mcp.json``.
+    """
+    from pathlib import Path
+
+    from agent_scan.agents import VSCodeDiscoverer
+
+    # Built-in (bundled) extension dirs neutralized so the assertion stays hermetic
+    # on machines where VS Code is actually installed.
+    monkeypatch.setattr(VSCodeDiscoverer, "_builtin_extension_dirs", lambda self: [])
+
+    # A reachable user-scope MCP outside the extensions subtree — must survive.
+    (tmp_path / ".vscode").mkdir()
+    (tmp_path / ".vscode" / "mcp.json").write_text('{"servers": {"user-srv": {"command": "u"}}}')
+
+    ext_base = tmp_path / ".vscode" / "extensions"
+    ext_base.mkdir()
+    real_exists = Path.exists
+
+    def fake_exists(self, *args, **kwargs):
+        # Only the extensions base probe is denied (parent not traversable).
+        if self == ext_base:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_exists(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "exists", fake_exists)
+
+    discoverer = VSCodeDiscoverer(tmp_path)
+    # Both top-level scans must complete without raising.
+    mcp_configs = discoverer.discover_mcp_servers()
+    skills_dirs = discoverer.discover_skills()
+
+    user_keys = [k for k in mcp_configs if k.endswith("/.vscode/mcp.json")]
+    assert len(user_keys) == 1, f"user-scope ~/.vscode/mcp.json must survive; got {list(mcp_configs)}"
+    name, _server = mcp_configs[user_keys[0]][0]
+    assert name == "user-srv"
+    assert not any("/extensions/" in k for k in mcp_configs)
+    assert not any("/extensions/" in k for k in skills_dirs)
+
+
+def test_claude_code_plugin_walks_unreadable_do_not_abort_discovery(tmp_path, monkeypatch):
+    """An unreadable plugin base (walked by both ``_discover_plugin_mcp_servers`` and
+    ``_plugin_manifests``) must not abort ``discover_mcp_servers()``; the reachable
+    user-scope ``~/.claude.json`` MCP still surfaces."""
+    from pathlib import Path
+
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    (tmp_path / ".claude.json").write_text('{"mcpServers": {"my-server": {"command": "echo", "args": ["hi"]}}}')
+
+    denied_plugin_base = tmp_path / ".claude" / "plugins" / "cache"
+    monkeypatch.setattr(ClaudeCodeDiscoverer, "_plugin_base_dirs", lambda self: [denied_plugin_base])
+    real_exists = Path.exists
+
+    def fake_exists(self, *args, **kwargs):
+        if self == denied_plugin_base:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_exists(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "exists", fake_exists)
+
+    mcp_configs = ClaudeCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    user_keys = [k for k in mcp_configs if k.endswith("/.claude.json")]
+    assert len(user_keys) == 1, f"user-scope ~/.claude.json must survive; got {list(mcp_configs)}"
+    name, _server = mcp_configs[user_keys[0]][0]
+    assert name == "my-server"

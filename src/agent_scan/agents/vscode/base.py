@@ -25,7 +25,7 @@ from agent_scan.agents.base import (
     McpConfigsResult,
     McpScanResult,
     SkillsDirsResult,
-    _walk_under_depth,
+    _walk_under_depth_guarded,
 )
 from agent_scan.models import (
     ClaudeConfigFile,
@@ -568,24 +568,13 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         results: list[tuple[Path, dict]] = []
         for userdata in self._user_data_dirs():
             workspace_storage = userdata / "User" / "workspaceStorage"
-            # An unreadable userdata tree must be skipped, not allowed to abort the
-            # discoverer. On Python 3.12+ ``Path.exists()`` re-raises
-            # ``PermissionError`` (rather than returning ``False``) when an ancestor
-            # isn't traversable — the routine ``--scan-all-users`` case of hitting
-            # another user's home. Without this guard the exception propagates out
-            # of ``discover()`` and the pipeline drops the whole discoverer, losing
-            # every other (reachable) source for this IDE/user. Mirrors the same
-            # tolerance ``_load_json_file`` and ``profiles_dir.iterdir`` already apply.
-            try:
-                if not workspace_storage.exists():
-                    continue
-                workspace_files = list(
-                    _walk_under_depth(workspace_storage, "workspace.json", _MAX_WORKSPACE_STORAGE_DEPTH, want_file=True)
-                )
-            except (PermissionError, OSError):
-                logger.warning("Permission error walking %s", workspace_storage.as_posix())
-                continue
-            for workspace_file in workspace_files:
+            # ``_walk_under_depth_guarded`` skips an unreadable userdata tree rather
+            # than letting it abort the discoverer — the routine ``--scan-all-users``
+            # case where ``Path.exists()`` re-raises ``PermissionError`` on Python
+            # 3.12+ for another user's home (see the helper's docstring).
+            for workspace_file in _walk_under_depth_guarded(
+                workspace_storage, "workspace.json", _MAX_WORKSPACE_STORAGE_DEPTH, want_file=True
+            ):
                 data = self._load_json_file(workspace_file)
                 if isinstance(data, dict):
                     results.append((workspace_file, data))
@@ -753,9 +742,7 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         """
         result: McpConfigsResult = {}
         for base in self._extension_base_dirs():
-            if not base.exists():
-                continue
-            for mcp_file in _walk_under_depth(base, "mcp.json", _MAX_PLUGIN_RGLOB_DEPTH, want_file=True):
+            for mcp_file in _walk_under_depth_guarded(base, "mcp.json", _MAX_PLUGIN_RGLOB_DEPTH, want_file=True):
                 if not mcp_file.is_file():
                     continue
                 parsed = self._parse_mcp_file(mcp_file, formats=_VSCODE_FAMILY_FORMATS, skip_unrecognized=True)
