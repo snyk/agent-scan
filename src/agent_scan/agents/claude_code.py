@@ -59,16 +59,12 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
     # discoverers.
     _project_skills_relative: tuple[str, ...] = (".claude/skills", ".agents/skills")
     # Subtrees under a plugin *root* (see ``_plugin_root_dirs``) that stage
-    # *installed* plugins. ``cache`` is the current hydrated install tree;
-    # ``repos`` is the legacy name kept for back-compat with older installs.
-    # Both can host MCP servers / skills / commands.
-    #
-    # ``marketplaces`` is intentionally excluded: it holds the cloned marketplace
-    # *catalog* (the full set of plugins a marketplace makes *available*), not the
-    # subset the user installed. Installing a plugin hydrates it into ``cache``;
-    # the marketplace clone stays a catalog. Scanning it would over-report plugins
-    # that were never installed, so only the install trees are scanned.
-    _plugin_subdirs: tuple[str, ...] = ("cache", "repos")
+    # installed plugins. ``cache`` is the hydrated install tree and
+    # ``marketplaces`` the cloned marketplace sources (the current layout, per
+    # ``~/.claude/plugins`` and the plugin-marketplaces docs); ``repos`` is the
+    # legacy name kept for back-compat with older installs. All can host MCP
+    # servers / skills / commands.
+    _plugin_subdirs: tuple[str, ...] = ("cache", "marketplaces", "repos")
 
     # --- public (override AgentDiscoverer abstracts) ---
 
@@ -258,8 +254,8 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
     # --- private: plugin discovery ---
 
     def _plugin_root_dirs(self) -> list[Path]:
-        """Plugin *root* directories — each holds the ``cache``/``repos``
-        subtrees (see :attr:`_plugin_subdirs`).
+        """Plugin *root* directories — each holds the ``cache``/``marketplaces``/
+        ``repos`` subtrees (see :attr:`_plugin_subdirs`).
 
         The always-present root is ``<base>/plugins`` for each global folder
         (``base`` already honors ``CLAUDE_CONFIG_DIR``). Two env vars add *further*
@@ -272,7 +268,7 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         know another user's env:
 
         * ``CLAUDE_CODE_PLUGIN_CACHE_DIR`` — an additional plugins root (despite the
-          name it is the parent dir; ``cache``/``repos`` live beneath it).
+          name it is the parent dir; ``cache``/``marketplaces`` live beneath it).
         * ``CLAUDE_CODE_PLUGIN_SEED_DIR`` — ``os.pathsep``-separated read-only seed
           roots mirroring the plugins layout (container/CI pre-population).
 
