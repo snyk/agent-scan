@@ -1488,7 +1488,7 @@ def test_plugin_skills_respects_max_depth_cap(tmp_path):
 
 
 def test_server_config_discriminator_keys_match_model_required_fields():
-    """_SERVER_CONFIG_DISCRIMINATOR_KEYS must stay in sync with the required
+    """SERVER_CONFIG_DISCRIMINATOR_KEYS must stay in sync with the required
     top-level fields of StdioServer + RemoteServer (including validation aliases).
 
     The flat-payload gate in ``_looks_like_mcp_payload`` (and ``PluginMCPConfigFile``)
@@ -1499,8 +1499,7 @@ def test_server_config_discriminator_keys_match_model_required_fields():
     """
     from pydantic import AliasChoices
 
-    from agent_scan.agents.base import _SERVER_CONFIG_DISCRIMINATOR_KEYS
-    from agent_scan.models import RemoteServer, StdioServer
+    from agent_scan.models import SERVER_CONFIG_DISCRIMINATOR_KEYS, RemoteServer, StdioServer
 
     expected: set[str] = set()
     for model in (StdioServer, RemoteServer):
@@ -1514,10 +1513,10 @@ def test_server_config_discriminator_keys_match_model_required_fields():
             elif isinstance(alias, AliasChoices):
                 expected.update(c for c in alias.choices if isinstance(c, str))
 
-    assert expected == set(_SERVER_CONFIG_DISCRIMINATOR_KEYS), (
+    assert expected == set(SERVER_CONFIG_DISCRIMINATOR_KEYS), (
         f"Required model fields {expected} drifted from "
-        f"_SERVER_CONFIG_DISCRIMINATOR_KEYS {set(_SERVER_CONFIG_DISCRIMINATOR_KEYS)}. "
-        "Update the constant in agents/base.py so the flat-vs-wrapped detector "
+        f"SERVER_CONFIG_DISCRIMINATOR_KEYS {set(SERVER_CONFIG_DISCRIMINATOR_KEYS)}. "
+        "Update the constant in models.py so the flat-vs-wrapped detector "
         "still recognises every required server-config key."
     )
 

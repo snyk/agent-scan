@@ -111,11 +111,22 @@ class ScalarToolLabels(BaseModel):
     private_data: int | float
 
 
+# Top-level keys that mark a JSON object as a single MCP *server config* rather
+# than a ``{name: serverConfig}`` map: ``command`` (StdioServer) and the remote
+# URL aliases (RemoteServer). Single source of truth reused by RemoteServer's
+# ``validation_alias``, the ``PluginMCPConfigFile`` flat-format gate, and
+# ``base._looks_like_mcp_payload``. A drift guard
+# (test_server_config_discriminator_keys_match_model_required_fields) keeps it in
+# sync with the models' required fields.
+_REMOTE_URL_ALIASES = ("url", "serverUrl", "httpUrl")
+SERVER_CONFIG_DISCRIMINATOR_KEYS = frozenset({"command", *_REMOTE_URL_ALIASES})
+
+
 class RemoteServer(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     # ``serverUrl`` (Figma/Antigravity) and ``httpUrl`` (Gemini CLI Streamable HTTP)
     # are vendor aliases for the same remote-server URL. First present wins.
-    url: str = Field(validation_alias=AliasChoices("url", "serverUrl", "httpUrl"))
+    url: str = Field(validation_alias=AliasChoices(*_REMOTE_URL_ALIASES))
     # ``sse``/``http`` are the transports the client implements
     # (``streamable-http`` folds onto ``http`` below). ``ws`` -- a documented
     # Claude Code WebSocket transport -- is intentionally NOT accepted here yet:
@@ -276,7 +287,7 @@ class PluginMCPConfigFile(MCPConfig):
         for v in data.values():
             if not isinstance(v, dict):
                 raise ValueError("values must be dicts")
-            if not ("command" in v or "url" in v or "serverUrl" in v or "httpUrl" in v):
+            if not any(key in v for key in SERVER_CONFIG_DISCRIMINATOR_KEYS):
                 raise ValueError("values must look like server configs")
         return {"servers": data}
 

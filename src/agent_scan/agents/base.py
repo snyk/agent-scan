@@ -18,6 +18,7 @@ from pathlib import Path
 import pyjson5
 
 from agent_scan.models import (
+    SERVER_CONFIG_DISCRIMINATOR_KEYS,
     ClientToInspect,
     CouldNotParseMCPConfig,
     FileNotFoundConfig,
@@ -44,12 +45,6 @@ McpScanResult = list[tuple[str, StdioServer | RemoteServer]] | CouldNotParseMCPC
 
 # Cap traversal into ``~/.claude/plugins/{cache,repos}``
 _MAX_PLUGIN_RGLOB_DEPTH = 10
-
-# Top-level keys that only ever appear on a single server config (StdioServer.command,
-# RemoteServer.url/serverUrl/httpUrl). Used by ``_looks_like_mcp_payload`` to recognize a
-# wrapper-less flat ``{name: serverConfig}`` MCP payload. Must stay in sync with
-# RemoteServer's URL AliasChoices and the PluginMCPConfigFile flat-format gate in models.py.
-_SERVER_CONFIG_DISCRIMINATOR_KEYS = frozenset({"command", "url", "serverUrl", "httpUrl"})
 
 # Cap the size of a config/skill JSON file read whole into memory. Real MCP /
 # settings files are KB-scale; without a cap a multi-GB file planted under an
@@ -123,7 +118,7 @@ def _looks_like_mcp_payload(data: dict) -> bool:
     if any(key in data for key in ("mcpServers", "mcp", "servers")):
         return True
     return bool(data) and all(
-        isinstance(value, dict) and any(disc in value for disc in _SERVER_CONFIG_DISCRIMINATOR_KEYS)
+        isinstance(value, dict) and any(disc in value for disc in SERVER_CONFIG_DISCRIMINATOR_KEYS)
         for value in data.values()
     )
 
