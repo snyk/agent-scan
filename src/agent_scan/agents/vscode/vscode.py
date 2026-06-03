@@ -11,7 +11,15 @@ class VSCodeDiscoverer(VSCodeFamilyDiscoverer):
     # which uses a separate userdata tree and extensions dir.
     _user_data_dir_names = ("Code", "Code - Insiders")
     _install_paths = ("~/.vscode", "~/.vscode-insiders")
-    _user_mcp_file_paths = ("~/.vscode/mcp.json",)
+    # ``~/.vscode/mcp.json`` is VS Code's own user-level MCP file.
+    # ``~/.copilot/mcp-config.json`` is GitHub Copilot CLI's user-level MCP config
+    # (wrapped ``{"mcpServers": {...}}`` shape) per the official docs:
+    # https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-mcp-servers
+    # It lives under the same ``~/.copilot`` home this discoverer already reads for
+    # skills, so the matching MCP config is surfaced here. Copilot CLI's project-level
+    # ``.mcp.json`` is already covered by ``_workspace_mcp_relative`` below.
+    # (Undocumented ``COPILOT_HOME`` / ``XDG_CONFIG_HOME`` relocations are not honored.)
+    _user_mcp_file_paths = ("~/.vscode/mcp.json", "~/.copilot/mcp-config.json")
     _userdata_user_mcp_file = "User/mcp.json"
     _user_settings_file = "User/settings.json"
     # ``.vscode/mcp.json`` is the documented workspace MCP file. ``.mcp.json``

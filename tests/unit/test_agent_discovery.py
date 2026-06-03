@@ -2008,6 +2008,34 @@ def test_vscode_discoverer_parses_user_dotvscode_mcp_json(tmp_path):
     assert isinstance(server, StdioServer)
 
 
+def test_vscode_discoverer_parses_copilot_cli_user_mcp_config(tmp_path):
+    """GitHub Copilot CLI stores its user-level MCP servers at
+    ``~/.copilot/mcp-config.json`` in the wrapped ``{"mcpServers": {...}}`` shape
+    (docs.github.com/copilot/how-tos/copilot-cli/customize-copilot/add-mcp-servers).
+
+    The VSCode discoverer already reads Copilot's ``~/.copilot/skills``; the
+    matching MCP config under the same ``~/.copilot`` home must surface too.
+    """
+    from agent_scan.agents import VSCodeDiscoverer
+
+    copilot_dir = tmp_path / ".copilot"
+    copilot_dir.mkdir()
+    (copilot_dir / "mcp-config.json").write_text('{"mcpServers": {"my-srv": {"command": "echo", "args": ["a"]}}}')
+    # A ``~/.vscode`` dir marks the client as present (no mcp.json inside, so it
+    # contributes no competing entry).
+    (tmp_path / ".vscode").mkdir()
+
+    mcp_configs = VSCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    file_keys = [k for k in mcp_configs if k.endswith("/.copilot/mcp-config.json")]
+    assert len(file_keys) == 1, f"~/.copilot/mcp-config.json must be discovered; got {list(mcp_configs)}"
+    entries = mcp_configs[file_keys[0]]
+    assert isinstance(entries, list)
+    name, server = entries[0]
+    assert name == "my-srv"
+    assert isinstance(server, StdioServer)
+
+
 def test_vscode_discoverer_parses_settings_json_nested_mcp(tmp_path):
     """``<userdata>/User/settings.json`` carries MCP servers under a nested ``mcp.servers`` key."""
     from agent_scan.agents import VSCodeDiscoverer
