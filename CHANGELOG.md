@@ -81,4 +81,3 @@
 - `0.5.4` Fix bug in parsing of skills. Cosmetic improvements to the CLI. Security fixes. Added agent-guard support for codex.
 - `0.5.5` Introduce bootstrap API and recursive check for mcp_config_globs and skills_dir_globs.
 - `0.5.6` Per-agent discovery refactor with Claude Code support. Bundle all detect_secrets plugins in PyInstaller binary. Starlette security update.
-- `0.5.7` Expand per-agent discovery to the VS Code family (VS Code, Cursor, Windsurf, Kiro, Antigravity); discover project-scoped MCP and skills in opened workspaces; close MCP/skills discovery gaps. Send username with scan metadata. Upgrade pyjwt dependency (security).
