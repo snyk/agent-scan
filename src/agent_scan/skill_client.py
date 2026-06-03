@@ -20,12 +20,6 @@ from agent_scan.models import ServerSignature, SkillServer
 
 logger = logging.getLogger(__name__)
 
-# Cap traversal depth when walking a commands dir, mirroring the value used by
-# the discoverer plugin/extension walks (``agents.base._MAX_PLUGIN_RGLOB_DEPTH``).
-# Kept as a separate constant here to avoid a circular import (agents.base
-# imports this module).
-_MAX_COMMANDS_WALK_DEPTH = 10
-
 
 def get_skill_md_path(path: str) -> str | None:
     for file in os.listdir(path):
@@ -34,59 +28,8 @@ def get_skill_md_path(path: str) -> str | None:
     return None
 
 
-def _inspect_skill_file(expanded_path: str) -> ServerSignature:
-    """Inspect a single-file skill/command (a flat ``*.md``).
-
-    Command files (``~/.claude/commands/*.md``) are markdown files with optional
-    YAML frontmatter, not ``<name>/SKILL.md`` directories. The name defaults to
-    the file stem; an optional frontmatter ``name``/``description`` overrides it.
-    """
-    with open(expanded_path, encoding="utf-8") as f:
-        content = f.read()
-
-    name = os.path.splitext(os.path.basename(expanded_path))[0]
-    description = ""
-    # Only treat the file as having YAML frontmatter when it actually *starts*
-    # with a ``---`` fence; otherwise ``---`` used as a markdown horizontal rule
-    # in the body would be misread as frontmatter.
-    content_chunks = content.split("---")
-    if content.lstrip().startswith("---") and len(content_chunks) > 2:
-        try:
-            yaml_data = yaml.safe_load(content_chunks[1].strip())
-        except YAMLError:
-            yaml_data = None
-        if isinstance(yaml_data, dict):
-            # Guard against non-string frontmatter values (e.g. a YAML list),
-            # which would otherwise fail Pydantic validation downstream.
-            if isinstance(yaml_data.get("name"), str):
-                name = yaml_data["name"]
-            if isinstance(yaml_data.get("description"), str):
-                description = yaml_data["description"]
-
-    # Name the single prompt after the command's resolved ``name`` (file stem, or
-    # a frontmatter ``name`` override) so it matches ``serverInfo`` below rather
-    # than carrying the raw ``<stem>.md`` filename.
-    base_prompt = Prompt(name=name, description=content)
-    return ServerSignature(
-        metadata=InitializeResult(
-            protocolVersion="built-in",
-            instructions=description,
-            capabilities=ServerCapabilities(tools=ToolsCapability(listChanged=False)),
-            prompts=PromptsCapability(listChanged=False),
-            resources=ResourcesCapability(listChanged=False),
-            serverInfo=Implementation(name=name, version="skills"),
-        ),
-        prompts=[base_prompt],
-        resources=[],
-        tools=[],
-    )
-
-
 def inspect_skill(config: SkillServer) -> ServerSignature:
     logger.info(f"Scanning skill at path: {config.path}")
-    expanded_path = os.path.expanduser(config.path)
-    if os.path.isfile(expanded_path):
-        return _inspect_skill_file(expanded_path)
     skill_md_path = get_skill_md_path(config.path)
     if skill_md_path is None:
         raise Exception(f"neither SKILL.md nor skill.md file found at path: {config.path}")
@@ -211,42 +154,3 @@ def inspect_skills_dir(path: str) -> list[tuple[str, SkillServer]]:
             skills_servers.append((candidate_skill_dir, SkillServer(path=candidate_skill_dir_full_path)))
     logger.info("Found %d skills servers", len(skills_servers))
     return skills_servers
-
-
-def inspect_commands_dir(path: str) -> list[tuple[str, SkillServer]]:
-    """List command files under ``path`` as skill entries.
-
-    Unlike :func:`inspect_skills_dir` (which expects ``<name>/SKILL.md``
-    subdirectories), command files are flat ``*.md`` files. Claude Code
-    namespaces nested command files by their relative path joined with ``:``
-    (e.g. ``commands/git/commit.md`` -> ``git:commit``). Each file becomes one
-    ``SkillServer`` pointing at the file itself.
-
-    Traversal is depth-bounded by :data:`_MAX_COMMANDS_WALK_DEPTH`, pruning the
-    walk once it would descend past the cap rather than walking the whole subtree
-    first. This mirrors the discoverer plugin/extension walks
-    (``agents.base._walk_under_depth``) so a pathologically deep tree under a
-    commands dir can't blow up the scan. A ``.md`` file is surfaced only when its
-    path relative to ``path`` is at most ``_MAX_COMMANDS_WALK_DEPTH`` components
-    deep.
-    """
-    logger.info("Scanning commands dir: %s", path)
-
-    expanded_path = os.path.expanduser(path)
-    commands: list[tuple[str, SkillServer]] = []
-    for root, dirs, files in os.walk(expanded_path):
-        relative_root = os.path.relpath(root, expanded_path)
-        dir_depth = 0 if relative_root == os.curdir else len(relative_root.split(os.sep))
-        for file in files:
-            if not file.endswith(".md"):
-                continue
-            full_path = os.path.join(root, file)
-            relative = os.path.relpath(full_path, expanded_path)
-            name = os.path.splitext(relative)[0].replace(os.path.sep, ":")
-            commands.append((name, SkillServer(path=full_path)))
-        # A file inside the current dir sits at depth+1; prune once that reaches
-        # the cap so we don't descend into deeper subdirectories.
-        if dir_depth + 1 >= _MAX_COMMANDS_WALK_DEPTH:
-            dirs.clear()
-    logger.info("Found %d command files", len(commands))
-    return commands

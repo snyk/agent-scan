@@ -59,10 +59,6 @@ def setup_logging(verbose=False, log_to_stderr=False):
         # Remove any existing handlers (including the NullHandler)
         for hdlr in root_logger.handlers:
             root_logger.removeHandler(hdlr)
-        # markup=False on both handlers: log messages carry arbitrary scanned
-        # data (payloads, file paths, server output) that can contain "[...]"
-        # which Rich would otherwise parse as console markup and raise
-        # MarkupError. Intentional styling goes through rich.print, not logging.
         if log_to_stderr:
             # stderr logging
             stderr_console = rich.console.Console(stderr=True)
@@ -71,7 +67,7 @@ def setup_logging(verbose=False, log_to_stderr=False):
                 datefmt="[%X]",
                 force=True,
                 level=logging.DEBUG,
-                handlers=[RichHandler(markup=False, rich_tracebacks=True, console=stderr_console)],
+                handlers=[RichHandler(markup=True, rich_tracebacks=True, console=stderr_console)],
             )
             root_logger.debug("Verbose mode enabled, logging initialized to stderr")
         else:  # stdout logging
@@ -80,7 +76,7 @@ def setup_logging(verbose=False, log_to_stderr=False):
                 datefmt="[%X]",
                 force=True,
                 level=logging.DEBUG,
-                handlers=[RichHandler(markup=False, rich_tracebacks=True)],
+                handlers=[RichHandler(markup=True, rich_tracebacks=True)],
             )
             root_logger.debug("Logging initialized to stdout")
         root_logger.debug("Logging initialized")
