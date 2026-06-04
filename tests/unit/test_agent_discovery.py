@@ -1164,7 +1164,16 @@ def test_DISCOVERERS_registers_claude_code_and_vscode_family():
     """
     from agent_scan.agents import DISCOVERERS
 
-    assert set(DISCOVERERS) == {"claude code", "vscode", "cursor", "windsurf", "kiro", "antigravity", "codex"}
+    assert set(DISCOVERERS) == {
+        "claude code",
+        "vscode",
+        "cursor",
+        "windsurf",
+        "kiro",
+        "antigravity",
+        "codex",
+        "claude",
+    }
 
 
 def test_find_discoverers_returns_claude_code_when_installed(tmp_path):
@@ -6217,3 +6226,219 @@ def test_codex_plugin_base_dirs_are_the_plugin_subdirs(tmp_path):
 
     assert disc._plugin_subdirs == ("cache", "marketplaces", "repos")
     assert disc._plugin_base_dirs() == [plugins_root / sub for sub in disc._plugin_subdirs]
+
+
+# --- ClaudeDesktopDiscoverer: per-OS config (claude_desktop_config.json) ---
+#
+# Claude Desktop stores MCP servers in a single per-OS file
+# (``claude_desktop_config.json``) in the wrapped ``{"mcpServers": {...}}`` form.
+# It has no project scope, no skills feature, and no documented extension / env-var
+# paths. ``sys.platform`` is monkeypatched in every path-dependent test so they are
+# deterministic regardless of the OS running the suite (e.g. Linux CI).
+
+
+def _claude_desktop_dir(home, platform):
+    """The documented install/config dir for Claude Desktop under ``home``."""
+    if platform == "darwin":
+        return home / "Library" / "Application Support" / "Claude"
+    if platform == "win32":
+        return home / "AppData" / "Roaming" / "Claude"
+    raise ValueError(f"unsupported platform: {platform}")
+
+
+def test_claude_desktop_discoverer_detects_installation_macos(tmp_path, monkeypatch):
+    from agent_scan.agents import claude_desktop as claude_desktop_module
+
+    monkeypatch.setattr(claude_desktop_module.sys, "platform", "darwin")
+    _claude_desktop_dir(tmp_path, "darwin").mkdir(parents=True)
+
+    result = claude_desktop_module.ClaudeDesktopDiscoverer(tmp_path).client_exists()
+
+    assert result is not None
+    assert result.endswith("/Library/Application Support/Claude")
+
+
+def test_claude_desktop_discoverer_returns_none_when_absent(tmp_path, monkeypatch):
+    from agent_scan.agents import claude_desktop as claude_desktop_module
+
+    monkeypatch.setattr(claude_desktop_module.sys, "platform", "darwin")
+
+    result = claude_desktop_module.ClaudeDesktopDiscoverer(tmp_path).client_exists()
+
+    assert result is None
+
+
+def test_claude_desktop_discoverer_returns_none_on_unsupported_platform(tmp_path, monkeypatch):
+    """Claude Desktop is macOS/Windows only; on Linux there is no documented path,
+    so detection returns None even if a same-named dir happens to exist."""
+    from agent_scan.agents import claude_desktop as claude_desktop_module
+
+    monkeypatch.setattr(claude_desktop_module.sys, "platform", "linux")
+    # Plant both candidate layouts; neither must be honored on an unsupported OS.
+    (tmp_path / "Library" / "Application Support" / "Claude").mkdir(parents=True)
+    (tmp_path / "AppData" / "Roaming" / "Claude").mkdir(parents=True)
+
+    disc = claude_desktop_module.ClaudeDesktopDiscoverer(tmp_path)
+
+    assert disc.client_exists() is None
+    assert disc._config_path() is None
+    assert disc.discover_mcp_servers() == {}
+
+
+def test_claude_desktop_discoverer_parses_stdio_mcp_server(tmp_path, monkeypatch):
+    from agent_scan.agents import claude_desktop as claude_desktop_module
+
+    monkeypatch.setattr(claude_desktop_module.sys, "platform", "darwin")
+    install = _claude_desktop_dir(tmp_path, "darwin")
+    install.mkdir(parents=True)
+    (install / "claude_desktop_config.json").write_text(
+        '{"mcpServers": {"filesystem": {"command": "npx", '
+        '"args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]}}}'
+    )
+
+    mcp_configs = claude_desktop_module.ClaudeDesktopDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert len(mcp_configs) == 1
+    config_path = next(iter(mcp_configs))
+    assert config_path.endswith("/Library/Application Support/Claude/claude_desktop_config.json")
+    entries = mcp_configs[config_path]
+    assert isinstance(entries, list)
+    name, server = entries[0]
+    assert name == "filesystem"
+    assert isinstance(server, StdioServer)
+    assert server.command == "npx"
+    assert server.args == ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+
+
+def test_claude_desktop_discoverer_parses_remote_mcp_server(tmp_path, monkeypatch):
+    from agent_scan.agents import claude_desktop as claude_desktop_module
+
+    monkeypatch.setattr(claude_desktop_module.sys, "platform", "darwin")
+    install = _claude_desktop_dir(tmp_path, "darwin")
+    install.mkdir(parents=True)
+    (install / "claude_desktop_config.json").write_text(
+        '{"mcpServers": {"remote": {"url": "https://mcp.example.com/mcp"}}}'
+    )
+
+    mcp_configs = claude_desktop_module.ClaudeDesktopDiscoverer(tmp_path).discover_mcp_servers()
+
+    config_path = next(iter(mcp_configs))
+    name, server = mcp_configs[config_path][0]
+    assert name == "remote"
+    assert isinstance(server, RemoteServer)
+    assert server.url == "https://mcp.example.com/mcp"
+
+
+def test_claude_desktop_discoverer_ignores_config_without_mcp_servers(tmp_path, monkeypatch):
+    """``claude_desktop_config.json`` is multi-purpose (UI settings + ``mcpServers``);
+    a config with no ``mcpServers`` key yields no entries -- not a parse failure."""
+    from agent_scan.agents import claude_desktop as claude_desktop_module
+
+    monkeypatch.setattr(claude_desktop_module.sys, "platform", "darwin")
+    install = _claude_desktop_dir(tmp_path, "darwin")
+    install.mkdir(parents=True)
+    (install / "claude_desktop_config.json").write_text('{"globalShortcut": "Cmd+Shift+Space"}')
+
+    mcp_configs = claude_desktop_module.ClaudeDesktopDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert mcp_configs == {}
+
+
+def test_claude_desktop_discoverer_malformed_json_is_parse_error(tmp_path, monkeypatch):
+    from agent_scan.agents import claude_desktop as claude_desktop_module
+
+    monkeypatch.setattr(claude_desktop_module.sys, "platform", "darwin")
+    install = _claude_desktop_dir(tmp_path, "darwin")
+    install.mkdir(parents=True)
+    (install / "claude_desktop_config.json").write_text('{"mcpServers": {')
+
+    mcp_configs = claude_desktop_module.ClaudeDesktopDiscoverer(tmp_path).discover_mcp_servers()
+
+    config_path = next(iter(mcp_configs))
+    assert config_path.endswith("/claude_desktop_config.json")
+    assert isinstance(mcp_configs[config_path], CouldNotParseMCPConfig)
+
+
+def test_claude_desktop_discoverer_returns_empty_when_config_absent(tmp_path, monkeypatch):
+    """Install dir present but no config file written yet -> no MCP entries."""
+    from agent_scan.agents import claude_desktop as claude_desktop_module
+
+    monkeypatch.setattr(claude_desktop_module.sys, "platform", "darwin")
+    _claude_desktop_dir(tmp_path, "darwin").mkdir(parents=True)
+
+    mcp_configs = claude_desktop_module.ClaudeDesktopDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert mcp_configs == {}
+
+
+def test_claude_desktop_discoverer_has_no_skills(tmp_path, monkeypatch):
+    """Claude Desktop has no documented skills feature (skills are Claude Code-only)."""
+    from agent_scan.agents import claude_desktop as claude_desktop_module
+
+    monkeypatch.setattr(claude_desktop_module.sys, "platform", "darwin")
+    _claude_desktop_dir(tmp_path, "darwin").mkdir(parents=True)
+
+    assert claude_desktop_module.ClaudeDesktopDiscoverer(tmp_path).discover_skills() == {}
+
+
+def test_claude_desktop_discoverer_discover_assembles_client_to_inspect(tmp_path, monkeypatch):
+    from agent_scan.agents import claude_desktop as claude_desktop_module
+
+    monkeypatch.setattr(claude_desktop_module.sys, "platform", "darwin")
+    install = _claude_desktop_dir(tmp_path, "darwin")
+    install.mkdir(parents=True)
+    (install / "claude_desktop_config.json").write_text('{"mcpServers": {"toy": {"command": "echo"}}}')
+
+    cti = claude_desktop_module.ClaudeDesktopDiscoverer(tmp_path).discover()
+
+    assert isinstance(cti, ClientToInspect)
+    # Must match the Phase-A ``well_known_clients`` "claude" entry so the two phases
+    # merge onto a single client in ``pipelines.discover_clients_to_inspect``.
+    assert cti.name == "claude"
+    assert cti.client_path.endswith("/Library/Application Support/Claude")
+
+
+def test_claude_desktop_discoverer_windows_path(tmp_path, monkeypatch):
+    from agent_scan.agents import claude_desktop as claude_desktop_module
+
+    monkeypatch.setattr(claude_desktop_module.sys, "platform", "win32")
+    install = _claude_desktop_dir(tmp_path, "win32")
+    install.mkdir(parents=True)
+    (install / "claude_desktop_config.json").write_text('{"mcpServers": {"win": {"command": "w"}}}')
+
+    disc = claude_desktop_module.ClaudeDesktopDiscoverer(tmp_path)
+    assert disc.client_exists().endswith("/AppData/Roaming/Claude")
+    mcp_configs = disc.discover_mcp_servers()
+    config_path = next(iter(mcp_configs))
+    assert config_path.endswith("/AppData/Roaming/Claude/claude_desktop_config.json")
+    assert mcp_configs[config_path][0][0] == "win"
+
+
+def test_claude_desktop_config_path_is_per_os(tmp_path, monkeypatch):
+    from agent_scan.agents import claude_desktop as claude_desktop_module
+
+    disc = claude_desktop_module.ClaudeDesktopDiscoverer(tmp_path)
+
+    monkeypatch.setattr(claude_desktop_module.sys, "platform", "darwin")
+    assert disc._config_path() == (
+        tmp_path / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json"
+    )
+
+    monkeypatch.setattr(claude_desktop_module.sys, "platform", "win32")
+    assert disc._config_path() == tmp_path / "AppData" / "Roaming" / "Claude" / "claude_desktop_config.json"
+
+    # Linux is not an officially supported Claude Desktop platform -> no path.
+    monkeypatch.setattr(claude_desktop_module.sys, "platform", "linux")
+    assert disc._config_path() is None
+
+
+def test_find_discoverers_returns_claude_desktop_when_installed(tmp_path, monkeypatch):
+    from agent_scan.agents import claude_desktop as claude_desktop_module
+    from agent_scan.agents import find_discoverers
+
+    monkeypatch.setattr(claude_desktop_module.sys, "platform", "darwin")
+    _claude_desktop_dir(tmp_path, "darwin").mkdir(parents=True)
+
+    found = find_discoverers(tmp_path)
+
+    assert any(isinstance(d, claude_desktop_module.ClaudeDesktopDiscoverer) for d in found)
