@@ -1164,7 +1164,7 @@ def test_DISCOVERERS_registers_claude_code_and_vscode_family():
     """
     from agent_scan.agents import DISCOVERERS
 
-    assert set(DISCOVERERS) == {"claude code", "vscode", "cursor", "windsurf", "kiro", "antigravity"}
+    assert set(DISCOVERERS) == {"claude code", "vscode", "cursor", "windsurf", "kiro", "antigravity", "codex"}
 
 
 def test_find_discoverers_returns_claude_code_when_installed(tmp_path):
@@ -5640,3 +5640,291 @@ def test_vscode_code_workspace_malformed_file_skipped(tmp_path):
 
     assert not any("broken.code-workspace" in k for k in mcp_configs)
     assert any(k.endswith("/good-repo/.vscode/mcp.json") for k in mcp_configs)
+
+
+# --- CodexDiscoverer: client_exists ---
+
+
+def test_codex_discoverer_detects_installation(tmp_path):
+    from agent_scan.agents import CodexDiscoverer
+
+    (tmp_path / ".codex").mkdir()
+
+    result = CodexDiscoverer(tmp_path).client_exists()
+
+    assert result is not None
+    assert result.endswith("/.codex")
+
+
+def test_codex_discoverer_returns_none_when_absent(tmp_path):
+    from agent_scan.agents import CodexDiscoverer
+
+    result = CodexDiscoverer(tmp_path).client_exists()
+
+    assert result is None
+
+
+# --- CodexDiscoverer: discover_mcp_servers (TOML config.toml) ---
+
+
+def test_codex_discoverer_parses_stdio_mcp_server(tmp_path):
+    """A stdio ``[mcp_servers.<name>]`` table becomes a StdioServer keyed by config path."""
+    from agent_scan.agents import CodexDiscoverer
+
+    (tmp_path / ".codex").mkdir()
+    (tmp_path / ".codex" / "config.toml").write_text(
+        "[mcp_servers.context7]\n"
+        'command = "npx"\n'
+        'args = ["-y", "@upstash/context7-mcp"]\n'
+        "\n"
+        "[mcp_servers.context7.env]\n"
+        'MY_ENV_VAR = "MY_ENV_VALUE"\n'
+    )
+
+    mcp_configs = CodexDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert len(mcp_configs) == 1
+    config_path = next(iter(mcp_configs))
+    assert config_path.endswith("/.codex/config.toml")
+    entries = mcp_configs[config_path]
+    assert isinstance(entries, list)
+    name, server = entries[0]
+    assert name == "context7"
+    assert isinstance(server, StdioServer)
+    assert server.command == "npx"
+    assert server.args == ["-y", "@upstash/context7-mcp"]
+    assert server.env == {"MY_ENV_VAR": "MY_ENV_VALUE"}
+
+
+def test_codex_discoverer_parses_http_mcp_server(tmp_path):
+    """An HTTP ``[mcp_servers.<name>]`` table (url) becomes a RemoteServer.
+
+    Codex-only keys (``bearer_token_env_var``/``http_headers``) are ignored by
+    the model's default ``extra="ignore"`` and must not sink validation.
+    """
+    from agent_scan.agents import CodexDiscoverer
+
+    (tmp_path / ".codex").mkdir()
+    (tmp_path / ".codex" / "config.toml").write_text(
+        "[mcp_servers.figma]\n"
+        'url = "https://mcp.figma.com/mcp"\n'
+        'bearer_token_env_var = "FIGMA_OAUTH_TOKEN"\n'
+        'http_headers = { "X-Figma-Region" = "us-east-1" }\n'
+    )
+
+    mcp_configs = CodexDiscoverer(tmp_path).discover_mcp_servers()
+
+    config_path = next(iter(mcp_configs))
+    entries = mcp_configs[config_path]
+    assert isinstance(entries, list)
+    name, server = entries[0]
+    assert name == "figma"
+    assert isinstance(server, RemoteServer)
+    assert server.url == "https://mcp.figma.com/mcp"
+
+
+def test_codex_discoverer_mixes_stdio_and_http_servers(tmp_path):
+    from agent_scan.agents import CodexDiscoverer
+
+    (tmp_path / ".codex").mkdir()
+    (tmp_path / ".codex" / "config.toml").write_text(
+        '[mcp_servers.local]\ncommand = "server"\n\n[mcp_servers.remote]\nurl = "https://mcp.example.com/mcp"\n'
+    )
+
+    mcp_configs = CodexDiscoverer(tmp_path).discover_mcp_servers()
+
+    config_path = next(iter(mcp_configs))
+    by_name = dict(mcp_configs[config_path])
+    assert set(by_name) == {"local", "remote"}
+    assert isinstance(by_name["local"], StdioServer)
+    assert isinstance(by_name["remote"], RemoteServer)
+
+
+def test_codex_discoverer_ignores_config_without_mcp_servers(tmp_path):
+    """A ``config.toml`` carrying only model/approval settings (no ``mcp_servers``)
+    returns no entries -- it is not a parse failure (Codex config is multi-purpose)."""
+    from agent_scan.agents import CodexDiscoverer
+
+    (tmp_path / ".codex").mkdir()
+    (tmp_path / ".codex" / "config.toml").write_text('model = "gpt-5-codex"\napproval_policy = "on-request"\n')
+
+    mcp_configs = CodexDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert mcp_configs == {}
+
+
+def test_codex_discoverer_returns_empty_when_config_absent(tmp_path):
+    from agent_scan.agents import CodexDiscoverer
+
+    (tmp_path / ".codex").mkdir()
+
+    mcp_configs = CodexDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert mcp_configs == {}
+
+
+def test_codex_discoverer_malformed_toml_is_parse_error(tmp_path):
+    from agent_scan.agents import CodexDiscoverer
+
+    (tmp_path / ".codex").mkdir()
+    # Unterminated table header -- not valid TOML.
+    (tmp_path / ".codex" / "config.toml").write_text("[mcp_servers.broken\ncommand = ")
+
+    mcp_configs = CodexDiscoverer(tmp_path).discover_mcp_servers()
+
+    config_path = next(iter(mcp_configs))
+    assert config_path.endswith("/.codex/config.toml")
+    assert isinstance(mcp_configs[config_path], CouldNotParseMCPConfig)
+
+
+def test_codex_discoverer_extra_codex_keys_do_not_sink_validation(tmp_path):
+    """Codex-specific stdio keys (``env_vars``/``cwd``/``enabled``) are tolerated."""
+    from agent_scan.agents import CodexDiscoverer
+
+    (tmp_path / ".codex").mkdir()
+    (tmp_path / ".codex" / "config.toml").write_text(
+        "[mcp_servers.ctx]\n"
+        'command = "npx"\n'
+        'args = ["-y", "pkg"]\n'
+        'env_vars = ["LOCAL_TOKEN"]\n'
+        'cwd = "/tmp"\n'
+        "enabled = true\n"
+    )
+
+    mcp_configs = CodexDiscoverer(tmp_path).discover_mcp_servers()
+
+    config_path = next(iter(mcp_configs))
+    name, server = mcp_configs[config_path][0]
+    assert name == "ctx"
+    assert isinstance(server, StdioServer)
+    assert server.command == "npx"
+
+
+# --- CodexDiscoverer: CODEX_HOME relocation ---
+
+
+def test_codex_discoverer_honors_codex_home_on_own_home_scan(tmp_path, monkeypatch):
+    """On an own-home scan (``home_directory=None``), ``CODEX_HOME`` relocates the
+    config dir, mirroring how Claude Code honors ``CLAUDE_CONFIG_DIR``."""
+    from agent_scan.agents import CodexDiscoverer
+
+    cfg = tmp_path / "custom-codex"
+    cfg.mkdir()
+    (cfg / "config.toml").write_text('[mcp_servers.relocated]\ncommand = "r"\n')
+    monkeypatch.setenv("CODEX_HOME", str(cfg))
+
+    mcp_configs = CodexDiscoverer(None).discover_mcp_servers()
+
+    keys = [k for k in mcp_configs if k.endswith("/custom-codex/config.toml")]
+    assert len(keys) == 1
+    assert mcp_configs[keys[0]][0][0] == "relocated"
+
+
+def test_codex_discoverer_ignores_codex_home_when_home_passed(tmp_path, monkeypatch):
+    """Under a multi-user scan (an explicit, different home is passed) the scanning
+    process's ``CODEX_HOME`` must NOT relocate the target user's config."""
+    from agent_scan.agents import CodexDiscoverer
+
+    cfg = tmp_path / "process-env-dir"
+    cfg.mkdir()
+    (cfg / "config.toml").write_text('[mcp_servers.should-not-appear]\ncommand = "x"\n')
+    monkeypatch.setenv("CODEX_HOME", str(cfg))
+
+    home = tmp_path / "alice"
+    (home / ".codex").mkdir(parents=True)
+    (home / ".codex" / "config.toml").write_text('[mcp_servers.alice-server]\ncommand = "a"\n')
+
+    mcp_configs = CodexDiscoverer(home).discover_mcp_servers()
+
+    all_names = {n for v in mcp_configs.values() if isinstance(v, list) for n, _ in v}
+    assert "alice-server" in all_names
+    assert "should-not-appear" not in all_names
+
+
+# --- CodexDiscoverer: discover_skills (documented dirs) ---
+
+
+def test_codex_discoverer_discovers_user_skills(tmp_path, monkeypatch):
+    """User skills live at ``$HOME/.agents/skills/<name>/SKILL.md`` per Codex docs."""
+    from agent_scan.agents import CodexDiscoverer
+
+    # Keep the admin path hermetic (point it somewhere that does not exist).
+    monkeypatch.setattr(CodexDiscoverer, "_admin_skills_dir", str(tmp_path / "no-admin"))
+
+    my_skill = tmp_path / ".agents" / "skills" / "my-skill"
+    my_skill.mkdir(parents=True)
+    (my_skill / "SKILL.md").write_text("---\nname: my-skill\ndescription: A test skill\n---\n\nBody.\n")
+
+    skills_dirs = CodexDiscoverer(tmp_path).discover_skills()
+
+    keys = [k for k in skills_dirs if k.endswith("/.agents/skills")]
+    assert len(keys) == 1
+    assert {n for n, _ in skills_dirs[keys[0]]} == {"my-skill"}
+    assert isinstance(skills_dirs[keys[0]][0][1], SkillServer)
+
+
+def test_codex_discoverer_discovers_admin_skills(tmp_path, monkeypatch):
+    """Admin skills live at ``/etc/codex/skills`` per Codex docs; retargeted here."""
+    from agent_scan.agents import CodexDiscoverer
+
+    admin = tmp_path / "etc-codex-skills"
+    skill = admin / "ops-skill"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: ops-skill\ndescription: admin\n---\n\nBody.\n")
+    monkeypatch.setattr(CodexDiscoverer, "_admin_skills_dir", str(admin))
+
+    skills_dirs = CodexDiscoverer(tmp_path).discover_skills()
+
+    keys = [k for k in skills_dirs if k.endswith("/etc-codex-skills")]
+    assert len(keys) == 1
+    assert {n for n, _ in skills_dirs[keys[0]]} == {"ops-skill"}
+
+
+def test_codex_discoverer_returns_empty_skills_when_no_dirs(tmp_path, monkeypatch):
+    from agent_scan.agents import CodexDiscoverer
+
+    monkeypatch.setattr(CodexDiscoverer, "_admin_skills_dir", str(tmp_path / "no-admin"))
+
+    skills_dirs = CodexDiscoverer(tmp_path).discover_skills()
+
+    assert skills_dirs == {}
+
+
+# --- CodexDiscoverer: full discover() + registry ---
+
+
+def test_codex_discoverer_discover_assembles_client(tmp_path, monkeypatch):
+    from agent_scan.agents import CodexDiscoverer
+    from agent_scan.models import ClientToInspect
+
+    monkeypatch.setattr(CodexDiscoverer, "_admin_skills_dir", str(tmp_path / "no-admin"))
+    (tmp_path / ".codex").mkdir()
+    (tmp_path / ".codex" / "config.toml").write_text('[mcp_servers.local]\ncommand = "server"\n')
+
+    cti = CodexDiscoverer(tmp_path).discover()
+
+    assert isinstance(cti, ClientToInspect)
+    assert cti.name == "codex"
+    assert cti.client_path.endswith("/.codex")
+
+
+def test_codex_discoverer_discover_returns_none_when_absent(tmp_path):
+    from agent_scan.agents import CodexDiscoverer
+
+    assert CodexDiscoverer(tmp_path).discover() is None
+
+
+def test_DISCOVERERS_registers_codex():
+    from agent_scan.agents import DISCOVERERS, CodexDiscoverer
+
+    assert DISCOVERERS["codex"] is CodexDiscoverer
+
+
+def test_find_discoverers_returns_codex_when_installed(tmp_path):
+    from agent_scan.agents import CodexDiscoverer, find_discoverers
+
+    (tmp_path / ".codex").mkdir()
+
+    found = find_discoverers(tmp_path)
+
+    assert any(isinstance(d, CodexDiscoverer) for d in found)

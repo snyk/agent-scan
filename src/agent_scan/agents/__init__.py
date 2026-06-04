@@ -10,6 +10,7 @@ from pathlib import Path
 
 from agent_scan.agents.base import AgentDiscoverer
 from agent_scan.agents.claude_code import ClaudeCodeDiscoverer
+from agent_scan.agents.codex import CodexDiscoverer
 from agent_scan.agents.vscode import (
     AntigravityDiscoverer,
     CursorDiscoverer,
@@ -28,6 +29,7 @@ DISCOVERERS: dict[str, type[AgentDiscoverer]] = {
     WindsurfDiscoverer.name: WindsurfDiscoverer,
     KiroDiscoverer.name: KiroDiscoverer,
     AntigravityDiscoverer.name: AntigravityDiscoverer,
+    CodexDiscoverer.name: CodexDiscoverer,
 }
 
 
@@ -58,6 +60,7 @@ __all__ = [
     "AgentDiscoverer",
     "AntigravityDiscoverer",
     "ClaudeCodeDiscoverer",
+    "CodexDiscoverer",
     "CursorDiscoverer",
     "KiroDiscoverer",
     "VSCodeDiscoverer",
