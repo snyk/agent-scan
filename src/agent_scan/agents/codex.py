@@ -32,11 +32,15 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 lacks stdlib TOML
 
 from agent_scan.agents.base import (
     _MAX_CONFIG_FILE_BYTES,
+    _MAX_PLUGIN_RGLOB_DEPTH,
     AgentDiscoverer,
     McpConfigsResult,
+    McpScanResult,
     SkillsDirsResult,
+    _walk_under_depth,
 )
-from agent_scan.models import CouldNotParseMCPConfig
+from agent_scan.models import CouldNotParseMCPConfig, PluginMCPConfigFile
+from agent_scan.skill_client import inspect_skills_dir
 from agent_scan.well_known_clients import expand_path
 
 logger = logging.getLogger(__name__)
@@ -56,6 +60,10 @@ class CodexDiscoverer(AgentDiscoverer):
       ``<codex_home>/<name>.config.toml`` MCP servers; user ``~/.agents/skills``.
     * **Managed (enterprise)** — ``/etc/codex/managed_config.toml`` MCP servers.
     * **Admin / machine** — admin ``/etc/codex/skills`` skills.
+    * **Plugins** — the ``<codex_home>/plugins/<subdir>`` trees (see
+      :attr:`_plugin_subdirs`) are walked for bundled ``.mcp.json`` MCP servers and
+      ``skills/`` directories, mirroring Claude Code's plugin walk under
+      ``~/.claude/plugins``.
     * **Project** — every project recorded in the user config's ``[projects]``
       table (keyed by absolute path) is scanned for its ``<proj>/.codex/config.toml``
       MCP servers and ``<proj>/.agents/skills`` skills, plus every ancestor up to
@@ -95,6 +103,13 @@ class CodexDiscoverer(AgentDiscoverer):
     #                                  it dedups across homes under --scan-all-users)
     _user_skills_relative = "~/.agents/skills"
     _admin_skills_dir = "/etc/codex/skills"
+    # Subtrees under ``<codex_home>/plugins`` that stage installed plugins, mirroring
+    # ``ClaudeCodeDiscoverer._plugin_subdirs``. ``cache`` is the hydrated install tree
+    # (verified on disk as ``cache/<marketplace>/<plugin>/<version>/``); ``marketplaces``
+    # holds cloned marketplace sources and ``repos`` is a legacy name — both included
+    # for parity with Claude Code and forward-compat (a subdir absent on disk is simply
+    # skipped). All can host MCP servers / skills. Drop an entry here to stop scanning it.
+    _plugin_subdirs: tuple[str, ...] = ("cache", "marketplaces", "repos")
 
     # --- public (override AgentDiscoverer abstracts) ---
 
@@ -109,18 +124,22 @@ class CodexDiscoverer(AgentDiscoverer):
 
     def discover_mcp_servers(self) -> McpConfigsResult:
         """MCP servers across every config layer Codex reads: the user config, profile
-        config files, the enterprise managed config, and each registered project's config."""
+        config files, the enterprise managed config, installed plugins, and each
+        registered project's config."""
         result: McpConfigsResult = {}
         result.update(self._discover_user_mcp_servers())
         result.update(self._discover_profile_mcp_servers())
         result.update(self._discover_managed_mcp_servers())
+        result.update(self._discover_plugin_mcp_servers())
         result.update(self._discover_project_mcp_servers())
         return result
 
     def discover_skills(self) -> SkillsDirsResult:
-        """Skills from the documented user/admin dirs plus every registered project."""
+        """Skills from the documented user/admin dirs, installed plugins, and every
+        registered project."""
         result: SkillsDirsResult = {}
         result.update(self._discover_global_skills())
+        result.update(self._discover_plugin_skills())
         result.update(self._discover_project_skills())
         return result
 
@@ -180,6 +199,56 @@ class CodexDiscoverer(AgentDiscoverer):
         # than guessed. The macOS-MDM preference domain (``com.openai.codex``) is a
         # separate, non-filesystem mechanism and is likewise not read.
         return None
+
+    # --- private: plugin discovery (mirrors ClaudeCodeDiscoverer's plugin walk) ---
+
+    def _plugin_base_dirs(self) -> list[Path]:
+        """Every ``<codex_home>/plugins/<subdir>`` to walk for plugin MCP servers and
+        skills, one per :attr:`_plugin_subdirs`. Mirrors
+        ``ClaudeCodeDiscoverer._plugin_base_dirs``; a subdir absent on disk is skipped
+        downstream by :func:`_walk_under_depth`."""
+        root = self._codex_home() / "plugins"
+        return [root / sub for sub in self._plugin_subdirs]
+
+    def _discover_plugin_mcp_servers(self) -> McpConfigsResult:
+        """Scan every plugin tree for ``.mcp.json`` files (mirrors
+        ``ClaudeCodeDiscoverer._discover_plugin_mcp_servers``)."""
+        result: McpConfigsResult = {}
+        for base in self._plugin_base_dirs():
+            for mcp_file in _walk_under_depth(base, ".mcp.json", _MAX_PLUGIN_RGLOB_DEPTH, want_file=True):
+                if not mcp_file.is_file():
+                    continue
+                parsed = self._parse_plugin_mcp_json(mcp_file)
+                if not parsed:
+                    continue
+                result[mcp_file.as_posix()] = parsed
+        return result
+
+    def _discover_plugin_skills(self) -> SkillsDirsResult:
+        """Scan ``skills/`` subdirs under every plugin tree (mirrors
+        ``ClaudeCodeDiscoverer._discover_plugin_skills``)."""
+        return self._discover_skill_and_command_dirs(self._plugin_base_dirs(), "skills", inspect_skills_dir)
+
+    def _parse_plugin_mcp_json(self, path: Path) -> McpScanResult:
+        """Parse a plugin ``.mcp.json`` (JSON, unlike the TOML configs).
+
+        Per the Codex plugin docs it is either a wrapped ``{"mcp_servers": {...}}``
+        object or a flat ``{name: serverConfig}`` map. The wrapped form is handled
+        first (none of the shared ``MCPConfig`` models recognize the snake-case
+        ``mcp_servers`` wrapper key); otherwise it falls back to the flat
+        ``PluginMCPConfigFile`` shape via :meth:`_parse_mcp_file`. Returns ``None`` for
+        missing/empty/unrecognized files and ``CouldNotParseMCPConfig`` for malformed
+        JSON.
+        """
+        data = self._load_json_file(path)
+        if data is None or isinstance(data, CouldNotParseMCPConfig):
+            return data
+        if isinstance(data, dict) and isinstance(data.get("mcp_servers"), dict):
+            servers = data["mcp_servers"]
+            if not servers:
+                return None
+            return self._validate_servers(servers, source=f"mcp_servers in {path.as_posix()}")
+        return self._parse_mcp_file(path, formats=(PluginMCPConfigFile,), skip_unrecognized=True)
 
     def _discover_project_mcp_servers(self) -> McpConfigsResult:
         """Parse ``<project>/.codex/config.toml`` ``mcp_servers`` for every registered

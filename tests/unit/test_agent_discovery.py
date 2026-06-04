@@ -6124,3 +6124,96 @@ def test_codex_managed_config_path_is_per_os(monkeypatch):
     # Windows managed-config path is not clearly documented -> no path (flagged gap).
     monkeypatch.setattr(codex_module.sys, "platform", "win32")
     assert disc._managed_config_path() is None
+
+
+# --- CodexDiscoverer: plugin discovery (~/.codex/plugins/cache + marketplace sources) ---
+
+
+def _make_codex_plugin(cache_root, marketplace, plugin, version):
+    """Create a Codex plugin bundle dir under a cache root, returning the version dir."""
+    plugin_dir = cache_root / marketplace / plugin / version
+    (plugin_dir / ".codex-plugin").mkdir(parents=True)
+    (plugin_dir / ".codex-plugin" / "plugin.json").write_text(f'{{"name": "{plugin}", "skills": "./skills/"}}')
+    return plugin_dir
+
+
+def test_codex_discoverer_discovers_plugin_skills(tmp_path, monkeypatch):
+    """Plugin skills live at ``<codex_home>/plugins/cache/<mkt>/<plugin>/<ver>/skills``."""
+    from agent_scan.agents import CodexDiscoverer
+
+    cache = tmp_path / ".codex" / "plugins" / "cache"
+    plugin_dir = _make_codex_plugin(cache, "openai-bundled", "latex", "0.2.2")
+    skill = plugin_dir / "skills" / "latex-compile"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: latex-compile\ndescription: d\n---\n\nB.\n")
+
+    disc = CodexDiscoverer(tmp_path)
+    disc._admin_skills_dir = str(tmp_path / "no-admin")
+    skills_dirs = disc.discover_skills()
+
+    keys = [k for k in skills_dirs if k.endswith("/latex/0.2.2/skills")]
+    assert len(keys) == 1
+    assert {n for n, _ in skills_dirs[keys[0]]} == {"latex-compile"}
+
+
+def test_codex_discoverer_discovers_plugin_mcp_flat(tmp_path):
+    """A plugin ``.mcp.json`` in the flat ``{name: cfg}`` form is discovered."""
+    from agent_scan.agents import CodexDiscoverer
+
+    cache = tmp_path / ".codex" / "plugins" / "cache"
+    plugin_dir = _make_codex_plugin(cache, "mkt", "docs-plugin", "1.0.0")
+    (plugin_dir / ".mcp.json").write_text('{"docs": {"command": "docs-mcp", "args": ["--stdio"]}}')
+
+    (tmp_path / ".codex" / "config.toml").write_text("")
+
+    mcp_configs = CodexDiscoverer(tmp_path).discover_mcp_servers()
+
+    keys = [k for k in mcp_configs if k.endswith("/docs-plugin/1.0.0/.mcp.json")]
+    assert len(keys) == 1
+    name, server = mcp_configs[keys[0]][0]
+    assert name == "docs"
+    assert isinstance(server, StdioServer)
+
+
+def test_codex_discoverer_discovers_plugin_mcp_wrapped(tmp_path):
+    """A plugin ``.mcp.json`` in the wrapped ``{"mcp_servers": {...}}`` form is discovered."""
+    from agent_scan.agents import CodexDiscoverer
+
+    cache = tmp_path / ".codex" / "plugins" / "cache"
+    plugin_dir = _make_codex_plugin(cache, "mkt", "wrapped-plugin", "1.0.0")
+    (plugin_dir / ".mcp.json").write_text('{"mcp_servers": {"w": {"command": "wsrv"}}}')
+
+    mcp_configs = CodexDiscoverer(tmp_path).discover_mcp_servers()
+
+    keys = [k for k in mcp_configs if k.endswith("/wrapped-plugin/1.0.0/.mcp.json")]
+    assert len(keys) == 1
+    name, server = mcp_configs[keys[0]][0]
+    assert name == "w"
+    assert isinstance(server, StdioServer)
+    assert server.command == "wsrv"
+
+
+def test_codex_discoverer_discovers_marketplace_subdir_plugins(tmp_path):
+    """Plugins under the ``<codex_home>/plugins/marketplaces`` subdir are scanned too
+    (not only ``cache``)."""
+    from agent_scan.agents import CodexDiscoverer
+
+    marketplaces = tmp_path / ".codex" / "plugins" / "marketplaces"
+    plugin_dir = _make_codex_plugin(marketplaces, "mkt", "mkt-plugin", "0.1.0")
+    (plugin_dir / ".mcp.json").write_text('{"src_srv": {"command": "s"}}')
+
+    mcp_configs = CodexDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert any(k.endswith("/mkt-plugin/0.1.0/.mcp.json") for k in mcp_configs)
+
+
+def test_codex_plugin_base_dirs_are_the_plugin_subdirs(tmp_path):
+    """Plugin roots are ``<codex_home>/plugins/<subdir>`` for each ``_plugin_subdirs``
+    entry (the Claude Code layout); dropping an entry removes that root."""
+    from agent_scan.agents import CodexDiscoverer
+
+    disc = CodexDiscoverer(tmp_path)
+    plugins_root = tmp_path / ".codex" / "plugins"
+
+    assert disc._plugin_subdirs == ("cache", "marketplaces", "repos")
+    assert disc._plugin_base_dirs() == [plugins_root / sub for sub in disc._plugin_subdirs]
