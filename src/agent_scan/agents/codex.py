@@ -11,6 +11,7 @@ https://developers.openai.com/codex/mcp.
 
 import logging
 import os
+import sys
 import traceback
 from functools import cached_property
 from pathlib import Path
@@ -51,8 +52,10 @@ class CodexDiscoverer(AgentDiscoverer):
 
     Scopes covered:
 
-    * **User / machine** — ``<codex_home>/config.toml`` MCP servers, user
-      ``~/.agents/skills``, admin ``/etc/codex/skills``.
+    * **User** — ``<codex_home>/config.toml`` MCP servers + profile config files
+      ``<codex_home>/<name>.config.toml`` MCP servers; user ``~/.agents/skills``.
+    * **Managed (enterprise)** — ``/etc/codex/managed_config.toml`` MCP servers.
+    * **Admin / machine** — admin ``/etc/codex/skills`` skills.
     * **Project** — every project recorded in the user config's ``[projects]``
       table (keyed by absolute path) is scanned for its ``<proj>/.codex/config.toml``
       MCP servers and ``<proj>/.agents/skills`` skills, plus every ancestor up to
@@ -66,10 +69,17 @@ class CodexDiscoverer(AgentDiscoverer):
     listed project is scanned regardless of trust (the table is treated purely as a
     list of project paths).
 
-    Deliberately not covered (documented gaps, no path):
+    Deliberately not covered:
 
-    * OpenAI-bundled "system" skills: the docs give no concrete path.
-    * Configuration profiles: the on-disk shape is ambiguous in the docs.
+    * ``requirements.toml`` (``/etc/codex/requirements.toml`` /
+      ``%ProgramData%\\OpenAI\\Codex\\requirements.toml``): it only *allowlists* MCP
+      servers, it does not define them — nothing to discover.
+    * The macOS-MDM managed-config preference domain (``com.openai.codex``) and the
+      Windows ``managed_config.toml`` location: non-filesystem / undocumented path.
+    * OpenAI-bundled "system" skills and a Windows admin-skills path: no concrete
+      path is documented.
+    * The ``[[skills.config]]`` / ``enabled = false`` disable flags are not honored —
+      configured-but-disabled skills/servers are still surfaced (an inventory choice).
     """
 
     # MUST match the Codex entry name in ``well_known_clients.py`` so the Phase-A
@@ -98,9 +108,12 @@ class CodexDiscoverer(AgentDiscoverer):
         return None
 
     def discover_mcp_servers(self) -> McpConfigsResult:
-        """MCP servers from the user config plus every registered project's config."""
+        """MCP servers across every config layer Codex reads: the user config, profile
+        config files, the enterprise managed config, and each registered project's config."""
         result: McpConfigsResult = {}
         result.update(self._discover_user_mcp_servers())
+        result.update(self._discover_profile_mcp_servers())
+        result.update(self._discover_managed_mcp_servers())
         result.update(self._discover_project_mcp_servers())
         return result
 
@@ -117,6 +130,56 @@ class CodexDiscoverer(AgentDiscoverer):
         """Parse the ``mcp_servers`` table in ``<codex_home>/config.toml``."""
         config_path = self._codex_home() / self._config_filename
         return self._mcp_servers_from_data(self._user_config_toml, config_path)
+
+    def _discover_profile_mcp_servers(self) -> McpConfigsResult:
+        """Parse ``mcp_servers`` from profile config files ``$CODEX_HOME/<name>.config.toml``.
+
+        Codex profiles live next to the main config as ``<profile-name>.config.toml``
+        and are config.toml-shaped overlays selected with ``--profile``; a profile can
+        carry its own ``[mcp_servers]``. The main ``config.toml`` does not match the
+        ``*.config.toml`` glob, but it is excluded explicitly for safety (it is handled
+        by :meth:`_discover_user_mcp_servers`). An unreadable ``codex_home`` is skipped.
+        """
+        result: McpConfigsResult = {}
+        codex_home = self._codex_home()
+        try:
+            profile_files = sorted(codex_home.glob("*.config.toml"))
+        except (PermissionError, OSError):
+            return result
+        for profile_file in profile_files:
+            if profile_file.name == self._config_filename:
+                continue
+            result.update(self._mcp_servers_from_data(self._load_toml_file(profile_file), profile_file))
+        return result
+
+    def _discover_managed_mcp_servers(self) -> McpConfigsResult:
+        """Parse ``mcp_servers`` from the enterprise managed config (per-OS system path).
+
+        ``managed_config.toml`` holds admin-pushed ``managed defaults`` in the same
+        shape as ``config.toml`` (the macOS-MDM form ships it as ``config_toml_base64``),
+        so it can define ``[mcp_servers]``. This is the Codex analogue of Claude Code's
+        machine-level ``managed-mcp.json`` (see ``ClaudeCodeDiscoverer._managed_mcp_path``);
+        it is a fixed system path, identical across homes on one machine, and keyed by
+        absolute path so duplicates collapse. The ``requirements.toml`` layer only
+        *allowlists* servers (it doesn't define them), so it is intentionally not read.
+        """
+        path = self._managed_config_path()
+        if path is None:
+            return {}
+        return self._mcp_servers_from_data(self._load_toml_file(path), path)
+
+    def _managed_config_path(self) -> Path | None:
+        """Per-OS absolute path to the enterprise ``managed_config.toml``, or ``None``
+        on platforms where it isn't documented. See
+        https://developers.openai.com/codex/enterprise/managed-configuration."""
+        if sys.platform in ("darwin", "linux", "linux2"):
+            return Path("/etc/codex/managed_config.toml")
+        # On Windows the managed-defaults file location is not clearly documented
+        # (``requirements.toml`` lives under ``%ProgramData%\\OpenAI\\Codex`` but the
+        # managed_config.toml path is ambiguous), so it is left as a flagged gap rather
+        # than guessed. The macOS-MDM preference domain (``com.openai.codex``) is a
+        # separate, non-filesystem mechanism and is likewise not read.
+        return None
 
     def _discover_project_mcp_servers(self) -> McpConfigsResult:
         """Parse ``<project>/.codex/config.toml`` ``mcp_servers`` for every registered

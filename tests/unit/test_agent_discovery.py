@@ -6067,3 +6067,60 @@ def test_codex_discoverer_walks_project_ancestors_for_skills(tmp_path):
     keys = [k for k in skills_dirs if k.endswith("/monorepo/.agents/skills")]
     assert len(keys) == 1
     assert {n for n, _ in skills_dirs[keys[0]]} == {"root-skill"}
+
+
+# --- CodexDiscoverer: profile + managed (admin) MCP sources ---
+
+
+def test_codex_discoverer_discovers_profile_mcp_servers(tmp_path):
+    """Profile config files ``$CODEX_HOME/<name>.config.toml`` can define their own
+    ``[mcp_servers]``; the main ``config.toml`` is not double-counted by the glob."""
+    from agent_scan.agents import CodexDiscoverer
+
+    codex = tmp_path / ".codex"
+    codex.mkdir()
+    (codex / "config.toml").write_text('[mcp_servers.user_srv]\ncommand = "u"\n')
+    (codex / "work.config.toml").write_text('[mcp_servers.profile_srv]\ncommand = "p"\n')
+
+    mcp_configs = CodexDiscoverer(tmp_path).discover_mcp_servers()
+
+    prof_keys = [k for k in mcp_configs if k.endswith("/work.config.toml")]
+    assert len(prof_keys) == 1
+    assert mcp_configs[prof_keys[0]][0][0] == "profile_srv"
+    # Main config still surfaces independently, exactly once.
+    main_keys = [k for k in mcp_configs if k.endswith("/.codex/config.toml")]
+    assert len(main_keys) == 1
+    all_names = {n for v in mcp_configs.values() if isinstance(v, list) for n, _ in v}
+    assert {"user_srv", "profile_srv"} <= all_names
+
+
+def test_codex_discoverer_discovers_managed_mcp_servers(tmp_path, monkeypatch):
+    """The enterprise managed config (``/etc/codex/managed_config.toml``) can define
+    ``[mcp_servers]``; retargeted to a tmp file here."""
+    from agent_scan.agents import CodexDiscoverer
+
+    managed = tmp_path / "managed_config.toml"
+    managed.write_text('[mcp_servers.managed_srv]\ncommand = "m"\n')
+    monkeypatch.setattr(CodexDiscoverer, "_managed_config_path", lambda self: managed)
+
+    (tmp_path / ".codex").mkdir()
+
+    mcp_configs = CodexDiscoverer(tmp_path).discover_mcp_servers()
+
+    keys = [k for k in mcp_configs if k.endswith("/managed_config.toml")]
+    assert len(keys) == 1
+    assert mcp_configs[keys[0]][0][0] == "managed_srv"
+
+
+def test_codex_managed_config_path_is_per_os(monkeypatch):
+    from pathlib import Path
+
+    from agent_scan.agents import codex as codex_module
+
+    disc = codex_module.CodexDiscoverer(None)
+    for plat in ("linux", "linux2", "darwin"):
+        monkeypatch.setattr(codex_module.sys, "platform", plat)
+        assert disc._managed_config_path() == Path("/etc/codex/managed_config.toml")
+    # Windows managed-config path is not clearly documented -> no path (flagged gap).
+    monkeypatch.setattr(codex_module.sys, "platform", "win32")
+    assert disc._managed_config_path() is None
