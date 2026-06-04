@@ -678,6 +678,10 @@ class ClientToInspect(BaseModel):
 class InspectedExtensions(BaseModel):
     name: str  # ignore if name is available in the config
     config: StdioServer | RemoteServer | SkillServer
+    # ``None`` means the extension was recorded without being inspected and
+    # without an error to report — used for stdio MCP servers on the push-key
+    # path, where the scan never starts the subprocess and the absence
+    # of a handshake is the documented behavior rather than a failure.
     signature_or_error: (
         ServerSignature
         | ServerStartupError
@@ -685,7 +689,8 @@ class InspectedExtensions(BaseModel):
         | SkillScannError
         | UserDeclinedError
         | SkippedByRuntimeConfigError
-    )
+        | None
+    ) = None
 
 
 class InspectedClient(BaseModel):

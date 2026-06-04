@@ -334,11 +334,44 @@ def is_interactive_run(args) -> bool:
     answer yes or no consent prompts.
     """
     command = getattr(args, "command", None)
-    if command in ("evo", "inspect"):
+    if command == "inspect":
         return True
     # If the scan is run with a push key, skip consent prompts.
     has_push_key = bool(get_push_key(getattr(args, "control_servers", []) or []))
     return not has_push_key
+
+
+def skip_stdio_handshake(args) -> bool:
+    """
+    True when ``run_scan`` must not handshake with stdio MCP servers
+    on this run. No subprocess is spawned; configured stdio servers are
+    recorded with ``signature=None`` and ``error=None``.
+
+    Decision flow:
+
+    1. ``inspect`` — never skip. inspect has no upload/analyze step
+       and exists to explore tools locally.
+    2. Is this a push-key run?
+       * ``scan`` — push-key if ``--control-server-H`` carries a
+         ``x-client-id`` header.
+       * ``evo`` — *always* a push-key run.
+    3. Non-push-key runs handshake normally → return False.
+    4. Push-key runs skip handshakes by default.
+    5. The one explicit override is the
+       ``--ci --dangerously-run-mcp-servers`` pair, which forces
+       handshakes even on the push-key path. ``--ci`` is gated on
+       ``--dangerously-run-mcp-servers``.
+    """
+    command = getattr(args, "command", None)
+    if command == "inspect":
+        return False
+    has_push_key = command == "evo" or bool(get_push_key(getattr(args, "control_servers", []) or []))
+    if not has_push_key:
+        return False
+    ci_dangerous_override = bool(getattr(args, "ci", False)) and bool(
+        getattr(args, "dangerously_run_mcp_servers", False)
+    )
+    return not ci_dangerous_override
 
 
 def resolve_server_io_default(args) -> None:
@@ -354,6 +387,12 @@ def enforce_consent_requirements(args) -> None:
     """
     --ci must opt into starting subprocesses explicitly, because CI runs
     cannot answer the interactive per-server consent prompt.
+
+    The requirement applies regardless of push key or ``SNYK_TOKEN`` — on
+    the push-key path the explicit ``--ci --dangerously-run-mcp-servers``
+    pair is what overrides the default push-key stdio skip (see
+    ``skip_stdio_handshake``), so requiring ``--dangerously-run-mcp-servers``
+    is what makes that override intentional and visible to the user.
     """
     dangerous = getattr(args, "dangerously_run_mcp_servers", False)
     ci_mode = getattr(args, "ci", False)
@@ -685,6 +724,10 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[Scan
     suppress_io: bool = bool(args.suppress_mcpserver_io)
     stream_stderr: bool = not suppress_io
     dangerous: bool = bool(getattr(args, "dangerously_run_mcp_servers", False))
+    # See ``skip_stdio_handshake``: the function encapsulates the
+    # push-key-skip default and the ``--ci --dangerously-run-mcp-servers``
+    # override in one place.
+    should_skip_stdio_handshake: bool = skip_stdio_handshake(args)
 
     # Step 1: Discover everything we would inspect without starting any server.
     clients_to_inspect, precomputed_scan_path_results, scanned_usernames = await discover_clients_to_inspect(
@@ -693,7 +736,9 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[Scan
 
     # Step 2: Collect consent per stdio server when running interactively.
     declined_servers: set[tuple[str, str]] = set()
-    if is_interactive_run(args) and not dangerous:
+    if should_skip_stdio_handshake:
+        pass
+    elif is_interactive_run(args) and not dangerous:
         declined_servers = collect_consent(clients_to_inspect)
     elif dangerous and is_interactive_run(args):
         message = (
@@ -733,6 +778,7 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[Scan
             scanned_usernames=scanned_usernames,
             stream_stderr=stream_stderr,
             declined_servers=declined_servers,
+            skip_stdio_handshake=should_skip_stdio_handshake,
         )
     elif mode == "inspect":
         scan_path_results, _scanned_usernames = await inspect_pipeline(
@@ -742,6 +788,7 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[Scan
             scanned_usernames=scanned_usernames,
             stream_stderr=stream_stderr,
             declined_servers=declined_servers,
+            skip_stdio_handshake=should_skip_stdio_handshake,
         )
         return scan_path_results
     else:

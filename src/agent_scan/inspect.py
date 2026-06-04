@@ -298,6 +298,7 @@ async def inspect_client(
     *,
     stream_stderr: bool = False,
     declined_servers: set[tuple[str, str]] | None = None,
+    skip_stdio_handshake: bool = False,
 ) -> InspectedClient:
     """
     Scan a client (Cursor, VSCode, etc.) and return a InspectedClient object.
@@ -305,6 +306,11 @@ async def inspect_client(
     declined_servers is an optional set of (mcp_config_path, server_name)
     pairs the user declined during the consent flow. Declined stdio servers are
     not started. They are recorded as errors with category user_declined.
+
+    skip_stdio_handshake when True suppresses the MCP handshake for every
+    stdio server (no subprocess is started). Remote servers are still
+    contacted. This is the push-key path. Skill scanning is unaffected since
+    skills do not handshake.
     """
     declined = declined_servers or set()
     extensions: dict[
@@ -330,6 +336,9 @@ async def inspect_client(
                         ),
                     )
                 )
+                continue
+            if skip_stdio_handshake and isinstance(server, StdioServer):
+                extensions_for_mcp_config.append(InspectedExtensions(name=name, config=server, signature_or_error=None))
                 continue
             # Bootstrap runtime config skips short-circuit before inspect_extension so we
             # never start the subprocess / open the connection.
@@ -403,6 +412,12 @@ def inspected_client_to_scan_path_result(inspected_client: InspectedClient) -> S
                     ServerScanResult(
                         name=extension.name, server=extension.config, signature=extension.signature_or_error, error=None
                     )
+                )
+            elif extension.signature_or_error is None:
+                # Recorded but not inspected (e.g. stdio MCP server on the
+                # push-key path).
+                servers.append(
+                    ServerScanResult(name=extension.name, server=extension.config, signature=None, error=None)
                 )
             else:
                 servers.append(
