@@ -5928,3 +5928,142 @@ def test_find_discoverers_returns_codex_when_installed(tmp_path):
     found = find_discoverers(tmp_path)
 
     assert any(isinstance(d, CodexDiscoverer) for d in found)
+
+
+# --- CodexDiscoverer: project-scoped discovery via the [projects] table ---
+
+
+def test_codex_discoverer_enumerates_all_projects_ignoring_trust(tmp_path):
+    """``_discover_project_folders`` returns every key in the ``[projects]`` table,
+    regardless of (or absent) ``trust_level`` -- the value is never read."""
+    from agent_scan.agents import CodexDiscoverer
+
+    proj_trusted = tmp_path / "trusted-repo"
+    proj_untrusted = tmp_path / "untrusted-repo"
+    proj_bare = tmp_path / "bare-repo"
+    (tmp_path / ".codex").mkdir()
+    (tmp_path / ".codex" / "config.toml").write_text(
+        f'[projects."{proj_trusted.as_posix()}"]\n'
+        'trust_level = "trusted"\n\n'
+        f'[projects."{proj_untrusted.as_posix()}"]\n'
+        'trust_level = "untrusted"\n\n'
+        f'[projects."{proj_bare.as_posix()}"]\n'
+    )
+
+    folders = set(CodexDiscoverer(tmp_path)._discover_project_folders())
+
+    assert folders == {proj_trusted, proj_untrusted, proj_bare}
+
+
+def test_codex_discoverer_no_projects_table_yields_no_project_folders(tmp_path):
+    from agent_scan.agents import CodexDiscoverer
+
+    (tmp_path / ".codex").mkdir()
+    (tmp_path / ".codex" / "config.toml").write_text('model = "gpt-5-codex"\n')
+
+    assert CodexDiscoverer(tmp_path)._discover_project_folders() == []
+
+
+def test_codex_discoverer_discovers_project_mcp_servers(tmp_path):
+    """A project's ``<proj>/.codex/config.toml`` ``[mcp_servers]`` is discovered,
+    keyed by that file -- and an untrusted project is scanned just the same."""
+    from agent_scan.agents import CodexDiscoverer
+
+    proj = tmp_path / "repo"
+    (proj / ".codex").mkdir(parents=True)
+    (proj / ".codex" / "config.toml").write_text('[mcp_servers.proj_srv]\ncommand = "p"\n')
+
+    (tmp_path / ".codex").mkdir()
+    (tmp_path / ".codex" / "config.toml").write_text(f'[projects."{proj.as_posix()}"]\ntrust_level = "untrusted"\n')
+
+    mcp_configs = CodexDiscoverer(tmp_path).discover_mcp_servers()
+
+    keys = [k for k in mcp_configs if k.endswith("/repo/.codex/config.toml")]
+    assert len(keys) == 1
+    name, server = mcp_configs[keys[0]][0]
+    assert name == "proj_srv"
+    assert isinstance(server, StdioServer)
+
+
+def test_codex_discoverer_surfaces_user_and_project_mcp_together(tmp_path):
+    from agent_scan.agents import CodexDiscoverer
+
+    proj = tmp_path / "repo"
+    (proj / ".codex").mkdir(parents=True)
+    (proj / ".codex" / "config.toml").write_text('[mcp_servers.proj_srv]\ncommand = "p"\n')
+
+    (tmp_path / ".codex").mkdir()
+    (tmp_path / ".codex" / "config.toml").write_text(
+        f'[mcp_servers.user_srv]\ncommand = "u"\n\n[projects."{proj.as_posix()}"]\ntrust_level = "trusted"\n'
+    )
+
+    mcp_configs = CodexDiscoverer(tmp_path).discover_mcp_servers()
+
+    all_names = {n for v in mcp_configs.values() if isinstance(v, list) for n, _ in v}
+    assert {"user_srv", "proj_srv"} <= all_names
+    assert any(k.endswith("/.codex/config.toml") and "/repo/" not in k for k in mcp_configs)
+    assert any(k.endswith("/repo/.codex/config.toml") for k in mcp_configs)
+
+
+def test_codex_discoverer_malformed_project_config_is_parse_error(tmp_path):
+    from agent_scan.agents import CodexDiscoverer
+
+    proj = tmp_path / "repo"
+    (proj / ".codex").mkdir(parents=True)
+    (proj / ".codex" / "config.toml").write_text("[mcp_servers.broken\ncommand = ")
+
+    (tmp_path / ".codex").mkdir()
+    (tmp_path / ".codex" / "config.toml").write_text(f'[projects."{proj.as_posix()}"]\n')
+
+    mcp_configs = CodexDiscoverer(tmp_path).discover_mcp_servers()
+
+    keys = [k for k in mcp_configs if k.endswith("/repo/.codex/config.toml")]
+    assert len(keys) == 1
+    assert isinstance(mcp_configs[keys[0]], CouldNotParseMCPConfig)
+
+
+def test_codex_discoverer_discovers_project_skills(tmp_path):
+    """A registered project's ``<proj>/.agents/skills`` is discovered."""
+    from agent_scan.agents import CodexDiscoverer
+
+    monkeypatch_admin = tmp_path / "no-admin"
+    proj = tmp_path / "repo"
+    skill = proj / ".agents" / "skills" / "proj-skill"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: proj-skill\ndescription: d\n---\n\nBody.\n")
+
+    (tmp_path / ".codex").mkdir()
+    (tmp_path / ".codex" / "config.toml").write_text(f'[projects."{proj.as_posix()}"]\n')
+
+    disc = CodexDiscoverer(tmp_path)
+    disc._admin_skills_dir = str(monkeypatch_admin)
+    skills_dirs = disc.discover_skills()
+
+    keys = [k for k in skills_dirs if k.endswith("/repo/.agents/skills")]
+    assert len(keys) == 1
+    assert {n for n, _ in skills_dirs[keys[0]]} == {"proj-skill"}
+
+
+def test_codex_discoverer_walks_project_ancestors_for_skills(tmp_path):
+    """``.agents/skills`` is found in an ancestor of a registered project root,
+    matching Codex's walk from cwd up to the repository root."""
+    from agent_scan.agents import CodexDiscoverer
+
+    repo_root = tmp_path / "monorepo"
+    subpkg = repo_root / "packages" / "app"
+    subpkg.mkdir(parents=True)
+    ancestor_skill = repo_root / ".agents" / "skills" / "root-skill"
+    ancestor_skill.mkdir(parents=True)
+    (ancestor_skill / "SKILL.md").write_text("---\nname: root-skill\ndescription: d\n---\n\nB.\n")
+
+    (tmp_path / ".codex").mkdir()
+    # Only the sub-package is registered as a project; the skills live at the repo root.
+    (tmp_path / ".codex" / "config.toml").write_text(f'[projects."{subpkg.as_posix()}"]\n')
+
+    disc = CodexDiscoverer(tmp_path)
+    disc._admin_skills_dir = str(tmp_path / "no-admin")
+    skills_dirs = disc.discover_skills()
+
+    keys = [k for k in skills_dirs if k.endswith("/monorepo/.agents/skills")]
+    assert len(keys) == 1
+    assert {n for n, _ in skills_dirs[keys[0]]} == {"root-skill"}
