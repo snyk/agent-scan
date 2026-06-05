@@ -39,7 +39,11 @@ from agent_scan.agents.base import (
     SkillsDirsResult,
     _walk_under_depth,
 )
-from agent_scan.models import CouldNotParseMCPConfig, PluginMCPConfigFile
+from agent_scan.models import (
+    SERVER_CONFIG_DISCRIMINATOR_KEYS,
+    CouldNotParseMCPConfig,
+    PluginMCPConfigFile,
+)
 from agent_scan.skill_client import inspect_skills_dir
 from agent_scan.well_known_clients import expand_path
 
@@ -64,7 +68,9 @@ class CodexDiscoverer(AgentDiscoverer):
     * **Admin / machine** — admin ``/etc/codex/skills`` skills.
     * **Plugins** — the ``<codex_home>/plugins`` root (where Codex installs plugins
       under ``cache/<marketplace>/<plugin>/<version>/``) is walked recursively for
-      bundled ``.mcp.json`` MCP servers and ``skills/`` directories.
+      bundled ``.mcp.json`` MCP servers and ``skills/`` directories. Plugin servers
+      *defined* in ``config.toml`` under ``[plugins."<name>".mcp_servers.<server>]``
+      are also surfaced (see :meth:`_discover_config_plugin_mcp_servers`).
     * **Project** — every project recorded in the user config's ``[projects]``
       table (keyed by absolute path) is scanned for its ``<proj>/.codex/config.toml``
       MCP servers and ``<proj>/.agents/skills`` skills, plus every ancestor up to
@@ -129,6 +135,7 @@ class CodexDiscoverer(AgentDiscoverer):
         result.update(self._discover_profile_mcp_servers())
         result.update(self._discover_system_mcp_servers())
         result.update(self._discover_plugin_mcp_servers())
+        result.update(self._discover_config_plugin_mcp_servers())
         result.update(self._discover_project_mcp_servers())
         return result
 
@@ -247,6 +254,43 @@ class CodexDiscoverer(AgentDiscoverer):
         """Scan ``skills/`` subdirs under every plugin tree (mirrors
         ``ClaudeCodeDiscoverer._discover_plugin_skills``)."""
         return self._discover_skill_and_command_dirs(self._plugin_base_dirs(), "skills", inspect_skills_dir)
+
+    def _discover_config_plugin_mcp_servers(self) -> McpConfigsResult:
+        """Surface plugin-provided MCP servers *defined* in ``config.toml`` under
+        ``[plugins."<name>".mcp_servers.<server>]``.
+
+        Plugins normally define their servers in the plugin's own ``.mcp.json``
+        (covered by :meth:`_discover_plugin_mcp_servers`); the ``config.toml``
+        ``[plugins.<name>.mcp_servers.<server>]`` table is primarily an
+        enable / tool-approval *overlay* for those. Codex uses one server struct for
+        both (``RawMcpServerConfig`` — transport keys plus ``enabled``/``enabled_tools``),
+        so such an entry *can* also carry a full ``command``/``url`` definition; only
+        those are surfaced. Override-only entries (no transport key) are skipped so
+        they don't sink validation as a malformed server. Read from the user
+        ``config.toml`` (the cached parse) and keyed ``<config>#plugins`` so it does
+        not collide with the top-level ``mcp_servers`` entry from the same file.
+        """
+        data = self._user_config_toml
+        if not isinstance(data, dict):
+            return {}
+        plugins = data.get("plugins")
+        if not isinstance(plugins, dict):
+            return {}
+        defs: dict[str, dict] = {}
+        for plugin_cfg in plugins.values():
+            servers = plugin_cfg.get("mcp_servers") if isinstance(plugin_cfg, dict) else None
+            if not isinstance(servers, dict):
+                continue
+            for server_name, server_cfg in servers.items():
+                if isinstance(server_cfg, dict) and any(
+                    disc in server_cfg for disc in SERVER_CONFIG_DISCRIMINATOR_KEYS
+                ):
+                    defs[server_name] = server_cfg
+        if not defs:
+            return {}
+        config_path = self._codex_home() / self._config_filename
+        source = f"plugins mcp_servers in {config_path.as_posix()}"
+        return {f"{config_path.as_posix()}#plugins": self._validate_servers(defs, source=source)}
 
     def _parse_plugin_mcp_json(self, path: Path) -> McpScanResult:
         """Parse a plugin ``.mcp.json`` (JSON, unlike the TOML configs).

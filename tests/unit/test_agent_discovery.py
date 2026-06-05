@@ -6242,3 +6242,30 @@ def test_codex_plugin_base_dir_is_the_plugins_root(tmp_path):
 
     assert disc._plugin_base_dirs() == [plugins_root]
     assert not hasattr(disc, "_plugin_subdirs")
+
+
+def test_codex_discoverer_discovers_config_plugin_mcp_servers(tmp_path):
+    """A full server definition under ``[plugins."<name>".mcp_servers.<srv>]`` in
+    config.toml is surfaced (keyed ``...config.toml#plugins``); an override-only entry
+    (``enabled``/``enabled_tools`` with no ``command``/``url``) is skipped so it does
+    not sink validation."""
+    from agent_scan.agents import CodexDiscoverer
+
+    (tmp_path / ".codex").mkdir()
+    (tmp_path / ".codex" / "config.toml").write_text(
+        '[plugins."acme".mcp_servers.defined]\n'
+        'command = "acme-mcp"\n'
+        'args = ["--stdio"]\n\n'
+        '[plugins."acme".mcp_servers.overlay_only]\n'
+        "enabled = true\n"
+        'enabled_tools = ["a", "b"]\n'
+    )
+
+    mcp_configs = CodexDiscoverer(tmp_path).discover_mcp_servers()
+
+    keys = [k for k in mcp_configs if k.endswith("/.codex/config.toml#plugins")]
+    assert len(keys) == 1
+    by_name = dict(mcp_configs[keys[0]])
+    assert set(by_name) == {"defined"}  # overlay_only skipped (no command/url)
+    assert isinstance(by_name["defined"], StdioServer)
+    assert by_name["defined"].command == "acme-mcp"
