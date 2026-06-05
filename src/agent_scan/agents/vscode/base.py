@@ -728,12 +728,91 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
             expand_path(Path(raw), self.home_directory) for raw in self._builtin_extension_dir_templates.get(key, ())
         ]
 
+    # --- private: install-manifest gating (don't scan uninstalled extensions) ---
+
+    def _installed_extension_names(self, base: Path) -> set[str] | None:
+        """Names of the extension dirs VSCode records as *installed* in
+        ``<base>/extensions.json`` — its authoritative install manifest. Each
+        entry's ``relativeLocation`` is the on-disk dir name; some manifest shapes
+        omit it, so fall back to the basename of ``location.path``.
+
+        Returns ``None`` when no parseable ``extensions.json`` is present, which
+        the caller treats as "no manifest, scan every subdir" — the *built-in*
+        (bundled) extension roots ship none. A present-but-empty manifest (``[]``)
+        returns an empty set: nothing is installed, so nothing is scanned.
+        """
+        data = self._load_json_file(base / "extensions.json")
+        if not isinstance(data, list):
+            return None
+        names: set[str] = set()
+        for entry in data:
+            if not isinstance(entry, dict):
+                continue
+            rel = entry.get("relativeLocation")
+            if isinstance(rel, str) and rel:
+                names.add(rel)
+                continue
+            location = entry.get("location")
+            path = location.get("path") if isinstance(location, dict) else None
+            if isinstance(path, str) and path:
+                names.add(Path(path).name)
+        return names
+
+    def _obsolete_extension_names(self, base: Path) -> set[str]:
+        """Names of extension dirs VSCode marked uninstalled-but-not-yet-deleted in
+        ``<base>/.obsolete`` (a ``{dirname: true}`` map). These linger on disk
+        after an uninstall/upgrade until a later cleanup, so they must be skipped.
+        Empty when ``.obsolete`` is absent or not an object.
+        """
+        data = self._load_json_file(base / ".obsolete")
+        if not isinstance(data, dict):
+            return set()
+        return {name for name, flagged in data.items() if flagged and isinstance(name, str)}
+
+    @staticmethod
+    def _top_level_extension_name(base: Path, found: Path) -> str | None:
+        """The extension's own directory name: the first path component of ``found``
+        relative to ``base``. ``None`` when ``found`` is not under ``base`` or sits
+        directly at the root (a hit needs ``<ext>/…/<name>``, so the root manifest
+        files ``extensions.json`` / ``.obsolete`` are never treated as extensions).
+        """
+        try:
+            parts = found.relative_to(base).parts
+        except ValueError:
+            return None
+        return parts[0] if len(parts) >= 2 else None
+
+    def _iter_installed_extension_hits(self, name: str, *, want_file: bool) -> list[Path]:
+        """Walk each extension root for ``name`` (file or dir), restricted to the
+        user's *installed* extensions.
+
+        Per root, ``extensions.json`` is the install allowlist and ``.obsolete``
+        the uninstalled denylist (see :meth:`_installed_extension_names` /
+        :meth:`_obsolete_extension_names`). A hit is kept only when its top-level
+        extension dir is not obsolete and — when the root has a manifest — is
+        listed there. Roots without a manifest (built-in/bundled) fall back to
+        scanning every subdir. The walk stays rooted at ``base`` so the
+        ``_MAX_PLUGIN_RGLOB_DEPTH`` depth cap keeps its current meaning.
+        """
+        hits: list[Path] = []
+        for base in self._extension_base_dirs():
+            allowed = self._installed_extension_names(base)
+            obsolete = self._obsolete_extension_names(base)
+            for found in _walk_under_depth(base, name, _MAX_PLUGIN_RGLOB_DEPTH, want_file=want_file):
+                ext = self._top_level_extension_name(base, found)
+                if ext is None or ext in obsolete or (allowed is not None and ext not in allowed):
+                    continue
+                hits.append(found)
+        return hits
+
     def _discover_extension_mcp_servers(self) -> McpConfigsResult:
-        """Walk each extension root for ``mcp.json`` (no leading dot — matches the
+        """Scan ``mcp.json`` under each *installed* extension (no leading dot — the
         VSCode-family file-name convention). Mirrors
         :meth:`ClaudeCodeDiscoverer._discover_plugin_mcp_servers` but uses
         :attr:`_VSCODE_FAMILY_FORMATS` so wrapped, VSCode-flat ``servers``, and
-        fully flat shapes all parse.
+        fully flat shapes all parse. The walk is install-manifest gated (see
+        :meth:`_iter_installed_extension_hits`) so uninstalled extensions left on
+        disk are not scanned.
 
         ``skip_unrecognized=True``: this walk matches every file merely *named*
         ``mcp.json``, and extensions ship unrelated files under that name (JSON
@@ -742,19 +821,23 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         that fails to validate is still reported as malformed.
         """
         result: McpConfigsResult = {}
-        for base in self._extension_base_dirs():
-            for mcp_file in _walk_under_depth(base, "mcp.json", _MAX_PLUGIN_RGLOB_DEPTH, want_file=True):
-                if not mcp_file.is_file():
-                    continue
-                parsed = self._parse_mcp_file(mcp_file, formats=_VSCODE_FAMILY_FORMATS, skip_unrecognized=True)
-                if parsed is None:
-                    continue
-                result[mcp_file.as_posix()] = parsed
+        for mcp_file in self._iter_installed_extension_hits("mcp.json", want_file=True):
+            if not mcp_file.is_file():
+                continue
+            parsed = self._parse_mcp_file(mcp_file, formats=_VSCODE_FAMILY_FORMATS, skip_unrecognized=True)
+            if parsed is None:
+                continue
+            result[mcp_file.as_posix()] = parsed
         return result
 
     def _discover_extension_skills(self) -> SkillsDirsResult:
-        """Walk each extension root for ``skills/`` subdirectories."""
-        return self._discover_skill_and_command_dirs(self._extension_base_dirs(), "skills", inspect_skills_dir)
+        """Scan ``skills/`` subdirs under each *installed* extension (install-
+        manifest gated, see :meth:`_iter_installed_extension_hits`)."""
+        result: SkillsDirsResult = {}
+        for skills_dir in self._iter_installed_extension_hits("skills", want_file=False):
+            if skills_dir.is_dir():
+                result[skills_dir.as_posix()] = inspect_skills_dir(str(skills_dir))
+        return result
 
     # --- private: chat.agentSkillsLocations ---
 
