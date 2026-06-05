@@ -6216,13 +6216,14 @@ def test_codex_discoverer_discovers_plugin_mcp_wrapped(tmp_path):
     assert server.command == "wsrv"
 
 
-def test_codex_discoverer_discovers_marketplace_subdir_plugins(tmp_path):
-    """Plugins under the ``<codex_home>/plugins/marketplaces`` subdir are scanned too
-    (not only ``cache``)."""
+def test_codex_discoverer_discovers_non_cache_subdir_plugins(tmp_path):
+    """A plugin staged under a non-``cache`` subdir of the plugins root is still found:
+    the discoverer walks ``<codex_home>/plugins`` recursively rather than enumerating
+    guessed subdir names."""
     from agent_scan.agents import CodexDiscoverer
 
-    marketplaces = tmp_path / ".codex" / "plugins" / "marketplaces"
-    plugin_dir = _make_codex_plugin(marketplaces, "mkt", "mkt-plugin", "0.1.0")
+    other = tmp_path / ".codex" / "plugins" / "marketplaces"
+    plugin_dir = _make_codex_plugin(other, "mkt", "mkt-plugin", "0.1.0")
     (plugin_dir / ".mcp.json").write_text('{"src_srv": {"command": "s"}}')
 
     mcp_configs = CodexDiscoverer(tmp_path).discover_mcp_servers()
@@ -6230,13 +6231,14 @@ def test_codex_discoverer_discovers_marketplace_subdir_plugins(tmp_path):
     assert any(k.endswith("/mkt-plugin/0.1.0/.mcp.json") for k in mcp_configs)
 
 
-def test_codex_plugin_base_dirs_are_the_plugin_subdirs(tmp_path):
-    """Plugin roots are ``<codex_home>/plugins/<subdir>`` for each ``_plugin_subdirs``
-    entry (the Claude Code layout); dropping an entry removes that root."""
+def test_codex_plugin_base_dir_is_the_plugins_root(tmp_path):
+    """The plugin scan walks the documented ``<codex_home>/plugins`` root directly
+    (Codex installs to ``plugins/cache/<mkt>/<plugin>/<ver>/``); intermediate subdir
+    names are not enumerated/guessed."""
     from agent_scan.agents import CodexDiscoverer
 
     disc = CodexDiscoverer(tmp_path)
     plugins_root = tmp_path / ".codex" / "plugins"
 
-    assert disc._plugin_subdirs == ("cache", "marketplaces", "repos")
-    assert disc._plugin_base_dirs() == [plugins_root / sub for sub in disc._plugin_subdirs]
+    assert disc._plugin_base_dirs() == [plugins_root]
+    assert not hasattr(disc, "_plugin_subdirs")

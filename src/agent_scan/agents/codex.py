@@ -62,10 +62,9 @@ class CodexDiscoverer(AgentDiscoverer):
       (``/etc/codex/config.toml`` on Unix, ``%ProgramData%\\OpenAI\\Codex\\config.toml``
       on Windows) MCP servers.
     * **Admin / machine** — admin ``/etc/codex/skills`` skills.
-    * **Plugins** — the ``<codex_home>/plugins/<subdir>`` trees (see
-      :attr:`_plugin_subdirs`) are walked for bundled ``.mcp.json`` MCP servers and
-      ``skills/`` directories, mirroring Claude Code's plugin walk under
-      ``~/.claude/plugins``.
+    * **Plugins** — the ``<codex_home>/plugins`` root (where Codex installs plugins
+      under ``cache/<marketplace>/<plugin>/<version>/``) is walked recursively for
+      bundled ``.mcp.json`` MCP servers and ``skills/`` directories.
     * **Project** — every project recorded in the user config's ``[projects]``
       table (keyed by absolute path) is scanned for its ``<proj>/.codex/config.toml``
       MCP servers and ``<proj>/.agents/skills`` skills, plus every ancestor up to
@@ -109,13 +108,6 @@ class CodexDiscoverer(AgentDiscoverer):
     #                                  it dedups across homes under --scan-all-users)
     _user_skills_relative = "~/.agents/skills"
     _admin_skills_dir = "/etc/codex/skills"
-    # Subtrees under ``<codex_home>/plugins`` that stage installed plugins, mirroring
-    # ``ClaudeCodeDiscoverer._plugin_subdirs``. ``cache`` is the hydrated install tree
-    # (verified on disk as ``cache/<marketplace>/<plugin>/<version>/``); ``marketplaces``
-    # holds cloned marketplace sources and ``repos`` is a legacy name — both included
-    # for parity with Claude Code and forward-compat (a subdir absent on disk is simply
-    # skipped). All can host MCP servers / skills. Drop an entry here to stop scanning it.
-    _plugin_subdirs: tuple[str, ...] = ("cache", "marketplaces", "repos")
 
     # --- public (override AgentDiscoverer abstracts) ---
 
@@ -224,12 +216,18 @@ class CodexDiscoverer(AgentDiscoverer):
     # --- private: plugin discovery (mirrors ClaudeCodeDiscoverer's plugin walk) ---
 
     def _plugin_base_dirs(self) -> list[Path]:
-        """Every ``<codex_home>/plugins/<subdir>`` to walk for plugin MCP servers and
-        skills, one per :attr:`_plugin_subdirs`. Mirrors
-        ``ClaudeCodeDiscoverer._plugin_base_dirs``; a subdir absent on disk is skipped
-        downstream by :func:`_walk_under_depth`."""
-        root = self._codex_home() / "plugins"
-        return [root / sub for sub in self._plugin_subdirs]
+        """The Codex plugins root ``<codex_home>/plugins``, walked recursively
+        (depth-capped) by the plugin scans.
+
+        Codex installs plugins under
+        ``<codex_home>/plugins/cache/<marketplace>/<plugin>/<version>/``
+        (developers.openai.com/codex/plugins/build). This previously enumerated
+        ``cache``/``marketplaces``/``repos`` subdirs carried over from Claude Code, but
+        only ``cache`` is a documented Codex location — walking the ``plugins`` root
+        directly finds every bundled ``.mcp.json`` / ``skills/`` without guessing
+        intermediate names. A missing root is skipped downstream by
+        :func:`_walk_under_depth`."""
+        return [self._codex_home() / "plugins"]
 
     def _discover_plugin_mcp_servers(self) -> McpConfigsResult:
         """Scan every plugin tree for ``.mcp.json`` files (mirrors
