@@ -785,32 +785,28 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
             return candidate
         return None
 
-    def _iter_installed_extension_hits(self, name: str, *, want_file: bool) -> list[Path]:
-        """Walk for ``name`` (file or dir) under the user's *installed* extensions.
-
-        ``extensions.json`` is VSCode's authoritative install manifest, so each
-        root is scanned at exactly the dirs it lists (see
-        :meth:`_installed_extension_dirs`). A root with no manifest — the built-in
-        / bundled extension dirs ship none — falls back to scanning every subdir,
-        so built-in coverage is unchanged. Each scanned dir is walked with the
-        ``_MAX_PLUGIN_RGLOB_DEPTH`` depth cap.
-        """
-        hits: list[Path] = []
+    def _extension_scan_roots(self) -> list[Path]:
+        """The directories to walk for bundled ``mcp.json`` / ``skills/``: each
+        extension root from :meth:`_extension_base_dirs`, gated through its install
+        manifest. ``extensions.json`` is VSCode's authoritative install manifest,
+        so a managed root contributes exactly the dirs it lists (see
+        :meth:`_installed_extension_dirs`); a root with no manifest — the built-in
+        / bundled dirs, and the fork trees a subclass marks unmanaged — is scanned
+        in full. The actual walking is the shared :func:`_walk_under_depth`."""
+        roots: list[Path] = []
         for base in self._extension_base_dirs():
             installed = self._installed_extension_dirs(base)
-            roots = [base] if installed is None else installed
-            for root in roots:
-                hits.extend(_walk_under_depth(root, name, _MAX_PLUGIN_RGLOB_DEPTH, want_file=want_file))
-        return hits
+            roots.extend([base] if installed is None else installed)
+        return roots
 
     def _discover_extension_mcp_servers(self) -> McpConfigsResult:
         """Scan ``mcp.json`` under each *installed* extension (no leading dot — the
         VSCode-family file-name convention). Mirrors
         :meth:`ClaudeCodeDiscoverer._discover_plugin_mcp_servers` but uses
         :attr:`_VSCODE_FAMILY_FORMATS` so wrapped, VSCode-flat ``servers``, and
-        fully flat shapes all parse. The walk is install-manifest gated (see
-        :meth:`_iter_installed_extension_hits`) so uninstalled extensions left on
-        disk are not scanned.
+        fully flat shapes all parse. Roots are install-manifest gated (see
+        :meth:`_extension_scan_roots`) so uninstalled extensions left on disk are
+        not scanned.
 
         ``skip_unrecognized=True``: this walk matches every file merely *named*
         ``mcp.json``, and extensions ship unrelated files under that name (JSON
@@ -819,22 +815,24 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         that fails to validate is still reported as malformed.
         """
         result: McpConfigsResult = {}
-        for mcp_file in self._iter_installed_extension_hits("mcp.json", want_file=True):
-            if not mcp_file.is_file():
-                continue
-            parsed = self._parse_mcp_file(mcp_file, formats=_VSCODE_FAMILY_FORMATS, skip_unrecognized=True)
-            if parsed is None:
-                continue
-            result[mcp_file.as_posix()] = parsed
+        for root in self._extension_scan_roots():
+            for mcp_file in _walk_under_depth(root, "mcp.json", _MAX_PLUGIN_RGLOB_DEPTH, want_file=True):
+                if not mcp_file.is_file():
+                    continue
+                parsed = self._parse_mcp_file(mcp_file, formats=_VSCODE_FAMILY_FORMATS, skip_unrecognized=True)
+                if parsed is None:
+                    continue
+                result[mcp_file.as_posix()] = parsed
         return result
 
     def _discover_extension_skills(self) -> SkillsDirsResult:
-        """Scan ``skills/`` subdirs under each *installed* extension (install-
-        manifest gated, see :meth:`_iter_installed_extension_hits`)."""
+        """Scan ``skills/`` subdirs under each *installed* extension (roots are
+        install-manifest gated, see :meth:`_extension_scan_roots`)."""
         result: SkillsDirsResult = {}
-        for skills_dir in self._iter_installed_extension_hits("skills", want_file=False):
-            if skills_dir.is_dir():
-                result[skills_dir.as_posix()] = inspect_skills_dir(str(skills_dir))
+        for root in self._extension_scan_roots():
+            for skills_dir in _walk_under_depth(root, "skills", _MAX_PLUGIN_RGLOB_DEPTH, want_file=False):
+                if skills_dir.is_dir():
+                    result[skills_dir.as_posix()] = inspect_skills_dir(str(skills_dir))
         return result
 
     # --- private: chat.agentSkillsLocations ---
