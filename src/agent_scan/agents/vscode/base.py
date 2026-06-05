@@ -730,79 +730,77 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
 
     # --- private: install-manifest gating (don't scan uninstalled extensions) ---
 
-    def _installed_extension_names(self, base: Path) -> set[str] | None:
-        """Names of the extension dirs VSCode records as *installed* in
+    def _installed_extension_dirs(self, base: Path) -> list[Path] | None:
+        """The extension dirs VSCode records as *installed* in
         ``<base>/extensions.json`` — its authoritative install manifest. Each
         entry's ``relativeLocation`` is the on-disk dir name; some manifest shapes
-        omit it, so fall back to the basename of ``location.path``.
+        omit it, so fall back to the basename of ``location.path``. The name is
+        resolved against ``base`` and confined to it (see :meth:`_confine_to_base`)
+        so an attacker-influenceable manifest (under ``--scan-all-users``) cannot
+        redirect the scan outside the extension root.
 
         Returns ``None`` when no parseable ``extensions.json`` is present, which
         the caller treats as "no manifest, scan every subdir" — the *built-in*
         (bundled) extension roots ship none. A present-but-empty manifest (``[]``)
-        returns an empty set: nothing is installed, so nothing is scanned.
+        returns an empty list: nothing is installed, so nothing is scanned.
+        Uninstalled leftovers and upgraded-away versions linger on disk but are
+        absent from the manifest, so they are never reached — no separate
+        ``.obsolete`` denylist is needed (an obsolete dir is never in the manifest).
         """
         data = self._load_json_file(base / "extensions.json")
         if not isinstance(data, list):
             return None
-        names: set[str] = set()
+        dirs: list[Path] = []
+        seen: set[str] = set()
         for entry in data:
             if not isinstance(entry, dict):
                 continue
             rel = entry.get("relativeLocation")
-            if isinstance(rel, str) and rel:
-                names.add(rel)
+            if not (isinstance(rel, str) and rel):
+                location = entry.get("location")
+                path = location.get("path") if isinstance(location, dict) else None
+                rel = Path(path).name if isinstance(path, str) and path else None
+            if not rel or rel in seen:
                 continue
-            location = entry.get("location")
-            path = location.get("path") if isinstance(location, dict) else None
-            if isinstance(path, str) and path:
-                names.add(Path(path).name)
-        return names
-
-    def _obsolete_extension_names(self, base: Path) -> set[str]:
-        """Names of extension dirs VSCode marked uninstalled-but-not-yet-deleted in
-        ``<base>/.obsolete`` (a ``{dirname: true}`` map). These linger on disk
-        after an uninstall/upgrade until a later cleanup, so they must be skipped.
-        Empty when ``.obsolete`` is absent or not an object.
-        """
-        data = self._load_json_file(base / ".obsolete")
-        if not isinstance(data, dict):
-            return set()
-        return {name for name, flagged in data.items() if flagged and isinstance(name, str)}
+            seen.add(rel)
+            confined = self._confine_to_base(base, rel)
+            if confined is not None:
+                dirs.append(confined)
+        return dirs
 
     @staticmethod
-    def _top_level_extension_name(base: Path, found: Path) -> str | None:
-        """The extension's own directory name: the first path component of ``found``
-        relative to ``base``. ``None`` when ``found`` is not under ``base`` or sits
-        directly at the root (a hit needs ``<ext>/…/<name>``, so the root manifest
-        files ``extensions.json`` / ``.obsolete`` are never treated as extensions).
+    def _confine_to_base(base: Path, relative_location: str) -> Path | None:
+        """Resolve a manifest dir name against ``base``, confined to it.
+
+        ``relativeLocation`` is normally a single dir name (e.g.
+        ``pub.ext-1.0.0``), but the manifest is attacker-influenceable under
+        ``--scan-all-users``; a value carrying ``..`` or an absolute path must not
+        redirect the walk outside the extension root. Returns the resolved dir, or
+        ``None`` for anything that escapes (or equals) ``base``. Normalized
+        lexically — no filesystem access, so it cannot be defeated by symlinks
+        planted between this check and the walk.
         """
-        try:
-            parts = found.relative_to(base).parts
-        except ValueError:
-            return None
-        return parts[0] if len(parts) >= 2 else None
+        candidate = Path(os.path.normpath(base / relative_location))
+        if candidate != base and candidate.is_relative_to(base):
+            return candidate
+        return None
 
     def _iter_installed_extension_hits(self, name: str, *, want_file: bool) -> list[Path]:
-        """Walk each extension root for ``name`` (file or dir), restricted to the
-        user's *installed* extensions.
+        """Walk for ``name`` (file or dir) under the user's *installed* extensions.
 
-        Per root, ``extensions.json`` is the install allowlist and ``.obsolete``
-        the uninstalled denylist (see :meth:`_installed_extension_names` /
-        :meth:`_obsolete_extension_names`). A hit is kept only when its top-level
-        extension dir is not obsolete and — when the root has a manifest — is
-        listed there. Roots without a manifest (built-in/bundled) fall back to
-        scanning every subdir. The walk stays rooted at ``base`` so the
-        ``_MAX_PLUGIN_RGLOB_DEPTH`` depth cap keeps its current meaning.
+        ``extensions.json`` is VSCode's authoritative install manifest, so each
+        root is scanned at exactly the dirs it lists (see
+        :meth:`_installed_extension_dirs`). A root with no manifest — the built-in
+        / bundled extension dirs ship none — falls back to scanning every subdir,
+        so built-in coverage is unchanged. Each scanned dir is walked with the
+        ``_MAX_PLUGIN_RGLOB_DEPTH`` depth cap.
         """
         hits: list[Path] = []
         for base in self._extension_base_dirs():
-            allowed = self._installed_extension_names(base)
-            obsolete = self._obsolete_extension_names(base)
-            for found in _walk_under_depth(base, name, _MAX_PLUGIN_RGLOB_DEPTH, want_file=want_file):
-                ext = self._top_level_extension_name(base, found)
-                if ext is None or ext in obsolete or (allowed is not None and ext not in allowed):
-                    continue
-                hits.append(found)
+            installed = self._installed_extension_dirs(base)
+            roots = [base] if installed is None else installed
+            for root in roots:
+                hits.extend(_walk_under_depth(root, name, _MAX_PLUGIN_RGLOB_DEPTH, want_file=want_file))
         return hits
 
     def _discover_extension_mcp_servers(self) -> McpConfigsResult:

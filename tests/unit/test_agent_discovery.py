@@ -3390,22 +3390,24 @@ def test_vscode_extension_walk_respects_max_depth_cap(tmp_path, monkeypatch):
     assert not any("/a/b/c/d/mcp.json" in k for k in mcp_configs)
 
 
-# --- Install-manifest gating: don't scan uninstalled extensions ---
+# --- Install-manifest gating: scan only what extensions.json lists ---
 #
 # A directory existing under an extension root does NOT mean the extension is
-# installed. VSCode records the authoritative install set in
-# ``<ext-root>/extensions.json`` and, on uninstall/upgrade, leaves the stale dir
-# on disk while recording it in ``<ext-root>/.obsolete`` until a later cleanup.
-# The extension walks must scan only installed extensions.
+# installed. ``<ext-root>/extensions.json`` is VSCode's authoritative install
+# manifest, so the extension walks scan only the dirs it lists. Uninstalled
+# leftovers and upgraded-away versions linger on disk (VSCode also records them
+# in ``<ext-root>/.obsolete`` pending cleanup) but are absent from the manifest,
+# so they are never reached — no separate ``.obsolete`` check is needed.
 
 
-def test_vscode_extension_mcp_skips_obsolete_extension(tmp_path, monkeypatch):
-    """An extension dir VSCode marked uninstalled in ``.obsolete`` (left on disk
-    after an upgrade) is NOT scanned, while its installed replacement is.
+def test_vscode_extension_mcp_skips_upgraded_away_version(tmp_path, monkeypatch):
+    """An extension version left on disk after an upgrade is NOT scanned, while
+    its installed replacement is.
 
     Mirrors real on-disk state: ``ext-1.0.0`` was upgraded to ``ext-2.0.0``;
-    VSCode rewrote ``extensions.json`` to list only ``ext-2.0.0`` and recorded
-    ``ext-1.0.0`` in ``.obsolete`` pending deletion. Both dirs still exist.
+    VSCode rewrote ``extensions.json`` to list only ``ext-2.0.0`` and left the
+    ``ext-1.0.0`` dir on disk pending cleanup. Only the manifest-listed version
+    is scanned.
     """
     from agent_scan.agents import VSCodeDiscoverer
 
@@ -3418,7 +3420,6 @@ def test_vscode_extension_mcp_skips_obsolete_extension(tmp_path, monkeypatch):
     (old / "mcp.json").write_text('{"mcpServers": {"old-srv": {"command": "o"}}}')
     (new / "mcp.json").write_text('{"mcpServers": {"new-srv": {"command": "n"}}}')
     (exts / "extensions.json").write_text('[{"relativeLocation": "pub.ext-2.0.0"}]')
-    (exts / ".obsolete").write_text('{"pub.ext-1.0.0": true}')
 
     mcp_configs = VSCodeDiscoverer(tmp_path).discover_mcp_servers()
 
@@ -3520,7 +3521,7 @@ def test_vscode_builtin_extension_dir_scanned_without_manifest(tmp_path, monkeyp
     assert "builtin-srv" in names
 
 
-def test_vscode_extension_skills_skips_obsolete_extension(tmp_path, monkeypatch):
+def test_vscode_extension_skills_skips_upgraded_away_version(tmp_path, monkeypatch):
     """The same install-manifest gate applies to extension ``skills/`` discovery."""
     from agent_scan.agents import VSCodeDiscoverer
 
@@ -3533,7 +3534,6 @@ def test_vscode_extension_skills_skips_obsolete_extension(tmp_path, monkeypatch)
     (old_skill / "SKILL.md").write_text("---\nname: old-skill\ndescription: o\n---\n\nbody.\n")
     (new_skill / "SKILL.md").write_text("---\nname: new-skill\ndescription: n\n---\n\nbody.\n")
     (exts / "extensions.json").write_text('[{"relativeLocation": "pub.sk-2.0.0"}]')
-    (exts / ".obsolete").write_text('{"pub.sk-1.0.0": true}')
 
     skills_dirs = VSCodeDiscoverer(tmp_path).discover_skills()
 
@@ -3541,9 +3541,9 @@ def test_vscode_extension_skills_skips_obsolete_extension(tmp_path, monkeypatch)
     assert not any("/pub.sk-1.0.0/" in k for k in skills_dirs)
 
 
-def test_cursor_extension_mcp_skips_obsolete_extension(tmp_path, monkeypatch):
+def test_cursor_extension_mcp_skips_upgraded_away_version(tmp_path, monkeypatch):
     """The install-manifest gate is inherited by forks — Cursor under
-    ``~/.cursor/extensions`` honors ``extensions.json`` / ``.obsolete`` too."""
+    ``~/.cursor/extensions`` scans only what its ``extensions.json`` lists."""
     from agent_scan.agents import CursorDiscoverer
 
     monkeypatch.setattr(CursorDiscoverer, "_builtin_extension_dirs", lambda self: [])
@@ -3555,13 +3555,44 @@ def test_cursor_extension_mcp_skips_obsolete_extension(tmp_path, monkeypatch):
     (old / "mcp.json").write_text('{"mcpServers": {"cur-old": {"command": "o"}}}')
     (new / "mcp.json").write_text('{"mcpServers": {"cur-new": {"command": "n"}}}')
     (exts / "extensions.json").write_text('[{"relativeLocation": "v.c-2.0.0"}]')
-    (exts / ".obsolete").write_text('{"v.c-1.0.0": true}')
 
     mcp_configs = CursorDiscoverer(tmp_path).discover_mcp_servers()
 
     names = {n for v in mcp_configs.values() if isinstance(v, list) for n, _ in v}
     assert "cur-new" in names
     assert "cur-old" not in names
+
+
+def test_vscode_extension_manifest_rejects_path_traversal(tmp_path, monkeypatch):
+    """A hostile ``extensions.json`` (e.g. another user's home under
+    ``--scan-all-users``) cannot redirect the walk outside the extension root via
+    a ``..`` or absolute ``relativeLocation``.
+
+    A normal entry alongside the malicious one is still scanned; the traversal
+    entry pointing at an ``mcp.json`` outside the root is not.
+    """
+    from agent_scan.agents import VSCodeDiscoverer
+
+    monkeypatch.setattr(VSCodeDiscoverer, "_builtin_extension_dirs", lambda self: [])
+    exts = tmp_path / ".vscode" / "extensions"
+    good = exts / "pub.good-1.0.0"
+    good.mkdir(parents=True)
+    (good / "mcp.json").write_text('{"mcpServers": {"good-srv": {"command": "g"}}}')
+    # A real file outside the extension root that the traversal entry resolves to
+    # (``.vscode/extensions/../../outside`` -> ``<tmp>/outside``); confinement must
+    # reject it, so without the guard this mcp.json would otherwise be walked.
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "mcp.json").write_text('{"mcpServers": {"evil-srv": {"command": "e"}}}')
+    (exts / "extensions.json").write_text(
+        '[{"relativeLocation": "pub.good-1.0.0"}, {"relativeLocation": "../../outside"}]'
+    )
+
+    mcp_configs = VSCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    names = {n for v in mcp_configs.values() if isinstance(v, list) for n, _ in v}
+    assert "good-srv" in names
+    assert "evil-srv" not in names
 
 
 def test_kiro_discoverer_walks_kiro_extensions_dir(tmp_path):
