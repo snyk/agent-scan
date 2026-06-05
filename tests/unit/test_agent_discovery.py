@@ -996,42 +996,55 @@ def test_claude_code_discoverer_plugin_mcp_servers_scans_both_cache_and_repos(tm
     assert any("/plugins/repos/" in k for k in mcp_configs)
 
 
-def test_claude_code_discoverer_plugin_mcp_servers_scans_marketplaces_dir(tmp_path):
-    """Plugins staged under ~/.claude/plugins/marketplaces/**/ are discovered.
+def test_claude_code_discoverer_plugin_mcp_servers_skips_marketplaces_dir(tmp_path):
+    """Plugins staged under ~/.claude/plugins/marketplaces/**/ are NOT discovered.
 
-    ``marketplaces/`` is the current sibling of ``cache/`` (the legacy ``repos/``
-    was renamed); a plugin's source ``.mcp.json`` can live there."""
+    ``marketplaces/`` is the cloned marketplace *catalog* — every plugin the
+    marketplace offers, almost all of which the user has NOT installed. Installed
+    plugins are copied into ``cache/`` (and legacy ``repos/``), so only those are
+    scanned; the not-yet-installed catalog must be skipped. A sibling ``cache/``
+    plugin in the same scan confirms installed plugins are still picked up."""
     from agent_scan.agents import ClaudeCodeDiscoverer
 
     mp_plugin = tmp_path / ".claude" / "plugins" / "marketplaces" / "official" / "plugin-x"
     mp_plugin.mkdir(parents=True)
     (mp_plugin / ".mcp.json").write_text('{"mp-srv": {"command": "m"}}')
+    cache_plugin = tmp_path / ".claude" / "plugins" / "cache" / "official" / "plugin-y"
+    cache_plugin.mkdir(parents=True)
+    (cache_plugin / ".mcp.json").write_text('{"cache-srv": {"command": "c"}}')
 
     mcp_configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
 
-    mp_keys = [k for k in mcp_configs if "/plugins/marketplaces/" in k]
-    assert len(mp_keys) == 1
-    entries = mcp_configs[mp_keys[0]]
-    assert isinstance(entries, list) and entries[0][0] == "mp-srv"
+    assert not [k for k in mcp_configs if "/plugins/marketplaces/" in k]
+    names = {n for v in mcp_configs.values() if isinstance(v, list) for n, _ in v}
+    assert "mp-srv" not in names
+    assert "cache-srv" in names
 
 
-def test_claude_code_discoverer_plugin_skills_scans_marketplaces_dir(tmp_path):
-    """Plugin skills staged under ~/.claude/plugins/marketplaces/**/ are discovered."""
+def test_claude_code_discoverer_plugin_skills_skips_marketplaces_dir(tmp_path):
+    """Plugin skills staged under ~/.claude/plugins/marketplaces/**/ are NOT discovered.
+
+    The marketplace catalog lists un-installed plugins; only ``cache/``/``repos/``
+    (installed) skills are scanned. A sibling ``cache/`` skill confirms installed
+    plugin skills are still surfaced."""
     from agent_scan.agents import ClaudeCodeDiscoverer
 
     skills_dir = tmp_path / ".claude" / "plugins" / "marketplaces" / "official" / "p" / "skills" / "ms"
     skills_dir.mkdir(parents=True)
     (skills_dir / "SKILL.md").write_text("---\nname: ms\ndescription: m\n---\n\nB.\n")
+    cache_skill = tmp_path / ".claude" / "plugins" / "cache" / "official" / "q" / "skills" / "cs"
+    cache_skill.mkdir(parents=True)
+    (cache_skill / "SKILL.md").write_text("---\nname: cs\ndescription: c\n---\n\nB.\n")
 
     skills_dirs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_skills()
 
-    mp_keys = [k for k in skills_dirs if "/plugins/marketplaces/" in k]
-    assert len(mp_keys) == 1
+    assert not [k for k in skills_dirs if "/plugins/marketplaces/" in k]
+    assert any("/plugins/cache/" in k for k in skills_dirs)
 
 
 def test_claude_code_honors_plugin_cache_dir_env_on_own_home_scan(tmp_path, monkeypatch):
     """CLAUDE_CODE_PLUGIN_CACHE_DIR relocates the plugins ROOT (cache/ and
-    marketplaces/ live beneath it). Honored only on an own-home scan."""
+    repos/ live beneath it). Honored only on an own-home scan."""
     from pathlib import Path
 
     from agent_scan.agents import ClaudeCodeDiscoverer
@@ -1041,14 +1054,14 @@ def test_claude_code_honors_plugin_cache_dir_env_on_own_home_scan(tmp_path, monk
     monkeypatch.setattr(Path, "home", lambda: home)
 
     plugin_root = tmp_path / "relocated-plugins"
-    plugin = plugin_root / "marketplaces" / "official" / "p"
+    plugin = plugin_root / "cache" / "official" / "p"
     plugin.mkdir(parents=True)
     (plugin / ".mcp.json").write_text('{"relocated-plugin": {"command": "p"}}')
     monkeypatch.setenv("CLAUDE_CODE_PLUGIN_CACHE_DIR", str(plugin_root))
 
     mcp_configs = ClaudeCodeDiscoverer(home)._discover_plugin_mcp_servers()
 
-    keys = [k for k in mcp_configs if "/relocated-plugins/marketplaces/" in k]
+    keys = [k for k in mcp_configs if "/relocated-plugins/cache/" in k]
     assert len(keys) == 1, f"CLAUDE_CODE_PLUGIN_CACHE_DIR root must be scanned; got: {list(mcp_configs)}"
     assert mcp_configs[keys[0]][0][0] == "relocated-plugin"
 
@@ -1069,8 +1082,10 @@ def test_claude_code_honors_plugin_seed_dir_env_on_own_home_scan(tmp_path, monke
     seed_b = tmp_path / "seed-b"
     (seed_a / "cache" / "mp" / "p").mkdir(parents=True)
     (seed_a / "cache" / "mp" / "p" / ".mcp.json").write_text('{"seed-a-srv": {"command": "a"}}')
-    (seed_b / "marketplaces" / "mp" / "p").mkdir(parents=True)
-    (seed_b / "marketplaces" / "mp" / "p" / ".mcp.json").write_text('{"seed-b-srv": {"command": "b"}}')
+    # Seed roots mirror the plugins layout; the legacy ``repos/`` install dir is
+    # still scanned alongside ``cache/`` (only the ``marketplaces/`` catalog is skipped).
+    (seed_b / "repos" / "mp" / "p").mkdir(parents=True)
+    (seed_b / "repos" / "mp" / "p" / ".mcp.json").write_text('{"seed-b-srv": {"command": "b"}}')
     monkeypatch.setenv("CLAUDE_CODE_PLUGIN_SEED_DIR", os.pathsep.join([str(seed_a), str(seed_b)]))
 
     mcp_configs = ClaudeCodeDiscoverer(home)._discover_plugin_mcp_servers()
@@ -1088,8 +1103,8 @@ def test_claude_code_ignores_plugin_env_dirs_under_multiuser_scan(tmp_path, monk
     from agent_scan.agents import ClaudeCodeDiscoverer
 
     rogue = tmp_path / "rogue-plugins"
-    (rogue / "marketplaces" / "mp" / "p").mkdir(parents=True)
-    (rogue / "marketplaces" / "mp" / "p" / ".mcp.json").write_text('{"should-not-appear": {"command": "x"}}')
+    (rogue / "cache" / "mp" / "p").mkdir(parents=True)
+    (rogue / "cache" / "mp" / "p" / ".mcp.json").write_text('{"should-not-appear": {"command": "x"}}')
     monkeypatch.setenv("CLAUDE_CODE_PLUGIN_CACHE_DIR", str(rogue))
     monkeypatch.setenv("CLAUDE_CODE_PLUGIN_SEED_DIR", str(rogue) + os.pathsep)
 
