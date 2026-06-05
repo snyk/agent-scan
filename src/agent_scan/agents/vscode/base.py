@@ -739,17 +739,30 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         so an attacker-influenceable manifest (under ``--scan-all-users``) cannot
         redirect the scan outside the extension root.
 
-        Returns ``None`` when no parseable ``extensions.json`` is present, which
-        the caller treats as "no manifest, scan every subdir" — the *built-in*
-        (bundled) extension roots ship none. A present-but-empty manifest (``[]``)
-        returns an empty list: nothing is installed, so nothing is scanned.
+        Return contract (consumed by :meth:`_extension_scan_roots`):
+
+        * ``None`` — *not* manifest-managed; scan every subdir. Reserved for roots
+          that ship no ``extensions.json`` *by design*: the built-in (bundled)
+          extension roots, detected here, and the fork-declared unmanaged trees
+          (Kiro Powers, Antigravity's Gemini dir) whose subclasses override this.
+        * ``[]`` — manifest-managed, nothing to scan. A managed root whose
+          ``extensions.json`` is missing, unreadable, or unparseable **fails
+          closed**: an extension is installed iff the manifest lists it, and the
+          editor itself loads nothing from such a dir, so there is nothing live to
+          scan. A present-but-empty manifest (``[]``) is the same: nothing installed.
+        * a non-empty list — exactly the installed dirs the manifest names.
+
         Uninstalled leftovers and upgraded-away versions linger on disk but are
         absent from the manifest, so they are never reached — no separate
         ``.obsolete`` denylist is needed (an obsolete dir is never in the manifest).
         """
+        # Built-in/bundled roots ship no manifest by design — they are not
+        # manifest-managed, so scan them wholesale rather than failing closed.
+        if base in set(self._builtin_extension_dirs()):
+            return None
         data = self._load_json_file(base / "extensions.json")
         if not isinstance(data, list):
-            return None
+            return []
         dirs: list[Path] = []
         seen: set[str] = set()
         for entry in data:
@@ -788,11 +801,13 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
     def _extension_scan_roots(self) -> list[Path]:
         """The directories to walk for bundled ``mcp.json`` / ``skills/``: each
         extension root from :meth:`_extension_base_dirs`, gated through its install
-        manifest. ``extensions.json`` is VSCode's authoritative install manifest,
-        so a managed root contributes exactly the dirs it lists (see
-        :meth:`_installed_extension_dirs`); a root with no manifest — the built-in
-        / bundled dirs, and the fork trees a subclass marks unmanaged — is scanned
-        in full. The actual walking is the shared :func:`_walk_under_depth`."""
+        manifest (see :meth:`_installed_extension_dirs` for the return contract).
+
+        An *unmanaged* root (``None``) — the built-in/bundled dirs and the fork
+        trees a subclass marks unmanaged — is scanned in full; a *manifest-managed*
+        root contributes exactly the dirs its ``extensions.json`` lists, which is
+        empty (scan nothing, fail closed) when that manifest is missing or
+        unparseable. The actual walking is the shared :func:`_walk_under_depth`."""
         roots: list[Path] = []
         for base in self._extension_base_dirs():
             installed = self._installed_extension_dirs(base)

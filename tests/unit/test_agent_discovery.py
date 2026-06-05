@@ -3169,6 +3169,7 @@ def test_vscode_extension_mcp_discovers_wrapped_mcp_json(tmp_path):
     ext_dir = tmp_path / ".vscode" / "extensions" / "publisher.example-1.0.0"
     ext_dir.mkdir(parents=True)
     (ext_dir / "mcp.json").write_text('{"mcpServers": {"ext-srv": {"command": "e"}}}')
+    (ext_dir.parent / "extensions.json").write_text('[{"relativeLocation": "publisher.example-1.0.0"}]')
 
     mcp_configs = VSCodeDiscoverer(tmp_path).discover_mcp_servers()
 
@@ -3188,6 +3189,7 @@ def test_vscode_extension_mcp_discovers_vscode_flat_servers_shape(tmp_path):
     ext_dir = tmp_path / ".vscode" / "extensions" / "x.flat-2.0.0"
     ext_dir.mkdir(parents=True)
     (ext_dir / "mcp.json").write_text('{"servers": {"flat-srv": {"command": "f"}}}')
+    (ext_dir.parent / "extensions.json").write_text('[{"relativeLocation": "x.flat-2.0.0"}]')
 
     mcp_configs = VSCodeDiscoverer(tmp_path).discover_mcp_servers()
 
@@ -3222,6 +3224,7 @@ def test_vscode_extension_mcp_records_could_not_parse_for_invalid_json(tmp_path)
     ext_dir = tmp_path / ".vscode" / "extensions" / "x.bad-0.0.1"
     ext_dir.mkdir(parents=True)
     (ext_dir / "mcp.json").write_text("{ not valid json")
+    (ext_dir.parent / "extensions.json").write_text('[{"relativeLocation": "x.bad-0.0.1"}]')
 
     mcp_configs = VSCodeDiscoverer(tmp_path).discover_mcp_servers()
 
@@ -3251,6 +3254,7 @@ def test_vscode_extension_mcp_skips_unrelated_json_named_mcp_json(tmp_path):
         '"title": "config schema", "type": "object", '
         '"properties": {"foo": {"type": "string"}}}'
     )
+    (ext_dir.parent / "extensions.json").write_text('[{"relativeLocation": "x.schema-1.0.0"}]')
 
     mcp_configs = VSCodeDiscoverer(tmp_path).discover_mcp_servers()
 
@@ -3272,6 +3276,7 @@ def test_vscode_extension_mcp_still_flags_malformed_mcp_shaped_file(tmp_path):
     # Recognizably MCP (mcpServers wrapper), but the server has neither a
     # ``command`` (stdio) nor a ``url`` (remote), so no server model validates.
     (ext_dir / "mcp.json").write_text('{"mcpServers": {"bad": {"args": ["x"]}}}')
+    (ext_dir.parent / "extensions.json").write_text('[{"relativeLocation": "x.brokenmcp-1.0.0"}]')
 
     mcp_configs = VSCodeDiscoverer(tmp_path).discover_mcp_servers()
 
@@ -3284,9 +3289,11 @@ def test_vscode_extension_skills_discovers_skills_dir(tmp_path):
     """An extension shipping a ``skills/`` directory is picked up."""
     from agent_scan.agents import VSCodeDiscoverer
 
-    ext_skill_dir = tmp_path / ".vscode" / "extensions" / "p.ext-1.0.0" / "skills" / "ext-skill"
+    exts = tmp_path / ".vscode" / "extensions"
+    ext_skill_dir = exts / "p.ext-1.0.0" / "skills" / "ext-skill"
     ext_skill_dir.mkdir(parents=True)
     (ext_skill_dir / "SKILL.md").write_text("---\nname: ext-skill\ndescription: e\n---\n\nbody.\n")
+    (exts / "extensions.json").write_text('[{"relativeLocation": "p.ext-1.0.0"}]')
 
     skills_dirs = VSCodeDiscoverer(tmp_path).discover_skills()
 
@@ -3323,6 +3330,7 @@ def test_cursor_extension_mcp_discovers_mcp_json(tmp_path):
     ext_dir = tmp_path / ".cursor" / "extensions" / "vendor.curext-3.1.4"
     ext_dir.mkdir(parents=True)
     (ext_dir / "mcp.json").write_text('{"mcpServers": {"cur-ext-srv": {"command": "c"}}}')
+    (ext_dir.parent / "extensions.json").write_text('[{"relativeLocation": "vendor.curext-3.1.4"}]')
 
     mcp_configs = CursorDiscoverer(tmp_path).discover_mcp_servers()
 
@@ -3338,9 +3346,11 @@ def test_cursor_extension_skills_discovers_skills_dir(tmp_path):
     """Cursor extensions can ship a ``skills/`` directory just like VSCode."""
     from agent_scan.agents import CursorDiscoverer
 
-    ext_skill_dir = tmp_path / ".cursor" / "extensions" / "v.c-1.0.0" / "skills" / "cur-skill"
+    exts = tmp_path / ".cursor" / "extensions"
+    ext_skill_dir = exts / "v.c-1.0.0" / "skills" / "cur-skill"
     ext_skill_dir.mkdir(parents=True)
     (ext_skill_dir / "SKILL.md").write_text("---\nname: cur-skill\ndescription: c\n---\n\nbody.\n")
+    (exts / "extensions.json").write_text('[{"relativeLocation": "v.c-1.0.0"}]')
 
     skills_dirs = CursorDiscoverer(tmp_path).discover_skills()
 
@@ -3355,6 +3365,7 @@ def test_windsurf_extension_mcp_discovers_mcp_json(tmp_path):
     ext_dir = tmp_path / ".codeium" / "windsurf" / "extensions" / "v.ws-1.0.0"
     ext_dir.mkdir(parents=True)
     (ext_dir / "mcp.json").write_text('{"mcpServers": {"ws-ext-srv": {"command": "w"}}}')
+    (ext_dir.parent / "extensions.json").write_text('[{"relativeLocation": "v.ws-1.0.0"}]')
 
     mcp_configs = WindsurfDiscoverer(tmp_path).discover_mcp_servers()
 
@@ -3379,9 +3390,15 @@ def test_vscode_extension_walk_respects_max_depth_cap(tmp_path, monkeypatch):
     # (agents.vscode.base), so patch the cap there.
     monkeypatch.setattr(vscode_base, "_MAX_PLUGIN_RGLOB_DEPTH", 3)
 
-    # Inside ``~/.vscode/extensions/`` the relative-parts depth of
-    # ``a/b/c/d/mcp.json`` is 4 — beyond cap 3, so it must NOT be discovered.
-    deep = tmp_path / ".vscode" / "extensions" / "a" / "b" / "c" / "d"
+    # Scan the tree as a built-in (manifest-less) root so it is walked wholesale
+    # and depth *pruning* — not manifest gating — is what's under test; depth is
+    # measured from the scanned root. A dedicated dir (not the user extensions
+    # path) keeps it a single, purely built-in scan root.
+    exts = tmp_path / "builtin-extensions"
+    monkeypatch.setattr(VSCodeDiscoverer, "_builtin_extension_dirs", lambda self: [exts])
+    # Relative to that root the depth of ``a/b/c/d/mcp.json`` is 4 — beyond cap 3,
+    # so it must NOT be discovered.
+    deep = exts / "a" / "b" / "c" / "d"
     deep.mkdir(parents=True)
     (deep / "mcp.json").write_text('{"mcpServers": {"deep": {"command": "x"}}}')
 
@@ -3468,10 +3485,16 @@ def test_vscode_extension_mcp_empty_manifest_scans_nothing(tmp_path, monkeypatch
     assert not any("/extensions/" in k for k in mcp_configs)
 
 
-def test_vscode_extension_mcp_no_manifest_scans_all(tmp_path, monkeypatch):
-    """With no ``extensions.json`` present the walk falls back to scanning every
-    subdir — the behavior built-in/bundled extension roots rely on (they ship no
-    manifest)."""
+def test_vscode_extension_mcp_no_manifest_scans_nothing(tmp_path, monkeypatch):
+    """A *managed* extension root with no ``extensions.json`` scans NOTHING (fail
+    closed): with no manifest there is no installed set, and VSCode itself loads
+    nothing from such a dir (an extension is installed iff the manifest lists it).
+
+    The scan-all exception is reserved for roots that ship no manifest *by design*
+    — built-in/bundled roots (see
+    ``test_vscode_builtin_extension_dir_scanned_without_manifest``) and the
+    fork-declared unmanaged trees (Kiro Powers, Antigravity's Gemini dir).
+    """
     from agent_scan.agents import VSCodeDiscoverer
 
     monkeypatch.setattr(VSCodeDiscoverer, "_builtin_extension_dirs", lambda self: [])
@@ -3482,7 +3505,28 @@ def test_vscode_extension_mcp_no_manifest_scans_all(tmp_path, monkeypatch):
     mcp_configs = VSCodeDiscoverer(tmp_path).discover_mcp_servers()
 
     names = {n for v in mcp_configs.values() if isinstance(v, list) for n, _ in v}
-    assert "nomani-srv" in names
+    assert "nomani-srv" not in names
+    assert not any("/extensions/" in k for k in mcp_configs)
+
+
+def test_vscode_extension_mcp_corrupt_manifest_scans_nothing(tmp_path, monkeypatch):
+    """A *managed* extension root whose ``extensions.json`` is corrupt (unparseable)
+    scans NOTHING (fail closed) — it does not fall back to scanning every on-disk
+    dir. An unreadable manifest yields no installed set, same as a missing one."""
+    from agent_scan.agents import VSCodeDiscoverer
+
+    monkeypatch.setattr(VSCodeDiscoverer, "_builtin_extension_dirs", lambda self: [])
+    exts = tmp_path / ".vscode" / "extensions"
+    ext_dir = exts / "pub.corrupt-1.0.0"
+    ext_dir.mkdir(parents=True)
+    (ext_dir / "mcp.json").write_text('{"mcpServers": {"corrupt-srv": {"command": "c"}}}')
+    (exts / "extensions.json").write_text("{ not valid json")
+
+    mcp_configs = VSCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    names = {n for v in mcp_configs.values() if isinstance(v, list) for n, _ in v}
+    assert "corrupt-srv" not in names
+    assert not any("/extensions/" in k for k in mcp_configs)
 
 
 def test_vscode_extension_manifest_location_path_fallback(tmp_path, monkeypatch):
@@ -3607,6 +3651,7 @@ def test_kiro_discoverer_walks_kiro_extensions_dir(tmp_path):
     ext_dir = tmp_path / ".kiro" / "extensions" / "x.kr-1.0.0"
     ext_dir.mkdir(parents=True)
     (ext_dir / "mcp.json").write_text('{"mcpServers": {"kr-ext": {"command": "k"}}}')
+    (ext_dir.parent / "extensions.json").write_text('[{"relativeLocation": "x.kr-1.0.0"}]')
 
     mcp_configs = KiroDiscoverer(tmp_path).discover_mcp_servers()
 
@@ -4117,6 +4162,7 @@ def test_kiro_extension_mcp_discovers_mcp_json(tmp_path):
     ext_dir = tmp_path / ".kiro" / "extensions" / "p.kr-ext-1.0.0"
     ext_dir.mkdir(parents=True)
     (ext_dir / "mcp.json").write_text('{"mcpServers": {"kr-ext-srv": {"command": "k"}}}')
+    (ext_dir.parent / "extensions.json").write_text('[{"relativeLocation": "p.kr-ext-1.0.0"}]')
 
     mcp_configs = KiroDiscoverer(tmp_path).discover_mcp_servers()
 
@@ -4133,9 +4179,11 @@ def test_kiro_extension_skills_discovers_skills_dir(tmp_path):
     """An extension shipping a ``skills/`` directory under ``~/.kiro/extensions/`` surfaces."""
     from agent_scan.agents import KiroDiscoverer
 
-    ext_skill_dir = tmp_path / ".kiro" / "extensions" / "p.kr-1.0.0" / "skills" / "kr-skill"
+    exts = tmp_path / ".kiro" / "extensions"
+    ext_skill_dir = exts / "p.kr-1.0.0" / "skills" / "kr-skill"
     ext_skill_dir.mkdir(parents=True)
     (ext_skill_dir / "SKILL.md").write_text("---\nname: kr-skill\ndescription: t\n---\n\nbody\n")
+    (exts / "extensions.json").write_text('[{"relativeLocation": "p.kr-1.0.0"}]')
 
     skills_dirs = KiroDiscoverer(tmp_path).discover_skills()
 
