@@ -1,7 +1,6 @@
 """Antigravity discoverer."""
 
 from pathlib import Path
-from typing import ClassVar
 
 from agent_scan.agents.vscode.base import (
     VSCodeFamilyDiscoverer,
@@ -92,30 +91,6 @@ class AntigravityDiscoverer(VSCodeFamilyDiscoverer):
     # no central manifest); kept as a shared-``~/.gemini`` best-effort catch that is
     # a no-op when absent.
     _extension_paths = ("~/.gemini/config/plugins", "~/.gemini/extensions")
-    # Built-in (bundled) extensions shipped inside the Antigravity application.
-    # KNOWN COVERAGE GAP on macOS: VERIFIED on disk that the bundle ships an
-    # Electron ``app.asar`` (``…/Antigravity.app/Contents/Resources/app.asar``) and
-    # has NO ``Contents/Resources/app/extensions`` dir — built-ins are packed inside
-    # the archive and cannot be reached by a plain directory walk. The macOS entries
-    # below are retained as harmless no-ops (and in case a future build unpacks
-    # them); they do not currently match. Windows/Linux remain INFERRED — Google has
-    # not published install paths: Windows is user-level (%LOCALAPPDATA%, exact
-    # folder unconfirmed); Linux extracts to /opt/antigravity (community-reported,
-    # version-dependent) and likely also packs into app.asar. Re-check on a real
-    # install per platform.
-    _builtin_extension_dir_templates: ClassVar[dict[str, tuple[str, ...]]] = {
-        "darwin": (
-            "/Applications/Antigravity.app/Contents/Resources/app/extensions",  # packed in app.asar — no-op
-            "~/Applications/Antigravity.app/Contents/Resources/app/extensions",  # packed in app.asar — no-op
-        ),
-        "win32": (
-            # inferred — verify: user-level install confirmed by Google, exact folder name NOT.
-            "~/AppData/Local/Programs/Antigravity/resources/app/extensions",
-        ),
-        "linux": (
-            "/opt/antigravity/resources/app/extensions",  # inferred — verify (may be packed in app.asar)
-        ),
-    }
 
     def _installed_extension_dirs(self, base: Path) -> list[Path]:
         """Every Antigravity extension root ships no ``extensions.json`` manifest,

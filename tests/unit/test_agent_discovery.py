@@ -5593,6 +5593,29 @@ def test_windsurf_builtin_extension_no_linux_path(tmp_path, monkeypatch, linux_p
     assert WindsurfDiscoverer(tmp_path)._builtin_extension_dirs() == []
 
 
+@pytest.mark.parametrize("platform", ["darwin", "linux", "linux2", "win32"])
+def test_antigravity_builtin_extension_no_path_any_platform(tmp_path, monkeypatch, platform):
+    """Antigravity ships NO on-disk built-in extension tree, so built-in
+    discovery is empty on every platform — not a guess, a verified finding.
+
+    Inspected on a real macOS install (v2.0.11): the bundle is a thin Electron
+    shell (``app.asar`` → ``dist/main.js``) driven by a ~127MB Go
+    ``language_server`` binary; it has NO ``Contents/Resources/app/extensions``
+    dir and NO ``extensions/`` packed inside ``app.asar`` (and no ``product.json``
+    / ``extensionsGallery``). It is not a Code-OSS bundle that ships built-in
+    VSIX extensions. The earlier per-OS ``resources/app/extensions`` templates
+    chased a layout this product does not use, so the override is dropped and the
+    family-base empty default applies. Re-add (with a real path) only if a future
+    build is verified to ship an on-disk built-in extensions dir."""
+    import agent_scan.agents.vscode.base as base
+    from agent_scan.agents import AntigravityDiscoverer
+
+    monkeypatch.setattr(base.sys, "platform", platform)
+
+    assert AntigravityDiscoverer._builtin_extension_dir_templates == {}
+    assert AntigravityDiscoverer(tmp_path)._builtin_extension_dirs() == []
+
+
 @pytest.mark.skipif(
     sys.platform not in ("darwin", "linux", "linux2", "win32"),
     reason="built-in paths only defined for macOS/Linux/Windows",
