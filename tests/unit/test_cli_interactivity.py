@@ -8,7 +8,8 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from agent_scan.cli import (
-    do_stdio_handshake,
+    HandshakeDecision,
+    decide_handshake,
     enforce_consent_requirements,
     is_interactive_run,
     resolve_server_io_default,
@@ -177,33 +178,32 @@ class TestIsInteractiveRunMatrix:
         )
 
 
-class TestDoStdioHandshake:
+class TestDecideHandshake:
     """
-    Pins ``do_stdio_handshake`` — the single function that decides
-    whether ``run_scan`` will start stdio MCP server subprocesses on
-    this run. The predicate is positive on purpose: spawning subprocesses
-    from a user's config is the dangerous action, so it must be the
-    explicit opt-in (and every layer downstream defaults to ``False``).
+    Pins ``decide_handshake`` — the single function that decides
+    whether ``run_scan`` will start stdio MCP server subprocesses,
+    collect interactive consent, and/or print the dangerous-flag
+    warning. Returns a frozen ``HandshakeDecision`` struct that the
+    action layer in ``run_scan`` dispatches on without re-checking
+    flag combinations.
+
+    The function is **allowlist-first**: only commands explicitly
+    listed in ``_LOCAL_SCAN_COMMANDS`` (currently ``scan``, ``inspect``,
+    and the ``None`` fallback) may handshake. Anything else — ``evo``,
+    ``guard``, ``help``, or any future command — defaults to no
+    handshake, no consent, no warning. ``--dangerously-run-mcp-servers``
+    is the universal explicit opt-in override.
 
     The decision combines four dimensions:
 
     * ``command`` (``scan`` / ``evo`` / ``inspect`` / other)
     * push-key in ``args.control_servers``
-    * ``--ci``
+    * ``--ci``  (only matters via ``enforce_consent_requirements``,
+      not this function)
     * ``--dangerously-run-mcp-servers``
-
-    The function's contract:
-
-    1. ``inspect`` always handshakes — it has no upload step.
-    2. ``evo`` is always a push-key run, so it does NOT handshake by default.
-    3. ``scan`` does NOT handshake iff a push key is present in
-       ``--control-server-H``.
-    4. The push-key default is overridden by ``--ci --dangerously-run-mcp-servers``
-       together (and only that pair): the explicit CI opt-in to spawn
-       stdio MCP server subprocesses regardless of the auth mechanism.
     """
 
-    # -- inspect: always handshakes ---------------------------------------
+    # -- inspect: always handshakes, always interactive -------------------
 
     def test_inspect_always_handshakes(self):
         for control_servers in (
@@ -219,10 +219,18 @@ class TestDoStdioHandshake:
                         ci=ci,
                         dangerously_run_mcp_servers=dangerous,
                     )
-                    assert do_stdio_handshake(args) is True, (
+                    decision = decide_handshake(args)
+                    assert decision.do_stdio_handshake is True, (
                         f"inspect must always handshake; got False for "
                         f"control_servers={control_servers}, ci={ci}, dangerous={dangerous}"
                     )
+                    # Inspect is always at the terminal, so consent is
+                    # collected unless ``--dangerously`` was set. (The
+                    # dangerous-flag banner is tested in
+                    # ``TestRunScanConsentAndStreamStderrWiring`` via
+                    # captured stdout — see ``decide_handshake``'s class
+                    # docstring for why it isn't a field here.)
+                    assert decision.collect_consent is (not dangerous)
 
     # -- scan without push key: always handshakes -------------------------
 
@@ -236,7 +244,12 @@ class TestDoStdioHandshake:
                 ci=ci,
                 dangerously_run_mcp_servers=dangerous,
             )
-            assert do_stdio_handshake(args) is True
+            decision = decide_handshake(args)
+            assert decision.do_stdio_handshake is True
+            # Interactive local scan: dangerous decides consent vs the
+            # informational banner (banner is asserted via stdout in
+            # ``TestRunScanConsentAndStreamStderrWiring``).
+            assert decision.collect_consent is (not dangerous)
 
     # -- scan with push key: skips by default, override = --dangerously ---
 
@@ -248,6 +261,9 @@ class TestDoStdioHandshake:
         stdio-handshake skip. ``--ci`` is orthogonal here (the gate in
         ``enforce_consent_requirements`` independently couples them, but
         the predicate itself only consults ``dangerous``).
+
+        Consent is never collected on the push-key path — there is no
+        human at the terminal to prompt.
         """
         args = _ns(
             command="scan",
@@ -255,24 +271,30 @@ class TestDoStdioHandshake:
             ci=ci,
             dangerously_run_mcp_servers=dangerous,
         )
-        assert do_stdio_handshake(args) is dangerous
+        decision = decide_handshake(args)
+        assert decision.do_stdio_handshake is dangerous
+        assert decision.collect_consent is False
 
     def test_scan_with_push_key_in_mixed_servers_still_skips_handshake(self):
         args = _ns(
             command="scan",
             control_servers=[_control_server_without_push_key(), _control_server_with_push_key()],
         )
-        assert do_stdio_handshake(args) is False
+        decision = decide_handshake(args)
+        assert decision.do_stdio_handshake is False
+        assert decision.collect_consent is False
 
-    # -- evo: always a push-key run, same override --------------------------
+    # -- evo: outside _LOCAL_SCAN_COMMANDS, same dangerous override -------
 
     @pytest.mark.parametrize("ci", [True, False])
     @pytest.mark.parametrize("dangerous", [True, False])
     def test_evo_handshake_depends_on_dangerous_override(self, ci: bool, dangerous: bool):
         """
-        evo is always a push-key run regardless of ``control_servers``
-        contents at call time, so the only thing that flips the handshake
-        decision is ``--dangerously-run-mcp-servers``.
+        evo is not in the local-scan allowlist (it uploads via a minted
+        push key), so it defaults to no handshake regardless of
+        ``control_servers`` contents. The only thing that flips the
+        handshake decision is ``--dangerously-run-mcp-servers``. As on
+        every other unattended path, consent / warning are silent.
         """
         for control_servers in (
             [],
@@ -284,7 +306,9 @@ class TestDoStdioHandshake:
                 ci=ci,
                 dangerously_run_mcp_servers=dangerous,
             )
-            assert do_stdio_handshake(args) is dangerous
+            decision = decide_handshake(args)
+            assert decision.do_stdio_handshake is dangerous
+            assert decision.collect_consent is False
 
     # -- override granularity: --dangerously is the load-bearing flag -----
 
@@ -301,7 +325,7 @@ class TestDoStdioHandshake:
             ci=False,
             dangerously_run_mcp_servers=True,
         )
-        assert do_stdio_handshake(args) is True
+        assert decide_handshake(args).do_stdio_handshake is True
 
     def test_ci_alone_does_not_enable_handshake_on_push_key(self):
         """
@@ -316,7 +340,7 @@ class TestDoStdioHandshake:
             ci=True,
             dangerously_run_mcp_servers=False,
         )
-        assert do_stdio_handshake(args) is False
+        assert decide_handshake(args).do_stdio_handshake is False
 
     def test_ci_and_dangerous_together_enable_handshake_on_push_key(self):
         """The typical CI invocation (both flags set) handshakes — same
@@ -329,22 +353,66 @@ class TestDoStdioHandshake:
             ci=True,
             dangerously_run_mcp_servers=True,
         )
-        assert do_stdio_handshake(args) is True
+        assert decide_handshake(args).do_stdio_handshake is True
+
+    # -- safe default for unknown / future commands -----------------------
+
+    @pytest.mark.parametrize("future_command", ["verify", "report", "audit", "guard", "help"])
+    def test_unknown_or_future_command_defaults_to_no_handshake(self, future_command: str):
+        """
+        Forward-compat safety contract: any command not in
+        ``_LOCAL_SCAN_COMMANDS`` defaults to no handshake / no consent /
+        no warning. Adding a new subcommand to argparse must NOT
+        accidentally start spawning stdio MCP server subprocesses on
+        the user's machine — opting a command into handshakes requires
+        a deliberate edit of ``_LOCAL_SCAN_COMMANDS``.
+        """
+        for control_servers in ([], [_control_server_without_push_key()], [_control_server_with_push_key()]):
+            args = _ns(command=future_command, control_servers=control_servers)
+            decision = decide_handshake(args)
+            assert decision.do_stdio_handshake is False, (
+                f"future command {future_command!r} must default to no handshake (control_servers={control_servers})"
+            )
+            assert decision.collect_consent is False
+
+    def test_unknown_command_still_honors_dangerous_override(self):
+        """The ``--dangerously`` override applies universally, even to
+        unknown commands — it's the only universal escape hatch."""
+        args = _ns(command="some_new_future_command", dangerously_run_mcp_servers=True)
+        assert decide_handshake(args).do_stdio_handshake is True
+
+    # -- decision struct is a frozen dataclass ----------------------------
+
+    def test_decision_is_immutable(self):
+        """``HandshakeDecision`` is frozen — the action layer can't
+        mutate the decision after computing it."""
+        decision = decide_handshake(_ns(command="scan"))
+        with pytest.raises(AttributeError):
+            decision.do_stdio_handshake = False  # type: ignore[misc]
+
+    def test_decision_returns_handshake_decision_type(self):
+        decision = decide_handshake(_ns(command="scan"))
+        assert isinstance(decision, HandshakeDecision)
 
     # -- missing-attribute robustness --------------------------------------
 
-    def test_missing_command_falls_through_to_push_key_check(self):
-        """No ``command`` attribute → treated like ``scan``."""
-        assert do_stdio_handshake(Namespace(control_servers=[])) is True
-        assert do_stdio_handshake(Namespace(control_servers=[_control_server_with_push_key()])) is False
+    def test_missing_command_falls_through_to_scan_logic(self):
+        """No ``command`` attribute → treated like ``scan`` (None is in
+        the allowlist as the argparse-no-subcommand fallback)."""
+        decision_no_push_key = decide_handshake(Namespace(control_servers=[]))
+        assert decision_no_push_key.do_stdio_handshake is True
+
+        decision_with_push_key = decide_handshake(Namespace(control_servers=[_control_server_with_push_key()]))
+        assert decision_with_push_key.do_stdio_handshake is False
 
     def test_missing_control_servers_attribute_is_safe(self):
-        """getattr fallbacks keep the function total for non-scan Namespaces."""
-        assert do_stdio_handshake(Namespace(command="scan")) is True
-        # inspect special-case still applies without control_servers attr.
-        assert do_stdio_handshake(Namespace(command="inspect")) is True
-        # evo command-based short-circuit still applies — skip by default.
-        assert do_stdio_handshake(Namespace(command="evo")) is False
+        """getattr fallbacks keep the function total for any Namespace."""
+        # scan with no control_servers attr → no push key → handshake.
+        assert decide_handshake(Namespace(command="scan")).do_stdio_handshake is True
+        # inspect always handshakes.
+        assert decide_handshake(Namespace(command="inspect")).do_stdio_handshake is True
+        # evo is outside the allowlist → safe-default skip.
+        assert decide_handshake(Namespace(command="evo")).do_stdio_handshake is False
 
 
 class TestEnforceConsentRequirements:

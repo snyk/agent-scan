@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import sys
+from dataclasses import dataclass
 
 import psutil
 import rich
@@ -345,33 +346,65 @@ def is_interactive_run(args) -> bool:
     return not has_push_key
 
 
-def do_stdio_handshake(args) -> bool:
+@dataclass(frozen=True)
+class HandshakeDecision:
+    # Whether to start stdio MCP server subprocesses to read their
+    # tool / prompt / resource catalogs.
+    do_stdio_handshake: bool
+    # Whether to run the interactive per-server y/n consent prompt
+    # before any subprocess is started.
+    collect_consent: bool
+
+
+def decide_handshake(args) -> HandshakeDecision:
     """
-    True when ``run_scan`` *should* handshake with stdio MCP servers on
-    this run — i.e., start the subprocesses to perform a handshake.
+    Command logic for stdio handshake + interactive consent.
 
-    Decision flow:
-
-    1. ``inspect`` — *always* handshake. inspect has no upload/analyze
-       step and exists to explore tools locally.
-    2. ``--dangerously-run-mcp-servers`` is the explicit user opt-in to
-       spawn every configured stdio MCP server subprocess. When set, we
-       honor it on every path — including push-key runs that
-       would otherwise skip stdio handshakes by default.
-    3. Is this a push-key run?
-       * ``scan`` — push-key iff ``--control-server-H`` carries an
-         ``x-client-id`` header.
-       * ``evo`` — *always* a push-key run (``evo()`` mints one).
-    4. Non-push-key runs handshake normally → return True.
-    5. Push-key runs skip handshakes by default → return False.
+        command       push_key  --dangerously  do_stdio_handshake  collect_consent
+        ------------  --------  -------------  ------------------  ---------------
+        inspect       N/A       no             True                True
+        inspect       N/A       yes            True                False
+        scan / None   no        no             True                True
+        scan / None   no        yes            True                False
+        scan / None   yes       no             False               False
+        scan / None   yes       yes            True                False
+        evo / other   any       no             False               False
+        evo / other   any       yes            True                False
     """
     command = getattr(args, "command", None)
-    if command == "inspect":
-        return True
-    if bool(getattr(args, "dangerously_run_mcp_servers", False)):
-        return True
-    has_push_key = command == "evo" or bool(get_push_key(getattr(args, "control_servers", []) or []))
-    return not has_push_key
+    dangerously_run_mcp_servers = bool(getattr(args, "dangerously_run_mcp_servers", False))
+
+    # 1. Explicit user opt-in via --dangerously-run-mcp-servers. Spawn
+    # every stdio MCP server and skip consent.
+    if dangerously_run_mcp_servers:
+        return HandshakeDecision(do_stdio_handshake=True, collect_consent=False)
+
+    # 2. Attended scan - handshake and prompt for per-server consent.
+    # inspect always qualifies.
+    # scan / no-subcommand qualifies when there is no push key.
+    is_attended_scan = command == "inspect" or (
+        (command is None or command == "scan") and not bool(get_push_key(getattr(args, "control_servers", []) or []))
+    )
+    if is_attended_scan:
+        return HandshakeDecision(do_stdio_handshake=True, collect_consent=True)
+
+    # 3. Default - unattended (push-key scan, evo, or any
+    # future subcommand).
+    # Safe default — no handshake, no consent.
+    return HandshakeDecision(do_stdio_handshake=False, collect_consent=False)
+
+
+def _print_dangerous_warning(suppress_io: bool) -> None:
+    """Print the dangerous-flag banner. Tip is only relevant when stderr
+    is actually being streamed (suppress_io=False)."""
+    message = (
+        "[bold red]--dangerously-run-mcp-servers is set: starting every "
+        "stdio MCP server listed in the scanned configs without "
+        "prompting.[/bold red]\n"
+    )
+    if not suppress_io:
+        message += "Tip: set --suppress-mcpserver-io=true to hide server stderr output.\n"
+    rich.print(message)
 
 
 def resolve_server_io_default(args) -> None:
@@ -388,10 +421,10 @@ def enforce_consent_requirements(args) -> None:
     --ci must opt into starting subprocesses explicitly, because CI runs
     cannot answer the interactive per-server consent prompt.
     """
-    dangerous = getattr(args, "dangerously_run_mcp_servers", False)
+    dangerously_run_mcp_servers = getattr(args, "dangerously_run_mcp_servers", False)
     ci_mode = getattr(args, "ci", False)
 
-    if ci_mode and not dangerous:
+    if ci_mode and not dangerously_run_mcp_servers:
         rich.print(
             "[bold red]Running with --ci requires --dangerously-run-mcp-servers.[/bold red]\n"
             "Agent Scan starts subprocesses for every stdio MCP server it "
@@ -717,28 +750,23 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[Scan
         args.suppress_mcpserver_io = not is_interactive_run(args)
     suppress_io: bool = bool(args.suppress_mcpserver_io)
     stream_stderr: bool = not suppress_io
-    dangerous: bool = bool(getattr(args, "dangerously_run_mcp_servers", False))
-    should_do_stdio_handshake: bool = do_stdio_handshake(args)
+
+    decision = decide_handshake(args)
+    dangerously_run_mcp_servers: bool = bool(getattr(args, "dangerously_run_mcp_servers", False))
 
     # Step 1: Discover everything we would inspect without starting any server.
     clients_to_inspect, precomputed_scan_path_results, scanned_usernames = await discover_clients_to_inspect(
         inspect_args
     )
 
-    # Step 2: Collect consent per stdio server when running interactively.
+    # Collect consent when applicable; otherwise show the
+    # dangerous-flag banner to users at the terminal. Silent
+    # otherwise.
     declined_servers: set[tuple[str, str]] = set()
-    if should_do_stdio_handshake:
-        if is_interactive_run(args) and not dangerous:
-            declined_servers = collect_consent(clients_to_inspect)
-        elif dangerous and is_interactive_run(args):
-            message = (
-                "[bold red]--dangerously-run-mcp-servers is set: starting every "
-                "stdio MCP server listed in the scanned configs without "
-                "prompting.[/bold red]\n"
-            )
-            if not suppress_io:
-                message += "Tip: set --suppress-mcpserver-io=true to hide server stderr output.\n"
-            rich.print(message)
+    if decision.collect_consent:
+        declined_servers = collect_consent(clients_to_inspect)
+    elif dangerously_run_mcp_servers and is_interactive_run(args):
+        _print_dangerous_warning(suppress_io)
 
     if mode == "scan":
         skip_ssl_verify: bool = bool(hasattr(args, "skip_ssl_verify") and args.skip_ssl_verify)
@@ -768,7 +796,7 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[Scan
             scanned_usernames=scanned_usernames,
             stream_stderr=stream_stderr,
             declined_servers=declined_servers,
-            do_stdio_handshake=should_do_stdio_handshake,
+            do_stdio_handshake=decision.do_stdio_handshake,
         )
     elif mode == "inspect":
         scan_path_results, _scanned_usernames = await inspect_pipeline(
@@ -778,7 +806,7 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[Scan
             scanned_usernames=scanned_usernames,
             stream_stderr=stream_stderr,
             declined_servers=declined_servers,
-            do_stdio_handshake=should_do_stdio_handshake,
+            do_stdio_handshake=decision.do_stdio_handshake,
         )
         return scan_path_results
     else:
