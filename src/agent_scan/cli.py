@@ -368,6 +368,44 @@ def enforce_consent_requirements(args) -> None:
         sys.exit(2)
 
 
+_LAUNCH_CLIENTS = ("claude", "codex")
+
+
+def _extract_launch_passthrough() -> list[str] | None:
+    """Split `guard run [--profile X] <client> <agent args...>`: consume our guard options, forward the rest.
+
+    Guard options (currently just --profile) sit before the client token; everything from the
+    client onward is forwarded to the agent verbatim. Returns the passthrough args (possibly empty),
+    or None when this isn't a launcher invocation we can handle. Rewrites sys.argv in place to
+    `guard run [--profile X] <client>` so argparse never sees (and never rejects) the agent's own flags.
+    """
+    if len(sys.argv) < 4 or sys.argv[1] != "guard" or sys.argv[2] != "run":
+        return None
+
+    head = sys.argv[3:]
+    profile: str | None = None
+    i = 0
+    while i < len(head):
+        tok = head[i]
+        if tok == "--profile":
+            if i + 1 < len(head):
+                profile = head[i + 1]
+                i += 2
+                continue
+            i += 1
+            continue
+        if tok.startswith("--profile="):
+            profile = tok.split("=", 1)[1]
+            i += 1
+            continue
+        if tok in _LAUNCH_CLIENTS:
+            sys.argv[:] = sys.argv[:3] + (["--profile", profile] if profile is not None else []) + [tok]
+            return head[i + 1 :]
+        # Anything else before the client isn't ours to consume — let argparse report it.
+        return None
+    return None
+
+
 def main():
     ensure_unicode_console()
     # Create main parser with description
@@ -496,6 +534,61 @@ def main():
         default=False,
         help="Install hooks to the managed (admin/MDM) config path instead of the user-level path",
     )
+    guard_install_parser.add_argument(
+        "--profile",
+        type=str,
+        default="strict",
+        choices=["strict", "standard", "permissive"],
+        help="Sandbox profile to write alongside hooks (default: strict)",
+    )
+
+    # GUARD LOGIN — bind this machine to a push key + default profile (stored locally)
+    guard_login_parser = guard_subparsers.add_parser(
+        "login",
+        help="Enroll this machine with an Agent Guard push key and a default profile",
+    )
+    guard_login_parser.add_argument(
+        "--push-key", dest="push_key", type=str, default=None, help="Push key from Evo (else prompted, or PUSH_KEY env)"
+    )
+    guard_login_parser.add_argument(
+        "--tenant-id", dest="tenant_id", type=str, default=None, help="Snyk tenant ID (optional; or TENANT_ID env)"
+    )
+    guard_login_parser.add_argument(
+        "--url", type=str, default="https://api.snyk.io", help="Remote hooks base URL (default: https://api.snyk.io)"
+    )
+    guard_login_parser.add_argument(
+        "--profile",
+        type=str,
+        default="strict",
+        choices=["strict", "standard", "permissive"],
+        help="Default sandbox profile to remember (default: strict)",
+    )
+
+    # GUARD RUN <client> — launch an agent under a config dir we own (Option B)
+    guard_run_parser = guard_subparsers.add_parser(
+        "run",
+        help="Launch a coding agent under an Agent Guard sandbox profile",
+    )
+    guard_run_parser.add_argument(
+        "--profile",
+        type=str,
+        default=None,
+        choices=["strict", "standard", "permissive"],
+        help="Sandbox profile for this session (default: the profile chosen at login, else strict)",
+    )
+    guard_run_subparsers = guard_run_parser.add_subparsers(
+        dest="run_command",
+        title="Agents",
+        description="Agent to launch under the sandbox",
+        metavar="AGENT",
+    )
+    for _launch_client in ("claude", "codex"):
+        guard_run_subparsers.add_parser(
+            _launch_client,
+            help=f"Launch {_launch_client} under an Agent Guard sandbox profile",
+        )
+        # --profile is parsed on `guard run` (before the client); agent_args is populated by
+        # _extract_launch_passthrough below — all args after the client are forwarded verbatim.
 
     guard_uninstall_parser = guard_subparsers.add_parser(
         "uninstall",
@@ -525,10 +618,18 @@ def main():
     ):
         sys.argv.insert(1, "scan")
 
+    # For `guard run <client>` launchers, forward every arg after the client to the agent verbatim
+    # (only our own --profile is consumed). We strip them from argv here so argparse doesn't try
+    # to interpret the agent's flags, then re-attach them to args.agent_args after parsing.
+    launch_passthrough = _extract_launch_passthrough()
+
     # Parse control servers before argparse to preserve their grouping
     control_servers = parse_control_servers(sys.argv)
 
     args = parser.parse_args()
+
+    if launch_passthrough is not None:
+        args.agent_args = launch_passthrough
 
     # Attach parsed control servers to args
     args.control_servers = control_servers

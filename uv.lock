@@ -2056,6 +2056,7 @@ dependencies = [
     { name = "rapidfuzz" },
     { name = "regex" },
     { name = "rich" },
+    { name = "tomli", marker = "python_full_version < '3.11'" },
     { name = "truststore" },
 ]
 
@@ -2092,6 +2093,7 @@ requires-dist = [
     { name = "rich", specifier = "==14.2.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.11.8" },
     { name = "shiv", marker = "extra == 'dev'", specifier = ">=1.0.4" },
+    { name = "tomli", marker = "python_full_version < '3.11'", specifier = ">=2.0.1" },
     { name = "truststore", specifier = ">=0.10.4" },
 ]
 provides-extras = ["test", "dev"]

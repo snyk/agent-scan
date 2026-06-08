@@ -1944,3 +1944,102 @@ class TestRunInstallCallsEnsureGuardEnabled:
         _run_install(args)
         mock_fetch.assert_not_called()
         mock_install.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Sandbox config (Option A) — write & remove
+# ---------------------------------------------------------------------------
+
+import json as _json  # noqa: E402
+
+from agent_scan.guard import (  # noqa: E402
+    SANDBOX_TOML_BEGIN,
+    _remove_sandbox_config,
+    _strip_sandbox_block,
+    write_sandbox_config,
+)
+
+
+class TestSandboxConfigWrite:
+    def test_claude_install_merges_sandbox_key(self, tmp_path):
+        settings = tmp_path / "settings.json"
+        settings.write_text(_json.dumps({"hooks": {"PreToolUse": []}}))
+        changed = write_sandbox_config("claude", settings, "strict", "Claude Code", managed=False)
+        assert changed is True
+        data = _json.loads(settings.read_text())
+        assert data["hooks"] == {"PreToolUse": []}  # existing keys preserved
+        assert data["sandbox"]["enabled"] is True
+        assert data["sandbox"]["network"]["allowedDomains"] == []
+
+    def test_codex_install_prepends_block_preserving_user_content(self, tmp_path):
+        hooks = tmp_path / "hooks.json"
+        config_toml = tmp_path / "config.toml"
+        config_toml.write_text('model = "gpt-5"\n\n[history]\npersistence = "save-all"\n')
+        write_sandbox_config("codex", hooks, "standard", "Codex", managed=False)
+        text = config_toml.read_text()
+        # our block is prepended and the user's content survives intact below it
+        assert text.startswith(SANDBOX_TOML_BEGIN)
+        assert 'model = "gpt-5"' in text
+        assert "[history]" in text
+        assert "sandbox_mode" in text
+
+    def test_codex_install_is_idempotent(self, tmp_path):
+        hooks = tmp_path / "hooks.json"
+        config_toml = tmp_path / "config.toml"
+        assert write_sandbox_config("codex", hooks, "strict", "Codex", managed=False) is True
+        assert write_sandbox_config("codex", hooks, "strict", "Codex", managed=False) is False
+
+    def test_managed_claude_writes_lockdown_keys(self, tmp_path):
+        settings = tmp_path / "managed-settings.json"
+        assert write_sandbox_config("claude", settings, "strict", "Claude Code", managed=True) is True
+        sandbox = _json.loads(settings.read_text())["sandbox"]
+        assert sandbox["network"]["allowedDomains"] == []
+        assert sandbox["network"]["allowManagedDomainsOnly"] is True
+        assert sandbox["filesystem"]["allowManagedReadPathsOnly"] is True
+
+    def test_managed_scope_skips_non_claude(self, tmp_path):
+        hooks = tmp_path / "hooks.json"
+        assert write_sandbox_config("codex", hooks, "strict", "Codex", managed=True) is False
+        assert not (tmp_path / "config.toml").exists()
+
+    def test_windows_claude_skips_sandbox(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("agent_scan.guard.IS_WINDOWS", True)
+        settings = tmp_path / "settings.json"
+        assert write_sandbox_config("claude", settings, "strict", "Claude Code", managed=False) is False
+        assert not settings.exists()
+
+    def test_windows_codex_still_writes(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("agent_scan.guard.IS_WINDOWS", True)
+        hooks = tmp_path / "hooks.json"
+        assert write_sandbox_config("codex", hooks, "strict", "Codex", managed=False) is True
+        assert (tmp_path / "config.toml").exists()
+
+
+class TestSandboxConfigRemove:
+    def test_remove_claude_sandbox_key(self, tmp_path):
+        settings = tmp_path / "settings.json"
+        write_sandbox_config("claude", settings, "strict", "Claude Code", managed=False)
+        _remove_sandbox_config("claude", settings)
+        assert "sandbox" not in _json.loads(settings.read_text())
+
+    def test_cursor_is_hooks_only_no_sandbox_file(self, tmp_path):
+        # Sandboxing supports Claude and Codex only; Cursor installs hooks but never a sandbox file.
+        hooks = tmp_path / "hooks.json"
+        assert write_sandbox_config("cursor", hooks, "strict", "Cursor", managed=False) is False
+        assert not (tmp_path / "sandbox.json").exists()
+        _remove_sandbox_config("cursor", hooks)  # no-op, must not raise
+        assert not (tmp_path / "sandbox.json").exists()
+
+    def test_remove_codex_block_keeps_user_content(self, tmp_path):
+        hooks = tmp_path / "hooks.json"
+        config_toml = tmp_path / "config.toml"
+        config_toml.write_text('model = "gpt-5"\n')
+        write_sandbox_config("codex", hooks, "strict", "Codex", managed=False)
+        _remove_sandbox_config("codex", hooks)
+        text = config_toml.read_text()
+        assert SANDBOX_TOML_BEGIN not in text
+        assert 'model = "gpt-5"' in text
+
+
+def test_strip_sandbox_block_noop_without_marker():
+    assert _strip_sandbox_block('model = "x"\n') == 'model = "x"\n'

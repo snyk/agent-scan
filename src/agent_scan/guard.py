@@ -6,14 +6,29 @@ import json
 import os
 import re
 import shutil
-import stat
 import sys
-from importlib import resources as importlib_resources
 from pathlib import Path
 from urllib.parse import urlparse
 
 import rich
 
+from agent_scan.guard_launch import run_launch
+from agent_scan.hook_common import (  # noqa: F401
+    CLAUDE_EVENTS_WITH_MATCHER,
+    CLAUDE_HOOK_EVENTS,
+    CODEX_HOOK_EVENTS,
+    CURSOR_HOOK_EVENTS,
+    DEFAULT_REMOTE_URL,
+    _build_hook_command,
+    _build_hook_command_powershell,
+    _copy_hook_script,
+    _hook_client_name,
+    _remove_hook_script,
+    _shell_quote,
+    build_claude_hooks,
+    build_codex_hooks,
+    build_cursor_hooks,
+)
 from agent_scan.pushkeys import (
     GuardEnabledAccessDeniedError,
     _is_localhost,
@@ -28,7 +43,6 @@ IS_WINDOWS = sys.platform == "win32"
 # Constants
 # ---------------------------------------------------------------------------
 
-DEFAULT_REMOTE_URL = "https://api.snyk.io"
 DETECTION_MARKER = "snyk-agent-guard"
 _PERMISSION_DENIED = "__permission_denied__"
 
@@ -52,48 +66,6 @@ else:  # Linux and others
     CURSOR_MANAGED_HOOKS_PATH = Path("/etc/cursor/hooks.json")
     CODEX_MANAGED_HOOKS_PATH = Path("/etc/codex/requirements.toml")
 
-CLAUDE_HOOK_EVENTS = [
-    "PreToolUse",
-    "PostToolUse",
-    "PostToolUseFailure",
-    "UserPromptSubmit",
-    "Stop",
-    "SessionStart",
-    "SessionEnd",
-    "SubagentStart",
-    "SubagentStop",
-]
-CLAUDE_EVENTS_WITH_MATCHER = {"PreToolUse", "PostToolUse", "PostToolUseFailure"}
-
-CODEX_HOOK_EVENTS = [
-    "PreToolUse",
-    "PermissionRequest",
-    "PostToolUse",
-    "UserPromptSubmit",
-    "Stop",
-    "SessionStart",
-]
-
-CURSOR_HOOK_EVENTS = [
-    "beforeSubmitPrompt",
-    "beforeShellExecution",
-    "afterShellExecution",
-    "beforeMCPExecution",
-    "afterMCPExecution",
-    "beforeReadFile",
-    "afterFileEdit",
-    "afterAgentResponse",
-    "afterAgentThought",
-    "stop",
-    "preToolUse",
-    "postToolUse",
-    "postToolUseFailure",
-    "sessionStart",
-    "sessionEnd",
-    "subagentStart",
-    "subagentStop",
-]
-
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -106,6 +78,10 @@ def run_guard(args) -> int:
             _run_install(args)
         elif guard_command == "uninstall":
             _run_uninstall(args)
+        elif guard_command == "login":
+            _run_login(args)
+        elif guard_command == "run":
+            return run_launch(args)
         else:
             _run_status()
         return 0
@@ -115,6 +91,54 @@ def run_guard(args) -> int:
     except PermissionError as e:
         rich.print(f"[bold red]Error:[/bold red] Permission denied: {e}")
         return 1
+
+
+# ---------------------------------------------------------------------------
+# Login (local identity store)
+# ---------------------------------------------------------------------------
+
+
+def _run_login(args) -> None:
+    """Bind this machine to a push key + default profile, stored locally.
+
+    v0 carries identity (the push key, a short enrollment token from Evo), not the
+    profile bodies — those stay hardcoded in agent_scan.sandbox. This is the seam
+    through which Evo will later serve per-role profiles without a CLI release.
+    """
+    from agent_scan import identity
+    from agent_scan.sandbox import DEFAULT_PROFILE, PROFILES
+    from agent_scan.upload import get_hostname
+
+    url: str = getattr(args, "url", None) or DEFAULT_REMOTE_URL
+    push_key = (getattr(args, "push_key", None) or os.environ.get("PUSH_KEY", "")).strip()
+    tenant_id = (getattr(args, "tenant_id", None) or os.environ.get("TENANT_ID", "")).strip()
+    profile = (getattr(args, "profile", None) or DEFAULT_PROFILE).strip()
+
+    rich.print("[bold magenta]Agent Guard login[/bold magenta] — enrolling this machine")
+    rich.print()
+
+    if not push_key:
+        rich.print("Paste your Agent Guard push key (from Evo):")
+        push_key = input().strip()
+    if not push_key:
+        rich.print("[bold red]Error:[/bold red] a push key is required to log in.")
+        sys.exit(1)
+    if profile not in PROFILES:
+        rich.print(f"[bold red]Error:[/bold red] unknown profile {profile!r}. Choose from {sorted(PROFILES)}.")
+        sys.exit(1)
+
+    path = identity.save_identity(
+        push_key=push_key,
+        tenant_id=tenant_id,
+        url=url,
+        default_profile=profile,
+        hostname=get_hostname(),
+    )
+    rich.print(f"[green]✓[/green]  Logged in   [yellow]{_mask_key(push_key)}[/yellow]")
+    rich.print(f"   Default profile: [bold]{profile}[/bold]")
+    rich.print(f"   Stored:          [dim]{path}[/dim]")
+    rich.print()
+    rich.print("[dim]Launch a sandboxed agent with: snyk-agent-scan guard run <claude|codex> [--profile <name>][/dim]")
 
 
 # ---------------------------------------------------------------------------
@@ -290,6 +314,121 @@ def _install_hooks(
     rich.print(f"   Remote URL: [dim]{url}[/dim]")
     rich.print(f"   Push Key:   [yellow]{_mask_key(push_key)}[/yellow]")
     rich.print()
+
+    # Write the OS-level sandbox config alongside hooks (Option A).
+    profile = getattr(args, "profile", None)
+    if profile:
+        managed = getattr(args, "managed", False)
+        write_sandbox_config(client, config_path, profile, label, managed=managed)
+
+
+# ---------------------------------------------------------------------------
+# Sandbox config (shared by install Option A and the guard run <client> launcher)
+# ---------------------------------------------------------------------------
+
+SANDBOX_TOML_BEGIN = "# >>> snyk-agent-guard sandbox (managed by guard) >>>"
+SANDBOX_TOML_END = "# <<< snyk-agent-guard sandbox <<<"
+
+
+def _sandbox_sibling(client: str, config_path: Path) -> Path:
+    """The file holding sandbox config for a client, given its hooks config path."""
+    if client == "claude":
+        return config_path  # settings.json holds both hooks and the "sandbox" object
+    return config_path.parent / "config.toml"  # codex
+
+
+def write_sandbox_config(client: str, config_path: Path, profile_name: str, label: str, *, managed: bool) -> bool:
+    """Compile the profile and write the harness-native sandbox config. Returns True if changed.
+
+    Prints intentional degradation notes plus the standing MCP-not-sandboxed reminder.
+    """
+    from agent_scan import sandbox as sb
+
+    # Sandboxing supports Claude and Codex only; Cursor gets hooks-only monitoring.
+    if client == "cursor":
+        rich.print(f"[yellow]Note:[/yellow] OS sandboxing is not supported for {label} \u2014 running hooks-only.")
+        return False
+
+    # Managed sandbox is the only path to a hard, no-prompt network/read boundary (via Claude's
+    # allowManagedDomainsOnly / allowManagedReadPathsOnly). v0 implements it for Claude only.
+    if managed and client != "claude":
+        rich.print(
+            f"[yellow]Note:[/yellow] managed sandbox config for {label} is not implemented in v0 "
+            "(Claude only). Hooks were still installed."
+        )
+        return False
+
+    # Windows has no native OS sandbox for Claude \u2014 surface the gap rather than pretend.
+    if IS_WINDOWS and client == "claude":
+        rich.print(
+            f"[yellow]Note:[/yellow] no OS sandbox on Windows for {label} \u2014 running hooks-only. "
+            "Use WSL for filesystem/network boundaries."
+        )
+        return False
+
+    profile = sb.get_profile(profile_name)
+    compiled = sb.compile_for(client, profile, managed=managed)
+    target = _sandbox_sibling(client, config_path)
+
+    if client == "claude":
+        changed = _write_claude_sandbox(target, compiled.config["sandbox"])
+    else:  # codex
+        changed = _write_codex_sandbox_toml(target, sb.render_codex_toml(compiled.config))
+
+    if changed:
+        rich.print(f"[green]\u2713[/green]  Sandbox profile [bold]{profile_name}[/bold] written [dim]{target}[/dim]")
+    else:
+        rich.print(f"[green]\u2713[/green]  Sandbox profile [bold]{profile_name}[/bold] up to date [dim]{target}[/dim]")
+    for note in compiled.notes:
+        rich.print(f"   [dim]\u2022 {note}[/dim]")
+    rich.print()
+    return changed
+
+
+def _write_claude_sandbox(path: Path, sandbox_obj: dict) -> bool:
+    """Merge the ``sandbox`` object into settings.json. Returns True if changed."""
+    settings = _read_json_or_empty(path)
+    if settings.get("sandbox") == sandbox_obj:
+        return False
+    settings["sandbox"] = sandbox_obj
+    return _write_json_if_changed(path, settings)
+
+
+def _strip_sandbox_block(text: str) -> str:
+    """Remove our marker-delimited sandbox block from a config.toml text body."""
+    if SANDBOX_TOML_BEGIN not in text:
+        return text
+    out: list[str] = []
+    skipping = False
+    for line in text.splitlines():
+        if line.strip() == SANDBOX_TOML_BEGIN:
+            skipping = True
+            continue
+        if line.strip() == SANDBOX_TOML_END:
+            skipping = False
+            continue
+        if not skipping:
+            out.append(line)
+    return "\n".join(out).lstrip("\n")
+
+
+def _write_codex_sandbox_toml(path: Path, block_body: str) -> bool:
+    """Prepend our sandbox block to config.toml (replacing any prior block). Returns True if changed.
+
+    The block uses only top-level inline-table assignments (no ``[section]`` headers), so
+    prepending it never captures the user's existing content into one of our tables.
+    """
+    existing = path.read_text() if path.exists() else ""
+    rest = _strip_sandbox_block(existing)
+    block = f"{SANDBOX_TOML_BEGIN}\n{block_body.rstrip(chr(10))}\n{SANDBOX_TOML_END}\n"
+    new_content = block + ("\n" + rest if rest.strip() else "")
+    if existing == new_content:
+        return False
+    if path.exists():
+        _backup_file(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(new_content)
+    return True
 
 
 def _install_claude(command: str, path: Path) -> bool:
@@ -515,11 +654,45 @@ def _run_uninstall(args) -> None:
     # Remove hook script
     _remove_hook_script(client, config_path)
 
+    # Remove sandbox config. User scope: all clients. Managed scope: Claude only (the only
+    # client whose managed sandbox we write — see write_sandbox_config).
+    if not managed or client == "claude":
+        _remove_sandbox_config(client, config_path)
+
     # Try to revoke the push key
     if info and info.get("auth_value"):
         _try_revoke_push_key(info, label)
 
     rich.print()
+
+
+def _remove_sandbox_config(client: str, config_path: Path) -> None:
+    """Undo write_sandbox_config: drop the Claude ``sandbox`` key or strip our Codex marker block.
+    Cursor is hooks-only (no sandbox written), so there is nothing to remove."""
+    if client == "cursor":
+        return
+    target = _sandbox_sibling(client, config_path)
+    if not target.exists():
+        return
+    if client == "claude":
+        settings = _read_json_or_empty(target)
+        if "sandbox" not in settings:
+            return
+        _backup_file(target)
+        settings.pop("sandbox", None)
+        _write_json(target, settings)
+        rich.print(f"[green]✓[/green]  Removed sandbox config from [dim]{target}[/dim]")
+    else:  # codex
+        text = target.read_text()
+        if SANDBOX_TOML_BEGIN not in text:
+            return
+        rest = _strip_sandbox_block(text)
+        _backup_file(target)
+        if rest.strip():
+            target.write_text(rest if rest.endswith("\n") else rest + "\n")
+        else:
+            target.unlink()
+        rich.print(f"[green]✓[/green]  Removed sandbox config from [dim]{target}[/dim]")
 
 
 def _try_revoke_push_key(info: dict, label: str) -> None:
@@ -916,16 +1089,10 @@ def _extract_env_from_cmd(cmd: str, key: str) -> str:
 
 
 _CLIENT_LABELS = {"claude": "Claude Code", "cursor": "Cursor", "codex": "Codex"}
-_HOOK_CLIENT_NAMES = {"claude": "claude-code", "cursor": "cursor", "codex": "codex"}
 
 
 def _client_label(client: str) -> str:
     return _CLIENT_LABELS.get(client, client)
-
-
-def _hook_client_name(client: str) -> str:
-    """Endpoint slug used on the agent-monitor side (and --client in the hook script)."""
-    return _HOOK_CLIENT_NAMES.get(client, client)
 
 
 def _config_path(client: str, override: str | None = None, managed: bool = False) -> Path:
@@ -966,30 +1133,6 @@ def _revoke_after_failure(url: str, tenant_id: str, snyk_token: str, push_key: s
         rich.print(f"[yellow]Warning:[/yellow] Could not revoke push key: {e}")
 
 
-def _build_hook_command(push_key: str, url: str, script_path: Path, hook_client: str, *, tenant_id: str = "") -> str:
-    if IS_WINDOWS:
-        return _build_hook_command_powershell(push_key, url, script_path, hook_client, tenant_id=tenant_id)
-    parts = [
-        f"PUSH_KEY={_shell_quote(push_key)}",
-        f"REMOTE_HOOKS_BASE_URL={_shell_quote(url)}",
-    ]
-    if tenant_id:
-        parts.append(f"TENANT_ID={_shell_quote(tenant_id)}")
-    parts.append(f"bash {_shell_quote(script_path.as_posix())}")
-    parts.append(f"--client {hook_client}")
-    return " ".join(parts)
-
-
-def _build_hook_command_powershell(
-    push_key: str, url: str, script_path: Path, hook_client: str, *, tenant_id: str = ""
-) -> str:
-    return f"powershell -File '{script_path}' -Client {hook_client} -PushKey '{push_key}' -RemoteUrl '{url}'"
-
-
-def _shell_quote(s: str) -> str:
-    return "'" + s.replace("'", "'\"'\"'") + "'"
-
-
 def _mask_key(k: str) -> str:
     if len(k) <= 8:
         return k
@@ -1003,42 +1146,6 @@ def _compact_events(events: list[str]) -> str:
     if len(events) <= show:
         return "(" + ", ".join(events) + ")"
     return f"({', '.join(events[:show])} + {len(events) - show} more)"
-
-
-def _copy_hook_script(client: str, config_path: Path) -> tuple[Path, bool, bool]:
-    """Copy bundled hook script to a hooks/ dir next to the config file.
-
-    Returns (path, already_existed, was_updated).
-    """
-    dest_dir = config_path.parent / "hooks"
-
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    script_name = "snyk-agent-guard.ps1" if IS_WINDOWS else "snyk-agent-guard.sh"
-    dest = dest_dir / script_name
-    existed = dest.exists()
-
-    from agent_scan.version import version_info
-
-    hook_pkg = importlib_resources.files("agent_scan.hooks")
-    source = hook_pkg.joinpath(script_name)
-    new_content = source.read_bytes().replace(b"__AGENT_SCAN_VERSION__", version_info.encode())
-
-    if existed and dest.read_bytes() == new_content:
-        return dest, existed, False
-
-    dest.write_bytes(new_content)
-    dest.chmod(dest.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-    rich.print(f"[green]\u2713[/green]  Copied hook script to [dim]{dest}[/dim]")
-    return dest, existed, True
-
-
-def _remove_hook_script(client: str, config_path: Path) -> None:
-    dest_dir = config_path.parent / "hooks"
-    script_name = "snyk-agent-guard.ps1" if IS_WINDOWS else "snyk-agent-guard.sh"
-    dest = dest_dir / script_name
-    if dest.exists():
-        dest.unlink()
-        rich.print(f"[green]\u2713[/green]  Removed hook script [dim]{dest}[/dim]")
 
 
 def _backup_file(path: Path) -> None:
