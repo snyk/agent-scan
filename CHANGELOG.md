@@ -82,3 +82,4 @@
 - `0.5.5` Introduce bootstrap API and recursive check for mcp_config_globs and skills_dir_globs.
 - `0.5.6` Per-agent discovery refactor with Claude Code support. Bundle all detect_secrets plugins in PyInstaller binary. Starlette security update.
 - `0.5.8` Reverting changes.
+- `0.5.9` Don't handshake (launch) stdio MCP servers by default. Add VSCode family discoverers (VSCode, Cursor, Windsurf, Kiro, Antigravity); only scan installed extensions and plugins. Upgrade aiohttp to fix CVEs.
