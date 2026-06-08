@@ -79,26 +79,39 @@ class AntigravityDiscoverer(VSCodeFamilyDiscoverer):
         # Workspace mirror of the user-global ``~/.gemini/config/mcp_config.json``.
         ".gemini/mcp_config.json",  # inferred — verify (undocumented for Antigravity)
     )
-    # Installed extensions live under ``~/.gemini/extensions/`` (shared with
-    # the Gemini CLI; not under the ``antigravity/`` subdir). The Gemini CLI
-    # manages this tree with its own per-extension layout — there is NO central
-    # ``extensions.json`` install manifest — so it is scanned wholesale via
-    # ``_unmanaged_extension_paths`` (see ``_installed_extension_dirs`` below).
-    _extension_paths = ("~/.gemini/extensions",)
+    # Antigravity installs *plugins* (its extension equivalent) under
+    # ``~/.gemini/config/plugins/<name>/`` — each a dir with a ``plugin.json``
+    # manifest and an optional ``skills/`` tree. VERIFIED on a real macOS install
+    # (``chrome-devtools-plugin``). There is NO central ``extensions.json`` (each
+    # plugin subdir is itself the install marker), so the tree is scanned wholesale
+    # via ``_unmanaged_extension_paths`` (see ``_installed_extension_dirs`` below).
+    # Plugin MCP is registered centrally in ``~/.gemini/config/mcp_config.json``
+    # (already in ``_user_mcp_file_paths``), not a per-plugin ``mcp.json`` — but the
+    # mcp.json walk is kept as a harmless catch in case a plugin ships one.
+    # ``~/.gemini/extensions`` is the Gemini *CLI's* tree (per-extension dirs, also
+    # no central manifest); kept as a shared-``~/.gemini`` best-effort catch that is
+    # a no-op when absent.
+    _extension_paths = ("~/.gemini/config/plugins", "~/.gemini/extensions")
     # Subset of ``_extension_paths`` with no ``extensions.json`` install manifest.
-    _unmanaged_extension_paths: ClassVar[tuple[str, ...]] = ("~/.gemini/extensions",)
+    _unmanaged_extension_paths: ClassVar[tuple[str, ...]] = (
+        "~/.gemini/config/plugins",
+        "~/.gemini/extensions",
+    )
     # Built-in (bundled) extensions shipped inside the Antigravity application.
-    # ENTIRELY INFERRED — verify: Antigravity was not available to verify on
-    # disk, and Google has not published install paths. The macOS bundle name is
-    # assumed to follow the product name; Google states the Windows installer is
-    # user-level (%LOCALAPPDATA%) but not the exact folder; the Linux installer
-    # currently extracts to /opt/antigravity (community-reported, version-
-    # dependent) and may pack extensions inside app.asar, in which case the dir
-    # below is absent. Re-check each entry against a real install.
+    # KNOWN COVERAGE GAP on macOS: VERIFIED on disk that the bundle ships an
+    # Electron ``app.asar`` (``…/Antigravity.app/Contents/Resources/app.asar``) and
+    # has NO ``Contents/Resources/app/extensions`` dir — built-ins are packed inside
+    # the archive and cannot be reached by a plain directory walk. The macOS entries
+    # below are retained as harmless no-ops (and in case a future build unpacks
+    # them); they do not currently match. Windows/Linux remain INFERRED — Google has
+    # not published install paths: Windows is user-level (%LOCALAPPDATA%, exact
+    # folder unconfirmed); Linux extracts to /opt/antigravity (community-reported,
+    # version-dependent) and likely also packs into app.asar. Re-check on a real
+    # install per platform.
     _builtin_extension_dir_templates: ClassVar[dict[str, tuple[str, ...]]] = {
         "darwin": (
-            "/Applications/Antigravity.app/Contents/Resources/app/extensions",  # inferred — verify
-            "~/Applications/Antigravity.app/Contents/Resources/app/extensions",  # inferred — verify
+            "/Applications/Antigravity.app/Contents/Resources/app/extensions",  # packed in app.asar — no-op
+            "~/Applications/Antigravity.app/Contents/Resources/app/extensions",  # packed in app.asar — no-op
         ),
         "win32": (
             # inferred — verify: user-level install confirmed by Google, exact folder name NOT.
@@ -114,10 +127,7 @@ class AntigravityDiscoverer(VSCodeFamilyDiscoverer):
         manifest, so those roots return their immediate subdirs (every present
         extension is scanned). All other roots (e.g. built-in/bundled dirs) stay
         manifest-gated via ``super()``."""
-        unmanaged = {
-            expand_path(Path(raw), self.home_directory)
-            for raw in self._unmanaged_extension_paths
-        }
+        unmanaged = {expand_path(Path(raw), self.home_directory) for raw in self._unmanaged_extension_paths}
         if base in unmanaged:
             return self._immediate_subdirs(base)
         return super()._installed_extension_dirs(base)

@@ -3374,10 +3374,14 @@ def test_cursor_extension_skills_discovers_skills_dir(tmp_path):
 
 
 def test_windsurf_extension_mcp_discovers_mcp_json(tmp_path):
-    """Windsurf is a VSCode fork; ``~/.codeium/windsurf/extensions/`` follows the same convention."""
+    """Windsurf is a VSCode fork. Its Codeium *engine* state lives under
+    ``~/.codeium/windsurf`` (the MCP/skill paths), but its VSCode-fork *user data*
+    — extensions + ``argv.json`` — lives under ``~/.windsurf`` (VERIFIED on disk:
+    ``~/.windsurf/extensions/extensions.json`` is present; ``~/.codeium/windsurf``
+    has no ``extensions`` subdir). Standard ``extensions.json`` tree → manifest-gated."""
     from agent_scan.agents import WindsurfDiscoverer
 
-    ext_dir = tmp_path / ".codeium" / "windsurf" / "extensions" / "v.ws-1.0.0"
+    ext_dir = tmp_path / ".windsurf" / "extensions" / "v.ws-1.0.0"
     ext_dir.mkdir(parents=True)
     (ext_dir / "mcp.json").write_text('{"mcpServers": {"ws-ext-srv": {"command": "w"}}}')
     (ext_dir.parent / "extensions.json").write_text('[{"relativeLocation": "v.ws-1.0.0"}]')
@@ -4326,6 +4330,47 @@ def test_antigravity_extension_skills_discovers_skills_dir(tmp_path):
 
     matching = [k for k in skills_dirs if k.endswith("/extensions/p.ag-1.0.0/skills")]
     assert len(matching) == 1
+
+
+def test_antigravity_discovers_plugin_skills_under_config_plugins(tmp_path):
+    """Antigravity installs plugins (its extension equivalent) under
+    ``~/.gemini/config/plugins/<name>/`` — each a dir with a ``plugin.json``
+    manifest and an optional ``skills/`` tree, no central ``extensions.json``. The
+    bundled skills must surface. VERIFIED layout on a real macOS install
+    (``chrome-devtools-plugin`` shipping a ``skills/`` tree)."""
+    from agent_scan.agents import AntigravityDiscoverer
+
+    plugin = tmp_path / ".gemini" / "config" / "plugins" / "chrome-devtools-plugin"
+    skill_dir = plugin / "skills" / "chrome-devtools"
+    skill_dir.mkdir(parents=True)
+    (plugin / "plugin.json").write_text('{"name": "chrome-devtools-plugin", "version": "0.21.0"}')
+    (skill_dir / "SKILL.md").write_text("---\nname: chrome-devtools\ndescription: d\n---\n\nbody\n")
+    (tmp_path / ".gemini" / "antigravity").mkdir(parents=True)
+
+    skills_dirs = AntigravityDiscoverer(tmp_path).discover_skills()
+
+    matching = [k for k in skills_dirs if k.endswith("/config/plugins/chrome-devtools-plugin/skills")]
+    assert len(matching) == 1
+
+
+def test_antigravity_config_plugins_scanned_wholesale_ignoring_manifest(tmp_path):
+    """The ``~/.gemini/config/plugins`` tree uses no ``extensions.json`` — each
+    plugin subdir is itself the install marker — so it is scanned wholesale: a
+    plugin shipping ``mcp.json`` surfaces, and a stray empty ``extensions.json``
+    must not suppress it."""
+    from agent_scan.agents import AntigravityDiscoverer
+
+    plugins = tmp_path / ".gemini" / "config" / "plugins"
+    plugin = plugins / "some-plugin"
+    plugin.mkdir(parents=True)
+    (plugin / "mcp.json").write_text('{"mcpServers": {"plugin-srv": {"command": "p"}}}')
+    (plugins / "extensions.json").write_text("[]")
+    (tmp_path / ".gemini" / "antigravity").mkdir(parents=True)
+
+    mcp_configs = AntigravityDiscoverer(tmp_path).discover_mcp_servers()
+
+    names = {n for v in mcp_configs.values() if isinstance(v, list) for n, _ in v}
+    assert "plugin-srv" in names
 
 
 # --- Per-fork extension-root conventions (subclass overrides of the
