@@ -85,12 +85,11 @@ class KiroDiscoverer(VSCodeFamilyDiscoverer):
         # documented fixed install root, so Linux built-in discovery is omitted.
     }
 
-    def _installed_extension_dirs(self, base: Path) -> list[Path] | None:
+    def _installed_extension_dirs(self, base: Path) -> list[Path]:
         """Kiro Powers (``~/.kiro/powers/installed``) ship no ``extensions.json``
-        manifest — each installed Power is just a present subdir — so that root is
-        scanned wholesale (returning ``None`` tells the base walk to scan every
-        subdir). ``~/.kiro/extensions`` is the standard OpenVSX tree and stays
-        manifest-gated via ``super()``."""
+        manifest — each installed Power is just a present subdir — so that root
+        returns its immediate subdirs (every Power is scanned). ``~/.kiro/extensions``
+        is the standard OpenVSX tree and stays manifest-gated via ``super()``."""
         if base == expand_path(Path("~/.kiro/powers/installed"), self.home_directory):
-            return None
+            return self._immediate_subdirs(base)
         return super()._installed_extension_dirs(base)

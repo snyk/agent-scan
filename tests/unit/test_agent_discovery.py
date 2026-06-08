@@ -3565,6 +3565,40 @@ def test_vscode_builtin_extension_dir_scanned_without_manifest(tmp_path, monkeyp
     assert "builtin-srv" in names
 
 
+def test_installed_extension_dirs_builtin_returns_subdirs_not_none(tmp_path, monkeypatch):
+    """An *unmanaged* (built-in/bundled) root has no ``extensions.json``; every
+    present subdir is an installed extension. ``_installed_extension_dirs`` returns
+    exactly those subdirs as a list — never ``None`` — and excludes stray files."""
+    from agent_scan.agents import VSCodeDiscoverer
+
+    builtin = tmp_path / "app" / "extensions"
+    (builtin / "vendor.a-1.0.0").mkdir(parents=True)
+    (builtin / "vendor.b-2.0.0").mkdir(parents=True)
+    (builtin / "extensions.json").write_text("[]")  # a stray file must be excluded
+    monkeypatch.setattr(VSCodeDiscoverer, "_builtin_extension_dirs", lambda self: [builtin])
+
+    result = VSCodeDiscoverer(tmp_path)._installed_extension_dirs(builtin)
+
+    assert result is not None
+    assert isinstance(result, list)
+    assert set(result) == {builtin / "vendor.a-1.0.0", builtin / "vendor.b-2.0.0"}
+
+
+def test_installed_extension_dirs_empty_unmanaged_root_returns_empty_list(tmp_path, monkeypatch):
+    """An unmanaged root with no subdirs (or absent on disk) returns ``[]``, not
+    ``None`` — the sentinel is gone, the contract is always ``list[Path]``."""
+    from agent_scan.agents import VSCodeDiscoverer
+
+    empty = tmp_path / "app" / "extensions"
+    empty.mkdir(parents=True)
+    absent = tmp_path / "app" / "missing"
+    monkeypatch.setattr(VSCodeDiscoverer, "_builtin_extension_dirs", lambda self: [empty, absent])
+
+    disc = VSCodeDiscoverer(tmp_path)
+    assert disc._installed_extension_dirs(empty) == []
+    assert disc._installed_extension_dirs(absent) == []
+
+
 def test_vscode_extension_skills_skips_upgraded_away_version(tmp_path, monkeypatch):
     """The same install-manifest gate applies to extension ``skills/`` discovery."""
     from agent_scan.agents import VSCodeDiscoverer

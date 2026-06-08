@@ -730,36 +730,53 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
 
     # --- private: install-manifest gating (don't scan uninstalled extensions) ---
 
-    def _installed_extension_dirs(self, base: Path) -> list[Path] | None:
-        """The extension dirs VSCode records as *installed* in
-        ``<base>/extensions.json`` — its authoritative install manifest. Each
-        entry's ``relativeLocation`` is the on-disk dir name; some manifest shapes
-        omit it, so fall back to the basename of ``location.path``. The name is
-        resolved against ``base`` and confined to it (see :meth:`_confine_to_base`)
-        so an attacker-influenceable manifest (under ``--scan-all-users``) cannot
-        redirect the scan outside the extension root.
+    @staticmethod
+    def _immediate_subdirs(base: Path) -> list[Path]:
+        """Immediate subdirectories of ``base`` (empty if absent/unreadable).
 
-        Return contract (consumed by :meth:`_extension_scan_roots`):
+        Used for *unmanaged* extension roots that ship no ``extensions.json`` —
+        every present subdir is an installed extension, so they are the dirs to
+        scan. Errors fail soft (empty list) so one unreadable root cannot drop the
+        whole discoverer; mirrors the tolerance in :func:`_walk_under_depth`.
+        """
+        try:
+            return [p for p in base.iterdir() if p.is_dir()]
+        except (PermissionError, OSError):
+            return []
 
-        * ``None`` — *not* manifest-managed; scan every subdir. Reserved for roots
-          that ship no ``extensions.json`` *by design*: the built-in (bundled)
-          extension roots, detected here, and the fork-declared unmanaged trees
-          (Kiro Powers, Antigravity's Gemini dir) whose subclasses override this.
-        * ``[]`` — manifest-managed, nothing to scan. A managed root whose
-          ``extensions.json`` is missing, unreadable, or unparseable **fails
+    def _installed_extension_dirs(self, base: Path) -> list[Path]:
+        """The dirs of the extensions *installed* under ``base`` — always a list,
+        the directories to walk for bundled ``mcp.json`` / ``skills/``.
+
+        Two kinds of root, both resolved here to a concrete list of dirs:
+
+        * *Manifest-managed* — gated by ``<base>/extensions.json``, VSCode's
+          authoritative install manifest. Each entry's ``relativeLocation`` is the
+          on-disk dir name; some manifest shapes omit it, so fall back to the
+          basename of ``location.path``. The name is resolved against ``base`` and
+          confined to it (see :meth:`_confine_to_base`) so an attacker-influenceable
+          manifest (under ``--scan-all-users``) cannot redirect the scan outside the
+          extension root. Returns exactly the dirs the manifest names, or ``[]``
+          when it is missing, unreadable, or unparseable — a managed root **fails
           closed**: an extension is installed iff the manifest lists it, and the
           editor itself loads nothing from such a dir, so there is nothing live to
-          scan. A present-but-empty manifest (``[]``) is the same: nothing installed.
-        * a non-empty list — exactly the installed dirs the manifest names.
+          scan (a present-but-empty manifest ``[]`` is the same: nothing installed).
+        * *Unmanaged* — roots that ship no ``extensions.json`` *by design*: the
+          built-in (bundled) extension roots, detected here, and the fork-declared
+          unmanaged trees (Kiro Powers, Antigravity's Gemini dir) whose subclasses
+          override this. Every present subdir is an installed extension, so this
+          returns all of them via :meth:`_immediate_subdirs`.
 
         Uninstalled leftovers and upgraded-away versions linger on disk but are
-        absent from the manifest, so they are never reached — no separate
-        ``.obsolete`` denylist is needed (an obsolete dir is never in the manifest).
+        absent from a managed root's manifest, so they are never reached — no
+        separate ``.obsolete`` denylist is needed (an obsolete dir is never in the
+        manifest).
         """
         # Built-in/bundled roots ship no manifest by design — they are not
-        # manifest-managed, so scan them wholesale rather than failing closed.
+        # manifest-managed, so scan every installed (present) subdir rather than
+        # failing closed.
         if base in set(self._builtin_extension_dirs()):
-            return None
+            return self._immediate_subdirs(base)
         data = self._load_json_file(base / "extensions.json")
         if not isinstance(data, list):
             return []
@@ -800,18 +817,12 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
 
     def _extension_scan_roots(self) -> list[Path]:
         """The directories to walk for bundled ``mcp.json`` / ``skills/``: each
-        extension root from :meth:`_extension_base_dirs`, gated through its install
-        manifest (see :meth:`_installed_extension_dirs` for the return contract).
-
-        An *unmanaged* root (``None``) — the built-in/bundled dirs and the fork
-        trees a subclass marks unmanaged — is scanned in full; a *manifest-managed*
-        root contributes exactly the dirs its ``extensions.json`` lists, which is
-        empty (scan nothing, fail closed) when that manifest is missing or
-        unparseable. The actual walking is the shared :func:`_walk_under_depth`."""
+        extension root from :meth:`_extension_base_dirs` contributes its installed
+        extension dirs (see :meth:`_installed_extension_dirs`). The actual walking
+        is the shared :func:`_walk_under_depth`."""
         roots: list[Path] = []
         for base in self._extension_base_dirs():
-            installed = self._installed_extension_dirs(base)
-            roots.extend([base] if installed is None else installed)
+            roots.extend(self._installed_extension_dirs(base))
         return roots
 
     def _discover_extension_mcp_servers(self) -> McpConfigsResult:

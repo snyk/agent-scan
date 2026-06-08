@@ -107,13 +107,13 @@ class AntigravityDiscoverer(VSCodeFamilyDiscoverer):
         ),
     }
 
-    def _installed_extension_dirs(self, base: Path) -> list[Path] | None:
+    def _installed_extension_dirs(self, base: Path) -> list[Path]:
         """``~/.gemini/extensions`` is the Gemini-CLI-shared tree with no
-        ``extensions.json`` manifest, so it is scanned wholesale (returning
-        ``None`` tells the base walk to scan every subdir). Any other root (the
-        built-in/bundled dirs) falls through to the manifest-gated base logic."""
+        ``extensions.json`` manifest, so it returns its immediate subdirs (every
+        present extension is scanned). Any other root (the built-in/bundled dirs)
+        falls through to the manifest-gated base logic."""
         if base == expand_path(Path("~/.gemini/extensions"), self.home_directory):
-            return None
+            return self._immediate_subdirs(base)
         return super()._installed_extension_dirs(base)
 
     # Antigravity's own opened-workspace registry. Each opened folder is recorded
