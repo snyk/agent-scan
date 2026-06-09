@@ -62,9 +62,15 @@ class CodexDiscoverer(AgentDiscoverer):
       never read — every listed project is scanned regardless of trust.
 
     Not covered: ``requirements.toml`` / legacy ``managed_config.toml`` (admin
-    allowlists, not server definitions); the cloud/MDM managed bundles (out-of-band,
-    no on-disk file); OpenAI's embedded ``skills/.system`` cache; ``enabled = false``
-    flags (disabled entries are still inventoried).
+    allowlists, not server definitions); the enterprise *cloud* bundle
+    (``cloud-config-bundle-cache.json`` — HMAC-signed, short-TTL, identity-scoped, not a
+    stable parseable on-disk config); OpenAI's embedded ``skills/.system`` cache;
+    ``enabled = false`` flags (disabled entries are still inventoried).
+
+    TODO(ADS-422): the macOS MDM ``com.openai.codex`` managed-preferences layer DOES
+    land on disk (``/Library/Managed Preferences/com.openai.codex.plist``) and its
+    ``config_toml_base64`` key carries a full ``[mcp_servers]`` table — currently
+    unscanned. https://snyksec.atlassian.net/browse/ADS-422
     """
 
     # MUST match the Codex entry in ``well_known_clients.py`` so the Phase-A /
