@@ -31,7 +31,6 @@ from agent_scan.agents.base import (
     _walk_under_depth,
 )
 from agent_scan.models import (
-    SERVER_CONFIG_DISCRIMINATOR_KEYS,
     CouldNotParseMCPConfig,
     PluginMCPConfigFile,
 )
@@ -53,11 +52,10 @@ class CodexDiscoverer(AgentDiscoverer):
       ``<codex_home>/<name>.config.toml``; ``~/.agents/skills``.
     * **System** — the machine-wide ``config.toml`` (``/etc/codex`` on Unix,
       ``%ProgramData%\\OpenAI\\Codex`` on Windows) and ``/etc/codex/skills``.
-    * **Plugins** — ``<codex_home>/plugins`` walked for ``.mcp.json`` + ``skills/``,
-      plus servers defined inline under ``[plugins.<name>.mcp_servers.*]``. A plugin
-      manifest (``.codex-plugin/plugin.json``, or the ``.claude-plugin`` fallback) may
-      relocate its MCP config (``mcpServers``) or add a skills root (``skills``); those
-      ``./``-relative overrides are honored additively.
+    * **Plugins** — ``<codex_home>/plugins`` walked for ``.mcp.json`` + ``skills/``. A
+      plugin manifest (``.codex-plugin/plugin.json``, or the ``.claude-plugin`` fallback)
+      may relocate its MCP config (``mcpServers``) or add a skills root (``skills``);
+      those ``./``-relative overrides are honored additively.
     * **Project** — each ``[projects]`` entry and its ancestors, scanned for
       ``.codex/config.toml`` servers and ``.agents/skills``. ``trust_level`` is
       never read — every listed project is scanned regardless of trust.
@@ -104,7 +102,6 @@ class CodexDiscoverer(AgentDiscoverer):
         result.update(self._discover_system_mcp_servers())
         result.update(self._discover_plugin_mcp_servers())
         result.update(self._discover_plugin_manifest_mcp_servers())
-        result.update(self._discover_config_plugin_mcp_servers())
         result.update(self._discover_project_mcp_servers())
         return result
 
@@ -275,36 +272,6 @@ class CodexDiscoverer(AgentDiscoverer):
             if entries is not None:
                 result[resolved.as_posix()] = entries
         return result
-
-    def _discover_config_plugin_mcp_servers(self) -> McpConfigsResult:
-        """Surface plugin servers *defined* inline in ``config.toml`` under
-        ``[plugins.<name>.mcp_servers.<server>]``. That table is usually just an
-        enable/approval overlay, but an entry can also carry a full ``command``/``url``;
-        only those are surfaced (override-only entries are skipped so they don't sink
-        validation). Keyed ``<config>#plugins`` so it doesn't collide with the
-        top-level ``mcp_servers`` entry from the same file.
-        """
-        data = self._user_config_toml()
-        if not isinstance(data, dict):
-            return {}
-        plugins = data.get("plugins")
-        if not isinstance(plugins, dict):
-            return {}
-        defs: dict[str, dict] = {}
-        for plugin_cfg in plugins.values():
-            servers = plugin_cfg.get("mcp_servers") if isinstance(plugin_cfg, dict) else None
-            if not isinstance(servers, dict):
-                continue
-            for server_name, server_cfg in servers.items():
-                if isinstance(server_cfg, dict) and any(
-                    disc in server_cfg for disc in SERVER_CONFIG_DISCRIMINATOR_KEYS
-                ):
-                    defs[server_name] = server_cfg
-        if not defs:
-            return {}
-        config_path = self._codex_home() / self._config_filename
-        source = f"plugins mcp_servers in {config_path.as_posix()}"
-        return {f"{config_path.as_posix()}#plugins": self._validate_servers(defs, source=source)}
 
     def _parse_plugin_mcp_json(self, path: Path) -> McpScanResult:
         """Parse a plugin ``.mcp.json`` (JSON): the wrapped ``{"mcp_servers": {...}}``
