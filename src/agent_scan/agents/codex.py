@@ -166,12 +166,10 @@ class CodexDiscoverer(AgentDiscoverer):
             return Path("/etc/codex/config.toml")
         if sys.platform == "win32":
             # Codex resolves ProgramData via the ``FOLDERID_ProgramData`` known-folder
-            # API; we read ``%PROGRAMDATA%`` instead. These coincide on virtually every
-            # machine — ProgramData is machine-global and effectively non-relocatable,
-            # and Windows keeps the env var in sync with the known folder — so the env
-            # var is a safe approximation, and it matches the env-var convention already
-            # used for the managed path in ``claude_code.py``. (``os.environ`` keys are
-            # uppercased on Windows: ``ProgramData`` -> ``PROGRAMDATA``.)
+            # API; reading ``%PROGRAMDATA%`` is a safe approximation (it's machine-global
+            # and kept in sync with the env var) and matches the managed-path convention
+            # in ``claude_code.py``. (Windows uppercases ``os.environ`` keys:
+            # ``ProgramData`` -> ``PROGRAMDATA``.)
             program_data = os.environ.get("PROGRAMDATA") or r"C:\ProgramData"
             return Path(program_data) / "OpenAI" / "Codex" / "config.toml"
         return None
@@ -348,12 +346,10 @@ class CodexDiscoverer(AgentDiscoverer):
 
     def _discover_global_skills(self) -> SkillsDirsResult:
         """Scan the user (``~/.agents/skills``), the deprecated-but-still-loaded
-        ``<codex_home>/skills`` (Codex keeps it "for backward compatibility"), and admin
-        (``/etc/codex/skills``) skill dirs via :meth:`_scan_skills_dir` (missing/file/
-        unreadable dirs are skipped). ``<codex_home>/skills`` follows ``CODEX_HOME`` so a
-        relocated home is covered — the legacy pipeline only scans the literal
-        ``~/.codex/skills``. (The OpenAI-embedded ``<codex_home>/skills/.system`` cache is
-        a level deeper and so is not surfaced by this one-level scan.)
+        ``<codex_home>/skills`` (kept by Codex for backward compatibility), and admin
+        (``/etc/codex/skills``) skill dirs; missing/non-dir/unreadable paths are skipped.
+        ``<codex_home>/skills`` follows ``CODEX_HOME``, so a relocated home is covered
+        where the legacy pipeline only scans the literal ``~/.codex/skills``.
         """
         result: SkillsDirsResult = {}
         skills_dirs = (
