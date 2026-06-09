@@ -257,19 +257,15 @@ async def check_server(
     else:
         logger.debug(f"Remote server with url: {server_config.url}, type: {server_config.type or 'none'}")
         strategy: list[tuple[Literal["sse", "http"], str]] = []
-        url_path = urlparse(server_config.url).path
+        base_url = server_config.url.rstrip("/")
+        url_path = urlparse(base_url).path
         if url_path.endswith("/sse"):
-            url_with_sse = server_config.url
-            url_without_end = server_config.url.replace("/sse", "")
-            url_with_mcp = server_config.url.replace("/sse", "/mcp")
+            base_url = base_url[: -len("/sse")]
         elif url_path.endswith("/mcp"):
-            url_with_mcp = server_config.url
-            url_without_end = server_config.url.replace("/mcp", "")
-            url_with_sse = server_config.url.replace("/mcp", "/sse")
-        else:
-            url_without_end = server_config.url
-            url_with_mcp = server_config.url + "/mcp"
-            url_with_sse = server_config.url + "/sse"
+            base_url = base_url[: -len("/mcp")]
+        url_without_end = base_url
+        url_with_mcp = base_url + "/mcp"
+        url_with_sse = base_url + "/sse"
 
         if server_config.type == "http" or server_config.type is None:
             strategy.append(("http", url_with_mcp))
