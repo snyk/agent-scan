@@ -50,8 +50,9 @@ class CodexDiscoverer(AgentDiscoverer):
     Scopes covered:
 
     * **User** — ``<codex_home>/config.toml`` + profile overlays
-      ``<codex_home>/<name>.config.toml``; skills in ``~/.agents/skills`` and the
-      deprecated-but-still-loaded ``<codex_home>/skills``.
+      ``<codex_home>/<name>.config.toml``; skills in ``~/.agents/skills``, the
+      deprecated-but-still-loaded ``<codex_home>/skills``, and the OpenAI-embedded
+      ``<codex_home>/skills/.system`` cache.
     * **System** — the machine-wide ``config.toml`` (``/etc/codex`` on Unix,
       ``%ProgramData%\\OpenAI\\Codex`` on Windows) and ``/etc/codex/skills``.
     * **Plugins** — ``<codex_home>/plugins`` walked for ``.mcp.json`` + ``skills/``. A
@@ -65,8 +66,8 @@ class CodexDiscoverer(AgentDiscoverer):
     Not covered: ``requirements.toml`` / legacy ``managed_config.toml`` (admin
     allowlists, not server definitions); the enterprise *cloud* bundle
     (``cloud-config-bundle-cache.json`` — HMAC-signed, short-TTL, identity-scoped, not a
-    stable parseable on-disk config); OpenAI's embedded ``skills/.system`` cache;
-    ``enabled = false`` flags (disabled entries are still inventoried).
+    stable parseable on-disk config); ``enabled = false`` flags (disabled entries are
+    still inventoried).
 
     TODO(ADS-422): the macOS MDM ``com.openai.codex`` managed-preferences layer DOES
     land on disk (``/Library/Managed Preferences/com.openai.codex.plist``) and its
@@ -346,14 +347,20 @@ class CodexDiscoverer(AgentDiscoverer):
 
     def _discover_global_skills(self) -> SkillsDirsResult:
         """Scan the user (``~/.agents/skills``), the deprecated-but-still-loaded
-        ``<codex_home>/skills`` (kept by Codex for backward compatibility), and admin
+        ``<codex_home>/skills`` (kept by Codex for backward compatibility), the
+        OpenAI-embedded ``<codex_home>/skills/.system`` cache, and admin
         (``/etc/codex/skills``) skill dirs; missing/non-dir/unreadable paths are skipped.
-        ``<codex_home>/skills`` follows ``CODEX_HOME``, so a relocated home is covered
-        where the legacy pipeline only scans the literal ``~/.codex/skills``.
+        These ``<codex_home>``-rooted dirs follow ``CODEX_HOME``, so a relocated home is
+        covered where the legacy pipeline only scans the literal ``~/.codex/skills``.
+
+        ``.system`` is scanned in its own right because its skills nest one level inside it
+        (``.system/<name>/SKILL.md``, e.g. ``imagegen``), below the one-level
+        ``<codex_home>/skills`` scan that would otherwise skip the dot-dir.
         """
         result: SkillsDirsResult = {}
         skills_dirs = (
             self._codex_home() / "skills",
+            self._codex_home() / "skills" / ".system",
             expand_path(Path(self._user_skills_relative), self.home_directory),
             Path(self._admin_skills_dir),
         )

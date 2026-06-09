@@ -6381,6 +6381,46 @@ def test_codex_discoverer_discovers_codex_home_skills_under_relocation(tmp_path,
     assert {n for n, _ in skills_dirs[keys[0]]} == {"legacy-skill"}
 
 
+def test_codex_discoverer_discovers_system_embedded_skills(tmp_path):
+    """OpenAI-bundled embedded skills are cached at
+    ``<codex_home>/skills/.system/<name>/SKILL.md`` (e.g. ``imagegen``;
+    core-skills/loader.rs ``system_cache_root_dir``). They sit one level inside the
+    ``.system`` cache -- below the one-level ``<codex_home>/skills`` scan -- so the cache
+    dir is scanned in its own right."""
+    from agent_scan.agents import CodexDiscoverer
+
+    skill = tmp_path / ".codex" / "skills" / ".system" / "imagegen"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: imagegen\ndescription: d\n---\n\nB.\n")
+
+    disc = CodexDiscoverer(tmp_path)
+    disc._admin_skills_dir = str(tmp_path / "no-admin")
+    skills_dirs = disc.discover_skills()
+
+    keys = [k for k in skills_dirs if k.endswith("/.codex/skills/.system")]
+    assert len(keys) == 1
+    assert {n for n, _ in skills_dirs[keys[0]]} == {"imagegen"}
+
+
+def test_codex_discoverer_discovers_system_embedded_skills_under_relocation(tmp_path, monkeypatch):
+    """The ``.system`` embedded-skills cache follows ``CODEX_HOME`` on an own-home scan,
+    same as the rest of ``<codex_home>``."""
+    from agent_scan.agents import CodexDiscoverer
+
+    cfg = tmp_path / "relocated-codex"
+    skill = cfg / "skills" / ".system" / "imagegen"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: imagegen\ndescription: d\n---\n\nB.\n")
+    monkeypatch.setenv("CODEX_HOME", str(cfg))
+    monkeypatch.setattr(CodexDiscoverer, "_admin_skills_dir", str(tmp_path / "no-admin"))
+
+    skills_dirs = CodexDiscoverer(None).discover_skills()
+
+    keys = [k for k in skills_dirs if k.endswith("/relocated-codex/skills/.system")]
+    assert len(keys) == 1
+    assert {n for n, _ in skills_dirs[keys[0]]} == {"imagegen"}
+
+
 # --- CodexDiscoverer: full discover() + registry ---
 
 
