@@ -31,6 +31,7 @@ from agent_scan.agents.base import (
     _walk_under_depth,
 )
 from agent_scan.models import (
+    ClaudeConfigFile,
     CouldNotParseMCPConfig,
     PluginMCPConfigFile,
 )
@@ -281,10 +282,17 @@ class CodexDiscoverer(AgentDiscoverer):
         return result
 
     def _parse_plugin_mcp_json(self, path: Path) -> McpScanResult:
-        """Parse a plugin ``.mcp.json`` (JSON): the wrapped ``{"mcp_servers": {...}}``
-        form (handled first — no shared ``MCPConfig`` model knows that snake-case key)
-        or the flat ``{name: serverConfig}`` map. ``None`` if missing/empty/unrecognized,
-        ``CouldNotParseMCPConfig`` if malformed.
+        """Parse a plugin ``.mcp.json`` (JSON) in any of the three shapes Codex accepts:
+
+        * the camelCase-wrapped ``{"mcpServers": {...}}`` form (``ClaudeConfigFile``) — the
+          shape Codex's plugin loader actually deserializes (its ``PluginMcpServersFile``
+          struct is ``#[serde(rename_all = "camelCase")]``; see openai/codex#22105);
+        * the flat ``{name: serverConfig}`` map (``PluginMCPConfigFile``);
+        * the snake_case-wrapped ``{"mcp_servers": {...}}`` form (handled first — no shared
+          ``MCPConfig`` model knows that snake-case key). Codex's docs show this shape even
+          though the loader expects camelCase, so it is accepted as a deliberate superset.
+
+        ``None`` if missing/empty/unrecognized, ``CouldNotParseMCPConfig`` if malformed.
         """
         data = self._load_json_file(path)
         if data is None or isinstance(data, CouldNotParseMCPConfig):
@@ -294,7 +302,7 @@ class CodexDiscoverer(AgentDiscoverer):
             if not servers:
                 return None
             return self._validate_servers(servers, source=f"mcp_servers in {path.as_posix()}")
-        return self._parse_mcp_file(path, formats=(PluginMCPConfigFile,), skip_unrecognized=True)
+        return self._parse_mcp_file(path, formats=(ClaudeConfigFile, PluginMCPConfigFile), skip_unrecognized=True)
 
     def _discover_project_mcp_servers(self) -> McpConfigsResult:
         """Parse ``<project>/.codex/config.toml`` servers for every registered project

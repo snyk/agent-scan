@@ -6675,8 +6675,33 @@ def test_codex_discoverer_discovers_plugin_mcp_flat(tmp_path):
     assert isinstance(server, StdioServer)
 
 
+def test_codex_discoverer_discovers_plugin_mcp_camel_wrapped(tmp_path):
+    """A plugin ``.mcp.json`` in the camelCase-wrapped ``{"mcpServers": {...}}`` form is
+    discovered. This is the form Codex's plugin loader actually deserializes -- its
+    ``PluginMcpServersFile`` struct is ``#[serde(rename_all = "camelCase")]``
+    (openai/codex#22105), so the camelCase wrapper is the primary real-world shape."""
+    from agent_scan.agents import CodexDiscoverer
+
+    cache = tmp_path / ".codex" / "plugins" / "cache"
+    plugin_dir = _make_codex_plugin(cache, "mkt", "camel-plugin", "1.0.0")
+    (plugin_dir / ".mcp.json").write_text('{"mcpServers": {"w": {"command": "wsrv"}}}')
+
+    mcp_configs = CodexDiscoverer(tmp_path).discover_mcp_servers()
+
+    keys = [k for k in mcp_configs if k.endswith("/camel-plugin/1.0.0/.mcp.json")]
+    assert len(keys) == 1
+    name, server = mcp_configs[keys[0]][0]
+    assert name == "w"
+    assert isinstance(server, StdioServer)
+    assert server.command == "wsrv"
+
+
 def test_codex_discoverer_discovers_plugin_mcp_wrapped(tmp_path):
-    """A plugin ``.mcp.json`` in the wrapped ``{"mcp_servers": {...}}`` form is discovered."""
+    """A plugin ``.mcp.json`` in the snake_case-wrapped ``{"mcp_servers": {...}}`` form is
+    discovered too. Codex's docs show this shape (the loader actually expects camelCase --
+    see :func:`test_codex_discoverer_discovers_plugin_mcp_camel_wrapped`), so the scanner
+    accepts it as a deliberate superset: a server an author wrote following the docs is
+    still inventoried."""
     from agent_scan.agents import CodexDiscoverer
 
     cache = tmp_path / ".codex" / "plugins" / "cache"
