@@ -160,7 +160,13 @@ class CodexDiscoverer(AgentDiscoverer):
         if sys.platform in ("darwin", "linux", "linux2"):
             return Path("/etc/codex/config.toml")
         if sys.platform == "win32":
-            # ``os.environ`` keys are uppercased on Windows: ``ProgramData`` -> ``PROGRAMDATA``.
+            # Codex resolves ProgramData via the ``FOLDERID_ProgramData`` known-folder
+            # API; we read ``%PROGRAMDATA%`` instead. These coincide on virtually every
+            # machine — ProgramData is machine-global and effectively non-relocatable,
+            # and Windows keeps the env var in sync with the known folder — so the env
+            # var is a safe approximation, and it matches the env-var convention already
+            # used for the managed path in ``claude_code.py``. (``os.environ`` keys are
+            # uppercased on Windows: ``ProgramData`` -> ``PROGRAMDATA``.)
             program_data = os.environ.get("PROGRAMDATA") or r"C:\ProgramData"
             return Path(program_data) / "OpenAI" / "Codex" / "config.toml"
         return None
