@@ -808,3 +808,119 @@ async def test_inspect_client_explicit_do_stdio_handshake_runs_stdio_servers():
         await inspect_client(client, timeout=10, tokens=[], scan_skills=False, do_stdio_handshake=True)
 
     mock_inspect_extension.assert_awaited_once()
+
+
+# --- config_path propagation tests ---
+
+
+def _signature() -> "object":
+    from mcp.types import Implementation, InitializeResult
+
+    from agent_scan.models import ServerSignature
+
+    return ServerSignature(
+        metadata=InitializeResult(
+            protocolVersion="2024-11-05",
+            capabilities={},
+            serverInfo=Implementation(name="x", version="1"),
+        ),
+    )
+
+
+def test_inspected_client_to_scan_path_result_sets_config_path_per_server():
+    """Every ServerScanResult must carry the config-file path it was
+    discovered in. The config path is the key of ``InspectedClient.extensions``;
+    the converter must propagate it onto each server across all three branches
+    (inspected signature, recorded-but-not-inspected ``None``, and error)."""
+    from agent_scan.models import InspectedClient, InspectedExtensions, ServerStartupError
+
+    cfg_path = "/home/u/.config/agent/.mcp.json"
+    ok = InspectedExtensions(name="ok", config=StdioServer(command="echo"), signature_or_error=_signature())
+    not_inspected = InspectedExtensions(name="skip", config=StdioServer(command="echo"), signature_or_error=None)
+    errored = InspectedExtensions(
+        name="boom",
+        config=RemoteServer(url="https://example.com/mcp", type="http"),
+        signature_or_error=ServerStartupError(message="boom"),
+    )
+
+    client = InspectedClient(
+        name="test",
+        client_path="/install/path",
+        extensions={cfg_path: [ok, not_inspected, errored]},
+    )
+
+    result = inspected_client_to_scan_path_result(client)
+
+    by_name = {s.name: s for s in result.servers or []}
+    assert by_name["ok"].config_path == cfg_path
+    assert by_name["skip"].config_path == cfg_path
+    assert by_name["boom"].config_path == cfg_path
+    # The top-level ScanPathResult.path stays the client install path, not the config file.
+    assert result.path == "/install/path"
+
+
+def test_inspected_client_to_scan_path_result_config_path_multiple_files():
+    """A single client flattens multiple config files into one ScanPathResult;
+    each server must retain the config path of the file it came from."""
+    from agent_scan.models import InspectedClient, InspectedExtensions
+
+    cfg_a = "/home/u/.cursor/mcp.json"
+    cfg_b = "/home/u/project/.mcp.json"
+    ext_a = InspectedExtensions(name="srv-a", config=StdioServer(command="a"), signature_or_error=_signature())
+    ext_b = InspectedExtensions(name="srv-b", config=StdioServer(command="b"), signature_or_error=_signature())
+
+    client = InspectedClient(
+        name="test",
+        client_path="/install/path",
+        extensions={cfg_a: [ext_a], cfg_b: [ext_b]},
+    )
+
+    result = inspected_client_to_scan_path_result(client)
+
+    by_name = {s.name: s for s in result.servers or []}
+    assert by_name["srv-a"].config_path == cfg_a
+    assert by_name["srv-b"].config_path == cfg_b
+
+
+def test_server_scan_result_clone_preserves_config_path():
+    """clone() must propagate config_path so the analysis-payload copy
+    (built via ScanPathResult.clone()/ServerScanResult.clone()) carries it too."""
+    from agent_scan.models import ServerScanResult
+
+    original = ServerScanResult(
+        name="srv",
+        config_path="/home/u/.mcp.json",
+        server=StdioServer(command="echo"),
+    )
+    cloned = original.clone()
+    assert cloned.config_path == "/home/u/.mcp.json"
+
+
+def test_config_path_survives_serialization_round_trip():
+    """config_path must serialize into the upload payload and round-trip back."""
+    from agent_scan.models import (
+        ScanPathResult,
+        ScanPathResultsCreate,
+        ScanUserInfo,
+        ServerScanResult,
+    )
+
+    payload = ScanPathResultsCreate(
+        scan_path_results=[
+            ScanPathResult(
+                client="test",
+                path="/install/path",
+                servers=[
+                    ServerScanResult(
+                        name="srv",
+                        config_path="/home/u/.mcp.json",
+                        server=StdioServer(command="echo"),
+                    )
+                ],
+            )
+        ],
+        scan_user_info=ScanUserInfo(),
+    )
+
+    restored = ScanPathResultsCreate.model_validate_json(payload.model_dump_json())
+    assert restored.scan_path_results[0].servers[0].config_path == "/home/u/.mcp.json"

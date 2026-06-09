@@ -394,7 +394,7 @@ def inspected_client_to_scan_path_result(inspected_client: InspectedClient) -> S
     """
     servers: list[ServerScanResult] = []
     candidate_errors: list[ScanError] = []
-    for _, extensions_or_error in inspected_client.extensions.items():
+    for config_path, extensions_or_error in inspected_client.extensions.items():
         if isinstance(
             extensions_or_error, FileNotFoundConfig | UnknownConfigFormat | CouldNotParseMCPConfig | SkillScannError
         ):
@@ -412,19 +412,30 @@ def inspected_client_to_scan_path_result(inspected_client: InspectedClient) -> S
             if isinstance(extension.signature_or_error, ServerSignature):
                 servers.append(
                     ServerScanResult(
-                        name=extension.name, server=extension.config, signature=extension.signature_or_error, error=None
+                        name=extension.name,
+                        config_path=config_path,
+                        server=extension.config,
+                        signature=extension.signature_or_error,
+                        error=None,
                     )
                 )
             elif extension.signature_or_error is None:
                 # Recorded but not inspected (e.g. stdio MCP server on the
                 # push-key path).
                 servers.append(
-                    ServerScanResult(name=extension.name, server=extension.config, signature=None, error=None)
+                    ServerScanResult(
+                        name=extension.name,
+                        config_path=config_path,
+                        server=extension.config,
+                        signature=None,
+                        error=None,
+                    )
                 )
             else:
                 servers.append(
                     ServerScanResult(
                         name=extension.name,
+                        config_path=config_path,
                         server=extension.config,
                         signature=None,
                         error=ScanError(
