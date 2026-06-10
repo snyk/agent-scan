@@ -20,12 +20,6 @@ _posix_only = pytest.mark.skipif(
 
 @pytest.mark.asyncio
 async def test_payload_includes_required_fields(monkeypatch):
-    monkeypatch.setattr(
-        bootstrap_module,
-        "get_readable_home_directories",
-        lambda all_users=False: [(Path("/home/alice"), "alice")],
-    )
-
     payload = await bootstrap_module._build_request("scan", None, "machine-1", ["--ci"])
     data = payload.model_dump()
 
@@ -46,11 +40,6 @@ async def test_windows_payload_reflects_platform_and_wsl(monkeypatch):
     monkeypatch.setenv("WSL_DISTRO_NAME", "Ubuntu")
     monkeypatch.setattr(bootstrap_module.platform, "system", lambda: "Windows")
     monkeypatch.setattr(bootstrap_module.platform, "release", lambda: "10")
-    monkeypatch.setattr(
-        bootstrap_module,
-        "get_readable_home_directories",
-        lambda all_users=False: [(Path("C:/Users/Alice"), "Alice")],
-    )
 
     payload = await bootstrap_module._build_request("scan", None, None, [])
     host = payload.model_dump()["host"]
@@ -61,11 +50,6 @@ async def test_windows_payload_reflects_platform_and_wsl(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_argv_flags_are_redacted(monkeypatch):
-    monkeypatch.setattr(
-        bootstrap_module,
-        "get_readable_home_directories",
-        lambda all_users=False: [(Path("/home/alice"), "alice")],
-    )
     # Mixed-case alphanumeric placeholders. Pure lowercase-hex literals
     # of this length match upstream secret-scanner heuristics for legacy
     # GitHub PATs and trigger false positives on the PR scan; mixing in
@@ -102,11 +86,6 @@ async def test_control_server_header_value_is_redacted_as_single_token(monkeypat
     # token must be replaced by exactly one redaction marker, with no
     # partial-leak of either the header name or the header value, and
     # the surrounding flag token must remain intact.
-    monkeypatch.setattr(
-        bootstrap_module,
-        "get_readable_home_directories",
-        lambda all_users=False: [(Path("/home/alice"), "alice")],
-    )
     # Mixed-case alphanumeric — same reasoning as test_argv_flags_are_redacted
     # above: lowercase-hex literals trigger upstream PAT scanners on PRs.
     client_id_value = "Vp3WbZxMrTcLqYn8XfJgAk5Bs7Hu"
@@ -132,11 +111,6 @@ async def test_control_server_header_value_is_redacted_as_single_token(monkeypat
 @pytest.mark.asyncio
 async def test_is_ci_flips_with_environment(monkeypatch):
     monkeypatch.setenv("AGENT_SCAN_ENVIRONMENT", "ci")
-    monkeypatch.setattr(
-        bootstrap_module,
-        "get_readable_home_directories",
-        lambda all_users=False: [(Path("/home/alice"), "alice")],
-    )
 
     payload = await bootstrap_module._build_request("scan", None, None, [])
 
@@ -283,13 +257,7 @@ def test_timezone_returns_a_value_when_all_iana_sources_fail(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_payload_excludes_schema_version_and_scanned_usernames(monkeypatch):
-    monkeypatch.setattr(
-        bootstrap_module,
-        "get_readable_home_directories",
-        lambda all_users=False: [(Path("/home/alice"), "alice")],
-    )
-
+async def test_payload_excludes_schema_version_and_scanned_usernames():
     payload = await bootstrap_module._build_request("scan", None, None, [])
     data = payload.model_dump()
 

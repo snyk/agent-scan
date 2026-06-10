@@ -704,7 +704,6 @@ async def bootstrap_runtime_config(
             control_identifier=control_servers[0].identifier if control_servers else None,
             argv=sys.argv[1:],
             no_bootstrap=getattr(args, "no_bootstrap", False),
-            scan_all_users=getattr(args, "scan_all_users", False),
             skip_ssl_verify=getattr(args, "skip_ssl_verify", False),
         )
         set_runtime_config(runtime_config)
