@@ -26,8 +26,6 @@ from agent_scan.runtime_config import RuntimeConfig
 from agent_scan.utils import (
     get_environment,
     get_hostname,
-    get_readable_home_directories,
-    get_tool_versions,
     get_username,
 )
 from agent_scan.verify_api import setup_tcp_connector
@@ -36,7 +34,6 @@ from agent_scan.version import version_info
 logger = logging.getLogger(__name__)
 
 _RETRY_STATUSES = {408, 429}
-_HOME_DIRECTORIES_LIMIT = 1000
 
 # Canonical control-server URL contract. The push endpoint is the surface
 # users configure via --control-server; the bootstrap endpoint is its
@@ -160,25 +157,12 @@ async def _build_request(
     subcommand: str | None,
     control_identifier: str | None,
     argv: list[str],
-    scan_all_users: bool = False,
 ) -> ClientBootstrapRequest:
-    # Security review allowlist: this payload sends client metadata, host OS
-    # details, hostname/current username, CI/WSL/container booleans, shell/term,
-    # locale/timezone, cwd/home/executable paths, readable home directories capped
-    # at 1000 entries, redacted argv tokens, and a runtimes dict containing
-    # best-effort versions of python/node/npx/uvx/docker (each value is the
-    # verbatim first line of `<tool> --version`, or None when probing fails).
-    # It intentionally excludes scanned_usernames and schema_version.
-    # Home enumeration mirrors the scan's --scan-all-users opt-in: a single-user
-    # scan only reports the current user's home, matching what discovery touches.
-    # Run the two slow signals (home enumeration + external tool probes)
-    # concurrently. Both are subprocess/IO bound and independent, so total
-    # wall time is bounded by whichever is slower rather than their sum.
-    home_dirs_raw, runtimes = await asyncio.gather(
-        asyncio.to_thread(get_readable_home_directories, all_users=scan_all_users),
-        get_tool_versions(),
-    )
-
+    # Security review allowlist: this payload sends client metadata (name,
+    # version, command/subcommand, control identifier, redacted argv tokens)
+    # and host info (OS details, hostname/current username, CI/WSL/container
+    # booleans, shell/term, locale/timezone). It intentionally excludes
+    # scanned_usernames, schema_version, and filesystem paths.
     return ClientBootstrapRequest(
         client=ClientInfo(
             name="agent-scan",
@@ -203,7 +187,6 @@ async def _build_request(
             term=os.environ.get("TERM"),
             locale=_get_locale(),
             timezone=_get_timezone(),
-            runtimes=runtimes,
         ),
     )
 
@@ -220,7 +203,6 @@ async def bootstrap_first_control_server(
     control_identifier: str | None,
     argv: list[str],
     no_bootstrap: bool,
-    scan_all_users: bool = False,
     skip_ssl_verify: bool = False,
     timeout_seconds: float = 3.0,
     max_attempts: int = 3,
@@ -243,7 +225,6 @@ async def bootstrap_first_control_server(
             control_identifier=control_identifier,
             argv=argv,
             no_bootstrap=no_bootstrap,
-            scan_all_users=scan_all_users,
             skip_ssl_verify=skip_ssl_verify,
             timeout_seconds=timeout_seconds,
             max_attempts=max_attempts,
@@ -261,7 +242,6 @@ async def _bootstrap_first_control_server_impl(
     control_identifier: str | None,
     argv: list[str],
     no_bootstrap: bool,
-    scan_all_users: bool,
     skip_ssl_verify: bool,
     timeout_seconds: float,
     max_attempts: int,
@@ -278,7 +258,7 @@ async def _bootstrap_first_control_server_impl(
         )
 
     try:
-        payload = await _build_request(command, subcommand, control_identifier, argv, scan_all_users)
+        payload = await _build_request(command, subcommand, control_identifier, argv)
     except Exception as exc:
         logger.warning("Client bootstrap failed; using defaults: %s", exc)
         return RuntimeConfig()

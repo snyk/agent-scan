@@ -9,11 +9,9 @@ import pytest
 from agent_scan import utils as utils_module
 from agent_scan.models import CommandParsingError, rebalance_command_args
 from agent_scan.utils import (
-    _probe_tool_version,
     calculate_distance,
     get_readable_home_directories,
     get_relative_path,
-    get_tool_versions,
     suppress_stdout,
 )
 
@@ -147,135 +145,6 @@ class TestSuppressStdout:
 
         # Only the final print should appear
         assert captured_output.getvalue() == "Final line\n"
-
-
-class TestProbeToolVersion:
-    """`_probe_tool_version` runs `<cmd> --version` and must never raise.
-
-    Bootstrap folds its result straight into telemetry; an exception here
-    would break the whole payload build. These tests pin each failure
-    mode to None explicitly, so future refactors that swap one exception
-    type for another can't accidentally turn "tool missing" into a crash.
-    """
-
-    def test_returns_first_stdout_line_on_success(self, monkeypatch):
-        def fake_run(cmd, **kwargs):
-            return SimpleNamespace(
-                returncode=0,
-                stdout="v20.10.0\nextra debug line\n",
-                stderr="",
-            )
-
-        monkeypatch.setattr(utils_module.subprocess, "run", fake_run)
-        assert _probe_tool_version("node") == "v20.10.0"
-
-    def test_falls_back_to_stderr_when_stdout_empty(self, monkeypatch):
-        # Older npm versions and some Java tools print --version to stderr.
-        # We don't want to specialize per tool, so stderr is the documented
-        # fallback when stdout is empty but the exit code is clean.
-        def fake_run(cmd, **kwargs):
-            return SimpleNamespace(
-                returncode=0,
-                stdout="",
-                stderr="6.14.18\n",
-            )
-
-        monkeypatch.setattr(utils_module.subprocess, "run", fake_run)
-        assert _probe_tool_version("npm") == "6.14.18"
-
-    def test_missing_binary_returns_none(self, monkeypatch):
-        def fake_run(cmd, **kwargs):
-            raise FileNotFoundError(cmd)
-
-        monkeypatch.setattr(utils_module.subprocess, "run", fake_run)
-        assert _probe_tool_version("definitely-not-installed") is None
-
-    def test_timeout_returns_none(self, monkeypatch):
-        # A hung `docker --version` (Docker Desktop spinning up on macOS)
-        # must not stall the bootstrap — the timeout converts to None.
-        def fake_run(cmd, **kwargs):
-            raise subprocess.TimeoutExpired(cmd, timeout=2.0)
-
-        monkeypatch.setattr(utils_module.subprocess, "run", fake_run)
-        assert _probe_tool_version("docker") is None
-
-    def test_nonzero_exit_returns_none(self, monkeypatch):
-        # A binary that exists but exits non-zero is treated as unprobeable
-        # rather than returning a garbage version string.
-        def fake_run(cmd, **kwargs):
-            return SimpleNamespace(returncode=2, stdout="usage: ...", stderr="")
-
-        monkeypatch.setattr(utils_module.subprocess, "run", fake_run)
-        assert _probe_tool_version("broken") is None
-
-    def test_permission_error_returns_none(self, monkeypatch):
-        def fake_run(cmd, **kwargs):
-            raise PermissionError("nope")
-
-        monkeypatch.setattr(utils_module.subprocess, "run", fake_run)
-        assert _probe_tool_version("locked-down") is None
-
-
-@pytest.mark.asyncio
-async def test_get_tool_versions_returns_one_entry_per_tool(monkeypatch):
-    # `get_tool_versions` must always return a key for every requested
-    # tool, even when probing fails. The dict shape — keys for asked-about
-    # tools, None for unprobeable ones — is the contract the bootstrap
-    # payload depends on to distinguish "not installed" from "not asked."
-    fake_results = {"node": "v20.10.0", "docker": None}
-
-    def fake_probe(command):
-        return fake_results[command]
-
-    monkeypatch.setattr(utils_module, "_probe_tool_version", fake_probe)
-
-    result = await get_tool_versions(("node", "docker"))
-
-    assert result == {"node": "v20.10.0", "docker": None}
-
-
-@pytest.mark.asyncio
-async def test_get_tool_versions_runs_probes_concurrently(monkeypatch):
-    # Probes are I/O-bound (subprocess + waitpid) and independent, so they
-    # must run in parallel via asyncio.to_thread. If a future refactor
-    # accidentally serializes them, total wall time would be sum(per-probe),
-    # which violates the 2s-per-bootstrap budget on hosts with 4+ probed
-    # tools. We assert parallelism by ensuring all probes have started
-    # before any has finished — a serial implementation can't satisfy this.
-    import asyncio
-    import threading
-
-    started = threading.Event()
-    pending = [threading.Event() for _ in range(3)]
-    release = threading.Event()
-
-    counter = {"started": 0}
-    lock = threading.Lock()
-
-    def slow_probe(command):
-        with lock:
-            counter["started"] += 1
-            idx = counter["started"] - 1
-        pending[idx].set()
-        if counter["started"] == 3:
-            started.set()
-        release.wait(timeout=2)
-        return f"{command}-ok"
-
-    monkeypatch.setattr(utils_module, "_probe_tool_version", slow_probe)
-
-    async def driver():
-        task = asyncio.create_task(get_tool_versions(("a", "b", "c")))
-        # Wait until all three probes have entered slow_probe before
-        # releasing them. If probes ran serially, only one would be
-        # in-flight at a time and `started` would never set.
-        await asyncio.to_thread(started.wait, 2)
-        release.set()
-        return await task
-
-    result = await driver()
-    assert set(result) == {"a", "b", "c"}
-    assert started.is_set(), "probes did not run concurrently"
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows-only behavior")

@@ -1,4 +1,3 @@
-import asyncio
 import contextlib
 import getpass
 import glob
@@ -9,7 +8,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -39,34 +37,6 @@ def get_username() -> str:
         return "unknown"
 
 
-# Per-tool wall-clock cap. The bootstrap handshake is best-effort and runs
-# before any HTTP retry, so a hung `docker --version` (e.g. Docker Desktop
-# starting on macOS) must not stall scan startup. Two seconds is enough for
-# every probe we care about on a healthy host; anything slower is treated
-# as "not installed."
-_TOOL_VERSION_PROBE_TIMEOUT = 2.0
-# Tools we expect to find on developer machines. Order is preserved in the
-# returned dict for stable serialization of the bootstrap payload. `python`
-# is probed via `python --version` like every other entry — note that this
-# may resolve to a different interpreter than the one running agent-scan
-# if multiple Pythons are on PATH; that's accepted in exchange for treating
-# every runtime uniformly.
-_DEFAULT_PROBED_TOOLS: tuple[str, ...] = (
-    "python",
-    "node",
-    "npx",
-    "uvx",
-    "docker",
-    # Shell-side dependencies of snyk_mcp_stdio_local_proxy.sh. The shim
-    # is bash-only (uses process substitution `>(...)`) and shells out to
-    # shasum/grep. Probing them here lets the server gate the
-    # stdio-local-proxy runtime flag on hosts that actually have the
-    # toolchain — and surface missing pieces in telemetry.
-    "bash",
-    "shasum",
-    "grep",
-)
-
 # Wall-clock cap for the `Get-CimInstance Win32_UserProfile` query that
 # enumerates Windows user profiles under --scan-all-users. WMI/CIM is known
 # to hang when the local repository is corrupted, the WinMgmt service is
@@ -74,54 +44,6 @@ _DEFAULT_PROBED_TOOLS: tuple[str, ...] = (
 # enough for healthy hosts (typical query is <500ms) while still preventing
 # scan startup and bootstrap payload build from blocking indefinitely.
 _WINDOWS_PROFILE_QUERY_TIMEOUT = 10.0
-
-
-def _probe_tool_version(command: str) -> str | None:
-    """Run `<command> --version` and return the first non-empty output line.
-
-    Returns None when the binary is missing, the call times out, exits
-    non-zero, or otherwise fails. Never raises — the caller folds the
-    result straight into telemetry, so any exception here would break
-    the bootstrap payload build and cascade into a failed handshake.
-
-    Output channel choice is intentionally lenient: `node --version`
-    writes to stdout, `docker --version` writes to stdout, but some
-    third-party tools (and old npm versions) write to stderr. We prefer
-    stdout and fall back to stderr so the most common case is correct
-    without specializing per tool.
-    """
-    try:
-        result = subprocess.run(
-            [command, "--version"],
-            capture_output=True,
-            text=True,
-            timeout=_TOOL_VERSION_PROBE_TIMEOUT,
-            check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired, PermissionError, OSError):
-        return None
-    if result.returncode != 0:
-        return None
-    output = (result.stdout or result.stderr or "").strip()
-    if not output:
-        return None
-    return output.splitlines()[0].strip() or None
-
-
-async def get_tool_versions(
-    tools: Iterable[str] = _DEFAULT_PROBED_TOOLS,
-) -> dict[str, str | None]:
-    """Probe versions of external tools in parallel.
-
-    Always returns a dict with one entry per requested tool. Missing /
-    unprobeable tools map to None — distinct from absent keys, which
-    signal "we didn't ask about this tool at all." Probes are offloaded
-    to threads via asyncio.to_thread so the slowest one bounds total
-    wall-clock time, not the sum.
-    """
-    tool_list = list(tools)
-    results = await asyncio.gather(*(asyncio.to_thread(_probe_tool_version, t) for t in tool_list))
-    return dict(zip(tool_list, results, strict=True))
 
 
 def ensure_unicode_console() -> None:

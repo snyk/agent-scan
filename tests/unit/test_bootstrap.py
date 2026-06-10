@@ -1,8 +1,6 @@
 import asyncio
 import json
 import logging
-import time
-from pathlib import Path
 from uuid import uuid4
 
 import pytest
@@ -64,15 +62,6 @@ def _control_server(url: str) -> ControlServer:
     if "/mcp-scan/push" not in url:
         url = f"{url.rstrip('/')}/mcp-scan/push"
     return ControlServer(url=url, headers={"x-client-id": str(uuid4())}, identifier="machine-1")
-
-
-@pytest.fixture(autouse=True)
-def _mock_home_dirs(monkeypatch):
-    monkeypatch.setattr(
-        bootstrap_module,
-        "get_readable_home_directories",
-        lambda all_users=False: [(Path("/home/alice"), "alice")],
-    )
 
 
 @pytest.mark.asyncio
@@ -380,74 +369,6 @@ async def test_response_missing_bootstrap_event_id_returns_default():
 
     assert cfg.source == "default"
     assert len(server.requests) == 1
-
-
-@pytest.mark.asyncio
-async def test_slow_home_enumeration_is_outside_http_timeout(monkeypatch):
-    def slow_home_dirs(all_users=False):
-        time.sleep(0.05)
-        return [(Path("/home/alice"), "alice")]
-
-    monkeypatch.setattr(bootstrap_module, "get_readable_home_directories", slow_home_dirs)
-    bootstrap_event_id = uuid4()
-    async with _BootstrapServer(
-        [(200, {"bootstrap_event_id": str(bootstrap_event_id), "runtime_config": {}}, 0)]
-    ) as server:
-        cfg = await bootstrap_first_control_server(
-            [_control_server(server.url)],
-            command="scan",
-            subcommand=None,
-            control_identifier="machine-1",
-            argv=[],
-            no_bootstrap=False,
-            timeout_seconds=0.5,
-        )
-
-    assert cfg.bootstrap_event_id == bootstrap_event_id
-
-
-@pytest.mark.asyncio
-async def test_home_enumeration_failure_returns_default(monkeypatch):
-    def fail_home_dirs(all_users=False):
-        raise RuntimeError("boom")
-
-    monkeypatch.setattr(bootstrap_module, "get_readable_home_directories", fail_home_dirs)
-    async with _BootstrapServer() as server:
-        cfg = await bootstrap_first_control_server(
-            [_control_server(server.url)],
-            command="scan",
-            subcommand=None,
-            control_identifier="machine-1",
-            argv=[],
-            no_bootstrap=False,
-        )
-
-    assert cfg.source == "default"
-    assert server.requests == []
-
-
-@pytest.mark.asyncio
-async def test_home_directory_enumeration_uses_to_thread(monkeypatch):
-    called = False
-
-    async def fake_to_thread(func, *args, **kwargs):
-        nonlocal called
-        called = True
-        return func(*args, **kwargs)
-
-    monkeypatch.setattr(bootstrap_module.asyncio, "to_thread", fake_to_thread)
-    async with _BootstrapServer() as server:
-        cfg = await bootstrap_first_control_server(
-            [_control_server(server.url)],
-            command="scan",
-            subcommand=None,
-            control_identifier="machine-1",
-            argv=[],
-            no_bootstrap=False,
-        )
-
-    assert cfg.source == "bootstrap"
-    assert called is True
 
 
 @pytest.mark.asyncio
