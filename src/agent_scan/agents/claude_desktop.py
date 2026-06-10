@@ -18,17 +18,29 @@ file itself belongs to the Claude Desktop chat surface and is only discovered
 here -- which is why this is a separate discoverer rather than part of
 ``ClaudeCodeDiscoverer``. See https://code.claude.com/docs/en/desktop.
 
-These two paths already exist as the Phase-A ``"claude"`` rows in
+These two paths already exist as the Phase-A ``"Claude Desktop"`` rows in
 ``well_known_clients.py``; this discoverer is the Phase-B (code-driven) analogue,
 mirroring how ``ClaudeCodeDiscoverer`` lives in both phases. Both use
-``name = "claude"`` so ``pipelines.discover_clients_to_inspect`` merges them onto
-a single client (keyed by ``(name, username)`` + absolute config path).
+``name = "Claude Desktop"`` so ``pipelines.discover_clients_to_inspect`` merges them
+onto a single client (keyed by ``(name, username)`` + absolute config path).
 
 Deliberately not covered (no officially-documented filesystem path -- not guessed
 by convention):
 
-  * **Extensions / ``.mcpb`` (Desktop Extensions / DXT)** -- the installed-extension
-    directory is not documented anywhere.
+  * **Skills** -- Claude Desktop (the claude.ai app surface) *does* support custom
+    Skills, but they are uploaded through Settings (Features / Customize > Skills)
+    as zip files and stored per-account in the cloud; Anthropic documents no local
+    filesystem path for them, so there is nothing on disk to scan. This is distinct
+    from Claude Code's filesystem skills (``~/.claude/skills/`` and project
+    ``.claude/skills/``), which ``ClaudeCodeDiscoverer`` already covers -- attributing
+    those to Claude Desktop would double-count and mis-attribute them.
+  * **Connectors (remote MCP)** -- added via Settings > Connectors (or org settings)
+    through an OAuth flow; cloud/account-managed, with sensitive values held in OS
+    secure storage (Keychain / Credential Manager), so there is no documented local
+    config file to read.
+  * **Extensions / ``.mcpb`` (Desktop Extensions / DXT)** -- installed via
+    Settings > Extensions, but the installed-extension directory is not documented
+    anywhere.
   * **Enterprise/MDM managed config** -- the macOS defaults domain
     ``com.anthropic.claudefordesktop``, the Windows registry key
     ``HKLM\\SOFTWARE\\Policies\\Claude``, and ``.../Claude/org-plugins/`` are
@@ -68,14 +80,14 @@ class ClaudeDesktopDiscoverer(AgentDiscoverer):
     file is multi-purpose (e.g. ``globalShortcut``).
     """
 
-    # MUST match the "claude" entry in ``well_known_clients.py`` so the Phase-A
-    # (data-driven) / Phase-B (this discoverer) merge in
+    # MUST match the "Claude Desktop" entry in ``well_known_clients.py`` so the
+    # Phase-A (data-driven) / Phase-B (this discoverer) merge in
     # ``pipelines.discover_clients_to_inspect`` lines up on a single client.
-    name = "claude"
+    name = "Claude Desktop"
 
     _config_filename = "claude_desktop_config.json"
     # Documented per-OS install/config directories (the same paths the Phase-A
-    # ``well_known_clients`` "claude" rows use). ``~`` is expanded against the
+    # ``well_known_clients`` "Claude Desktop" rows use). ``~`` is expanded against the
     # discoverer's bound home, so it resolves correctly per-home under
     # ``--scan-all-users``.
     _macos_dir = "~/Library/Application Support/Claude"
@@ -117,8 +129,11 @@ class ClaudeDesktopDiscoverer(AgentDiscoverer):
         return {config_path.as_posix(): entries}
 
     def discover_skills(self) -> SkillsDirsResult:
-        """Claude Desktop has no documented skills feature -- skills are a Claude
-        Code-only concept -- so there is nothing to discover."""
+        """Claude Desktop's custom Skills are uploaded through Settings and stored
+        per-account in the cloud, with no documented local filesystem path -- so
+        there is nothing on disk to discover. (The filesystem ``~/.claude/skills/``
+        path belongs to Claude Code, covered by ``ClaudeCodeDiscoverer``.) See the
+        module docstring."""
         return {}
 
     # --- private: per-OS path resolution ---
