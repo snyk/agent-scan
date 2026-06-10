@@ -6,11 +6,12 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from agent_scan.inspect import get_mcp_config_per_client, inspect_client
+from agent_scan.inspect import get_mcp_config_per_client, inspect_client, inspected_client_to_scan_path_result
 from agent_scan.mcp_client import scan_mcp_config_file
 from agent_scan.models import (
     CandidateClient,
     ClientToInspect,
+    RemoteServer,
     SkippedByRuntimeConfigError,
     StdioServer,
 )
@@ -658,7 +659,14 @@ async def test_inspect_client_skips_server_per_runtime_config_without_starting_s
 
         mock_inspect_extension.side_effect = fake_inspect
 
-        result = await inspect_client(client, timeout=10, tokens=[], scan_skills=False)
+        # ``do_stdio_handshake=True`` so the kept server actually reaches
+        # ``inspect_extension``. Without this, the safe-default kwarg
+        # would short-circuit *both* stdio servers and the test couldn't
+        # distinguish "skipped by runtime_config" from "skipped by
+        # safe-default kwarg" — the regression we want to guard against
+        # is specifically that runtime_config skip *also* prevents the
+        # subprocess even on the handshake-enabled path.
+        result = await inspect_client(client, timeout=10, tokens=[], scan_skills=False, do_stdio_handshake=True)
 
     extensions = result.extensions["/cfg.json"]
     assert len(extensions) == 2
@@ -671,3 +679,248 @@ async def test_inspect_client_skips_server_per_runtime_config_without_starting_s
     # Sanity: the non-skipped server did go through inspect_extension exactly once.
     call_names = [call.args[0] for call in mock_inspect_extension.call_args_list]
     assert call_names == ["other"]
+
+
+@pytest.mark.asyncio
+async def test_inspect_client_default_does_not_handshake_stdio_servers():
+    """The default behavior (no ``do_stdio_handshake`` kwarg) must NOT start
+    any stdio subprocess. This is the load-bearing safe-default property:
+    spawning subprocesses from a user config is the dangerous action, so
+    every caller must explicitly opt in.
+
+    A caller that forgets to forward ``do_stdio_handshake=True`` falls
+    through to this safe path: every stdio server is recorded on the
+    InspectedExtensions list with ``signature_or_error=None``, and
+    ``inspect_extension`` is only invoked for remote MCP servers (skills
+    do not flow through this code path). The test installs a side_effect
+    that raises if ``inspect_extension`` is ever called for a stdio
+    server — so any future refactor that flips the default fails loudly
+    here.
+
+    The downstream ``ServerScanResult`` exposes the skipped stdio server
+    with both ``signature`` and ``error`` set to ``None`` — the configured
+    entry is preserved without manufacturing an issue (the skip is the
+    documented behavior of this path, not a failure to report).
+    """
+    stdio_a = StdioServer(command="echo", args=["a"])
+    stdio_b = StdioServer(command="python", args=["-c", "print(1)"])
+    remote = RemoteServer(url="https://example.com/mcp", type="http")
+
+    client = ClientToInspect(
+        name="test",
+        client_path="/some/path",
+        mcp_configs={
+            "/cfg.json": [
+                ("stdio-a", stdio_a),
+                ("stdio-b", stdio_b),
+                ("remote", remote),
+            ]
+        },
+        skills_dirs={},
+    )
+
+    with patch("agent_scan.inspect.inspect_extension", new_callable=AsyncMock) as mock_inspect_extension:
+
+        async def fake_inspect(name, server, *args, **kwargs):
+            from mcp.types import Implementation, InitializeResult
+
+            from agent_scan.models import InspectedExtensions, ServerSignature
+
+            if isinstance(server, StdioServer):
+                raise AssertionError(
+                    f"inspect_extension must not be called for stdio server {name!r} on the default path"
+                )
+            return InspectedExtensions(
+                name=name,
+                config=server,
+                signature_or_error=ServerSignature(
+                    metadata=InitializeResult(
+                        protocolVersion="2024-11-05",
+                        capabilities={},
+                        serverInfo=Implementation(name="x", version="1"),
+                    ),
+                ),
+            )
+
+        mock_inspect_extension.side_effect = fake_inspect
+
+        # Intentionally omit ``do_stdio_handshake`` to verify the safe
+        # default kicks in.
+        result = await inspect_client(client, timeout=10, tokens=[], scan_skills=False)
+
+    extensions = result.extensions["/cfg.json"]
+    assert len(extensions) == 3
+
+    for name in ("stdio-a", "stdio-b"):
+        ext = next(e for e in extensions if e.name == name)
+        assert ext.signature_or_error is None
+
+    # Remote server still gets a handshake.
+    remote_call_names = [call.args[0] for call in mock_inspect_extension.call_args_list]
+    assert remote_call_names == ["remote"]
+
+    # ServerScanResult conversion preserves the server with no signature
+    # and no error for the default-skipped stdio entries.
+    scan_path_result = inspected_client_to_scan_path_result(result)
+    by_name = {s.name: s for s in scan_path_result.servers or []}
+    assert by_name["stdio-a"].signature is None
+    assert by_name["stdio-a"].error is None
+    assert by_name["stdio-b"].signature is None
+    assert by_name["stdio-b"].error is None
+    # The remote server still carries a signature.
+    assert by_name["remote"].signature is not None
+    assert by_name["remote"].error is None
+
+
+@pytest.mark.asyncio
+async def test_inspect_client_explicit_do_stdio_handshake_runs_stdio_servers():
+    """When the caller explicitly opts in via ``do_stdio_handshake=True``,
+    stdio servers flow through ``inspect_extension`` as expected. This
+    is the path taken by every command that wants real stdio handshakes
+    (interactive ``scan`` / ``inspect``, or ``--ci --dangerously-run-mcp-servers``
+    overriding the push-key skip)."""
+    stdio = StdioServer(command="echo", args=["hi"])
+
+    client = ClientToInspect(
+        name="test",
+        client_path="/some/path",
+        mcp_configs={"/cfg.json": [("stdio", stdio)]},
+        skills_dirs={},
+    )
+
+    with patch("agent_scan.inspect.inspect_extension", new_callable=AsyncMock) as mock_inspect_extension:
+        from mcp.types import Implementation, InitializeResult
+
+        from agent_scan.models import InspectedExtensions, ServerSignature
+
+        mock_inspect_extension.return_value = InspectedExtensions(
+            name="stdio",
+            config=stdio,
+            signature_or_error=ServerSignature(
+                metadata=InitializeResult(
+                    protocolVersion="2024-11-05",
+                    capabilities={},
+                    serverInfo=Implementation(name="x", version="1"),
+                ),
+            ),
+        )
+
+        await inspect_client(client, timeout=10, tokens=[], scan_skills=False, do_stdio_handshake=True)
+
+    mock_inspect_extension.assert_awaited_once()
+
+
+# --- config_path propagation tests ---
+
+
+def _signature() -> "object":
+    from mcp.types import Implementation, InitializeResult
+
+    from agent_scan.models import ServerSignature
+
+    return ServerSignature(
+        metadata=InitializeResult(
+            protocolVersion="2024-11-05",
+            capabilities={},
+            serverInfo=Implementation(name="x", version="1"),
+        ),
+    )
+
+
+def test_inspected_client_to_scan_path_result_sets_config_path_per_server():
+    """Every ServerScanResult must carry the config-file path it was
+    discovered in. The config path is the key of ``InspectedClient.extensions``;
+    the converter must propagate it onto each server across all three branches
+    (inspected signature, recorded-but-not-inspected ``None``, and error)."""
+    from agent_scan.models import InspectedClient, InspectedExtensions, ServerStartupError
+
+    cfg_path = "/home/u/.config/agent/.mcp.json"
+    ok = InspectedExtensions(name="ok", config=StdioServer(command="echo"), signature_or_error=_signature())
+    not_inspected = InspectedExtensions(name="skip", config=StdioServer(command="echo"), signature_or_error=None)
+    errored = InspectedExtensions(
+        name="boom",
+        config=RemoteServer(url="https://example.com/mcp", type="http"),
+        signature_or_error=ServerStartupError(message="boom"),
+    )
+
+    client = InspectedClient(
+        name="test",
+        client_path="/install/path",
+        extensions={cfg_path: [ok, not_inspected, errored]},
+    )
+
+    result = inspected_client_to_scan_path_result(client)
+
+    by_name = {s.name: s for s in result.servers or []}
+    assert by_name["ok"].config_path == cfg_path
+    assert by_name["skip"].config_path == cfg_path
+    assert by_name["boom"].config_path == cfg_path
+    # The top-level ScanPathResult.path stays the client install path, not the config file.
+    assert result.path == "/install/path"
+
+
+def test_inspected_client_to_scan_path_result_config_path_multiple_files():
+    """A single client flattens multiple config files into one ScanPathResult;
+    each server must retain the config path of the file it came from."""
+    from agent_scan.models import InspectedClient, InspectedExtensions
+
+    cfg_a = "/home/u/.cursor/mcp.json"
+    cfg_b = "/home/u/project/.mcp.json"
+    ext_a = InspectedExtensions(name="srv-a", config=StdioServer(command="a"), signature_or_error=_signature())
+    ext_b = InspectedExtensions(name="srv-b", config=StdioServer(command="b"), signature_or_error=_signature())
+
+    client = InspectedClient(
+        name="test",
+        client_path="/install/path",
+        extensions={cfg_a: [ext_a], cfg_b: [ext_b]},
+    )
+
+    result = inspected_client_to_scan_path_result(client)
+
+    by_name = {s.name: s for s in result.servers or []}
+    assert by_name["srv-a"].config_path == cfg_a
+    assert by_name["srv-b"].config_path == cfg_b
+
+
+def test_server_scan_result_clone_preserves_config_path():
+    """clone() must propagate config_path so the analysis-payload copy
+    (built via ScanPathResult.clone()/ServerScanResult.clone()) carries it too."""
+    from agent_scan.models import ServerScanResult
+
+    original = ServerScanResult(
+        name="srv",
+        config_path="/home/u/.mcp.json",
+        server=StdioServer(command="echo"),
+    )
+    cloned = original.clone()
+    assert cloned.config_path == "/home/u/.mcp.json"
+
+
+def test_config_path_survives_serialization_round_trip():
+    """config_path must serialize into the upload payload and round-trip back."""
+    from agent_scan.models import (
+        ScanPathResult,
+        ScanPathResultsCreate,
+        ScanUserInfo,
+        ServerScanResult,
+    )
+
+    payload = ScanPathResultsCreate(
+        scan_path_results=[
+            ScanPathResult(
+                client="test",
+                path="/install/path",
+                servers=[
+                    ServerScanResult(
+                        name="srv",
+                        config_path="/home/u/.mcp.json",
+                        server=StdioServer(command="echo"),
+                    )
+                ],
+            )
+        ],
+        scan_user_info=ScanUserInfo(),
+    )
+
+    restored = ScanPathResultsCreate.model_validate_json(payload.model_dump_json())
+    assert restored.scan_path_results[0].servers[0].config_path == "/home/u/.mcp.json"

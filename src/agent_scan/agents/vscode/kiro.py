@@ -1,8 +1,10 @@
 """Kiro discoverer."""
 
+from pathlib import Path
 from typing import ClassVar
 
 from agent_scan.agents.vscode.base import VSCodeFamilyDiscoverer
+from agent_scan.well_known_clients import expand_path
 
 
 class KiroDiscoverer(VSCodeFamilyDiscoverer):
@@ -55,16 +57,21 @@ class KiroDiscoverer(VSCodeFamilyDiscoverer):
         ".agents/skills",  # inferred — verify (undocumented for Kiro)
     )
     # Kiro is a VSCode fork using OpenVSX — installed extensions live under
-    # ``~/.kiro/extensions/`` and can contribute ``mcp.json`` / ``skills/``.
-    # Installed Kiro Powers live under ``~/.kiro/powers/installed/<name>/``,
+    # ``~/.kiro/extensions/``, tracked by that dir's ``extensions.json`` install
+    # manifest, so it is scanned manifest-gated like any VSCode-family extensions
+    # dir. Installed Kiro Powers live under ``~/.kiro/powers/installed/<name>/``,
     # each shipping its as-authored ``mcp.json`` + ``steering/`` (the official
     # kirodotdev/powers repo documents this layout, e.g. databricks/POWER.md).
-    # Walking that tree the same way as extensions picks them up. Powers are
-    # user-global only — no documented project-scoped equivalent.
+    # Powers use NO ``extensions.json`` manifest — the ``installed/`` segment is
+    # itself the install marker — so that tree is scanned wholesale via
+    # ``_unmanaged_extension_paths`` (see ``_installed_extension_dirs`` below).
+    # Powers are user-global only.
     _extension_paths = (
         "~/.kiro/extensions",
         "~/.kiro/powers/installed",
     )
+    # Subset of ``_extension_paths`` with no ``extensions.json`` install manifest.
+    _unmanaged_extension_paths: ClassVar[tuple[str, ...]] = ("~/.kiro/powers/installed",)
     # Built-in (bundled) extensions shipped inside the Kiro application.
     # ENTIRELY INFERRED — verify: Kiro was not available to verify on disk and
     # its docs only say "follow the installer". The macOS bundle name and the
@@ -80,3 +87,13 @@ class KiroDiscoverer(VSCodeFamilyDiscoverer):
         # linux: NO STABLE PATH — Kiro distributes an AppImage/tarball with no
         # documented fixed install root, so Linux built-in discovery is omitted.
     }
+
+    def _installed_extension_dirs(self, base: Path) -> list[Path]:
+        """Roots in ``_unmanaged_extension_paths`` ship no ``extensions.json``
+        manifest — each installed Power is just a present subdir — so those roots
+        return their immediate subdirs (every Power is scanned). All other roots
+        (e.g. ``~/.kiro/extensions``) stay manifest-gated via ``super()``."""
+        unmanaged = {expand_path(Path(raw), self.home_directory) for raw in self._unmanaged_extension_paths}
+        if base in unmanaged:
+            return self._immediate_subdirs(base)
+        return super()._installed_extension_dirs(base)

@@ -58,13 +58,21 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
     # (verified that Claude Code also loads it), shared with the VS Code-family
     # discoverers.
     _project_skills_relative: tuple[str, ...] = (".claude/skills", ".agents/skills")
-    # Subtrees under a plugin *root* (see ``_plugin_root_dirs``) that stage
-    # installed plugins. ``cache`` is the hydrated install tree and
-    # ``marketplaces`` the cloned marketplace sources (the current layout, per
-    # ``~/.claude/plugins`` and the plugin-marketplaces docs); ``repos`` is the
-    # legacy name kept for back-compat with older installs. All can host MCP
-    # servers / skills / commands.
-    _plugin_subdirs: tuple[str, ...] = ("cache", "marketplaces", "repos")
+    # Subtrees under a plugin *root* (see ``_plugin_root_dirs``) that hold the
+    # user's *installed* plugins. ``cache`` is the hydrated install tree every
+    # installed plugin is copied into — regardless of user/project/local scope,
+    # per the plugins-reference "plugin cache" note
+    # (https://code.claude.com/docs/en/plugins-reference); ``repos`` is the legacy
+    # name kept for back-compat with older installs. Both can host MCP servers /
+    # skills / commands.
+    #
+    # ``marketplaces/`` is deliberately NOT scanned: it is the cloned marketplace
+    # *catalog* — every plugin a marketplace offers, almost all of which the user
+    # has not installed. Adding a marketplace clones the catalog but installs
+    # nothing; only plugins the user installs are copied into ``cache``/``repos``.
+    # Walking the catalog would surface skills/MCP for plugins that were never
+    # installed (see https://code.claude.com/docs/en/discover-plugins).
+    _plugin_subdirs: tuple[str, ...] = ("cache", "repos")
 
     # --- public (override AgentDiscoverer abstracts) ---
 
@@ -254,8 +262,9 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
     # --- private: plugin discovery ---
 
     def _plugin_root_dirs(self) -> list[Path]:
-        """Plugin *root* directories — each holds the ``cache``/``marketplaces``/
-        ``repos`` subtrees (see :attr:`_plugin_subdirs`).
+        """Plugin *root* directories — each holds the installed-plugin ``cache``/
+        ``repos`` subtrees scanned per :attr:`_plugin_subdirs` (and the
+        ``marketplaces`` catalog clone, which that attribute deliberately skips).
 
         The always-present root is ``<base>/plugins`` for each global folder
         (``base`` already honors ``CLAUDE_CONFIG_DIR``). Two env vars add *further*
@@ -268,7 +277,8 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         know another user's env:
 
         * ``CLAUDE_CODE_PLUGIN_CACHE_DIR`` — an additional plugins root (despite the
-          name it is the parent dir; ``cache``/``marketplaces`` live beneath it).
+          name it is the parent dir; the ``cache``/``repos`` install subtrees live
+          beneath it).
         * ``CLAUDE_CODE_PLUGIN_SEED_DIR`` — ``os.pathsep``-separated read-only seed
           roots mirroring the plugins layout (container/CI pre-population).
 

@@ -18,7 +18,7 @@ from mcp.types import (
 from pytest_lazy_fixtures import lf
 
 from agent_scan.mcp_client import _check_server_pass, check_server, scan_mcp_config_file
-from agent_scan.models import StdioServer
+from agent_scan.models import RemoteServer, StdioServer
 from agent_scan.utils import resolve_command_and_args
 
 
@@ -99,6 +99,57 @@ async def test_check_server_mocked(mock_stdio_client):
     assert len(signature.prompts) == 2
     assert len(signature.resources) == 1
     assert len(signature.tools) == 3
+
+
+@pytest.mark.parametrize(
+    "input_url",
+    [
+        "https://example.com",
+        "https://example.com/",
+        "https://example.com/mcp",
+        "https://example.com/mcp/",
+        "https://example.com/sse",
+        "https://example.com/sse/",
+        "https://example.com/api/",
+        "https://example.com/api/mcp/",
+    ],
+)
+@pytest.mark.asyncio
+async def test_remote_url_candidates_have_no_double_slash_and_include_clean(input_url):
+    """Regression: trailing slashes or pre-existing /mcp,/sse suffixes used to
+    produce candidate URLs like //mcp or /mcp/mcp, and never fell back to a
+    clean URL stripped of the suffix."""
+    tried: list[str] = []
+
+    async def fake_check(server_config, *args, **kwargs):
+        tried.append(server_config.url)
+        raise RuntimeError("boom")
+
+    server = RemoteServer(url=input_url)
+    with patch("agent_scan.mcp_client._check_server_pass", side_effect=fake_check):
+        with pytest.raises(Exception, match="(?i)could not connect|boom"):
+            await check_server(server, 1, False)
+
+    assert tried, "expected the strategy to try at least one URL"
+    for url in tried:
+        scheme, _, rest = url.partition("://")
+        assert "//" not in rest, f"double slash leaked into candidate URL: {url}"
+        assert "/mcp/mcp" not in url, f"duplicated /mcp suffix in candidate URL: {url}"
+        assert "/sse/sse" not in url, f"duplicated /sse suffix in candidate URL: {url}"
+
+    # Clean fallback (no /mcp or /sse suffix) must be among the candidates.
+    expected_clean = input_url.rstrip("/")
+    for suffix in ("/mcp", "/sse"):
+        if expected_clean.endswith(suffix):
+            expected_clean = expected_clean[: -len(suffix)]
+            break
+    assert expected_clean in tried, f"clean URL {expected_clean!r} not tried; tried={tried}"
+
+    # After all strategies fail, server_config must be reset to the URL the
+    # user originally configured (trailing slash stripped) and the original
+    # type — not left on whatever the last attempt mutated it to.
+    assert server.url == input_url.rstrip("/"), f"server.url not reset to original: {server.url!r}"
+    assert server.type is None
 
 
 @pytest.mark.asyncio

@@ -142,6 +142,7 @@ async def inspect_pipeline(
     scanned_usernames: list[str] | None = None,
     stream_stderr: bool = False,
     declined_servers: set[tuple[str, str]] | None = None,
+    do_stdio_handshake: bool = False,
 ) -> tuple[list[ScanPathResult], list[str]]:
     """
     Inspect each discovered client's MCP servers.
@@ -160,6 +161,7 @@ async def inspect_pipeline(
             inspect_args.scan_skills,
             stream_stderr=stream_stderr,
             declined_servers=declined_servers,
+            do_stdio_handshake=do_stdio_handshake,
         )
         scan_path_results.append(inspected_client_to_scan_path_result(inspected_client))
     return scan_path_results, scanned_usernames or []
@@ -176,6 +178,7 @@ async def inspect_analyze_push_pipeline(
     scanned_usernames: list[str] | None = None,
     stream_stderr: bool = False,
     declined_servers: set[tuple[str, str]] | None = None,
+    do_stdio_handshake: bool = False,
 ) -> list[ScanPathResult]:
     """
     Pipeline the scan and analyze the machine.
@@ -188,6 +191,7 @@ async def inspect_analyze_push_pipeline(
         scanned_usernames=scanned_usernames,
         stream_stderr=stream_stderr,
         declined_servers=declined_servers,
+        do_stdio_handshake=do_stdio_handshake,
     )
 
     # redact

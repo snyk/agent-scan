@@ -728,12 +728,111 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
             expand_path(Path(raw), self.home_directory) for raw in self._builtin_extension_dir_templates.get(key, ())
         ]
 
+    # --- private: install-manifest gating (don't scan uninstalled extensions) ---
+
+    @staticmethod
+    def _immediate_subdirs(base: Path) -> list[Path]:
+        """Immediate subdirectories of ``base`` (empty if absent/unreadable).
+
+        Used for *unmanaged* extension roots that ship no ``extensions.json`` —
+        every present subdir is an installed extension, so they are the dirs to
+        scan. Errors fail soft (empty list) so one unreadable root cannot drop the
+        whole discoverer; mirrors the tolerance in :func:`_walk_under_depth`.
+        """
+        try:
+            return [p for p in base.iterdir() if p.is_dir()]
+        except (PermissionError, OSError):
+            return []
+
+    def _installed_extension_dirs(self, base: Path) -> list[Path]:
+        """The dirs of the extensions *installed* under ``base`` — always a list,
+        the directories to walk for bundled ``mcp.json`` / ``skills/``.
+
+        Two kinds of root, both resolved here to a concrete list of dirs:
+
+        * *Manifest-managed* — gated by ``<base>/extensions.json``, VSCode's
+          authoritative install manifest. Each entry's ``relativeLocation`` is the
+          on-disk dir name; some manifest shapes omit it, so fall back to the
+          basename of ``location.path``. The name is resolved against ``base`` and
+          confined to it (see :meth:`_confine_to_base`) so an attacker-influenceable
+          manifest (under ``--scan-all-users``) cannot redirect the scan outside the
+          extension root. Returns exactly the dirs the manifest names, or ``[]``
+          when it is missing, unreadable, or unparseable — a managed root **fails
+          closed**: an extension is installed iff the manifest lists it, and the
+          editor itself loads nothing from such a dir, so there is nothing live to
+          scan (a present-but-empty manifest ``[]`` is the same: nothing installed).
+        * *Unmanaged* — roots that ship no ``extensions.json`` *by design*: the
+          built-in (bundled) extension roots, detected here, and the fork-declared
+          unmanaged trees (Kiro Powers, Antigravity's Gemini dir) whose subclasses
+          override this. Every present subdir is an installed extension, so this
+          returns all of them via :meth:`_immediate_subdirs`.
+
+        Uninstalled leftovers and upgraded-away versions linger on disk but are
+        absent from a managed root's manifest, so they are never reached — no
+        separate ``.obsolete`` denylist is needed (an obsolete dir is never in the
+        manifest).
+        """
+        # Built-in/bundled roots ship no manifest by design — they are not
+        # manifest-managed, so scan every installed (present) subdir rather than
+        # failing closed.
+        if base in set(self._builtin_extension_dirs()):
+            return self._immediate_subdirs(base)
+        data = self._load_json_file(base / "extensions.json")
+        if not isinstance(data, list):
+            return []
+        dirs: list[Path] = []
+        seen: set[str] = set()
+        for entry in data:
+            if not isinstance(entry, dict):
+                continue
+            rel = entry.get("relativeLocation")
+            if not (isinstance(rel, str) and rel):
+                location = entry.get("location")
+                path = location.get("path") if isinstance(location, dict) else None
+                rel = Path(path).name if isinstance(path, str) and path else None
+            if not rel or rel in seen:
+                continue
+            seen.add(rel)
+            confined = self._confine_to_base(base, rel)
+            if confined is not None:
+                dirs.append(confined)
+        return dirs
+
+    @staticmethod
+    def _confine_to_base(base: Path, relative_location: str) -> Path | None:
+        """Resolve a manifest dir name against ``base``, confined to it.
+
+        ``relativeLocation`` is normally a single dir name (e.g.
+        ``pub.ext-1.0.0``), but the manifest is attacker-influenceable under
+        ``--scan-all-users``; a value carrying ``..`` or an absolute path must not
+        redirect the walk outside the extension root. Returns the resolved dir, or
+        ``None`` for anything that escapes (or equals) ``base``. Normalized
+        lexically — no filesystem access, so it cannot be defeated by symlinks
+        planted between this check and the walk.
+        """
+        candidate = Path(os.path.normpath(base / relative_location))
+        if candidate != base and candidate.is_relative_to(base):
+            return candidate
+        return None
+
+    def _extension_scan_roots(self) -> list[Path]:
+        """The directories to walk for bundled ``mcp.json`` / ``skills/``: each
+        extension root from :meth:`_extension_base_dirs` contributes its installed
+        extension dirs (see :meth:`_installed_extension_dirs`). The actual walking
+        is the shared :func:`_walk_under_depth`."""
+        roots: list[Path] = []
+        for base in self._extension_base_dirs():
+            roots.extend(self._installed_extension_dirs(base))
+        return roots
+
     def _discover_extension_mcp_servers(self) -> McpConfigsResult:
-        """Walk each extension root for ``mcp.json`` (no leading dot — matches the
+        """Scan ``mcp.json`` under each *installed* extension (no leading dot — the
         VSCode-family file-name convention). Mirrors
         :meth:`ClaudeCodeDiscoverer._discover_plugin_mcp_servers` but uses
         :attr:`_VSCODE_FAMILY_FORMATS` so wrapped, VSCode-flat ``servers``, and
-        fully flat shapes all parse.
+        fully flat shapes all parse. Roots are install-manifest gated (see
+        :meth:`_extension_scan_roots`) so uninstalled extensions left on disk are
+        not scanned.
 
         ``skip_unrecognized=True``: this walk matches every file merely *named*
         ``mcp.json``, and extensions ship unrelated files under that name (JSON
@@ -742,8 +841,8 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         that fails to validate is still reported as malformed.
         """
         result: McpConfigsResult = {}
-        for base in self._extension_base_dirs():
-            for mcp_file in _walk_under_depth(base, "mcp.json", _MAX_PLUGIN_RGLOB_DEPTH, want_file=True):
+        for root in self._extension_scan_roots():
+            for mcp_file in _walk_under_depth(root, "mcp.json", _MAX_PLUGIN_RGLOB_DEPTH, want_file=True):
                 if not mcp_file.is_file():
                     continue
                 parsed = self._parse_mcp_file(mcp_file, formats=_VSCODE_FAMILY_FORMATS, skip_unrecognized=True)
@@ -753,8 +852,14 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         return result
 
     def _discover_extension_skills(self) -> SkillsDirsResult:
-        """Walk each extension root for ``skills/`` subdirectories."""
-        return self._discover_skill_and_command_dirs(self._extension_base_dirs(), "skills", inspect_skills_dir)
+        """Scan ``skills/`` subdirs under each *installed* extension (roots are
+        install-manifest gated, see :meth:`_extension_scan_roots`)."""
+        result: SkillsDirsResult = {}
+        for root in self._extension_scan_roots():
+            for skills_dir in _walk_under_depth(root, "skills", _MAX_PLUGIN_RGLOB_DEPTH, want_file=False):
+                if skills_dir.is_dir():
+                    result[skills_dir.as_posix()] = inspect_skills_dir(str(skills_dir))
+        return result
 
     # --- private: chat.agentSkillsLocations ---
 

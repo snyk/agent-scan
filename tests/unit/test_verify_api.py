@@ -509,6 +509,97 @@ class TestAnalyzeMachineUserInfo:
             assert payload["scan_user_info"]["username"] == ["local-user"]
 
 
+class TestAnalyzeMachineAuthPrecedence:
+    """
+    Auth selection in ``analyze_machine`` follows an explicit precedence:
+
+    1. ``push_key`` (from ``--control-server-H x-client-id:...``) wins
+       — explicit CLI args beat implicit env state, and split-auth
+       (push-key for upload + SNYK_TOKEN for analysis) caused
+       hard-to-debug routing issues for users with both set.
+    2. ``SNYK_TOKEN`` env var.
+    3. ``SNYK_CLI_USE`` env var (proxy mode).
+    4. Otherwise → error.
+
+    These tests pin that exact ordering.
+    """
+
+    _ANALYSIS_URL = "https://api.snyk.io/hidden/mcp-scan/analysis-machine?version=2025-09-02"
+
+    @staticmethod
+    def _make_mock_session():
+        mock_session = MagicMock()
+        mock_response = AsyncMock()
+        mock_response.status = 200
+        mock_response.text = AsyncMock(
+            return_value='{"scan_path_results": [{"path": "/test/path", "issues": [], "labels": []}], "scan_user_info": {}}'
+        )
+        mock_response.raise_for_status = MagicMock()
+
+        mock_post = MagicMock()
+        mock_post.__aenter__ = AsyncMock(return_value=mock_response)
+        mock_post.__aexit__ = AsyncMock(return_value=None)
+
+        mock_session.post = MagicMock(return_value=mock_post)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=None)
+        return mock_session
+
+    async def _run(self, *, push_key: str | None, env: dict[str, str]):
+        scan_paths = [ScanPathResult(path="/test/path")]
+        with (
+            patch("agent_scan.verify_api.aiohttp.ClientSession") as mock_session_class,
+            patch("agent_scan.verify_api.get_username", return_value="local-user"),
+            patch("agent_scan.verify_api.get_hostname", return_value="test-host"),
+            patch.dict(os.environ, env, clear=False),
+        ):
+            mock_session_class.return_value = self._make_mock_session()
+            await analyze_machine(
+                scan_paths=scan_paths,
+                analysis_url=self._ANALYSIS_URL,
+                identifier=None,
+                push_key=push_key,
+            )
+            mock_session_class.return_value.post.assert_called_once()
+            call_args = mock_session_class.return_value.post.call_args
+            posted_url = call_args[0][0]
+            posted_headers = call_args[1]["headers"]
+        return posted_url, posted_headers
+
+    @pytest.mark.asyncio
+    async def test_push_key_only_uses_x_push_key_header_on_unrewritten_url(self):
+        # SNYK_TOKEN must not leak from a real test environment; drop it.
+        os.environ.pop("SNYK_TOKEN", None)
+        posted_url, posted_headers = await self._run(push_key="push-abc", env={})
+
+        assert posted_headers.get("X-Push-Key") == "push-abc"
+        assert "Authorization" not in posted_headers
+        assert posted_url == self._ANALYSIS_URL  # not rewritten
+
+    @pytest.mark.asyncio
+    async def test_snyk_token_only_uses_authorization_header_on_cli_url(self):
+        posted_url, posted_headers = await self._run(push_key=None, env={"SNYK_TOKEN": "snyk-tok-123"})
+
+        assert posted_headers.get("Authorization") == "token snyk-tok-123"
+        assert "X-Push-Key" not in posted_headers
+        assert "/cli/analysis-machine" in posted_url
+
+    @pytest.mark.asyncio
+    async def test_both_present_push_key_wins(self):
+        """
+        Load-bearing precedence: when both a push key and SNYK_TOKEN are
+        set, the push key wins. Explicit CLI args beat implicit env state.
+        The analysis URL is *not* rewritten to /cli/analysis-machine and
+        Authorization is *not* set — every byte of the call matches the
+        push-key-only case.
+        """
+        posted_url, posted_headers = await self._run(push_key="push-abc", env={"SNYK_TOKEN": "snyk-tok-123"})
+
+        assert posted_headers.get("X-Push-Key") == "push-abc"
+        assert "Authorization" not in posted_headers
+        assert posted_url == self._ANALYSIS_URL
+
+
 class TestAnalyzeMachineHttpErrors:
     """Test that analyze_machine handles various HTTP error status codes correctly."""
 

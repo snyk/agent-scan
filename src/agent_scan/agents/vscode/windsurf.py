@@ -45,7 +45,13 @@ class WindsurfDiscoverer(VSCodeFamilyDiscoverer):
         "~/.agents/skills",
         "~/.claude/skills",
     )
-    _extension_paths = ("~/.codeium/windsurf/extensions",)
+    # Windsurf keeps Codeium *engine* state under ``~/.codeium/windsurf`` (the
+    # MCP/skill paths above), but its VSCode-fork *user data* — extensions and
+    # ``argv.json`` — lives under ``~/.windsurf``. VERIFIED on disk:
+    # ``~/.windsurf/extensions/extensions.json`` plus the installed dirs are there,
+    # while ``~/.codeium/windsurf`` has no ``extensions`` subdir. Standard
+    # ``extensions.json`` tree, so it is manifest-gated like upstream VSCode.
+    _extension_paths = ("~/.windsurf/extensions",)
     # Built-in (bundled) extensions shipped inside the Windsurf application.
     _builtin_extension_dir_templates: ClassVar[dict[str, tuple[str, ...]]] = {
         "darwin": (

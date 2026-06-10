@@ -298,6 +298,7 @@ async def inspect_client(
     *,
     stream_stderr: bool = False,
     declined_servers: set[tuple[str, str]] | None = None,
+    do_stdio_handshake: bool = False,
 ) -> InspectedClient:
     """
     Scan a client (Cursor, VSCode, etc.) and return a InspectedClient object.
@@ -305,6 +306,11 @@ async def inspect_client(
     declined_servers is an optional set of (mcp_config_path, server_name)
     pairs the user declined during the consent flow. Declined stdio servers are
     not started. They are recorded as errors with category user_declined.
+
+    do_stdio_handshake when False, every stdio server is recorded with
+    ``signature_or_error=None`` (configured but not inspected) and no
+    subprocess is started. Remote servers and skills are unaffected
+    - they never handshake.
     """
     declined = declined_servers or set()
     extensions: dict[
@@ -318,7 +324,8 @@ async def inspect_client(
         extensions_for_mcp_config: list[InspectedExtensions] = []
         runtime_cfg = get_runtime_config()
         for name, server in mcp_configs:
-            # Skip servers that the user declined during the consent flow.
+            # Possible cases where we skip scanning a server:
+            # 1. Skip servers that the user declined during the consent flow.
             if (mcp_config_path, name) in declined:
                 extensions_for_mcp_config.append(
                     InspectedExtensions(
@@ -331,7 +338,7 @@ async def inspect_client(
                     )
                 )
                 continue
-            # Bootstrap runtime config skips short-circuit before inspect_extension so we
+            # 2. Bootstrap runtime config skips short-circuit before inspect_extension so we
             # never start the subprocess / open the connection.
             needle = runtime_cfg.matched_skip_needle(name, server)
             if needle is not None:
@@ -352,6 +359,10 @@ async def inspect_client(
                         ),
                     )
                 )
+                continue
+            # 3. If do_stdio_handshake is False, skip stdio servers.
+            if not do_stdio_handshake and isinstance(server, StdioServer):
+                extensions_for_mcp_config.append(InspectedExtensions(name=name, config=server, signature_or_error=None))
                 continue
             extension = await inspect_extension(
                 name,
@@ -383,7 +394,7 @@ def inspected_client_to_scan_path_result(inspected_client: InspectedClient) -> S
     """
     servers: list[ServerScanResult] = []
     candidate_errors: list[ScanError] = []
-    for _, extensions_or_error in inspected_client.extensions.items():
+    for config_path, extensions_or_error in inspected_client.extensions.items():
         if isinstance(
             extensions_or_error, FileNotFoundConfig | UnknownConfigFormat | CouldNotParseMCPConfig | SkillScannError
         ):
@@ -401,13 +412,30 @@ def inspected_client_to_scan_path_result(inspected_client: InspectedClient) -> S
             if isinstance(extension.signature_or_error, ServerSignature):
                 servers.append(
                     ServerScanResult(
-                        name=extension.name, server=extension.config, signature=extension.signature_or_error, error=None
+                        name=extension.name,
+                        config_path=config_path,
+                        server=extension.config,
+                        signature=extension.signature_or_error,
+                        error=None,
+                    )
+                )
+            elif extension.signature_or_error is None:
+                # Recorded but not inspected (e.g. stdio MCP server on the
+                # push-key path).
+                servers.append(
+                    ServerScanResult(
+                        name=extension.name,
+                        config_path=config_path,
+                        server=extension.config,
+                        signature=None,
+                        error=None,
                     )
                 )
             else:
                 servers.append(
                     ServerScanResult(
                         name=extension.name,
+                        config_path=config_path,
                         server=extension.config,
                         signature=None,
                         error=ScanError(

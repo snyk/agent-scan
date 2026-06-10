@@ -133,33 +133,28 @@ class AgentDiscoverer(ABC):
     ``__init_subclass__``.
 
     A discoverer is bound to a single user's ``home_directory`` at construction;
-    the multi-user (`--scan-all-users`) loop in ``pipelines`` constructs one
+    the multi-user (``--scan-all-users``) loop in ``pipelines`` constructs one
     discoverer per home directory.
 
-    Note: this abstraction intentionally does NOT consult the corresponding
-    ``CandidateClient`` row's ``mcp_config_globs`` / ``skills_dir_globs``
-    fields. Subclasses encode their layout directly. If a future agent
-    genuinely needs glob-based discovery, override ``discover_mcp_servers`` /
+    Unlike the legacy ``inspect.py`` pipeline, this abstraction does NOT consult
+    the ``CandidateClient`` row's ``mcp_config_globs`` / ``skills_dir_globs``;
+    subclasses encode their layout directly. An agent that genuinely needs
+    glob-based discovery should override ``discover_mcp_servers`` /
     ``discover_skills`` to handle it explicitly.
     """
 
     name: str = ""
 
     def __init__(self, home_directory: Path | None) -> None:
-        # ``None`` is the own-home sentinel; normalize it to ``Path.home()`` here so
-        # the stored home is always a concrete path. This keeps ``_scans_own_home``
-        # and every ``expand_path(..., self.home_directory)`` call site in agreement:
-        # ``expand_path`` treats ``None`` as "unknown home — don't expand" and would
-        # otherwise leave a ``~``-prefixed template literal (e.g. ``~/.claude``) on an
-        # own-home scan whose relocating env var is unset. Resolved at construction
-        # time, which is sound because the pipeline builds one discoverer per home
-        # immediately before scanning it.
+        # ``None`` is the own-home sentinel; normalize to ``Path.home()`` so the
+        # stored home is always concrete. ``expand_path`` treats ``None`` as
+        # "unknown home — don't expand", which would leave a ``~``-prefixed literal
+        # (e.g. ``~/.claude``) on an own-home scan whose relocating env var is unset.
         self.home_directory = home_directory if home_directory is not None else Path.home()
         # Lazily-populated cache for _project_paths_with_ancestors. A discoverer
-        # is constructed once per home and used for a single scan (see
-        # find_discoverers), so the project list is stable for its lifetime and
-        # the several discovery methods that consult it need not re-walk the
-        # workspaceStorage tree / re-read ~/.claude.json each time.
+        # serves a single scan (see find_discoverers), so the project list is
+        # stable for its lifetime and the discovery methods that consult it need
+        # not re-walk workspaceStorage / re-read ~/.claude.json each time.
         self._project_paths_cache: list[Path] | None = None
 
     def _scans_own_home(self) -> bool:
@@ -168,21 +163,15 @@ class AgentDiscoverer(ABC):
         Env-var-relocated config paths (``CLAUDE_CONFIG_DIR``, ``VSCODE_PORTABLE``)
         reflect the *scanning process's* environment, so they may only be honored
         when the home being scanned is that same user's. Other users' homes under
-        ``--scan-all-users`` must compare unequal (the scanner can't know their env).
+        ``--scan-all-users`` must compare unequal — the scanner can't know their env.
 
-        The scanning user's own home is spelled two ways depending on mode, so we
-        accept either:
-
-        * Single-user mode builds the discoverer with ``Path.home()`` (``$HOME``).
-        * ``--scan-all-users`` sources every home — including the current user's
-          own entry — from ``pwd.getpwall()`` (``Path(pw_dir)``), which can differ
-          from ``$HOME`` (a sudo-rewritten ``$HOME``, a symlinked / relocated /
-          container home). Comparing only against ``Path.home()`` there would drop
-          env-relocated config for the scanning user's own home. So we also accept
-          this uid's passwd ``pw_dir`` and resolve both sides to absorb symlinks.
-
-        ``pwd``/``os.getuid`` are POSIX-only; the guarded import simply skips that
-        extra candidate on Windows.
+        The scanning user's own home is spelled two ways, so we accept either and
+        resolve both sides to absorb symlinks: ``Path.home()`` (``$HOME``, used in
+        single-user mode) and this uid's passwd ``pw_dir`` (used by
+        ``--scan-all-users``, which sources homes from ``pwd.getpwall()`` and can
+        differ from ``$HOME`` for a sudo-rewritten / symlinked / container home).
+        ``pwd``/``os.getuid`` are POSIX-only; the guarded import skips the extra
+        candidate on Windows.
         """
         candidates = {Path.home()}
         try:
@@ -242,9 +231,9 @@ class AgentDiscoverer(ABC):
     # --- shared helpers (inherited by every concrete subclass) ---
 
     def _load_json_file(self, path: Path) -> dict | CouldNotParseMCPConfig | None:
-        """JSON-decode an arbitrary file. ``None`` if missing or unreadable due to
-        permissions, parsed dict on success, ``CouldNotParseMCPConfig`` on
-        malformed JSON.
+        """JSON-decode an arbitrary file. ``None`` if missing, unreadable (denied
+        permissions), or over the ``_MAX_CONFIG_FILE_BYTES`` cap; parsed dict on
+        success; ``CouldNotParseMCPConfig`` on malformed JSON.
 
         Uses ``pyjson5`` to match the legacy ``mcp_client.scan_mcp_config_file``
         path, which tolerates ``//`` comments and trailing commas. An empty or
@@ -343,12 +332,11 @@ class AgentDiscoverer(ABC):
         ``skip_unrecognized`` is an opt-in for *opportunistic* walks that match
         every file merely *named* ``mcp.json`` (the extension walk). When set, a
         valid-JSON file with no recognizable MCP shape (see
-        :func:`_looks_like_mcp_payload`) returns ``None`` (skip) instead of a
-        ``CouldNotParseMCPConfig`` — so an unrelated extension file isn't reported
-        as a malformed config. A wrapper-keyed file that then fails to validate is
-        still surfaced as malformed. Callers parsing an explicitly-named config
-        file (e.g. ``~/.vscode/mcp.json``) leave this off so genuine malformations
-        there are still reported.
+        :func:`_looks_like_mcp_payload`) returns ``None`` instead of
+        ``CouldNotParseMCPConfig``, so an unrelated extension file isn't reported as
+        malformed; a wrapper-keyed file that then fails to validate is still
+        surfaced. Callers parsing an explicitly-named config (e.g.
+        ``~/.vscode/mcp.json``) leave it off so genuine malformations are reported.
         """
         data = self._load_json_file(path)
         if data is None:
@@ -356,17 +344,16 @@ class AgentDiscoverer(ABC):
         if isinstance(data, CouldNotParseMCPConfig):
             return data
         if not isinstance(data, dict):
-            # A non-object root (JSON array/scalar) is not any known MCP shape.
-            # An opportunistic walk merely matched the filename, so skip it; an
-            # explicitly-named config file is unsupported/malformed and must
-            # surface as CouldNotParseMCPConfig (legacy ``scan_mcp_config_file``
-            # parity — there every model fails on a non-dict). It falls through to
-            # the format loop below, where each ``model_validate`` rejects the
-            # non-dict and the last error is reported.
+            # A non-object root (JSON array/scalar) is no known MCP shape. An
+            # opportunistic walk merely matched the filename, so skip it. An
+            # explicitly-named config falls through to the format loop below, where
+            # every ``model_validate`` rejects the non-dict and the last error
+            # surfaces as CouldNotParseMCPConfig (legacy ``scan_mcp_config_file``
+            # parity).
             if skip_unrecognized:
                 return None
         elif not data:
-            # Empty object: no servers to scan, and not malformed — skip quietly
+            # Empty object: no servers and not malformed — skip quietly
             # (legacy returns a zero-server ``ConfigWithoutMCP`` for ``{}``).
             return None
         elif skip_unrecognized and not _looks_like_mcp_payload(data):
@@ -446,7 +433,7 @@ class AgentDiscoverer(ABC):
         living in any parent folder of an opened project (e.g. a monorepo root
         that contains many project subdirectories).
 
-        The result is cached for the discoverer's lifetime
+        The result is cached for the discoverer's lifetime.
         """
         if self._project_paths_cache is not None:
             return self._project_paths_cache

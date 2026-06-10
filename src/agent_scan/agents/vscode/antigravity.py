@@ -1,7 +1,6 @@
 """Antigravity discoverer."""
 
 from pathlib import Path
-from typing import ClassVar
 
 from agent_scan.agents.vscode.base import (
     VSCodeFamilyDiscoverer,
@@ -79,30 +78,30 @@ class AntigravityDiscoverer(VSCodeFamilyDiscoverer):
         # Workspace mirror of the user-global ``~/.gemini/config/mcp_config.json``.
         ".gemini/mcp_config.json",  # inferred — verify (undocumented for Antigravity)
     )
-    # Installed extensions live under ``~/.gemini/extensions/`` (shared with
-    # the Gemini CLI; not under the ``antigravity/`` subdir).
-    _extension_paths = ("~/.gemini/extensions",)
-    # Built-in (bundled) extensions shipped inside the Antigravity application.
-    # ENTIRELY INFERRED — verify: Antigravity was not available to verify on
-    # disk, and Google has not published install paths. The macOS bundle name is
-    # assumed to follow the product name; Google states the Windows installer is
-    # user-level (%LOCALAPPDATA%) but not the exact folder; the Linux installer
-    # currently extracts to /opt/antigravity (community-reported, version-
-    # dependent) and may pack extensions inside app.asar, in which case the dir
-    # below is absent. Re-check each entry against a real install.
-    _builtin_extension_dir_templates: ClassVar[dict[str, tuple[str, ...]]] = {
-        "darwin": (
-            "/Applications/Antigravity.app/Contents/Resources/app/extensions",  # inferred — verify
-            "~/Applications/Antigravity.app/Contents/Resources/app/extensions",  # inferred — verify
-        ),
-        "win32": (
-            # inferred — verify: user-level install confirmed by Google, exact folder name NOT.
-            "~/AppData/Local/Programs/Antigravity/resources/app/extensions",
-        ),
-        "linux": (
-            "/opt/antigravity/resources/app/extensions",  # inferred — verify (may be packed in app.asar)
-        ),
-    }
+    # Antigravity installs *plugins* (its extension equivalent) under
+    # ``~/.gemini/config/plugins/<name>/`` — each a dir with a ``plugin.json``
+    # manifest and an optional ``skills/`` tree. VERIFIED on a real macOS install
+    # (``chrome-devtools-plugin``). There is NO central ``extensions.json`` (each
+    # plugin subdir is itself the install marker), so the tree is scanned wholesale
+    # (see ``_installed_extension_dirs`` below).
+    # Plugin MCP is registered centrally in ``~/.gemini/config/mcp_config.json``
+    # (already in ``_user_mcp_file_paths``), not a per-plugin ``mcp.json`` — but the
+    # mcp.json walk is kept as a harmless catch in case a plugin ships one.
+    # ``~/.gemini/extensions`` is the Gemini *CLI's* tree (per-extension dirs, also
+    # no central manifest); kept as a shared-``~/.gemini`` best-effort catch that is
+    # a no-op when absent.
+    _extension_paths = ("~/.gemini/config/plugins", "~/.gemini/extensions")
+
+    def _installed_extension_dirs(self, base: Path) -> list[Path]:
+        """Every Antigravity extension root ships no ``extensions.json`` manifest,
+        so ``_extension_paths`` roots return their immediate subdirs (every present
+        extension is scanned). Built-in/bundled dirs stay manifest-gated via
+        ``super()``."""
+        extension_roots = {expand_path(Path(raw), self.home_directory) for raw in self._extension_paths}
+        if base in extension_roots:
+            return self._immediate_subdirs(base)
+        return super()._installed_extension_dirs(base)
+
     # Antigravity's own opened-workspace registry. Each opened folder is recorded
     # as a ``<id>.json`` file here, with the root under
     # ``projectResources.resources[].folderUri`` (a ``file://`` URI). Shared by the

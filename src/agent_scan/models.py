@@ -388,6 +388,12 @@ class ServerSignature(BaseModel):
 class ServerScanResult(BaseModel):
     model_config = ConfigDict()
     name: str | None = None
+    # Absolute path of the config file this server was discovered in (e.g. a
+    # project ``.mcp.json`` or ``~/.claude.json``). A single client can flatten
+    # servers from several config files into one ScanPathResult, so the
+    # provenance is tracked per server rather than at the ScanPathResult level.
+    # Sent absolute to both backends, matching SkillServer.path.
+    config_path: str | None = None
     server: StdioServer | RemoteServer | SkillServer
     signature: ServerSignature | None = None
     error: ScanError | None = None
@@ -410,6 +416,7 @@ class ServerScanResult(BaseModel):
         """
         output = ServerScanResult(
             name=self.name,
+            config_path=self.config_path,
             server=self.server.model_copy(deep=True),
             signature=self.signature.model_copy(deep=True) if self.signature else None,
             error=self.error.clone() if self.error else None,
@@ -745,6 +752,10 @@ class ClientToInspect(BaseModel):
 class InspectedExtensions(BaseModel):
     name: str  # ignore if name is available in the config
     config: StdioServer | RemoteServer | SkillServer
+    # ``None`` means the extension was recorded without being inspected and
+    # without an error to report — used for stdio MCP servers on the push-key
+    # path, where the scan never starts the subprocess and the absence
+    # of a handshake is the documented behavior rather than a failure.
     signature_or_error: (
         ServerSignature
         | ServerStartupError
@@ -752,7 +763,8 @@ class InspectedExtensions(BaseModel):
         | SkillScannError
         | UserDeclinedError
         | SkippedByRuntimeConfigError
-    )
+        | None
+    ) = None
 
 
 class InspectedClient(BaseModel):

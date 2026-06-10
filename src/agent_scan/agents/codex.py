@@ -1,27 +1,18 @@
-"""Codex CLI discoverer: ``~/.codex/config.toml`` MCP servers (TOML) + the
-officially-documented skill directories (``~/.agents/skills``, ``/etc/codex/skills``).
+"""Codex CLI discoverer: ``config.toml`` MCP servers (TOML) + skill directories.
 
-Codex stores its MCP servers in a TOML ``[mcp_servers.<name>]`` table inside
-``config.toml``, which the data-driven JSON pipeline (``well_known_clients.py`` +
-``inspect.py``) can't parse — so Codex MCP servers are invisible to it. This
-discoverer closes that gap. Skills follow the layout documented at
-https://developers.openai.com/codex/skills and MCP the layout at
-https://developers.openai.com/codex/mcp.
+Codex keeps MCP servers in a TOML ``[mcp_servers.<name>]`` table that the
+JSON-only data-driven pipeline can't parse, so they're invisible to it; this
+discoverer closes that gap. Paths follow developers.openai.com/codex.
 """
 
 import logging
 import os
 import sys
 import traceback
-from functools import cached_property
 from pathlib import Path
 
-# TOML parsing is stdlib from Python 3.11 (``tomllib``). The project still
-# declares ``requires-python >=3.10`` (though every real environment — CI 3.12,
-# devcontainer 3.11, local 3.13 — is ≥3.11), so the import is guarded: fall back
-# to the ``tomli`` backport when it happens to be installed, else degrade to a
-# no-op (Codex TOML parsing is skipped and logged as a gap) rather than break
-# import on 3.10.
+# ``tomllib`` is stdlib from 3.11; fall back to the ``tomli`` backport on 3.10,
+# else degrade to a no-op (TOML scans skipped) rather than failing import.
 try:
     import tomllib  # type: ignore[import-not-found]
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10 lacks stdlib TOML
@@ -39,7 +30,11 @@ from agent_scan.agents.base import (
     SkillsDirsResult,
     _walk_under_depth,
 )
-from agent_scan.models import CouldNotParseMCPConfig, PluginMCPConfigFile
+from agent_scan.models import (
+    ClaudeConfigFile,
+    CouldNotParseMCPConfig,
+    PluginMCPConfigFile,
+)
 from agent_scan.skill_client import inspect_skills_dir
 from agent_scan.well_known_clients import expand_path
 
@@ -47,69 +42,54 @@ logger = logging.getLogger(__name__)
 
 
 class CodexDiscoverer(AgentDiscoverer):
-    """OpenAI Codex CLI discovery: ``~/.codex/config.toml`` MCP servers + documented skills.
+    """OpenAI Codex CLI discovery: ``config.toml`` MCP servers (TOML) + skills.
 
-    MCP servers live in a TOML ``[mcp_servers.<name>]`` table (stdio via
-    ``command``/``args``/``env`` or HTTP via ``url``); the table is a flat
-    ``{name: serverConfig}`` map, so it routes straight through the inherited
-    :meth:`AgentDiscoverer._validate_servers`.
+    MCP servers live in a flat ``[mcp_servers.<name>]`` table (stdio or HTTP),
+    routed through the inherited :meth:`AgentDiscoverer._validate_servers`.
 
     Scopes covered:
 
-    * **User** — ``<codex_home>/config.toml`` MCP servers + profile config files
-      ``<codex_home>/<name>.config.toml`` MCP servers; user ``~/.agents/skills``.
-    * **Managed (enterprise)** — ``/etc/codex/managed_config.toml`` MCP servers.
-    * **Admin / machine** — admin ``/etc/codex/skills`` skills.
-    * **Plugins** — the ``<codex_home>/plugins/<subdir>`` trees (see
-      :attr:`_plugin_subdirs`) are walked for bundled ``.mcp.json`` MCP servers and
-      ``skills/`` directories, mirroring Claude Code's plugin walk under
-      ``~/.claude/plugins``.
-    * **Project** — every project recorded in the user config's ``[projects]``
-      table (keyed by absolute path) is scanned for its ``<proj>/.codex/config.toml``
-      MCP servers and ``<proj>/.agents/skills`` skills, plus every ancestor up to
-      the filesystem root (matching Codex's "walk up to the repository root"). The
-      ``[projects]`` table is the documented analogue of Claude Code's
-      ``~/.claude.json`` ``projects`` map, surfaced through the inherited
-      :meth:`AgentDiscoverer._discover_project_folders` /
-      :meth:`_project_paths_with_ancestors` seam.
+    * **User** — ``<codex_home>/config.toml`` + profile overlays
+      ``<codex_home>/<name>.config.toml``; skills in ``~/.agents/skills``, the
+      deprecated-but-still-loaded ``<codex_home>/skills``, and the OpenAI-embedded
+      ``<codex_home>/skills/.system`` cache.
+    * **System** — the machine-wide ``config.toml`` (``/etc/codex`` on Unix,
+      ``%ProgramData%\\OpenAI\\Codex`` on Windows) and ``/etc/codex/skills``.
+    * **Plugins** — ``<codex_home>/plugins`` walked for ``.mcp.json`` + ``skills/``. A
+      plugin manifest (``.codex-plugin/plugin.json``, or the ``.claude-plugin`` fallback)
+      may relocate its MCP config (``mcpServers``) or add a skills root (``skills``);
+      those ``./``-relative overrides are honored additively.
+    * **Project** — each ``[projects]`` entry and its ancestors, scanned for
+      ``.codex/config.toml`` servers and ``.agents/skills``. ``trust_level`` is
+      never read — every listed project is scanned regardless of trust.
 
-    The ``trust_level`` recorded alongside each project is **never read** — every
-    listed project is scanned regardless of trust (the table is treated purely as a
-    list of project paths).
+    Not covered: ``requirements.toml`` / legacy ``managed_config.toml`` (admin
+    allowlists, not server definitions); the enterprise *cloud* bundle
+    (``cloud-config-bundle-cache.json`` — HMAC-signed, short-TTL, identity-scoped, not a
+    stable parseable on-disk config); ``enabled = false`` flags (disabled entries are
+    still inventoried).
 
-    Deliberately not covered:
-
-    * ``requirements.toml`` (``/etc/codex/requirements.toml`` /
-      ``%ProgramData%\\OpenAI\\Codex\\requirements.toml``): it only *allowlists* MCP
-      servers, it does not define them — nothing to discover.
-    * The macOS-MDM managed-config preference domain (``com.openai.codex``) and the
-      Windows ``managed_config.toml`` location: non-filesystem / undocumented path.
-    * OpenAI-bundled "system" skills and a Windows admin-skills path: no concrete
-      path is documented.
-    * The ``[[skills.config]]`` / ``enabled = false`` disable flags are not honored —
-      configured-but-disabled skills/servers are still surfaced (an inventory choice).
+    TODO(ADS-422): the macOS MDM ``com.openai.codex`` managed-preferences layer DOES
+    land on disk (``/Library/Managed Preferences/com.openai.codex.plist``) and its
+    ``config_toml_base64`` key carries a full ``[mcp_servers]`` table — currently
+    unscanned. https://snyksec.atlassian.net/browse/ADS-422
     """
 
-    # MUST match the Codex entry name in ``well_known_clients.py`` so the Phase-A
-    # (data-driven) / Phase-B (this discoverer) merge in
-    # ``pipelines.discover_clients_to_inspect`` lines up on a single client.
+    # MUST match the Codex entry in ``well_known_clients.py`` so the Phase-A /
+    # Phase-B merge in ``pipelines`` lines up on one client.
     name = "codex"
 
     _install_path = "~/.codex"
     _config_filename = "config.toml"
-    # Documented skill locations (developers.openai.com/codex/skills):
-    #   user:  $HOME/.agents/skills   (home-relative; the cross-agent convention)
-    #   admin: /etc/codex/skills      (absolute, machine-wide; keyed by abs path so
-    #                                  it dedups across homes under --scan-all-users)
+    # Plugin manifest dirs Codex reads, in precedence order: the native
+    # ``.codex-plugin`` then the Claude-compat ``.claude-plugin`` fallback. The
+    # manifest file inside each is ``plugin.json``.
+    _plugin_manifest_dirs = (".codex-plugin", ".claude-plugin")
+    _plugin_manifest_filename = "plugin.json"
+    # Documented skill dirs (developers.openai.com/codex/skills): user (home-relative,
+    # cross-agent convention) + admin (absolute, machine-wide).
     _user_skills_relative = "~/.agents/skills"
     _admin_skills_dir = "/etc/codex/skills"
-    # Subtrees under ``<codex_home>/plugins`` that stage installed plugins, mirroring
-    # ``ClaudeCodeDiscoverer._plugin_subdirs``. ``cache`` is the hydrated install tree
-    # (verified on disk as ``cache/<marketplace>/<plugin>/<version>/``); ``marketplaces``
-    # holds cloned marketplace sources and ``repos`` is a legacy name — both included
-    # for parity with Claude Code and forward-compat (a subdir absent on disk is simply
-    # skipped). All can host MCP servers / skills. Drop an entry here to stop scanning it.
-    _plugin_subdirs: tuple[str, ...] = ("cache", "marketplaces", "repos")
 
     # --- public (override AgentDiscoverer abstracts) ---
 
@@ -123,14 +103,14 @@ class CodexDiscoverer(AgentDiscoverer):
         return None
 
     def discover_mcp_servers(self) -> McpConfigsResult:
-        """MCP servers across every config layer Codex reads: the user config, profile
-        config files, the enterprise managed config, installed plugins, and each
-        registered project's config."""
+        """MCP servers across every on-disk layer: user + profile + system config,
+        plugins, and each registered project."""
         result: McpConfigsResult = {}
         result.update(self._discover_user_mcp_servers())
         result.update(self._discover_profile_mcp_servers())
-        result.update(self._discover_managed_mcp_servers())
+        result.update(self._discover_system_mcp_servers())
         result.update(self._discover_plugin_mcp_servers())
+        result.update(self._discover_plugin_manifest_mcp_servers())
         result.update(self._discover_project_mcp_servers())
         return result
 
@@ -140,6 +120,7 @@ class CodexDiscoverer(AgentDiscoverer):
         result: SkillsDirsResult = {}
         result.update(self._discover_global_skills())
         result.update(self._discover_plugin_skills())
+        result.update(self._discover_plugin_manifest_skills())
         result.update(self._discover_project_skills())
         return result
 
@@ -148,16 +129,12 @@ class CodexDiscoverer(AgentDiscoverer):
     def _discover_user_mcp_servers(self) -> McpConfigsResult:
         """Parse the ``mcp_servers`` table in ``<codex_home>/config.toml``."""
         config_path = self._codex_home() / self._config_filename
-        return self._mcp_servers_from_data(self._user_config_toml, config_path)
+        return self._mcp_servers_from_data(self._user_config_toml(), config_path)
 
     def _discover_profile_mcp_servers(self) -> McpConfigsResult:
-        """Parse ``mcp_servers`` from profile config files ``$CODEX_HOME/<name>.config.toml``.
-
-        Codex profiles live next to the main config as ``<profile-name>.config.toml``
-        and are config.toml-shaped overlays selected with ``--profile``; a profile can
-        carry its own ``[mcp_servers]``. The main ``config.toml`` does not match the
-        ``*.config.toml`` glob, but it is excluded explicitly for safety (it is handled
-        by :meth:`_discover_user_mcp_servers`). An unreadable ``codex_home`` is skipped.
+        """Parse ``mcp_servers`` from profile overlays ``<codex_home>/<name>.config.toml``
+        (selected with ``--profile``). The main ``config.toml`` is excluded; an
+        unreadable home is skipped.
         """
         result: McpConfigsResult = {}
         codex_home = self._codex_home()
@@ -171,48 +148,43 @@ class CodexDiscoverer(AgentDiscoverer):
             result.update(self._mcp_servers_from_data(self._load_toml_file(profile_file), profile_file))
         return result
 
-    def _discover_managed_mcp_servers(self) -> McpConfigsResult:
-        """Parse ``mcp_servers`` from the enterprise managed config (per-OS system path).
-
-        ``managed_config.toml`` holds admin-pushed ``managed defaults`` in the same
-        shape as ``config.toml`` (the macOS-MDM form ships it as ``config_toml_base64``),
-        so it can define ``[mcp_servers]``. This is the Codex analogue of Claude Code's
-        machine-level ``managed-mcp.json`` (see ``ClaudeCodeDiscoverer._managed_mcp_path``);
-        it is a fixed system path, identical across homes on one machine, and keyed by
-        absolute path so duplicates collapse. The ``requirements.toml`` layer only
-        *allowlists* servers (it doesn't define them), so it is intentionally not read.
+    def _discover_system_mcp_servers(self) -> McpConfigsResult:
+        """Parse ``mcp_servers`` from the machine-wide system ``config.toml`` (same
+        shape as the user config). Fixed absolute path, keyed by it so it dedups
+        across homes under ``--scan-all-users``.
         """
-        path = self._managed_config_path()
+        path = self._system_config_path()
         if path is None:
             return {}
         return self._mcp_servers_from_data(self._load_toml_file(path), path)
 
-    def _managed_config_path(self) -> Path | None:
-        """Per-OS absolute path to the enterprise ``managed_config.toml``, or ``None``
-        on platforms where it isn't documented. See
-        https://developers.openai.com/codex/enterprise/managed-configuration."""
+    def _system_config_path(self) -> Path | None:
+        """Per-OS path to the system ``config.toml``: ``/etc/codex/config.toml`` on
+        Unix, ``%ProgramData%\\OpenAI\\Codex\\config.toml`` on Windows (ProgramData from
+        the env — machine-global, so honoring it under ``--scan-all-users`` is correct).
+        """
         if sys.platform in ("darwin", "linux", "linux2"):
-            return Path("/etc/codex/managed_config.toml")
-        # On Windows the managed-defaults file location is not clearly documented
-        # (``requirements.toml`` lives under ``%ProgramData%\\OpenAI\\Codex`` but the
-        # managed_config.toml path is ambiguous), so it is left as a flagged gap rather
-        # than guessed. The macOS-MDM preference domain (``com.openai.codex``) is a
-        # separate, non-filesystem mechanism and is likewise not read.
+            return Path("/etc/codex/config.toml")
+        if sys.platform == "win32":
+            # Codex resolves ProgramData via the ``FOLDERID_ProgramData`` known-folder
+            # API; reading ``%PROGRAMDATA%`` is a safe approximation (it's machine-global
+            # and kept in sync with the env var) and matches the managed-path convention
+            # in ``claude_code.py``. (Windows uppercases ``os.environ`` keys:
+            # ``ProgramData`` -> ``PROGRAMDATA``.)
+            program_data = os.environ.get("PROGRAMDATA") or r"C:\ProgramData"
+            return Path(program_data) / "OpenAI" / "Codex" / "config.toml"
         return None
 
     # --- private: plugin discovery (mirrors ClaudeCodeDiscoverer's plugin walk) ---
 
     def _plugin_base_dirs(self) -> list[Path]:
-        """Every ``<codex_home>/plugins/<subdir>`` to walk for plugin MCP servers and
-        skills, one per :attr:`_plugin_subdirs`. Mirrors
-        ``ClaudeCodeDiscoverer._plugin_base_dirs``; a subdir absent on disk is skipped
-        downstream by :func:`_walk_under_depth`."""
-        root = self._codex_home() / "plugins"
-        return [root / sub for sub in self._plugin_subdirs]
+        """The Codex plugins root ``<codex_home>/plugins`` (Codex installs under
+        ``plugins/cache/<marketplace>/<plugin>/<version>/``), walked recursively by the
+        plugin scans. A missing root is skipped by :func:`_walk_under_depth`."""
+        return [self._codex_home() / "plugins"]
 
     def _discover_plugin_mcp_servers(self) -> McpConfigsResult:
-        """Scan every plugin tree for ``.mcp.json`` files (mirrors
-        ``ClaudeCodeDiscoverer._discover_plugin_mcp_servers``)."""
+        """Scan every plugin tree for ``.mcp.json`` files."""
         result: McpConfigsResult = {}
         for base in self._plugin_base_dirs():
             for mcp_file in _walk_under_depth(base, ".mcp.json", _MAX_PLUGIN_RGLOB_DEPTH, want_file=True):
@@ -225,20 +197,101 @@ class CodexDiscoverer(AgentDiscoverer):
         return result
 
     def _discover_plugin_skills(self) -> SkillsDirsResult:
-        """Scan ``skills/`` subdirs under every plugin tree (mirrors
-        ``ClaudeCodeDiscoverer._discover_plugin_skills``)."""
+        """Scan ``skills/`` subdirs under every plugin tree (the default location). A
+        manifest may declare an *additional* skills root; see
+        :meth:`_discover_plugin_manifest_skills`."""
         return self._discover_skill_and_command_dirs(self._plugin_base_dirs(), "skills", inspect_skills_dir)
 
-    def _parse_plugin_mcp_json(self, path: Path) -> McpScanResult:
-        """Parse a plugin ``.mcp.json`` (JSON, unlike the TOML configs).
+    def _plugin_manifests(self) -> list[tuple[Path, dict]]:
+        """Locate installed plugin manifests under the plugins root, returning
+        ``(plugin_root, manifest_data)`` for each.
 
-        Per the Codex plugin docs it is either a wrapped ``{"mcp_servers": {...}}``
-        object or a flat ``{name: serverConfig}`` map. The wrapped form is handled
-        first (none of the shared ``MCPConfig`` models recognize the snake-case
-        ``mcp_servers`` wrapper key); otherwise it falls back to the flat
-        ``PluginMCPConfigFile`` shape via :meth:`_parse_mcp_file`. Returns ``None`` for
-        missing/empty/unrecognized files and ``CouldNotParseMCPConfig`` for malformed
-        JSON.
+        A manifest lives at ``<plugin_root>/.codex-plugin/plugin.json`` (preferred) or
+        ``<plugin_root>/.claude-plugin/plugin.json`` (Claude-compat fallback). We walk
+        for ``plugin.json`` files, keep those whose parent dir is one of the manifest
+        dirs, and prefer the higher-precedence dir when a plugin root has both.
+        Unparseable / non-dict manifests are skipped.
+        """
+        precedence = self._plugin_manifest_dirs
+        by_root: dict[Path, Path] = {}
+        for base in self._plugin_base_dirs():
+            for manifest_path in _walk_under_depth(
+                base, self._plugin_manifest_filename, _MAX_PLUGIN_RGLOB_DEPTH, want_file=True
+            ):
+                dir_name = manifest_path.parent.name
+                if dir_name not in precedence:
+                    continue
+                plugin_root = manifest_path.parent.parent
+                existing = by_root.get(plugin_root)
+                if existing is None or precedence.index(dir_name) < precedence.index(existing.parent.name):
+                    by_root[plugin_root] = manifest_path
+        result: list[tuple[Path, dict]] = []
+        for plugin_root, manifest_path in by_root.items():
+            data = self._load_json_file(manifest_path)
+            if isinstance(data, dict):
+                result.append((plugin_root, data))
+        return result
+
+    def _resolve_manifest_relative_path(self, plugin_root: Path, value: object) -> Path | None:
+        """Resolve a manifest path value (``mcpServers`` / ``skills``) to an absolute
+        path under ``plugin_root``, mirroring Codex's rules: the value must be a string
+        starting with ``./`` and must not be absolute or contain a ``..`` component.
+        Anything else returns ``None`` (the override is ignored).
+        """
+        if not isinstance(value, str) or not value.startswith("./"):
+            return None
+        relative = value[2:].strip()
+        if not relative:
+            return None
+        candidate = Path(relative)
+        if candidate.is_absolute() or ".." in candidate.parts:
+            return None
+        return plugin_root / candidate
+
+    def _discover_plugin_manifest_mcp_servers(self) -> McpConfigsResult:
+        """Honor a plugin manifest's ``mcpServers`` path override: when a manifest
+        relocates its MCP config to a ``./``-relative file, parse that file too.
+        Additive to the default ``.mcp.json`` walk (keyed by path, so an override
+        pointing back at ``.mcp.json`` dedups with it).
+        """
+        result: McpConfigsResult = {}
+        for plugin_root, manifest in self._plugin_manifests():
+            resolved = self._resolve_manifest_relative_path(plugin_root, manifest.get("mcpServers"))
+            if resolved is None:
+                continue
+            parsed = self._parse_plugin_mcp_json(resolved)
+            if not parsed:
+                continue
+            result[resolved.as_posix()] = parsed
+        return result
+
+    def _discover_plugin_manifest_skills(self) -> SkillsDirsResult:
+        """Honor a plugin manifest's ``skills`` path override: scan an extra
+        ``./``-relative skills root declared in the manifest. Additive to the default
+        ``skills/`` walk (keyed by path, so an override naming ``./skills`` dedups).
+        """
+        result: SkillsDirsResult = {}
+        for plugin_root, manifest in self._plugin_manifests():
+            resolved = self._resolve_manifest_relative_path(plugin_root, manifest.get("skills"))
+            if resolved is None:
+                continue
+            entries = self._scan_skills_dir(resolved)
+            if entries is not None:
+                result[resolved.as_posix()] = entries
+        return result
+
+    def _parse_plugin_mcp_json(self, path: Path) -> McpScanResult:
+        """Parse a plugin ``.mcp.json`` (JSON) in any of the three shapes Codex accepts:
+
+        * the camelCase-wrapped ``{"mcpServers": {...}}`` form (``ClaudeConfigFile``) — the
+          shape Codex's plugin loader actually deserializes (its ``PluginMcpServersFile``
+          struct is ``#[serde(rename_all = "camelCase")]``; see openai/codex#22105);
+        * the flat ``{name: serverConfig}`` map (``PluginMCPConfigFile``);
+        * the snake_case-wrapped ``{"mcp_servers": {...}}`` form (handled first — no shared
+          ``MCPConfig`` model knows that snake-case key). Codex's docs show this shape even
+          though the loader expects camelCase, so it is accepted as a deliberate superset.
+
+        ``None`` if missing/empty/unrecognized, ``CouldNotParseMCPConfig`` if malformed.
         """
         data = self._load_json_file(path)
         if data is None or isinstance(data, CouldNotParseMCPConfig):
@@ -248,16 +301,12 @@ class CodexDiscoverer(AgentDiscoverer):
             if not servers:
                 return None
             return self._validate_servers(servers, source=f"mcp_servers in {path.as_posix()}")
-        return self._parse_mcp_file(path, formats=(PluginMCPConfigFile,), skip_unrecognized=True)
+        return self._parse_mcp_file(path, formats=(ClaudeConfigFile, PluginMCPConfigFile), skip_unrecognized=True)
 
     def _discover_project_mcp_servers(self) -> McpConfigsResult:
-        """Parse ``<project>/.codex/config.toml`` ``mcp_servers`` for every registered
-        project root and its ancestors (up to the filesystem root).
-
-        Walking ancestors mirrors ``ClaudeCodeDiscoverer._discover_project_mcp_servers``
-        so a monorepo root's config is found when only a sub-package is the registered
-        project. Each file is keyed by its absolute path, so a file that coincides with
-        the user config (e.g. an ancestor equal to ``codex_home``) dedups in the merge.
+        """Parse ``<project>/.codex/config.toml`` servers for every registered project
+        and its ancestors (so a monorepo root is found from a sub-package). Keyed by
+        absolute path, so an ancestor equal to ``codex_home`` dedups in the merge.
         """
         result: McpConfigsResult = {}
         for path in self._project_paths_with_ancestors():
@@ -266,14 +315,9 @@ class CodexDiscoverer(AgentDiscoverer):
         return result
 
     def _mcp_servers_from_data(self, data: dict | CouldNotParseMCPConfig | None, config_path: Path) -> McpConfigsResult:
-        """Turn a loaded ``config.toml`` into a (possibly empty) ``{path: result}`` map.
-
-        ``config.toml`` is multi-purpose (model, approval, sandbox, … settings), so
-        discovery is gated on the presence of a non-empty ``mcp_servers`` table: a
-        config without it returns ``{}`` (no entry) rather than a spurious parse
-        failure (mirrors ``ClaudeCodeDiscoverer._discover_global_mcp_servers``).
-        Missing/empty/unreadable (``None``) yields ``{}``; malformed TOML
-        (``CouldNotParseMCPConfig``) is surfaced keyed by the file.
+        """Turn a loaded ``config.toml`` into a ``{path: result}`` map, gated on a
+        non-empty ``mcp_servers`` table (the multi-purpose config without one is not a
+        parse failure). ``None`` -> ``{}``; malformed TOML is surfaced keyed by file.
         """
         if data is None:
             return {}
@@ -288,14 +332,10 @@ class CodexDiscoverer(AgentDiscoverer):
     # --- private: project enumeration ---
 
     def _discover_project_folders(self) -> list[Path]:
-        """Project roots recorded under the ``[projects]`` table in the user config.
-
-        Keys are absolute project paths; the ``trust_level`` value is intentionally
-        **not** read — every listed project is returned regardless of trust (the table
-        is treated purely as a path list). The returned roots flow into the inherited
-        :meth:`_project_paths_with_ancestors`, which every project-scoped scan consumes.
+        """Project roots from the ``[projects]`` table. ``trust_level`` is intentionally
+        not read — every listed project is returned regardless of trust.
         """
-        data = self._user_config_toml
+        data = self._user_config_toml()
         if not isinstance(data, dict):
             return []
         projects = data.get("projects")
@@ -306,15 +346,21 @@ class CodexDiscoverer(AgentDiscoverer):
     # --- private: skills discovery ---
 
     def _discover_global_skills(self) -> SkillsDirsResult:
-        """Scan the documented user (``~/.agents/skills``) and admin
-        (``/etc/codex/skills``) skill directories.
+        """Scan the user (``~/.agents/skills``), the deprecated-but-still-loaded
+        ``<codex_home>/skills`` (kept by Codex for backward compatibility), the
+        OpenAI-embedded ``<codex_home>/skills/.system`` cache, and admin
+        (``/etc/codex/skills``) skill dirs; missing/non-dir/unreadable paths are skipped.
+        These ``<codex_home>``-rooted dirs follow ``CODEX_HOME``, so a relocated home is
+        covered where the legacy pipeline only scans the literal ``~/.codex/skills``.
 
-        Both go through :meth:`AgentDiscoverer._scan_skills_dir`, which tolerates a
-        missing path, a regular file, or an unreadable dir (``PermissionError``
-        under ``--scan-all-users``) by skipping it rather than aborting discovery.
+        ``.system`` is scanned in its own right because its skills nest one level inside it
+        (``.system/<name>/SKILL.md``, e.g. ``imagegen``), below the one-level
+        ``<codex_home>/skills`` scan that would otherwise skip the dot-dir.
         """
         result: SkillsDirsResult = {}
         skills_dirs = (
+            self._codex_home() / "skills",
+            self._codex_home() / "skills" / ".system",
             expand_path(Path(self._user_skills_relative), self.home_directory),
             Path(self._admin_skills_dir),
         )
@@ -325,9 +371,7 @@ class CodexDiscoverer(AgentDiscoverer):
         return result
 
     def _discover_project_skills(self) -> SkillsDirsResult:
-        """Scan ``<project>/.agents/skills`` for every registered project root and its
-        ancestors — covering Codex's documented walk of ``.agents/skills`` from the
-        working directory up to the repository root."""
+        """Scan ``<project>/.agents/skills`` for every registered project and ancestor."""
         result: SkillsDirsResult = {}
         for path in self._project_paths_with_ancestors():
             skills_dir = path / ".agents" / "skills"
@@ -339,14 +383,9 @@ class CodexDiscoverer(AgentDiscoverer):
     # --- CODEX_HOME resolution ---
 
     def _codex_home(self) -> Path:
-        """Base directory holding Codex state (``~/.codex`` by default).
-
-        ``CODEX_HOME`` relocates it. The env var reflects the *scanning process's*
-        environment, so it is honored only when scanning that process's own home
-        (see :meth:`AgentDiscoverer._scans_own_home`); under ``--scan-all-users``
-        the scanner can't know each other target user's env, so the per-home
-        default is used. Mirrors how ``ClaudeCodeDiscoverer`` treats
-        ``CLAUDE_CONFIG_DIR``.
+        """Codex state dir (``~/.codex`` by default). ``CODEX_HOME`` relocates it, but
+        only on an own-home scan — under ``--scan-all-users`` the scanner can't know
+        another user's env. Mirrors ``ClaudeCodeDiscoverer``'s ``CLAUDE_CONFIG_DIR``.
         """
         if self._scans_own_home():
             codex_home = os.environ.get("CODEX_HOME")
@@ -354,26 +393,19 @@ class CodexDiscoverer(AgentDiscoverer):
                 return Path(codex_home)
         return expand_path(Path(self._install_path), self.home_directory)
 
-    @cached_property
     def _user_config_toml(self) -> dict | CouldNotParseMCPConfig | None:
-        """Parsed ``<codex_home>/config.toml``, read once per discoverer lifetime.
-
-        Both the user-scope MCP scan and the ``[projects]`` enumeration read it, so
-        caching avoids re-parsing the same file. A discoverer is constructed once per
-        home for a single scan, so the file is stable for its lifetime.
+        """Read and TOML-decode ``<codex_home>/config.toml`` (``None`` if missing/empty,
+        ``CouldNotParseMCPConfig`` if malformed). Re-read on each call rather than
+        cached, matching the uncached ``ClaudeCodeDiscoverer._load_config_raw``.
         """
         return self._load_toml_file(self._codex_home() / self._config_filename)
 
     # --- TOML loader (mirrors AgentDiscoverer._load_json_file semantics) ---
 
     def _load_toml_file(self, path: Path) -> dict | CouldNotParseMCPConfig | None:
-        """TOML-decode ``path``. ``None`` if missing, empty, unreadable (permissions
-        / TOML support unavailable), parsed dict on success, ``CouldNotParseMCPConfig``
-        on malformed TOML.
-
-        Mirrors :meth:`AgentDiscoverer._load_json_file`: same oversize cap,
-        ``PermissionError``-as-missing tolerance, and empty-file-as-empty-config
-        handling — only the decoder differs (``tomllib`` vs ``pyjson5``).
+        """TOML-decode ``path``: ``None`` if missing/empty/unreadable, parsed dict on
+        success, ``CouldNotParseMCPConfig`` on malformed TOML. Mirrors
+        :meth:`AgentDiscoverer._load_json_file` (same size cap + permission tolerance).
         """
         if tomllib is None:  # pragma: no cover - Python 3.10 without the tomli backport
             logger.warning("TOML support unavailable (Python < 3.11, no tomli); skipping %s", path.as_posix())
