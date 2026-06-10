@@ -35,63 +35,10 @@ async def test_payload_includes_required_fields(monkeypatch):
     assert data["client"]["control_identifier"] == "machine-1"
     assert data["host"]["hostname"]
     assert data["host"]["current_username"]
-    # `runtimes` is an open dict populated by `_DEFAULT_PROBED_TOOLS`; "python"
-    # is one of those probes (`python --version`), so the key is always
-    # present in the request even when the binary is missing on PATH (in
-    # which case the value is None).
-    assert "python" in data["host"]["runtimes"]
-
-
-@pytest.mark.asyncio
-async def test_payload_runtimes_passes_through_probed_tools_verbatim(monkeypatch):
-    # `runtimes` is whatever `get_tool_versions` returns, no post-processing
-    # in `_build_request`. python is just another probed tool now.
-    monkeypatch.setattr(
-        bootstrap_module,
-        "get_readable_home_directories",
-        lambda all_users=False: [(Path("/home/alice"), "alice")],
-    )
-
-    async def fake_probes():
-        return {
-            "python": "Python 3.12.5",
-            "node": "v20.10.0",
-            "npx": "10.2.3",
-            "uvx": "0.4.18",
-            "docker": None,
-            # Shell-side deps of the stdio-local-proxy shim. bash/shasum/grep
-            # support `--version` on both GNU and BSD; cut/mktemp/tee accept
-            # it on GNU but not on BSD — the BSD-None case is exercised here
-            # via `mktemp` so the payload contract for the shim deps stays
-            # pinned alongside the original runtimes set.
-            "bash": "GNU bash, version 5.2.15",
-            "shasum": "shasum (perl) version 6.04",
-            "cut": "cut (GNU coreutils) 9.4",
-            "mktemp": None,
-            "tee": "tee (GNU coreutils) 9.4",
-            "grep": "grep (GNU grep) 3.11",
-        }
-
-    monkeypatch.setattr(bootstrap_module, "get_tool_versions", fake_probes)
-
-    payload = await bootstrap_module._build_request("scan", None, None, [])
-    runtimes = payload.model_dump()["host"]["runtimes"]
-
-    assert runtimes["python"] == "Python 3.12.5"
-    assert runtimes["node"] == "v20.10.0"
-    assert runtimes["npx"] == "10.2.3"
-    assert runtimes["uvx"] == "0.4.18"
-    # `None` means "we probed and the tool isn't installed" — it must be
-    # preserved as an explicit null in the payload, not dropped.
-    assert runtimes["docker"] is None
-    # Shim deps: each is reported verbatim, including the BSD-None case
-    # for mktemp (where `--version` is unsupported on BSD/macOS).
-    assert runtimes["bash"] == "GNU bash, version 5.2.15"
-    assert runtimes["shasum"] == "shasum (perl) version 6.04"
-    assert runtimes["cut"] == "cut (GNU coreutils) 9.4"
-    assert runtimes["mktemp"] is None
-    assert runtimes["tee"] == "tee (GNU coreutils) 9.4"
-    assert runtimes["grep"] == "grep (GNU grep) 3.11"
+    # Tool-version probing has been removed: the payload no longer carries a
+    # `runtimes` dict, so the bootstrap handshake never shells out to probe
+    # python/node/docker/etc.
+    assert "runtimes" not in data["host"]
 
 
 @pytest.mark.asyncio

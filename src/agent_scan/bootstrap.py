@@ -27,7 +27,6 @@ from agent_scan.utils import (
     get_environment,
     get_hostname,
     get_readable_home_directories,
-    get_tool_versions,
     get_username,
 )
 from agent_scan.verify_api import setup_tcp_connector
@@ -165,19 +164,15 @@ async def _build_request(
     # Security review allowlist: this payload sends client metadata, host OS
     # details, hostname/current username, CI/WSL/container booleans, shell/term,
     # locale/timezone, cwd/home/executable paths, readable home directories capped
-    # at 1000 entries, redacted argv tokens, and a runtimes dict containing
-    # best-effort versions of python/node/npx/uvx/docker (each value is the
-    # verbatim first line of `<tool> --version`, or None when probing fails).
+    # at 1000 entries, and redacted argv tokens.
     # It intentionally excludes scanned_usernames and schema_version.
     # Home enumeration mirrors the scan's --scan-all-users opt-in: a single-user
     # scan only reports the current user's home, matching what discovery touches.
-    # Run the two slow signals (home enumeration + external tool probes)
-    # concurrently. Both are subprocess/IO bound and independent, so total
-    # wall time is bounded by whichever is slower rather than their sum.
-    home_dirs_raw, runtimes = await asyncio.gather(
-        asyncio.to_thread(get_readable_home_directories, all_users=scan_all_users),
-        get_tool_versions(),
-    )
+    # Home enumeration is subprocess/IO bound, so offload it to a thread to
+    # keep the event loop responsive. The result is not part of the payload
+    # (see "paths" exclusion below); the call is retained for its access-probe
+    # logging side effects.
+    await asyncio.to_thread(get_readable_home_directories, all_users=scan_all_users)
 
     return ClientBootstrapRequest(
         client=ClientInfo(
@@ -203,7 +198,6 @@ async def _build_request(
             term=os.environ.get("TERM"),
             locale=_get_locale(),
             timezone=_get_timezone(),
-            runtimes=runtimes,
         ),
     )
 
