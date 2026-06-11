@@ -27,9 +27,19 @@ logger = logging.getLogger(__name__)
 _MAX_COMMANDS_WALK_DEPTH = 10
 
 
+# Filenames that mark a directory as a skill. ``skill.md`` is the open Agent
+# Skills standard; ``power.md`` is Kiro's per-Power steering/instruction file
+# (the SKILL.md equivalent), which ships inside each installed Power directory
+# at ~/.kiro/powers/installed/<name>/. POWER.md is unique to Kiro Powers, so
+# recognizing it here does not affect any other agent's skill discovery. (No
+# system/project/extension Power location is documented — that is a coverage
+# gap by design, not handled here.)
+_SKILL_MD_FILENAMES = ("skill.md", "power.md")
+
+
 def get_skill_md_path(path: str) -> str | None:
     for file in os.listdir(path):
-        if file.lower() == "skill.md":
+        if file.lower() in _SKILL_MD_FILENAMES:
             return file
     return None
 
@@ -89,7 +99,7 @@ def inspect_skill(config: SkillServer) -> ServerSignature:
         return _inspect_skill_file(expanded_path)
     skill_md_path = get_skill_md_path(config.path)
     if skill_md_path is None:
-        raise Exception(f"neither SKILL.md nor skill.md file found at path: {config.path}")
+        raise Exception(f"neither SKILL.md, skill.md, nor POWER.md file found at path: {config.path}")
     with open(os.path.expanduser(os.path.join(config.path, skill_md_path)), encoding="utf-8") as f:
         content = f.read()
 
@@ -109,6 +119,9 @@ def inspect_skill(config: SkillServer) -> ServerSignature:
     if "name" not in yaml_data:
         raise Exception(f"Invalid SKILL.md file: {config.path}. Missing name in the YAML frontmatter.")
     name = yaml_data["name"]
+    # Both name and description are required. Kiro POWER.md frontmatter carries
+    # both (plus displayName/keywords/author); a POWER.md missing description
+    # surfaces here as a per-skill error, exactly like a malformed SKILL.md.
     if "description" not in yaml_data:
         raise Exception(f"Invalid SKILL.md file: {config.path}. Missing description in the YAML frontmatter.")
     description = yaml_data["description"]
@@ -150,7 +163,9 @@ def traverse_skill_tree(skill_path: str, relative_path: str | None) -> tuple[lis
             resources.extend(resources_sub)
             tools.extend(tools_sub)
             continue
-        elif file.lower() == "skill.md" and not relative_path:
+        elif file.lower() in _SKILL_MD_FILENAMES and not relative_path:
+            # The root skill file (SKILL.md / Kiro's POWER.md) is already surfaced
+            # as the base prompt; don't re-emit it as a nested prompt.
             continue
 
         elif file.endswith(".md"):

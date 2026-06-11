@@ -9,7 +9,7 @@ Code command files are flat ``*.md`` files, so they need their own scanner
 from pathlib import Path
 
 from agent_scan.models import SkillServer
-from agent_scan.skill_client import inspect_commands_dir, inspect_skill
+from agent_scan.skill_client import get_skill_md_path, inspect_commands_dir, inspect_skill
 
 
 def test_inspect_commands_dir_surfaces_flat_md_files(tmp_path):
@@ -150,3 +150,46 @@ def test_inspect_skill_body_horizontal_rules_not_parsed_as_frontmatter(tmp_path)
     sig = inspect_skill(SkillServer(path=str(cmd)))
 
     assert sig.metadata.serverInfo.name == "deploy"
+
+
+# --- Kiro Powers: POWER.md is the per-Power steering file (SKILL.md equivalent) ---
+
+
+def test_get_skill_md_path_matches_power_md_case_insensitive(tmp_path):
+    """Kiro Powers ship a POWER.md (not SKILL.md); the skill-file probe must
+    recognize it so a Power dir counts as a skill."""
+    power = tmp_path / "databricks"
+    power.mkdir()
+    (power / "POWER.md").write_text("---\nname: x\ndescription: y\n---\nbody")
+
+    assert get_skill_md_path(str(power)) == "POWER.md"
+
+
+def test_inspect_skill_reads_power_md_frontmatter(tmp_path):
+    """A POWER.md dir is inspected like a SKILL.md dir: frontmatter name/description
+    populate ``serverInfo`` and ``instructions``."""
+    power = tmp_path / "databricks"
+    power.mkdir()
+    (power / "POWER.md").write_text("---\nname: databricks\ndescription: Databricks power\n---\n\nUse it.\n")
+
+    sig = inspect_skill(SkillServer(path=str(power)))
+
+    assert sig.metadata.serverInfo.name == "databricks"
+    assert sig.metadata.instructions == "Databricks power"
+
+
+def test_inspect_skill_does_not_duplicate_root_power_md_prompt(tmp_path):
+    """The root POWER.md is the base prompt; the tree walk must NOT re-emit it as a
+    nested prompt. A Power's steering/*.md files ARE surfaced as prompts."""
+    power = tmp_path / "databricks"
+    (power / "steering").mkdir(parents=True)
+    (power / "POWER.md").write_text("---\nname: databricks\ndescription: d\n---\n\nbody\n")
+    (power / "steering" / "setup.md").write_text("# Setup steps")
+
+    sig = inspect_skill(SkillServer(path=str(power)))
+
+    prompt_names = [p.name for p in sig.prompts]
+    assert any(n.replace("\\", "/") == "steering/setup.md" for n in prompt_names)
+    # The root POWER.md must not appear as a nested prompt (the base prompt is
+    # emitted separately under a fixed label).
+    assert "POWER.md" not in prompt_names
