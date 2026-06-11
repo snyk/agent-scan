@@ -300,3 +300,71 @@ class TestMCPServerMap:
 
         with pytest.raises(ValidationError):
             MCPServerMap(servers={"bad": {"not_a": "server"}})
+
+
+class TestSkillServerPromptArtifact:
+    """SkillServer models any prompt-based artifact (skill/command/agent/power).
+
+    ``type`` is a ``PromptArtifact`` literal -- the single extension point for
+    new prompt-file kinds. Adding a kind = adding one value to ``PromptArtifact``,
+    mirrored in invariant-mcp-scan-backend + invariant-platform. ``skill`` stays
+    the default so existing discovery (skills + commands folded onto skills) is
+    unchanged.
+    """
+
+    def test_default_type_is_skill(self):
+        from agent_scan.models import SkillServer
+
+        assert SkillServer(path="/x/SKILL.md").type == "skill"
+
+    @pytest.mark.parametrize("artifact_type", ["skill", "command", "agent", "power"])
+    def test_accepts_each_prompt_artifact_type(self, artifact_type):
+        from agent_scan.models import SkillServer
+
+        assert SkillServer(path="/x/file.md", type=artifact_type).type == artifact_type
+
+    def test_rejects_unknown_type(self):
+        from agent_scan.models import SkillServer
+
+        with pytest.raises(ValidationError):
+            SkillServer(path="/x/file.md", type="bogus")
+
+    def test_prompt_artifact_lists_supported_kinds(self):
+        from typing import get_args
+
+        from agent_scan.models import PromptArtifact
+
+        assert set(get_args(PromptArtifact)) == {"skill", "command", "agent", "power"}
+
+    @pytest.mark.parametrize("artifact_type", ["command", "agent", "power"])
+    def test_new_type_round_trips_through_backend_payload(self, artifact_type):
+        """A new prompt-artifact type survives serialization to the upload payload
+        and back -- the end-to-end wire shape the backend/platform must accept."""
+        from agent_scan.models import (
+            ScanPathResult,
+            ScanPathResultsCreate,
+            ScanUserInfo,
+            ServerScanResult,
+            SkillServer,
+        )
+
+        payload = ScanPathResultsCreate(
+            scan_path_results=[
+                ScanPathResult(
+                    path="/home/u/.claude",
+                    servers=[
+                        ServerScanResult(
+                            name="my-artifact",
+                            server=SkillServer(path="/home/u/.claude/x.md", type=artifact_type),
+                        )
+                    ],
+                )
+            ],
+            scan_user_info=ScanUserInfo(),
+        )
+
+        roundtripped = ScanPathResultsCreate.model_validate_json(payload.model_dump_json())
+
+        server = roundtripped.scan_path_results[0].servers[0].server
+        assert isinstance(server, SkillServer)
+        assert server.type == artifact_type

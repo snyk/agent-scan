@@ -13,6 +13,7 @@ from agent_scan.models import (
     Issue,
     ScanError,
     ScanPathResult,
+    SkillServer,
     ToxicFlowExtraData,
 )
 
@@ -313,7 +314,10 @@ def print_scan_path_result(
     server_count = 0
     skill_count = 0
     for server in result.servers or []:
-        if server.server.type == "skill":
+        # Any prompt-based artifact (skill/command/agent/power) is a SkillServer;
+        # key off the model, not ``type == "skill"``, so non-skill kinds aren't
+        # miscounted as MCP servers.
+        if isinstance(server.server, SkillServer):
             skill_count += 1
         else:
             server_count += 1
@@ -353,7 +357,7 @@ def print_scan_path_result(
                     entity,
                     issues,
                     inspect_mode,
-                    is_skill=server.server.type == "skill",
+                    is_skill=isinstance(server.server, SkillServer),
                     full_description=full_description,
                 )
             )
