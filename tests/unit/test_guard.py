@@ -40,6 +40,7 @@ from agent_scan.guard import (
     _install_hooks,
     _is_agent_scan_command,
     _mask_key,
+    _parse_codex_requirements_toml,
     _parse_command_info,
     _preflight_writable,
     _prepare_claude_config,
@@ -1109,6 +1110,23 @@ class TestCodexManagedRequirementsToml:
     def test_uninstall_missing_file_is_noop(self, tmp_path):
         _, uninstall, _, _ = self._import_managed_helpers()
         uninstall(tmp_path / "requirements.toml")  # should not raise
+
+    def test_parse_backslash_path_no_unicode_escape(self):
+        toml = (
+            "[[hooks.PreToolUse.hooks]]\n"
+            "type = \"command\"\n"
+            'command = "PUSH_KEY=\'pk\' bash \'C:\\\\Users\\\\me\\\\hooks\\\\snyk-agent-guard.sh\' --client codex"\n'
+        )
+        events, cmd = _parse_codex_requirements_toml(toml)
+        assert "PreToolUse" in events
+        assert "C:\\Users\\me\\hooks\\snyk-agent-guard.sh" in cmd
+
+    def test_prepare_survives_unparseable_existing_toml(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text('command = "C:\\Users\\bad"\n')
+        content, diff = _prepare_codex_managed_config(CODEX_AGENT_SCAN_CMD, path)
+        assert "[features]" in content
+        assert diff["added"]
 
 
 @pytest.mark.skipif(IS_WINDOWS, reason="bash script; skipped on Windows")

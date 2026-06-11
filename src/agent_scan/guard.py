@@ -473,7 +473,10 @@ def _prepare_codex_managed_config(command: str, path: Path) -> tuple[str, dict]:
     old_cmd: str | None = None
     if path.exists():
         old_text = path.read_text()
-        old_events, old_cmd = _parse_codex_requirements_toml(old_text)
+        try:
+            old_events, old_cmd = _parse_codex_requirements_toml(old_text)
+        except (UnicodeDecodeError, ValueError):
+            pass
 
     old_event_set = set(old_events)
     new_event_set = set(CODEX_HOOK_EVENTS)
@@ -519,7 +522,7 @@ def _parse_codex_requirements_toml(text: str) -> tuple[list[str], str | None]:
             continue
         m = command_re.match(line)
         if m and current_event:
-            cmd = m.group(1).encode("utf-8").decode("unicode_escape")
+            cmd = m.group(1).replace("\\\\", "\0").replace('\\"', '"').replace("\0", "\\")
             if _is_agent_scan_command(cmd) and current_event not in events:
                 events.append(current_event)
                 if found_cmd is None:
