@@ -2879,7 +2879,7 @@ def test_vscode_discoverer_reads_each_documented_workspace_skills_path(tmp_path,
 
 
 def test_kiro_discoverer_has_no_skills_dir(tmp_path):
-    """Kiro doesn't ship a skills directory — ``discover_skills`` returns ``{}``."""
+    """With no skills dir and no installed Powers, ``discover_skills`` returns ``{}``."""
     from agent_scan.agents import KiroDiscoverer
 
     (tmp_path / ".kiro").mkdir()
@@ -4600,6 +4600,69 @@ def test_kiro_powers_walk_finds_multiple_installed_powers(tmp_path):
 
     keys = [k for k in mcp_configs if "/powers/installed/" in k and k.endswith("/mcp.json")]
     assert len(keys) == 2
+
+
+# --- Kiro Powers: POWER.md (+ steering/) surfaced as a skill ---
+#
+# A Power's POWER.md is Kiro's per-Power steering/instruction file — the
+# equivalent of SKILL.md for the open Agent Skills standard. Powers live
+# user-global at ~/.kiro/powers/installed/<name>/; no system/project/extension
+# Power location is documented, so only the user-global level is covered.
+
+
+def test_kiro_power_md_dir_surfaced_as_skill(tmp_path):
+    """An installed Power whose dir holds a POWER.md is surfaced as a skill,
+    keyed under the ~/.kiro/powers/installed root."""
+    from pathlib import Path
+
+    from agent_scan.agents import KiroDiscoverer
+
+    power_dir = tmp_path / ".kiro" / "powers" / "installed" / "databricks"
+    power_dir.mkdir(parents=True)
+    (power_dir / "POWER.md").write_text("---\nname: databricks\ndescription: d\n---\n\nbody\n")
+
+    skills = KiroDiscoverer(tmp_path).discover_skills()
+
+    keys = [k for k in skills if k.endswith("/powers/installed")]
+    assert len(keys) == 1
+    entries = skills[keys[0]]
+    assert isinstance(entries, list)
+    name, skill = next(e for e in entries if e[0] == "databricks")
+    assert isinstance(skill, SkillServer)
+    assert Path(skill.path) == power_dir
+
+
+def test_kiro_multiple_powers_each_surface_power_md(tmp_path):
+    """Every installed Power with a POWER.md is surfaced."""
+    from agent_scan.agents import KiroDiscoverer
+
+    installed = tmp_path / ".kiro" / "powers" / "installed"
+    for name in ("databricks", "supabase"):
+        d = installed / name
+        d.mkdir(parents=True)
+        (d / "POWER.md").write_text(f"---\nname: {name}\ndescription: d\n---\n\nbody\n")
+
+    skills = KiroDiscoverer(tmp_path).discover_skills()
+
+    skill_names = {n for v in skills.values() if isinstance(v, list) for n, _ in v}
+    assert {"databricks", "supabase"} <= skill_names
+
+
+def test_kiro_power_without_power_md_not_surfaced(tmp_path):
+    """A Power dir with only mcp.json (no POWER.md) is not surfaced as a skill,
+    though its MCP servers are still discovered."""
+    from agent_scan.agents import KiroDiscoverer
+
+    power_dir = tmp_path / ".kiro" / "powers" / "installed" / "stripe"
+    power_dir.mkdir(parents=True)
+    (power_dir / "mcp.json").write_text('{"mcpServers": {"stripe-mcp": {"command": "s"}}}')
+
+    discoverer = KiroDiscoverer(tmp_path)
+    skill_names = {n for v in discoverer.discover_skills().values() if isinstance(v, list) for n, _ in v}
+    mcp_names = {n for v in discoverer.discover_mcp_servers().values() if isinstance(v, list) for n, _ in v}
+
+    assert "stripe" not in skill_names
+    assert "stripe-mcp" in mcp_names
 
 
 # --- Kiro: custom agents / subagents with inline mcpServers ---

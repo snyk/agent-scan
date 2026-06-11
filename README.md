@@ -94,7 +94,7 @@ Legend: **✓** detected · **✗** the agent supports this but Agent Scan does 
 | Gemini CLI | N/A | ✗ | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ |
 | OpenClaw | N/A | N/A | ✓ | ✗ | ✓ † | N/A | ✗ | ✗ |
 | Amp | N/A | ✗ | ✓ | ✗ | ✗ ‡ | ✗ | ✗ | ✗ |
-| Kiro | N/A | N/A | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Kiro | N/A | N/A | ✓ § | ✓ | ✓ | ✓ | ✓ | ✓ |
 | OpenCode | N/A | ✗ | ✗ | ✗ | ✗ | ✗ | N/A | N/A |
 | Antigravity | N/A | N/A | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Codex | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
@@ -103,6 +103,8 @@ Legend: **✓** detected · **✗** the agent supports this but Agent Scan does 
 † OpenClaw has no opened-project enumeration: its project/workspace skills are found only at the fixed `~/.openclaw/workspace/skills`
 
 ‡ Amp stores project/workspace skills at `.agents/skills` (and the `.claude/skills` compatibility path); only the user-scope `~/.config/agents/skills` is detected today, so project-scope skills are supported but not yet scanned.
+
+§ Kiro user skills include installed **Powers** at `~/.kiro/powers/installed/<name>/`, whose instruction file is `POWER.md` (the per-Power equivalent of `SKILL.md`) and which also surface their `steering/*.md` files. Powers are user-global only — no system/project/extension Power location is documented.
 
 ## Quick Start
 

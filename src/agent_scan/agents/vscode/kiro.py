@@ -3,6 +3,7 @@
 from pathlib import Path
 from typing import ClassVar
 
+from agent_scan.agents.base import SkillsDirsResult
 from agent_scan.agents.vscode.base import VSCodeFamilyDiscoverer
 from agent_scan.well_known_clients import expand_path
 
@@ -97,3 +98,28 @@ class KiroDiscoverer(VSCodeFamilyDiscoverer):
         if base in unmanaged:
             return self._immediate_subdirs(base)
         return super()._installed_extension_dirs(base)
+
+    def _discover_power_skills(self) -> SkillsDirsResult:
+        """Surface each installed Kiro Power's instruction file as a skill.
+
+        A Power ships a ``POWER.md`` steering file (Kiro's per-Power equivalent of
+        ``SKILL.md``) plus an optional ``steering/`` dir, living user-global at
+        ``~/.kiro/powers/installed/<name>/``. Treating the powers ``installed/``
+        root as a skills dir means :func:`inspect_skills_dir` lists each Power
+        subdir and keeps the ones holding a ``POWER.md`` (recognized alongside
+        ``SKILL.md`` by ``skill_client``); each Power's ``steering/*.md`` is then
+        surfaced when the skill is inspected. No system/project/extension Power
+        location is documented, so only this user-global level is covered.
+        """
+        result: SkillsDirsResult = {}
+        for raw in self._unmanaged_extension_paths:
+            root = expand_path(Path(raw), self.home_directory)
+            entries = self._scan_skills_dir(root)
+            if entries is not None:
+                result[root.as_posix()] = entries
+        return result
+
+    def discover_skills(self) -> SkillsDirsResult:
+        result = super().discover_skills()
+        result.update(self._discover_power_skills())
+        return result
