@@ -4,16 +4,30 @@ import re
 from urllib.parse import parse_qsl, urlsplit
 
 import pytest
+from mcp.types import (
+    Implementation,
+    InitializeResult,
+    Prompt,
+    Resource,
+    ServerCapabilities,
+    Tool,
+)
 
-from agent_scan.models import RemoteServer, ScanPathResult, ServerScanResult, StdioServer
-from agent_scan.redact import redact_absolute_paths, redact_args, redact_scan_result
+from agent_scan.models import RemoteServer, ScanPathResult, ServerScanResult, ServerSignature, StdioServer
+from agent_scan.redact import (
+    redact_absolute_paths,
+    redact_args,
+    redact_scan_result,
+    redact_signature,
+    redact_text,
+)
+from tests.unit._secret_fixtures import synthetic_secret
 
-# High-entropy 40-char mixed-case+digit literal that should be flagged by
-# detect-secrets' default high-entropy plugins. NOT a known-prefix token
-# (the user explicitly forbade ghp_/sk-proj-/etc.). If during the red phase
-# this exact string is not flagged by the default plugins, swap to another
-# high-entropy random string of similar shape.
-FAKE_API_KEY = "Xk9mPq2vNwBzRtY7Lc4hJfDsAe6uGiQoVpWbZxMr"
+# High-entropy fake credential that detect-secrets' default high-entropy plugins
+# flag. Derived at runtime (see ``synthetic_secret``) rather than a hardcoded
+# literal so repo secret scanners don't flag a checked-in secret. NOT a
+# known-prefix token (ghp_/sk-proj-/etc. are intentionally avoided).
+FAKE_API_KEY = synthetic_secret()
 
 # Match the **REDACTED_SECRET_<PLUGIN>** marker shape without hardcoding which
 # detect-secrets plugin won the race. The plugin set may change across
@@ -377,6 +391,116 @@ class TestRedactArgs:
         args = ["--push-key", "foo123"]
         result = redact_args(args)
         assert result[1] == "**REDACTED_SECRET_SENSITIVEFLAGNAME**"
+
+
+class TestRedactText:
+    """Unit tests for redact_text (free-text secret + path redaction)."""
+
+    def test_redact_text_none(self):
+        assert redact_text(None) is None
+
+    def test_redact_text_empty(self):
+        assert redact_text("") == ""
+
+    def test_redact_text_preserves_innocuous_content(self):
+        text = "# My Skill\n\nThis skill fetches the weather for a given city.\n"
+        assert redact_text(text) == text
+
+    def test_redact_text_redacts_bare_high_entropy_token(self):
+        text = f"Use this token: {FAKE_API_KEY}\n"
+        result = redact_text(text)
+        assert FAKE_API_KEY not in result
+        assert "**REDACTED_SECRET_" in result
+
+    def test_redact_text_redacts_known_format_token(self):
+        text = "Authenticate with AKIAIOSFODNN7EXAMPLE before running."
+        result = redact_text(text)
+        assert "AKIAIOSFODNN7EXAMPLE" not in result
+        assert "**REDACTED_SECRET_AWSKEYDETECTOR**" in result
+
+    def test_redact_text_preserves_low_entropy_keyword_value(self):
+        """Keyword-only, low-entropy values are intentionally NOT redacted.
+
+        Skill content is documentation/code where a ``password``/``api_key``
+        keyword next to a value is usually legitimate context, not a live
+        secret. Redacting on keyword alone would strip analysis context, so
+        only high-entropy / known-format secrets are removed.
+        """
+        text = 'config = {"password": "changeme"}'
+        result = redact_text(text)
+        assert result == text
+
+    def test_redact_text_redacts_high_entropy_keyword_value(self):
+        """A keyword value that IS high-entropy is still redacted (by the
+        entropy detector, not by keyword context)."""
+        text = f'config = {{"password": "{FAKE_API_KEY}"}}'
+        result = redact_text(text)
+        assert FAKE_API_KEY not in result
+        assert "**REDACTED_SECRET_" in result
+
+    def test_redact_text_redacts_absolute_paths(self):
+        text = "Loading from /Users/alice/project/config.json"
+        result = redact_text(text)
+        assert "/Users/alice/project/config.json" not in result
+        assert "**REDACTED**" in result
+
+    def test_redact_text_preserves_line_structure(self):
+        text = f"line one\n{FAKE_API_KEY}\nline three"
+        result = redact_text(text)
+        lines = result.split("\n")
+        assert lines[0] == "line one"
+        assert is_secret_marker(lines[1])
+        assert lines[2] == "line three"
+
+
+def _skill_signature(*, instructions="", prompts=None, resources=None, tools=None) -> ServerSignature:
+    return ServerSignature(
+        metadata=InitializeResult(
+            protocolVersion="built-in",
+            instructions=instructions,
+            capabilities=ServerCapabilities(),
+            serverInfo=Implementation(name="skill", version="skills"),
+        ),
+        prompts=prompts or [],
+        resources=resources or [],
+        tools=tools or [],
+    )
+
+
+class TestRedactSignature:
+    """Unit tests for redact_signature (skill ServerSignature redaction)."""
+
+    def test_redact_signature_redacts_instructions(self):
+        sig = _skill_signature(instructions=f"Skill that uses {FAKE_API_KEY}")
+        redact_signature(sig)
+        assert FAKE_API_KEY not in sig.metadata.instructions
+
+    def test_redact_signature_redacts_prompt_description(self):
+        sig = _skill_signature(prompts=[Prompt(name="SKILL.md", description=f"key: {FAKE_API_KEY}")])
+        redact_signature(sig)
+        assert FAKE_API_KEY not in (sig.prompts[0].description or "")
+
+    def test_redact_signature_redacts_resource_and_tool_descriptions(self):
+        sig = _skill_signature(
+            resources=[Resource(name="data", uri="skill://data", description=f"secret {FAKE_API_KEY}")],
+            tools=[
+                Tool(name="run.sh", description=f"Script: run.sh. Code:\nexport TOKEN={FAKE_API_KEY}", inputSchema={})
+            ],
+        )
+        redact_signature(sig)
+        assert FAKE_API_KEY not in (sig.resources[0].description or "")
+        assert FAKE_API_KEY not in (sig.tools[0].description or "")
+        # The non-secret structure around the secret is preserved.
+        assert sig.tools[0].description.startswith("Script: run.sh. Code:")
+
+    def test_redact_signature_preserves_clean_content(self):
+        sig = _skill_signature(
+            instructions="A helpful skill",
+            prompts=[Prompt(name="SKILL.md", description="# Title\nDoes something useful.")],
+        )
+        redact_signature(sig)
+        assert sig.metadata.instructions == "A helpful skill"
+        assert sig.prompts[0].description == "# Title\nDoes something useful."
 
 
 def test_redact_remote_url_query_and_headers():

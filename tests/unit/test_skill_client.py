@@ -10,6 +10,7 @@ from pathlib import Path
 
 from agent_scan.models import SkillServer
 from agent_scan.skill_client import inspect_commands_dir, inspect_skill
+from tests.unit._secret_fixtures import synthetic_secret
 
 
 def test_inspect_commands_dir_surfaces_flat_md_files(tmp_path):
@@ -150,3 +151,78 @@ def test_inspect_skill_body_horizontal_rules_not_parsed_as_frontmatter(tmp_path)
     sig = inspect_skill(SkillServer(path=str(cmd)))
 
     assert sig.metadata.serverInfo.name == "deploy"
+
+
+# A high-entropy fake credential used to assert that skill contents are redacted
+# at read time. Derived at runtime (see ``synthetic_secret``) rather than a
+# hardcoded literal so repo secret scanners don't flag a checked-in secret.
+_FAKE_SKILL_SECRET = synthetic_secret()
+
+
+def test_inspect_skill_redacts_secrets_in_command_file(tmp_path):
+    """inspect_skill must redact secrets in a single-file command before returning."""
+    cmd = tmp_path / "deploy.md"
+    cmd.write_text(f"# Deploy\nexport TOKEN={_FAKE_SKILL_SECRET}\n")
+
+    sig = inspect_skill(SkillServer(path=str(cmd)))
+
+    assert _FAKE_SKILL_SECRET not in sig.model_dump_json()
+
+
+def test_inspect_skill_redacts_secrets_across_skill_tree(tmp_path):
+    """inspect_skill redacts secrets in SKILL.md, the frontmatter description,
+    bundled scripts (tools), nested prompts and other resources -- the whole
+    signature, across every file type traverse_skill_tree surfaces and into
+    nested subdirectories."""
+    skill = tmp_path / "myskill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(
+        f"---\nname: myskill\ndescription: uses {_FAKE_SKILL_SECRET}\n---\n# Heading\nkey={_FAKE_SKILL_SECRET}\n"
+    )
+    # Scripts -> tools (one per supported language extension).
+    (skill / "run.sh").write_text(f"export GH={_FAKE_SKILL_SECRET}\n")
+    (skill / "deploy.py").write_text(f"API_KEY = '{_FAKE_SKILL_SECRET}'\n")
+    (skill / "client.js").write_text(f"const token = '{_FAKE_SKILL_SECRET}';\n")
+    (skill / "client.ts").write_text(f"const token: string = '{_FAKE_SKILL_SECRET}';\n")
+    # Non-script, non-md files -> resources.
+    (skill / "notes.txt").write_text(f"remember the token {_FAKE_SKILL_SECRET}\n")
+    (skill / "config.json").write_text(f'{{"apiKey": "{_FAKE_SKILL_SECRET}"}}\n')
+    # Nested directory with a markdown prompt -> recursion.
+    nested = skill / "references"
+    nested.mkdir()
+    (nested / "guide.md").write_text(f"# Guide\nUse {_FAKE_SKILL_SECRET} to authenticate.\n")
+
+    sig = inspect_skill(SkillServer(path=str(skill)))
+
+    dump = sig.model_dump_json()
+    assert _FAKE_SKILL_SECRET not in dump
+    assert sig.metadata.serverInfo.name == "myskill"
+    # Non-secret structure (skill name, descriptions, headings, file names,
+    # prose) is preserved across every surfaced file and the nested prompt.
+    for retained in (
+        "myskill",
+        "description",
+        "uses",
+        "# Heading",
+        "run.sh",
+        "deploy.py",
+        "client.js",
+        "client.ts",
+        "notes.txt",
+        "remember the token",
+        "config.json",
+        "guide.md",
+        "# Guide",
+        "to authenticate",
+    ):
+        assert retained in dump
+
+
+def test_inspect_skill_preserves_clean_content(tmp_path):
+    """Redaction at read time must not mangle skills that contain no secrets."""
+    cmd = tmp_path / "deploy.md"
+    cmd.write_text("# Deploy\nDo the deploy.")
+
+    sig = inspect_skill(SkillServer(path=str(cmd)))
+
+    assert any("Do the deploy." in (p.description or "") for p in sig.prompts)

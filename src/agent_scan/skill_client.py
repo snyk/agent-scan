@@ -17,6 +17,7 @@ from mcp.types import (
 from yaml.error import YAMLError
 
 from agent_scan.models import ServerSignature, SkillServer
+from agent_scan.redact import redact_signature
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +84,16 @@ def _inspect_skill_file(expanded_path: str) -> ServerSignature:
 
 
 def inspect_skill(config: SkillServer) -> ServerSignature:
+    """Read a skill (single file or ``<name>/SKILL.md`` directory) into a signature.
+
+    Secrets and absolute paths in the skill's contents are redacted in place
+    here -- the single point where skill files are read -- so the signature is
+    already sanitized by the time it reaches the analysis / upload calls.
+    """
+    return redact_signature(_inspect_skill(config))
+
+
+def _inspect_skill(config: SkillServer) -> ServerSignature:
     logger.info(f"Scanning skill at path: {config.path}")
     expanded_path = os.path.expanduser(config.path)
     if os.path.isfile(expanded_path):

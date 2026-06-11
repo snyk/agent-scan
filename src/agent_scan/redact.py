@@ -17,7 +17,7 @@ from detect_secrets.plugins.high_entropy_strings import HighEntropyStringsPlugin
 from detect_secrets.plugins.keyword import KeywordDetector
 from detect_secrets.settings import default_settings, get_plugins, transient_settings
 
-from agent_scan.models import RemoteServer, ScanPathResult, ServerScanResult, StdioServer
+from agent_scan.models import RemoteServer, ScanPathResult, ServerScanResult, ServerSignature, StdioServer
 
 logger = logging.getLogger(__name__)
 
@@ -332,6 +332,102 @@ def redact_args(args: list[str]) -> list[str]:
             flag = args[arg_idx].partition("=")[0]
             out[arg_idx] = f"{flag}={_redaction_marker(mark)}"
     return out
+
+
+def _redact_secrets_in_line(line: str, plugins: list) -> str:
+    """Redact secret-bearing substrings within a single line of free text.
+
+    Reuses the detect-secrets plugin set in two complementary passes that each
+    preserve the line's surrounding text and whitespace:
+
+    1. Raw-line scan with the high-entropy plugins only. They report the
+       *complete* secret value via ``secret_value`` (unlike some format
+       detectors -- e.g. the GitHub token detector reports only the ``ghp``
+       prefix), so their value is safe to splice out by substring. They fire on
+       the quoted forms common in skill code snippets (``key = "value"``).
+    2. Whitespace-token scan with :func:`_detect_secret`, which runs format
+       detectors on the bare token and entropy detectors on a quote-wrapped
+       copy. A whole secret-shaped token (AWS key, GitHub token, bare
+       high-entropy string) is therefore replaced wholesale -- no partial
+       prefix can leak.
+
+    ``KeywordDetector`` is intentionally NOT used here. Unlike :func:`redact_args`
+    (where a flag's value is almost always a credential), skill content is
+    free-form documentation and code: a keyword like ``password`` / ``api_key``
+    / ``token`` next to a value is usually legitimate explanatory context
+    (examples, variable names, prose), not a real secret. Redacting on keyword
+    alone would strip large amounts of context the downstream analysis relies
+    on, so detection is scoped to high-entropy and known-format secrets that
+    actually look like live credentials.
+
+    Replacements are applied longest-first so a secret that is a substring of
+    another does not corrupt the marker inserted for the longer one.
+    """
+    replacements: dict[str, str] = {}
+
+    # Pass 1: high-entropy detectors on the raw line (catches quoted literals).
+    for plugin in plugins:
+        if not isinstance(plugin, HighEntropyStringsPlugin):
+            continue
+        for secret in plugin.analyze_line(filename="adhoc", line=line, line_number=1) or []:
+            value = getattr(secret, "secret_value", None)
+            if value:
+                replacements.setdefault(value, _redaction_marker(type(plugin).__name__))
+
+    # Pass 2: whole-token detection for format/entropy-shaped tokens.
+    for token in line.split():
+        if token in replacements:
+            continue
+        plugin_name = _detect_secret(token)
+        if plugin_name is not None:
+            replacements[token] = _redaction_marker(plugin_name)
+
+    redacted = line
+    for value in sorted(replacements, key=len, reverse=True):
+        redacted = redacted.replace(value, replacements[value])
+    return redacted
+
+
+def redact_text(text: str | None) -> str | None:
+    """Redact secrets and absolute paths from a block of free text.
+
+    Used for content read out of skill files (SKILL.md, command markdown,
+    bundled scripts, and other resources), which may contain credentials a
+    user pasted into a skill, as well as absolute paths that leak usernames.
+
+    Detection runs line by line so the plugin set is built once and reused;
+    secret values are spliced out in place (see :func:`_redact_secrets_in_line`)
+    and the whole result then has absolute paths redacted. Returns ``None`` for
+    ``None`` input and the input unchanged when it is empty.
+    """
+    if not text:
+        return text
+    with transient_settings(_DETECT_SECRETS_CONFIG):
+        plugins = list(get_plugins())
+        redacted = "\n".join(_redact_secrets_in_line(line, plugins) for line in text.split("\n"))
+    return redact_absolute_paths(redacted)
+
+
+def redact_signature(signature: ServerSignature) -> ServerSignature:
+    """Redact secrets and absolute paths from a (skill) ``ServerSignature`` in place.
+
+    Skill signatures embed raw file contents in their prompt / resource / tool
+    ``description`` fields, and the skill's frontmatter description in
+    ``metadata.instructions``. Any of these can carry secrets, so every
+    free-text field is run through :func:`redact_text` before the signature
+    leaves the machine.
+
+    This is the single redaction point for skill content: it runs once when the
+    skill is read (in ``skill_client.inspect_skill``), so the later
+    ``redact_scan_result`` passes on the upload / analysis paths find the
+    signature already sanitized.
+    """
+    if signature.metadata is not None and signature.metadata.instructions:
+        signature.metadata.instructions = redact_text(signature.metadata.instructions)
+    for entity in (*signature.prompts, *signature.resources, *signature.resource_templates, *signature.tools):
+        if entity.description:
+            entity.description = redact_text(entity.description)
+    return signature
 
 
 def redact_server(server_scan_result: ServerScanResult) -> ServerScanResult:
