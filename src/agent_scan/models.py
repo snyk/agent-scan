@@ -190,10 +190,28 @@ class StdioServer(BaseModel):
         return self
 
 
+# Kinds of prompt-bearing, disk-resident capability artifact a client can load.
+# They all share the same on-disk shape -- a path to a markdown/prompt file or
+# dir -- so they ride a single ``SkillServer`` model; ``type`` distinguishes the
+# kind so the backend can tell them apart. Supporting a new prompt-file kind is
+# adding a value here.
+#
+# WARNING: this value set is hand-mirrored downstream -- ``SkillServer.type`` in
+# invariant-mcp-scan-backend (server/models.py) and invariant-platform
+# (backend/models/base.py), plus ``ScanError.server_type`` in invariant-platform.
+# There is NO automated enforcement (cf. the sync warning above ``HomeDirectoryEntry``);
+# emitting a value those repos don't accept fails their Pydantic validation and
+# sinks the whole payload, exactly like the ``ws`` transport (TODO(ADS-384)). Add
+# a value in all three repos in a coordinated change.
+PromptArtifact = Literal["skill", "command", "agent", "power"]
+
+
 class SkillServer(BaseModel):
     model_config = ConfigDict()
     path: str
-    type: Literal["skill"] | None = "skill"
+    # ``skill`` stays the default so existing discovery (skills, plus commands
+    # folded onto skills) is unchanged; new kinds are opt-in per discoverer.
+    type: PromptArtifact | None = "skill"
 
 
 class MCPConfig(BaseModel):

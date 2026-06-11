@@ -79,3 +79,29 @@ class TestFormatEntityLine:
         result = format_entity_line(entity, issues=[], is_skill=True, full_description=True).plain
         assert "instruction SKILL.md" in result
         assert "instructionSKILL.md" not in result
+
+
+class TestPrintScanPathResultArtifactCounting:
+    """Any prompt-based artifact (skill/command/agent/power) is counted and
+    rendered as a skill -- never mistaken for an MCP server. The counting must
+    key off the artifact model, not the literal ``type == "skill"``."""
+
+    def test_command_artifact_counted_as_skill(self, capsys):
+        from agent_scan.models import ScanPathResult, ServerScanResult, SkillServer
+        from agent_scan.printer import print_scan_path_result
+
+        result = ScanPathResult(
+            path="/home/u/.claude/commands",
+            servers=[
+                ServerScanResult(
+                    name="git:commit",
+                    server=SkillServer(path="/home/u/.claude/commands/git/commit.md", type="command"),
+                )
+            ],
+        )
+
+        print_scan_path_result(result)
+
+        out = capsys.readouterr().out
+        assert "skill" in out
+        assert "mcp server" not in out
