@@ -7148,12 +7148,15 @@ def test_openclaw_discoverer_has_no_mcp_servers(tmp_path):
 # Amazon Q: ~/.aws/amazonq, MCP in agents/default.json + agents/mcp.json + mcp.json; macOS/Linux only
 
 
-def test_amazon_q_discoverer_detects_installation(tmp_path):
-    from agent_scan.agents import AmazonQDiscoverer
+def test_amazon_q_discoverer_detects_installation(tmp_path, monkeypatch):
+    # Amazon Q is macOS/Linux only (client_exists returns None on win32), so pin a
+    # non-Windows platform to keep this deterministic regardless of the runner OS.
+    from agent_scan.agents.partial import amazon_q as amazon_q_module
 
+    monkeypatch.setattr(amazon_q_module.sys, "platform", "darwin")
     (tmp_path / ".aws" / "amazonq").mkdir(parents=True)
 
-    assert AmazonQDiscoverer(tmp_path).client_exists().endswith("/.aws/amazonq")
+    assert amazon_q_module.AmazonQDiscoverer(tmp_path).client_exists().endswith("/.aws/amazonq")
 
 
 def test_amazon_q_discoverer_parses_mcp_from_default_json(tmp_path):
