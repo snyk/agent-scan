@@ -1536,6 +1536,7 @@ class TestRunInstallCallsEnsureGuardEnabled:
 # ===================================================================
 
 _G = "agent_scan.guard"
+_NO_RETURN_VALUE = object()
 
 _DIFF_REMOVED = {
     "added": {},
@@ -1584,18 +1585,19 @@ class TestInstallHooksOrchestration:
             "prep_codex": (f"{_G}._prepare_codex_config", (_PREPARED, _DIFF_REMOVED, 0)),
             "prep_codex_managed": (f"{_G}._prepare_codex_managed_config", ("toml-content", _DIFF_REMOVED)),
             "is_toml": (f"{_G}._is_codex_requirements_toml", False),
+            "detect_existing": (f"{_G}._detect_existing_install", None),
             "test_event": (f"{_G}._send_test_event", True),
             "write_claude": (f"{_G}._write_claude_config", True),
             "write_cursor": (f"{_G}._write_cursor_config", True),
             "write_codex": (f"{_G}._write_codex_config", True),
             "write_codex_managed": (f"{_G}._write_codex_managed_config", True),
-            "revoke": (f"{_G}._revoke_after_failure", None),
-            "rich": (f"{_G}.rich", None),
+            "revoke": (f"{_G}._revoke_after_failure", _NO_RETURN_VALUE),
+            "rich": (f"{_G}.rich", _NO_RETURN_VALUE),
         }
         active = {}
         m = {"dest": dest}
         for key, (target, rv) in targets.items():
-            p = patch(target, return_value=rv) if rv is not None else patch(target)
+            p = patch(target) if rv is _NO_RETURN_VALUE else patch(target, return_value=rv)
             active[key] = p
             m[key] = p.start()
         yield m
@@ -1728,6 +1730,7 @@ class TestInstallHooksOrchestration:
             first_install=True,
             config_changed=True,
             hooks_diff=_DIFF_REMOVED,
+            push_key_changed=False,
         )
 
     def test_test_event_receives_empty_diff(self, ctx, tmp_path):
@@ -1742,6 +1745,7 @@ class TestInstallHooksOrchestration:
             first_install=True,
             config_changed=False,
             hooks_diff=_DIFF_EMPTY,
+            push_key_changed=False,
         )
 
     def test_test_event_not_first_install(self, ctx, tmp_path):
@@ -1755,6 +1759,37 @@ class TestInstallHooksOrchestration:
             first_install=False,
             config_changed=True,
             hooks_diff=_DIFF_REMOVED,
+            push_key_changed=False,
+        )
+
+    def test_test_event_push_key_changed(self, ctx, tmp_path):
+        ctx["detect_existing"].return_value = {"auth_value": "old-push-key"}
+        ctx["copy"].return_value = (ctx["dest"], False, True)
+        self._call(tmp_path)
+        ctx["test_event"].assert_called_once_with(
+            "pk-test",
+            "https://api.snyk.io",
+            "claude-code",
+            ctx["dest"],
+            first_install=True,
+            config_changed=True,
+            hooks_diff=_DIFF_REMOVED,
+            push_key_changed=True,
+        )
+
+    def test_test_event_push_key_unchanged(self, ctx, tmp_path):
+        ctx["detect_existing"].return_value = {"auth_value": "pk-test"}
+        ctx["copy"].return_value = (ctx["dest"], False, True)
+        self._call(tmp_path)
+        ctx["test_event"].assert_called_once_with(
+            "pk-test",
+            "https://api.snyk.io",
+            "claude-code",
+            ctx["dest"],
+            first_install=True,
+            config_changed=True,
+            hooks_diff=_DIFF_REMOVED,
+            push_key_changed=False,
         )
 
     # ---------------------------------------------------------------
@@ -1972,6 +2007,27 @@ class TestComputeHooksDiff:
         assert "PreToolUse" in result["modified"]
         assert result["modified"]["PreToolUse"]["expected_value"] == new_val
         assert result["modified"]["PreToolUse"]["actual_value"] == old_val
+
+    def test_diff_is_deep_copied_from_sources(self):
+        old = {"Extra": [{"hooks": [{"command": "old-cmd"}]}]}
+        new = {
+            "Stop": [{"hooks": [{"command": "new-cmd"}]}],
+            "PreToolUse": [{"hooks": [{"command": "different"}]}],
+        }
+        old["PreToolUse"] = [{"hooks": [{"command": "original"}]}]
+        result = _compute_hooks_diff(old, new)
+
+        result["added"]["Extra"][0]["hooks"][0]["command"] = "MUTATED"
+        assert old["Extra"][0]["hooks"][0]["command"] == "old-cmd"
+
+        result["removed"]["Stop"][0]["hooks"][0]["command"] = "MUTATED"
+        assert new["Stop"][0]["hooks"][0]["command"] == "new-cmd"
+
+        result["modified"]["PreToolUse"]["expected_value"][0]["hooks"][0]["command"] = "MUTATED"
+        assert new["PreToolUse"][0]["hooks"][0]["command"] == "different"
+
+        result["modified"]["PreToolUse"]["actual_value"][0]["hooks"][0]["command"] = "MUTATED"
+        assert old["PreToolUse"][0]["hooks"][0]["command"] == "original"
 
 
 # ===================================================================

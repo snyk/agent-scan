@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import json
 import os
 import re
@@ -290,6 +291,15 @@ def _write_client_config(
     raise ValueError(f"Unknown client: {client}")
 
 
+def _detect_existing_install(client: str, config_path: Path) -> dict | None:
+    """Return the existing install info for *client*, or None if not installed."""
+    if client == "claude":
+        return _detect_claude_install(config_path)
+    if client == "cursor":
+        return _detect_cursor_install(config_path)
+    return _detect_codex_install(config_path)
+
+
 def _install_hooks(
     args,
     client: str,
@@ -304,6 +314,10 @@ def _install_hooks(
     snyk_token: str,
 ) -> None:
     """Post-mint install steps.  Extracted so _run_install can revoke on failure."""
+    existing_info = _detect_existing_install(client, config_path)
+    old_push_key = existing_info.get("auth_value", "") if existing_info else ""
+    push_key_changed = bool(old_push_key) and old_push_key != push_key
+
     dest_path, script_existed, script_updated = _copy_hook_script(client, config_path)
     command = _build_hook_command(push_key, url, dest_path, hook_client, tenant_id=tenant_id)
     prepared_config, prepared_content, hooks_diff, preserved = _prepare_client_config(client, command, config_path)
@@ -320,6 +334,7 @@ def _install_hooks(
         first_install=first_install,
         config_changed=config_changed,
         hooks_diff=hooks_diff,
+        push_key_changed=push_key_changed,
     ):
         if not script_existed:
             dest_path.unlink(missing_ok=True)
@@ -876,6 +891,7 @@ def _send_test_event(
     first_install: bool = False,
     config_changed: bool = False,
     hooks_diff: dict | None = None,
+    push_key_changed: bool = False,
 ) -> bool:
     """Send a test hooksConfigured event by invoking the hook script. Returns True on success."""
     import subprocess
@@ -886,6 +902,8 @@ def _send_test_event(
     else:
         payload_dict["conversation_id"] = "hooks-setup"
     payload_dict["first_install"] = first_install
+    if push_key_changed:
+        payload_dict["push_key_changed"] = True
     if not first_install:
         payload_dict["config_changed"] = config_changed
         if hooks_diff:
@@ -959,11 +977,14 @@ def _compute_hooks_diff(old_hooks: dict, new_hooks: dict) -> dict:
     removed = {}
     for key in set(old_hooks) | set(new_hooks):
         if key not in old_hooks:
-            removed[key] = new_hooks[key]
+            removed[key] = copy.deepcopy(new_hooks[key])
         elif key not in new_hooks:
-            added[key] = old_hooks[key]
+            added[key] = copy.deepcopy(old_hooks[key])
         elif old_hooks[key] != new_hooks[key]:
-            modified[key] = {"expected_value": new_hooks[key], "actual_value": old_hooks[key]}
+            modified[key] = {
+                "expected_value": copy.deepcopy(new_hooks[key]),
+                "actual_value": copy.deepcopy(old_hooks[key]),
+            }
     return {"added": added, "modified": modified, "removed": removed}
 
 
