@@ -7,7 +7,7 @@ class OpenclawDiscoverer(PartialDiscoverer):
     """Openclaw: installed at ``~/.clawdbot`` or ``~/.openclaw``.
 
     Skills only -- no documented MCP config file. Includes a project-local
-    ``.openclaw/skills`` path (cwd-relative, passed through ``expand_path``
+    ``.openclaw/skills`` path (cwd-relative, passed through ``_expand_path``
     unchanged) alongside the home-relative skills directories.
     """
 

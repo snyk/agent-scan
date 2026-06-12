@@ -241,6 +241,31 @@ class AgentDiscoverer(ABC):
 
     # --- shared helpers (inherited by every concrete subclass) ---
 
+    @staticmethod
+    def expand_path(path: Path, home_directory: Path | None) -> Path:
+        """Resolve a ``~``-prefixed path against a specific ``home_directory``.
+
+        Unlike ``Path.expanduser`` (which always uses the current process's
+        ``$HOME``), this expands against the *given* home so a discoverer bound to
+        another user's home under ``--scan-all-users`` resolves ``~/...`` correctly.
+        A ``None`` home (unknown) or a non-``~`` path (absolute or cwd-relative,
+        e.g. ``.amp/skills``) is returned unchanged.
+
+        Static (rather than reading ``self.home_directory``) because the legacy
+        ``inspect.py`` engine also resolves explicit ``--paths`` against multiple
+        homes without a discoverer instance; subclasses use the bound-home
+        convenience :meth:`_expand_path` instead.
+        """
+        if home_directory is None or not str(path).startswith("~"):
+            return path
+
+        suffix = path.parts[1:]
+        return home_directory / Path(*suffix)
+
+    def _expand_path(self, path: Path) -> Path:
+        """:meth:`expand_path` against this discoverer's bound ``home_directory``."""
+        return self.expand_path(path, self.home_directory)
+
     def _load_json_file(self, path: Path) -> dict | CouldNotParseMCPConfig | None:
         """JSON-decode an arbitrary file. ``None`` if missing, unreadable (denied
         permissions), or over the ``_MAX_CONFIG_FILE_BYTES`` cap; parsed dict on

@@ -37,22 +37,6 @@ def get_username() -> str:
         return "unknown"
 
 
-def expand_path(path: Path, home_directory: Path | None) -> Path:
-    """Resolve a ``~``-prefixed path against a specific ``home_directory``.
-
-    Unlike ``Path.expanduser`` (which always uses the current process's ``$HOME``),
-    this expands against the *given* home so a discoverer bound to another user's
-    home under ``--scan-all-users`` resolves ``~/...`` correctly. A ``None`` home
-    (unknown) or a non-``~`` path (absolute or cwd-relative, e.g. ``.amp/skills``)
-    is returned unchanged.
-    """
-    if home_directory is None or not str(path).startswith("~"):
-        return path
-
-    suffix = path.parts[1:]
-    return home_directory / Path(*suffix)
-
-
 # Wall-clock cap for the `Get-CimInstance Win32_UserProfile` query that
 # enumerates Windows user profiles under --scan-all-users. WMI/CIM is known
 # to hang when the local repository is corrupted, the WinMgmt service is

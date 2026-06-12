@@ -54,7 +54,6 @@ from agent_scan.agents.base import (
     SkillsDirsResult,
 )
 from agent_scan.models import CouldNotParseMCPConfig
-from agent_scan.utils import expand_path
 
 logger = logging.getLogger(__name__)
 
@@ -143,9 +142,9 @@ class ClaudeDesktopDiscoverer(AgentDiscoverer):
         scanning from Windows; Linux has no documented Claude Desktop install.
         """
         if sys.platform == "darwin":
-            return expand_path(Path(self._macos_dir), self.home_directory)
+            return self._expand_path(Path(self._macos_dir))
         if sys.platform == "win32":
-            return expand_path(Path(self._windows_dir), self.home_directory)
+            return self._expand_path(Path(self._windows_dir))
         return None
 
     def _config_path(self) -> Path | None:

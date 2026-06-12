@@ -20,7 +20,6 @@ from agent_scan.models import (
     PluginMCPConfigFile,
 )
 from agent_scan.skill_client import inspect_commands_dir, inspect_skills_dir
-from agent_scan.utils import expand_path
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +91,7 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
     def static_mcp_config_paths(self) -> list[str]:
         # The user-global config file; project/plugin ``.mcp.json`` paths are
         # dynamic and intentionally omitted (best-effort classifier).
-        return [expand_path(Path(self._mcp_config_path), self.home_directory).as_posix()]
+        return [self._expand_path(Path(self._mcp_config_path)).as_posix()]
 
     def discover_mcp_servers(self) -> McpConfigsResult:
         result: McpConfigsResult = {}
@@ -137,7 +136,7 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
             config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
             if config_dir:
                 return Path(config_dir)
-        return expand_path(Path(self._install_path), self.home_directory)
+        return self._expand_path(Path(self._install_path))
 
     def _config_json_path(self) -> Path:
         """Path to the global ``.claude.json``.
@@ -150,7 +149,7 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
             relocated = self._claude_base_dir() / ".claude.json"
             if relocated.exists():
                 return relocated
-        return expand_path(Path(self._mcp_config_path), self.home_directory)
+        return self._expand_path(Path(self._mcp_config_path))
 
     # --- private: folder enumeration ---
 

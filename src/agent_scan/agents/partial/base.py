@@ -25,7 +25,6 @@ from agent_scan.agents.base import (
     SkillsDirsResult,
 )
 from agent_scan.models import CouldNotParseMCPConfig
-from agent_scan.utils import expand_path
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +47,7 @@ class PartialDiscoverer(AgentDiscoverer, abstract=True):
 
     def client_exists(self) -> str | None:
         for raw in self._client_exists_paths:
-            path = expand_path(Path(raw), self.home_directory)
+            path = self._expand_path(Path(raw))
             try:
                 if path.exists():
                     return path.as_posix()
@@ -59,7 +58,7 @@ class PartialDiscoverer(AgentDiscoverer, abstract=True):
     def discover_mcp_servers(self) -> McpConfigsResult:
         result: McpConfigsResult = {}
         for raw in self._mcp_config_paths:
-            path = expand_path(Path(raw), self.home_directory)
+            path = self._expand_path(Path(raw))
             entry = self._discover_mcpservers_table(path)
             if entry is not None:
                 result[path.as_posix()] = entry
@@ -68,14 +67,14 @@ class PartialDiscoverer(AgentDiscoverer, abstract=True):
     def discover_skills(self) -> SkillsDirsResult:
         result: SkillsDirsResult = {}
         for raw in self._skills_dir_paths:
-            path = expand_path(Path(raw), self.home_directory)
+            path = self._expand_path(Path(raw))
             scanned = self._scan_skills_dir(path)
             if scanned is not None:
                 result[path.as_posix()] = scanned
         return result
 
     def static_mcp_config_paths(self) -> list[str]:
-        return [expand_path(Path(raw), self.home_directory).as_posix() for raw in self._mcp_config_paths]
+        return [self._expand_path(Path(raw)).as_posix() for raw in self._mcp_config_paths]
 
     def _discover_mcpservers_table(self, path: Path) -> McpScanResult:
         """Parse a wrapped ``{"mcpServers": {...}}`` config at ``path``.

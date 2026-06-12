@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import ClassVar
 
 from agent_scan.agents.vscode.base import VSCodeFamilyDiscoverer
-from agent_scan.utils import expand_path
 
 
 class KiroDiscoverer(VSCodeFamilyDiscoverer):
@@ -93,7 +92,7 @@ class KiroDiscoverer(VSCodeFamilyDiscoverer):
         manifest — each installed Power is just a present subdir — so those roots
         return their immediate subdirs (every Power is scanned). All other roots
         (e.g. ``~/.kiro/extensions``) stay manifest-gated via ``super()``."""
-        unmanaged = {expand_path(Path(raw), self.home_directory) for raw in self._unmanaged_extension_paths}
+        unmanaged = {self._expand_path(Path(raw)) for raw in self._unmanaged_extension_paths}
         if base in unmanaged:
             return self._immediate_subdirs(base)
         return super()._installed_extension_dirs(base)

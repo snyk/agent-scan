@@ -8,7 +8,7 @@ class AmpDiscoverer(PartialDiscoverer):
 
     Skills only -- no documented MCP config file. The ``.amp`` paths are
     project-relative (resolved against the current working directory), not
-    home-relative, so they are passed through ``expand_path`` unchanged.
+    home-relative, so they are passed through ``_expand_path`` unchanged.
     """
 
     name = "amp"
