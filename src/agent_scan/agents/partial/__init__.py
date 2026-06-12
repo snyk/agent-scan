@@ -8,14 +8,14 @@ from agent_scan.agents.partial.amazon_q import AmazonQDiscoverer
 from agent_scan.agents.partial.amp import AmpDiscoverer
 from agent_scan.agents.partial.base import PartialDiscoverer
 from agent_scan.agents.partial.gemini_cli import GeminiCliDiscoverer
-from agent_scan.agents.partial.opencode import OpencodeDiscoverer
 from agent_scan.agents.partial.openclaw import OpenclawDiscoverer
+from agent_scan.agents.partial.opencode import OpencodeDiscoverer
 
 __all__ = [
-    "PartialDiscoverer",
-    "GeminiCliDiscoverer",
-    "AmpDiscoverer",
-    "OpencodeDiscoverer",
-    "OpenclawDiscoverer",
     "AmazonQDiscoverer",
+    "AmpDiscoverer",
+    "GeminiCliDiscoverer",
+    "OpenclawDiscoverer",
+    "OpencodeDiscoverer",
+    "PartialDiscoverer",
 ]
