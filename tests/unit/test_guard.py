@@ -1605,14 +1605,12 @@ class TestInstallHooksOrchestration:
             p.stop()
 
     def _call(
-        self, tmp_path, client="claude", hook_client="claude-code", minted=False, test_flag=False, config_exists=False
+        self, tmp_path, client="claude", hook_client="claude-code", minted=False, config_exists=False, test=False
     ):
         config = tmp_path / "config.json"
         if config_exists:
             config.write_text("{}")
-        args = SimpleNamespace(test=test_flag)
         _install_hooks(
-            args,
             client,
             hook_client,
             "pk-test",
@@ -1623,6 +1621,7 @@ class TestInstallHooksOrchestration:
             minted,
             "tid-1",
             "snyk-tok",
+            test=test,
         )
         return config
 
@@ -1705,13 +1704,12 @@ class TestInstallHooksOrchestration:
         self._call(tmp_path, minted=True, config_exists=True)
         ctx["test_event"].assert_called_once()
 
-    def test_test_event_sent_when_test_flag(self, ctx, tmp_path):
-        self._call(tmp_path, test_flag=True, config_exists=True)
+    def test_test_event_always_sent(self, ctx, tmp_path):
+        self._call(tmp_path, config_exists=True, minted=False)
         ctx["test_event"].assert_called_once()
 
-    def test_test_event_skipped_when_existing_install(self, ctx, tmp_path):
-        """Config exists, script existed, not minted, no test flag → skip."""
-        self._call(tmp_path, config_exists=True, minted=False, test_flag=False)
+    def test_test_event_skipped_when_test_true(self, ctx, tmp_path):
+        self._call(tmp_path, config_exists=True, minted=False, test=True)
         ctx["test_event"].assert_not_called()
 
     # ---------------------------------------------------------------
@@ -1870,10 +1868,9 @@ class TestInstallHooksOrchestration:
         config = self._call(tmp_path, client="codex", hook_client="codex", config_exists=True)
         ctx["write_codex_managed"].assert_called_once_with("toml-data-xyz", config)
 
-    def test_config_written_without_test_event(self, ctx, tmp_path):
-        """Write proceeds even when test event is skipped."""
-        self._call(tmp_path, config_exists=True, minted=False, test_flag=False)
-        ctx["test_event"].assert_not_called()
+    def test_config_written_after_test_event(self, ctx, tmp_path):
+        self._call(tmp_path, config_exists=True, minted=False)
+        ctx["test_event"].assert_called_once()
         ctx["write_claude"].assert_called_once()
 
     # ---------------------------------------------------------------
