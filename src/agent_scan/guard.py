@@ -912,8 +912,7 @@ def _send_test_event(
     else:
         payload_dict["conversation_id"] = "hooks-setup"
     payload_dict["first_install"] = first_install
-    if push_key_changed:
-        payload_dict["push_key_changed"] = True
+    payload_dict["push_key_changed"] = push_key_changed
     if not first_install:
         payload_dict["config_changed"] = config_changed
         if hooks_diff:
@@ -972,6 +971,23 @@ def _send_test_event(
 # ---------------------------------------------------------------------------
 
 
+def _normalize_push_keys(value: object) -> object:
+    """Replace push-key UUIDs with a placeholder for comparison purposes."""
+    if isinstance(value, str):
+        result = value
+        for pattern in _PUSH_KEY_REDACT_PATTERNS:
+            result = pattern.sub(
+                lambda m: m.group(0).replace(m.group(1), "<PUSH_KEY>"),
+                result,
+            )
+        return result
+    if isinstance(value, dict):
+        return {k: _normalize_push_keys(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_normalize_push_keys(item) for item in value]
+    return value
+
+
 def _compute_hooks_diff(old_hooks: dict, new_hooks: dict) -> dict:
     """Compare existing hooks (old) against expected hooks (new).
 
@@ -981,6 +997,8 @@ def _compute_hooks_diff(old_hooks: dict, new_hooks: dict) -> dict:
     - "added": unexpected keys present in the existing config
     - "modified": keys present in both but with different values
       (each entry has "expected_value" and "actual_value")
+
+    Differences that consist solely of a push-key change are ignored.
     """
     added = {}
     modified = {}
@@ -990,11 +1008,14 @@ def _compute_hooks_diff(old_hooks: dict, new_hooks: dict) -> dict:
             removed[key] = copy.deepcopy(new_hooks[key])
         elif key not in new_hooks:
             added[key] = copy.deepcopy(old_hooks[key])
-        elif old_hooks[key] != new_hooks[key]:
-            modified[key] = {
-                "expected_value": copy.deepcopy(new_hooks[key]),
-                "actual_value": copy.deepcopy(old_hooks[key]),
-            }
+        else:
+            old_norm = _normalize_push_keys(copy.deepcopy(old_hooks[key]))
+            new_norm = _normalize_push_keys(copy.deepcopy(new_hooks[key]))
+            if old_norm != new_norm:
+                modified[key] = {
+                    "expected_value": copy.deepcopy(new_hooks[key]),
+                    "actual_value": copy.deepcopy(old_hooks[key]),
+                }
     return {"added": added, "modified": modified, "removed": removed}
 
 

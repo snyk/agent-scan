@@ -2005,6 +2005,85 @@ class TestComputeHooksDiff:
         assert result["modified"]["PreToolUse"]["expected_value"] == new_val
         assert result["modified"]["PreToolUse"]["actual_value"] == old_val
 
+    def test_push_key_only_difference_not_modified(self):
+        """Hooks differing only by push key UUID should not appear as modified."""
+        old = {
+            "PreToolUse": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "PUSH_KEY='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' bash '/path/to/script.sh' --client claude",
+                        }
+                    ]
+                }
+            ]
+        }
+        new = {
+            "PreToolUse": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "PUSH_KEY='bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' bash '/path/to/script.sh' --client claude",
+                        }
+                    ]
+                }
+            ]
+        }
+        result = _compute_hooks_diff(old, new)
+        assert result == {"added": {}, "modified": {}, "removed": {}}
+
+    def test_push_key_only_difference_powershell_not_modified(self):
+        """PowerShell-style -PushKey difference should also be ignored."""
+        old = {
+            "PreToolUse": [
+                {
+                    "command": "powershell -File 'script.ps1' -Client claude -PushKey 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' -RemoteUrl 'https://api.snyk.io'"
+                }
+            ]
+        }
+        new = {
+            "PreToolUse": [
+                {
+                    "command": "powershell -File 'script.ps1' -Client claude -PushKey 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb' -RemoteUrl 'https://api.snyk.io'"
+                }
+            ]
+        }
+        result = _compute_hooks_diff(old, new)
+        assert result == {"added": {}, "modified": {}, "removed": {}}
+
+    def test_push_key_plus_other_change_is_modified(self):
+        """If the command differs by push key AND something else, it IS modified."""
+        old = {
+            "PreToolUse": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "PUSH_KEY='aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa' REMOTE_HOOKS_BASE_URL='https://old.example.com' bash '/path/to/script.sh' --client claude",
+                        }
+                    ]
+                }
+            ]
+        }
+        new = {
+            "PreToolUse": [
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": "PUSH_KEY='bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb' REMOTE_HOOKS_BASE_URL='https://new.example.com' bash '/path/to/script.sh' --client claude",
+                        }
+                    ]
+                }
+            ]
+        }
+        result = _compute_hooks_diff(old, new)
+        assert "PreToolUse" in result["modified"]
+        assert result["modified"]["PreToolUse"]["expected_value"] == new["PreToolUse"]
+        assert result["modified"]["PreToolUse"]["actual_value"] == old["PreToolUse"]
+
     def test_diff_is_deep_copied_from_sources(self):
         old = {"Extra": [{"hooks": [{"command": "old-cmd"}]}]}
         new = {
