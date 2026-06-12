@@ -1,11 +1,11 @@
 """Abstract per-agent discoverer and shared discovery infrastructure.
 
-This package sits alongside the data-driven discovery pipeline
-(`well_known_clients.py` + `inspect.py`). ``AgentDiscoverer`` is the abstract
-base every concrete discoverer extends; each subclass owns the agent-specific
+``AgentDiscoverer`` is the abstract base every concrete discoverer extends, and
+the registry of these discoverers (``agents.DISCOVERERS``) is the single source
+of truth for which agents a scan covers. Each subclass owns the agent-specific
 knowledge of where to look for config files and skills directories. The
-module-level helpers here are shared infrastructure consumed
-by the concrete discoverers in sibling modules.
+module-level helpers here are shared infrastructure consumed by the concrete
+discoverers in sibling modules.
 """
 
 import logging
@@ -129,17 +129,16 @@ class AgentDiscoverer(ABC):
     Concrete subclasses encapsulate one agent's filesystem layout: where the
     install lives, which JSON file(s) hold its MCP servers, and which directory
     holds its skills. Subclasses MUST set the ``name`` class attribute to the
-    canonical agent name used in ``well_known_clients``; this is enforced in
+    agent's canonical name (its key in ``agents.DISCOVERERS`` and the ``name`` on
+    every ``ClientToInspect`` it produces); this is enforced in
     ``__init_subclass__``.
 
     A discoverer is bound to a single user's ``home_directory`` at construction;
     the multi-user (``--scan-all-users``) loop in ``pipelines`` constructs one
     discoverer per home directory.
 
-    Unlike the legacy ``inspect.py`` pipeline, this abstraction does NOT consult
-    the ``CandidateClient`` row's ``mcp_config_globs`` / ``skills_dir_globs``;
-    subclasses encode their layout directly. An agent that genuinely needs
-    glob-based discovery should override ``discover_mcp_servers`` /
+    Subclasses encode their filesystem layout directly in code. An agent that
+    needs glob-based discovery should override ``discover_mcp_servers`` /
     ``discover_skills`` to handle it explicitly.
     """
 
@@ -227,6 +226,18 @@ class AgentDiscoverer(ABC):
             mcp_configs=mcp_configs,
             skills_dirs=skills_dirs,
         )
+
+    def static_mcp_config_paths(self) -> list[str]:
+        """Documented standalone MCP config *file* paths this agent owns, with ``~``
+        expanded against the bound home.
+
+        Default empty; overridden by discoverers that have well-known config files.
+        Consumed by ``agents.get_client_from_path`` to label an explicitly-scanned
+        path (``--paths`` mode) with its owning agent name. Need not be exhaustive
+        (dynamic project/plugin paths are omitted) — it is a best-effort classifier
+        whose callers fall back to the already-known client name.
+        """
+        return []
 
     # --- shared helpers (inherited by every concrete subclass) ---
 

@@ -4,12 +4,12 @@ import logging
 import aiohttp
 import rich
 
+from agent_scan.agents import get_client_from_path
 from agent_scan.models import ScanPathResult, ScanPathResultsCreate, ScanUserInfo
 from agent_scan.redact import redact_scan_result
 from agent_scan.runtime_config import get_runtime_config
 from agent_scan.utils import get_hostname, get_username
 from agent_scan.verify_api import setup_aiohttp_debug_logging, setup_tcp_connector
-from agent_scan.well_known_clients import get_client_from_path
 
 logger = logging.getLogger(__name__)
 

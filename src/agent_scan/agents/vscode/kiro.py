@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import ClassVar
 
 from agent_scan.agents.vscode.base import VSCodeFamilyDiscoverer
-from agent_scan.well_known_clients import expand_path
+from agent_scan.utils import expand_path
 
 
 class KiroDiscoverer(VSCodeFamilyDiscoverer):

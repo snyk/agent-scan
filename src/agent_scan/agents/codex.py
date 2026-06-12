@@ -36,7 +36,7 @@ from agent_scan.models import (
     PluginMCPConfigFile,
 )
 from agent_scan.skill_client import inspect_skills_dir
-from agent_scan.well_known_clients import expand_path
+from agent_scan.utils import expand_path
 
 logger = logging.getLogger(__name__)
 
@@ -75,8 +75,8 @@ class CodexDiscoverer(AgentDiscoverer):
     unscanned. https://snyksec.atlassian.net/browse/ADS-422
     """
 
-    # MUST match the Codex entry in ``well_known_clients.py`` so the Phase-A /
-    # Phase-B merge in ``pipelines`` lines up on one client.
+    # Canonical agent name: this discoverer's key in ``agents.DISCOVERERS`` and the
+    # ``name`` on every ``ClientToInspect`` it produces.
     name = "codex"
 
     _install_path = "~/.codex"

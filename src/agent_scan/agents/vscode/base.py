@@ -39,7 +39,7 @@ from agent_scan.models import (
     VSCodeMCPConfig,
 )
 from agent_scan.skill_client import inspect_skills_dir
-from agent_scan.well_known_clients import expand_path
+from agent_scan.utils import expand_path
 
 logger = logging.getLogger(__name__)
 # Cap traversal into ``<userdata>/User/workspaceStorage/``. Layout is
@@ -323,6 +323,11 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         result.update(self._discover_settings_skill_locations())
         result.update(self._discover_code_workspace_skills())
         return result
+
+    def static_mcp_config_paths(self) -> list[str]:
+        # The standalone user-global MCP config files; userdata/profile/workspace
+        # and extension paths are dynamic and intentionally omitted (best-effort).
+        return [expand_path(Path(raw), self.home_directory).as_posix() for raw in self._user_mcp_file_paths]
 
     def _discover_home_skills_dirs(self) -> SkillsDirsResult:
         """Scan the home-relative skill directories declared in ``_skills_dir_paths``."""

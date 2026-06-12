@@ -7,7 +7,7 @@ from agent_scan.agents.vscode.base import (
     _file_uri_to_path,
     _nested_dict_get,
 )
-from agent_scan.well_known_clients import expand_path
+from agent_scan.utils import expand_path
 
 
 class AntigravityDiscoverer(VSCodeFamilyDiscoverer):

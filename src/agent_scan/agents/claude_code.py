@@ -20,9 +20,13 @@ from agent_scan.models import (
     PluginMCPConfigFile,
 )
 from agent_scan.skill_client import inspect_commands_dir, inspect_skills_dir
-from agent_scan.well_known_clients import CLAUDE_CODE_NAME, expand_path
+from agent_scan.utils import expand_path
 
 logger = logging.getLogger(__name__)
+
+# Canonical agent name for Claude Code, used as this discoverer's ``name`` and the
+# key under which it registers in ``agents.DISCOVERERS``.
+CLAUDE_CODE_NAME = "claude code"
 
 # Format-union for Claude Code ``.mcp.json`` files (project + plugin scope), tried
 # in order by ``_parse_mcp_file``: the wrapped ``{"mcpServers": {...}}`` shape
@@ -84,6 +88,11 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         except PermissionError:
             logger.warning("Permission error for path %s", path.as_posix())
         return None
+
+    def static_mcp_config_paths(self) -> list[str]:
+        # The user-global config file; project/plugin ``.mcp.json`` paths are
+        # dynamic and intentionally omitted (best-effort classifier).
+        return [expand_path(Path(self._mcp_config_path), self.home_directory).as_posix()]
 
     def discover_mcp_servers(self) -> McpConfigsResult:
         result: McpConfigsResult = {}

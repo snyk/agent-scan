@@ -33,7 +33,7 @@ from agent_scan.runtime_config import get_runtime_config
 from agent_scan.signed_binary import check_server_signature
 from agent_scan.skill_client import inspect_skill, inspect_skills_dir
 from agent_scan.traffic_capture import TrafficCapture
-from agent_scan.well_known_clients import expand_path
+from agent_scan.utils import expand_path
 
 logger = logging.getLogger(__name__)
 

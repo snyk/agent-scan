@@ -1170,24 +1170,33 @@ def test_agent_discoverer_subclass_without_name_raises():
 # --- DISCOVERERS registry + find_discoverers ---
 
 
-def test_DISCOVERERS_registers_claude_code_and_vscode_family():
-    """Registry must contain Claude Code plus the VSCode family discoverers.
+def test_DISCOVERERS_registers_all_agents():
+    """Registry must contain every agent: the dedicated discoverers plus the
+    ``partial/`` discoverers (the simple static-path agents).
 
     The exact set is asserted (rather than just inclusion) so adding a new
     discoverer requires a deliberate test update — silent additions would
-    affect every multi-user scan.
+    affect every multi-user scan. This registry is the single source of truth
+    for which agents are scanned.
     """
     from agent_scan.agents import DISCOVERERS
 
     assert set(DISCOVERERS) == {
+        # dedicated discoverers
         "claude code",
+        "claude desktop",
         "vscode",
         "cursor",
         "windsurf",
         "kiro",
         "antigravity",
         "codex",
-        "claude desktop",
+        # partial/ discoverers (simple static-path agents)
+        "gemini cli",
+        "amp",
+        "opencode",
+        "openclaw",
+        "amazon_q",
     }
 
 
@@ -1211,101 +1220,43 @@ def test_find_discoverers_returns_empty_when_no_agents_installed(tmp_path):
     assert found == []
 
 
-# --- Pipeline dispatch: legacy for all + ABC merge phase ---
+# --- Pipeline dispatch: discovery via the AgentDiscoverer registry ---
 
 
 @pytest.mark.asyncio
-async def test_discover_clients_to_inspect_runs_legacy_for_claude_code(tmp_path):
-    """Legacy get_mcp_config_per_client is invoked for Claude Code (no longer bypassed)."""
-    from agent_scan.inspect import get_mcp_config_per_client as real_legacy
-    from agent_scan.models import CandidateClient
-    from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
-
-    (tmp_path / ".claude").mkdir()
-    (tmp_path / ".claude.json").write_text('{"mcpServers": {}}')
-
-    candidate = CandidateClient(
-        name="claude code",
-        client_exists_paths=["~/.claude"],
-        mcp_config_paths=["~/.claude.json"],
-        skills_dir_paths=["~/.claude/skills"],
-    )
-
-    with (
-        patch(
-            "agent_scan.pipelines.get_readable_home_directories",
-            return_value=[(tmp_path, "alice")],
-        ),
-        patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
-        patch(
-            "agent_scan.pipelines.get_mcp_config_per_client",
-            side_effect=real_legacy,
-        ) as spy_legacy,
-    ):
-        args = InspectArgs(timeout=10, tokens=[], paths=[])
-        await discover_clients_to_inspect(args)
-
-    assert spy_legacy.called, "Legacy path must be called for claude code"
-    called_names = {call.args[0].name for call in spy_legacy.call_args_list}
-    assert "claude code" in called_names
-
-
-@pytest.mark.asyncio
-async def test_discover_clients_to_inspect_merges_abc_into_legacy_cti_keeping_both_keys(tmp_path):
-    """One CTI per (name, username); legacy and ABC keys for the same server both survive."""
-    from agent_scan.models import CandidateClient
+async def test_discover_clients_to_inspect_claude_code_keys_project_under_project_path(tmp_path):
+    """Claude Code is discovered solely via ``ClaudeCodeDiscoverer``: a project's
+    ``mcpServers`` is keyed under the *project path*, not flattened under
+    ``~/.claude.json``."""
     from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
 
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude.json").write_text('{"projects": {"/work/repo": {"mcpServers": {"srv": {"command": "echo"}}}}}')
 
-    candidate = CandidateClient(
-        name="claude code",
-        client_exists_paths=["~/.claude"],
-        mcp_config_paths=["~/.claude.json"],
-        skills_dir_paths=["~/.claude/skills"],
-    )
-
-    with (
-        patch(
-            "agent_scan.pipelines.get_readable_home_directories",
-            return_value=[(tmp_path, "alice")],
-        ),
-        patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
+    with patch(
+        "agent_scan.pipelines.get_readable_home_directories",
+        return_value=[(tmp_path, "alice")],
     ):
         args = InspectArgs(timeout=10, tokens=[], paths=[])
         ctis, _, _ = await discover_clients_to_inspect(args)
 
     claude_ctis = [c for c in ctis if c.name == "claude code" and c.username == "alice"]
     assert len(claude_ctis) == 1
-    merged = claude_ctis[0]
-
-    keys = list(merged.mcp_configs)
-    legacy_key = next(k for k in keys if k.endswith("/.claude.json"))
-    abc_key = next(k for k in keys if k == "/work/repo")
-
-    legacy_entries = merged.mcp_configs[legacy_key]
-    abc_entries = merged.mcp_configs[abc_key]
-    assert isinstance(legacy_entries, list)
-    assert isinstance(abc_entries, list)
-    # Without by-name dedup, "srv" is preserved in both phases' keys. Each represents
-    # a distinct discovery source (legacy flattens projects.* into ~/.claude.json;
-    # ABC reports it under the project path) and downstream scanning treats each
-    # (key, name) pair on its own merits.
-    assert [name for name, _ in legacy_entries] == ["srv"]
-    assert [name for name, _ in abc_entries] == ["srv"]
-    assert all(isinstance(s, StdioServer) for _, s in abc_entries)
+    cti = claude_ctis[0]
+    assert "/work/repo" in cti.mcp_configs
+    assert [name for name, _ in cti.mcp_configs["/work/repo"]] == ["srv"]
+    # No legacy flattening: the project server is NOT also keyed under ~/.claude.json.
+    assert not any(k.endswith("/.claude.json") for k in cti.mcp_configs)
 
 
 @pytest.mark.asyncio
 async def test_discover_clients_to_inspect_preserves_same_named_server_across_projects(tmp_path):
     """Two projects each registering the same server name (different configs) both survive.
 
-    This is the canonical multi-project case (e.g. `github` configured per-repo with
-    different tokens). Treating same-name registrations as duplicates would silently
-    drop one project's config; we want each project's entry to reach the inspector.
+    The canonical multi-project case (e.g. `github` configured per-repo with different
+    tokens): each project's entry is keyed under its own project path and reaches the
+    inspector.
     """
-    from agent_scan.models import CandidateClient
     from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
 
     (tmp_path / ".claude").mkdir()
@@ -1316,19 +1267,9 @@ async def test_discover_clients_to_inspect_preserves_same_named_server_across_pr
         "}}"
     )
 
-    candidate = CandidateClient(
-        name="claude code",
-        client_exists_paths=["~/.claude"],
-        mcp_config_paths=["~/.claude.json"],
-        skills_dir_paths=["~/.claude/skills"],
-    )
-
-    with (
-        patch(
-            "agent_scan.pipelines.get_readable_home_directories",
-            return_value=[(tmp_path, "alice")],
-        ),
-        patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
+    with patch(
+        "agent_scan.pipelines.get_readable_home_directories",
+        return_value=[(tmp_path, "alice")],
     ):
         args = InspectArgs(timeout=10, tokens=[], paths=[])
         ctis, _, _ = await discover_clients_to_inspect(args)
@@ -1352,111 +1293,23 @@ async def test_discover_clients_to_inspect_preserves_same_named_server_across_pr
 
 
 @pytest.mark.asyncio
-async def test_discover_clients_to_inspect_keeps_legacy_key_when_abc_adds_nothing(tmp_path):
-    """When ABC produces no project entries, legacy's ~/.claude.json entry is untouched."""
-    from agent_scan.models import CandidateClient
-    from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
-
-    (tmp_path / ".claude").mkdir()
-    (tmp_path / ".claude.json").write_text('{"projects": {}}')
-
-    candidate = CandidateClient(
-        name="claude code",
-        client_exists_paths=["~/.claude"],
-        mcp_config_paths=["~/.claude.json"],
-        skills_dir_paths=["~/.claude/skills"],
-    )
-
-    with (
-        patch(
-            "agent_scan.pipelines.get_readable_home_directories",
-            return_value=[(tmp_path, "alice")],
-        ),
-        patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
-    ):
-        args = InspectArgs(timeout=10, tokens=[], paths=[])
-        ctis, _, _ = await discover_clients_to_inspect(args)
-
-    claude_ctis = [c for c in ctis if c.name == "claude code"]
-    assert len(claude_ctis) == 1
-    keys = list(claude_ctis[0].mcp_configs)
-    # Only legacy keys present (no project keys from ABC to dedup against).
-    assert keys == [k for k in keys if k.endswith("/.claude.json")]
-
-
-@pytest.mark.asyncio
-async def test_discover_clients_to_inspect_abc_wins_on_same_key_collision(tmp_path):
-    """Both paths produce a ~/.claude.json key; ABC's value wins via dict-union merge."""
-    from agent_scan.models import CandidateClient
-    from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
-
-    (tmp_path / ".claude").mkdir()
-    (tmp_path / ".claude.json").write_text(
-        '{"mcpServers": {"top": {"command": "from-top"}}, '
-        '"projects": {"/work/repo": {"mcpServers": {"proj": {"command": "from-proj"}}}}}'
-    )
-
-    candidate = CandidateClient(
-        name="claude code",
-        client_exists_paths=["~/.claude"],
-        mcp_config_paths=["~/.claude.json"],
-        skills_dir_paths=["~/.claude/skills"],
-    )
-
-    with (
-        patch(
-            "agent_scan.pipelines.get_readable_home_directories",
-            return_value=[(tmp_path, "alice")],
-        ),
-        patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
-    ):
-        args = InspectArgs(timeout=10, tokens=[], paths=[])
-        ctis, _, _ = await discover_clients_to_inspect(args)
-
-    claude_ctis = [c for c in ctis if c.name == "claude code"]
-    assert len(claude_ctis) == 1
-    merged = claude_ctis[0]
-
-    legacy_key = next(k for k in merged.mcp_configs if k.endswith("/.claude.json"))
-    entries = merged.mcp_configs[legacy_key]
-    assert isinstance(entries, list)
-    # Legacy stored "proj" under .claude.json (its ClaudeCodeConfigFile flattening
-    # of projects.*). ABC stored "top" under .claude.json (top-level mcpServers).
-    # Dict-union merge picks ABC's value on the colliding key, so .claude.json now
-    # holds only "top"; "proj" lives under ABC's /work/repo key.
-    assert [name for name, _ in entries] == ["top"]
-    assert merged.mcp_configs["/work/repo"] == [("proj", merged.mcp_configs["/work/repo"][0][1])]
-
-
-@pytest.mark.asyncio
-async def test_discover_clients_to_inspect_falls_back_to_legacy_for_non_claude(tmp_path):
-    """Non-Claude agents (e.g. cursor) still go through get_mcp_config_per_client."""
-    from agent_scan.models import CandidateClient
+async def test_discover_clients_to_inspect_discovers_non_claude_agent_via_discoverer(tmp_path):
+    """A non-Claude agent (e.g. cursor) is discovered via its registered discoverer."""
     from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
 
     (tmp_path / ".cursor").mkdir()
     (tmp_path / ".cursor" / "mcp.json").write_text('{"mcpServers": {}}')
 
-    candidate = CandidateClient(
-        name="cursor",
-        client_exists_paths=["~/.cursor"],
-        mcp_config_paths=["~/.cursor/mcp.json"],
-        skills_dir_paths=[],
-    )
-
-    with (
-        patch(
-            "agent_scan.pipelines.get_readable_home_directories",
-            return_value=[(tmp_path, "alice")],
-        ),
-        patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
+    with patch(
+        "agent_scan.pipelines.get_readable_home_directories",
+        return_value=[(tmp_path, "alice")],
     ):
         args = InspectArgs(timeout=10, tokens=[], paths=[])
         ctis, _, _ = await discover_clients_to_inspect(args)
 
-    assert len(ctis) == 1
-    assert ctis[0].name == "cursor"
-    assert ctis[0].username == "alice"
+    cursor_ctis = [c for c in ctis if c.name == "cursor"]
+    assert len(cursor_ctis) == 1
+    assert cursor_ctis[0].username == "alice"
 
 
 # --- Plugin discovery depth cap ---
@@ -1683,10 +1536,9 @@ def test_find_discoverers_skips_discoverer_that_raises_unexpected_exception(tmp_
 @pytest.mark.asyncio
 async def test_discover_clients_to_inspect_skips_discoverer_whose_discover_raises(tmp_path):
     """A discoverer whose discover() raises mid-pipeline must not abort the loop —
-    other discoverers' results (and the legacy CTI) still land in clients_to_inspect.
+    other discoverers' results still land in clients_to_inspect.
     """
     from agent_scan.agents import DISCOVERERS, AgentDiscoverer
-    from agent_scan.models import CandidateClient
     from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
 
     class ExplodingMidPipelineDiscoverer(AgentDiscoverer):
@@ -1706,28 +1558,18 @@ async def test_discover_clients_to_inspect_skips_discoverer_whose_discover_raise
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude.json").write_text('{"mcpServers": {}}')
 
-    candidate = CandidateClient(
-        name="claude code",
-        client_exists_paths=["~/.claude"],
-        mcp_config_paths=["~/.claude.json"],
-        skills_dir_paths=["~/.claude/skills"],
-    )
-
     DISCOVERERS["exploding-mid"] = ExplodingMidPipelineDiscoverer
     try:
-        with (
-            patch(
-                "agent_scan.pipelines.get_readable_home_directories",
-                return_value=[(tmp_path, "alice")],
-            ),
-            patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
+        with patch(
+            "agent_scan.pipelines.get_readable_home_directories",
+            return_value=[(tmp_path, "alice")],
         ):
             args = InspectArgs(timeout=10, tokens=[], paths=[])
             ctis, _, _ = await discover_clients_to_inspect(args)
     finally:
         del DISCOVERERS["exploding-mid"]
 
-    # The exploding discoverer's CTI is dropped, but Claude Code's still lands.
+    # The exploding discoverer's CTI is dropped, but Claude Code's (real discoverer) still lands.
     names = {c.name for c in ctis}
     assert "claude code" in names
     assert "exploding-mid" not in names
@@ -1787,20 +1629,14 @@ def test_load_json_file_still_returns_could_not_parse_for_malformed_json(tmp_pat
 
 @pytest.mark.asyncio
 async def test_discover_clients_to_inspect_keeps_per_user_isolation_under_scan_all_users(tmp_path):
-    """End-to-end multi-home test for the ``(name, username)`` merge predicate.
+    """End-to-end multi-home test: each user's home is scanned independently and
+    yields its own ``ClientToInspect`` tagged with that user's name.
 
-    Phase B looks up the existing CTI via
-    ``c.name == cti.name and c.username == cti.username`` (pipelines.py:131).
-    If the ``username`` half of that predicate ever regresses (e.g. someone
-    simplifies to ``c.name == cti.name``), bob's ABC discoverer would merge
-    into the *first* "claude code" CTI in insertion order — which is alice's —
-    contaminating alice's CTI with bob's servers and leaving bob's CTI without
-    its ABC-discovered project key.
-
-    The test gives each user a *distinct* server name and a *distinct* project
-    path so cross-contamination is trivially detectable.
+    The pipeline appends one CTI per (discoverer, home), tagging it with the home's
+    username. If per-user tagging ever regressed (e.g. a stray cross-home merge),
+    bob's servers would contaminate alice's CTI. Each user gets a *distinct* server
+    name and a *distinct* project path so cross-contamination is trivially detectable.
     """
-    from agent_scan.models import CandidateClient
     from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
 
     alice_home = tmp_path / "alice"
@@ -1814,19 +1650,9 @@ async def test_discover_clients_to_inspect_keeps_per_user_isolation_under_scan_a
         '{"projects": {"/bob/repo": {"mcpServers": {"bob-srv": {"command": "echo"}}}}}'
     )
 
-    candidate = CandidateClient(
-        name="claude code",
-        client_exists_paths=["~/.claude"],
-        mcp_config_paths=["~/.claude.json"],
-        skills_dir_paths=["~/.claude/skills"],
-    )
-
-    with (
-        patch(
-            "agent_scan.pipelines.get_readable_home_directories",
-            return_value=[(alice_home, "alice"), (bob_home, "bob")],
-        ),
-        patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
+    with patch(
+        "agent_scan.pipelines.get_readable_home_directories",
+        return_value=[(alice_home, "alice"), (bob_home, "bob")],
     ):
         args = InspectArgs(timeout=10, tokens=[], paths=[], all_users=True)
         ctis, _, _ = await discover_clients_to_inspect(args)
@@ -1885,17 +1711,11 @@ async def test_discover_clients_to_inspect_propagates_all_users_flag_to_home_enu
         return [(tmp_path, "alice")]
 
     # all_users=True must reach the enumeration as True.
-    with (
-        patch("agent_scan.pipelines.get_readable_home_directories", side_effect=fake_home_enum),
-        patch("agent_scan.pipelines.get_well_known_clients", return_value=[]),
-    ):
+    with patch("agent_scan.pipelines.get_readable_home_directories", side_effect=fake_home_enum):
         await discover_clients_to_inspect(InspectArgs(timeout=10, tokens=[], paths=[], all_users=True))
 
     # all_users=False (single-user default) must reach as False.
-    with (
-        patch("agent_scan.pipelines.get_readable_home_directories", side_effect=fake_home_enum),
-        patch("agent_scan.pipelines.get_well_known_clients", return_value=[]),
-    ):
+    with patch("agent_scan.pipelines.get_readable_home_directories", side_effect=fake_home_enum):
         await discover_clients_to_inspect(InspectArgs(timeout=10, tokens=[], paths=[], all_users=False))
 
     assert captured["calls"] == [True, False], (
@@ -2942,57 +2762,6 @@ def test_discoverers_registry_includes_all_vscode_family():
     assert DISCOVERERS["windsurf"] is WindsurfDiscoverer
     assert DISCOVERERS["kiro"] is KiroDiscoverer
     assert DISCOVERERS["antigravity"] is AntigravityDiscoverer
-
-
-def test_vscode_family_discoverer_names_match_well_known_clients():
-    """Every VSCode-family discoverer name MUST exist as a ``CandidateClient.name``
-    in ``well_known_clients.py`` — the merge in
-    ``pipelines.discover_clients_to_inspect`` keys on ``(name, username)``, so a
-    discoverer whose name doesn't match its legacy entry produces duplicate
-    (split) entries in scan output for the same agent.
-
-    The expected set is read from the real ``well_known_clients`` module (not a
-    hardcoded literal) and checked against *every* platform list, so a rename in
-    any one of them is caught regardless of which OS the suite runs on. ``vscode``
-    is the canonical 'still aligned' control; the others are the new family.
-    """
-    from agent_scan.agents import (
-        AntigravityDiscoverer,
-        CursorDiscoverer,
-        KiroDiscoverer,
-        VSCodeDiscoverer,
-        WindsurfDiscoverer,
-    )
-    from agent_scan.well_known_clients import (
-        LINUX_WELL_KNOWN_CLIENTS,
-        MACOS_WELL_KNOWN_CLIENTS,
-        WINDOWS_WELL_KNOWN_CLIENTS,
-    )
-
-    family_names = {
-        cls.name
-        for cls in (
-            VSCodeDiscoverer,
-            CursorDiscoverer,
-            WindsurfDiscoverer,
-            KiroDiscoverer,
-            AntigravityDiscoverer,
-        )
-    }
-
-    for label, clients in (
-        ("macOS", MACOS_WELL_KNOWN_CLIENTS),
-        ("Linux", LINUX_WELL_KNOWN_CLIENTS),
-        ("Windows", WINDOWS_WELL_KNOWN_CLIENTS),
-    ):
-        well_known_names = {client.name for client in clients}
-        missing = family_names - well_known_names
-        assert not missing, (
-            f"VSCode-family discoverer name(s) {sorted(missing)} have no matching "
-            f"CandidateClient in the {label} well_known_clients list. A discoverer "
-            f"name that drifts from its legacy entry splits one agent into two "
-            f"(name, username) rows in scan output."
-        )
 
 
 def test_find_discoverers_picks_up_vscode_family_when_installed(tmp_path):
@@ -6354,7 +6123,7 @@ def test_codex_discoverer_returns_empty_skills_when_no_dirs(tmp_path, monkeypatc
 def test_codex_discoverer_discovers_codex_home_skills_default(tmp_path):
     """``<codex_home>/skills`` is the deprecated user skill root Codex still loads
     (``core-skills/loader.rs``, "kept for backward compatibility"). The discoverer scans
-    it itself, not only via the legacy ``well_known_clients`` ``~/.codex/skills`` entry."""
+    it directly."""
     from agent_scan.agents import CodexDiscoverer
 
     skill = tmp_path / ".codex" / "skills" / "home-skill"
@@ -7120,8 +6889,7 @@ def test_claude_desktop_discoverer_discover_assembles_client_to_inspect(tmp_path
     cti = claude_desktop_module.ClaudeDesktopDiscoverer(tmp_path).discover()
 
     assert isinstance(cti, ClientToInspect)
-    # Must match the Phase-A ``well_known_clients`` "claude desktop" entry so the two
-    # phases merge onto a single client in ``pipelines.discover_clients_to_inspect``.
+    # The canonical agent name (this discoverer's key in ``agents.DISCOVERERS``).
     assert cti.name == "claude desktop"
     assert cti.client_path.endswith("/Library/Application Support/Claude")
 
@@ -7170,3 +6938,292 @@ def test_find_discoverers_returns_claude_desktop_when_installed(tmp_path, monkey
     found = find_discoverers(tmp_path)
 
     assert any(isinstance(d, claude_desktop_module.ClaudeDesktopDiscoverer) for d in found)
+
+
+# --- partial/ discoverers: simple static-path agents. Each is its own registered
+# discoverer sharing the ``PartialDiscoverer`` base (mirroring ``VSCodeFamilyDiscoverer``).
+
+
+def test_partial_discoverers_registered_to_their_classes():
+    from agent_scan.agents import (
+        DISCOVERERS,
+        AmazonQDiscoverer,
+        AmpDiscoverer,
+        GeminiCliDiscoverer,
+        OpenclawDiscoverer,
+        OpencodeDiscoverer,
+    )
+
+    assert DISCOVERERS["gemini cli"] is GeminiCliDiscoverer
+    assert DISCOVERERS["amp"] is AmpDiscoverer
+    assert DISCOVERERS["opencode"] is OpencodeDiscoverer
+    assert DISCOVERERS["openclaw"] is OpenclawDiscoverer
+    assert DISCOVERERS["amazon_q"] is AmazonQDiscoverer
+
+
+# Gemini CLI: ~/.gemini, MCP in ~/.gemini/settings.json (wrapped mcpServers), ~/.gemini/skills
+
+
+def test_gemini_cli_discoverer_detects_installation(tmp_path):
+    from agent_scan.agents import GeminiCliDiscoverer
+
+    (tmp_path / ".gemini").mkdir()
+
+    result = GeminiCliDiscoverer(tmp_path).client_exists()
+
+    assert result is not None
+    assert result.endswith("/.gemini")
+
+
+def test_gemini_cli_discoverer_returns_none_when_absent(tmp_path):
+    from agent_scan.agents import GeminiCliDiscoverer
+
+    assert GeminiCliDiscoverer(tmp_path).client_exists() is None
+
+
+def test_gemini_cli_discoverer_parses_mcp_servers_from_settings(tmp_path):
+    from agent_scan.agents import GeminiCliDiscoverer
+
+    (tmp_path / ".gemini").mkdir()
+    (tmp_path / ".gemini" / "settings.json").write_text(
+        '{"theme": "dark", "mcpServers": {"g": {"command": "gem", "args": ["x"]}}}'
+    )
+
+    mcp = GeminiCliDiscoverer(tmp_path).discover_mcp_servers()
+
+    config_path = next(iter(mcp))
+    assert config_path.endswith("/.gemini/settings.json")
+    name, server = mcp[config_path][0]
+    assert name == "g"
+    assert isinstance(server, StdioServer)
+    assert server.command == "gem"
+
+
+def test_gemini_cli_discoverer_ignores_settings_without_mcp_servers(tmp_path):
+    """``settings.json`` is multi-purpose; no ``mcpServers`` key -> no entry, not a failure."""
+    from agent_scan.agents import GeminiCliDiscoverer
+
+    (tmp_path / ".gemini").mkdir()
+    (tmp_path / ".gemini" / "settings.json").write_text('{"theme": "dark"}')
+
+    assert GeminiCliDiscoverer(tmp_path).discover_mcp_servers() == {}
+
+
+def test_gemini_cli_discoverer_malformed_settings_is_parse_error(tmp_path):
+    from agent_scan.agents import GeminiCliDiscoverer
+
+    (tmp_path / ".gemini").mkdir()
+    (tmp_path / ".gemini" / "settings.json").write_text('{"mcpServers": {')
+
+    mcp = GeminiCliDiscoverer(tmp_path).discover_mcp_servers()
+
+    config_path = next(iter(mcp))
+    assert isinstance(mcp[config_path], CouldNotParseMCPConfig)
+
+
+def test_gemini_cli_discoverer_discovers_skills_dir(tmp_path):
+    from agent_scan.agents import GeminiCliDiscoverer
+
+    (tmp_path / ".gemini" / "skills").mkdir(parents=True)
+
+    result = GeminiCliDiscoverer(tmp_path).discover_skills()
+
+    assert any(k.endswith("/.gemini/skills") for k in result)
+
+
+def test_find_discoverers_returns_gemini_cli_when_installed(tmp_path):
+    from agent_scan.agents import GeminiCliDiscoverer, find_discoverers
+
+    (tmp_path / ".gemini").mkdir()
+
+    found = find_discoverers(tmp_path)
+
+    assert any(isinstance(d, GeminiCliDiscoverer) for d in found)
+
+
+# Amp: ~/.config/agents or .amp (cwd-relative), skills only, no MCP
+
+
+def test_amp_discoverer_detects_installation_via_config_agents(tmp_path):
+    from agent_scan.agents import AmpDiscoverer
+
+    (tmp_path / ".config" / "agents").mkdir(parents=True)
+
+    assert AmpDiscoverer(tmp_path).client_exists().endswith("/.config/agents")
+
+
+def test_amp_discoverer_has_no_mcp_servers(tmp_path):
+    from agent_scan.agents import AmpDiscoverer
+
+    (tmp_path / ".config" / "agents").mkdir(parents=True)
+
+    assert AmpDiscoverer(tmp_path).discover_mcp_servers() == {}
+
+
+def test_amp_discoverer_discovers_skills_dir(tmp_path):
+    from agent_scan.agents import AmpDiscoverer
+
+    (tmp_path / ".config" / "agents" / "skills").mkdir(parents=True)
+
+    result = AmpDiscoverer(tmp_path).discover_skills()
+
+    assert any(k.endswith("/.config/agents/skills") for k in result)
+
+
+def test_amp_discoverer_relative_skills_dir_resolves_cwd_relative(tmp_path, monkeypatch):
+    """The ``.amp/skills`` path is project-local (cwd-relative), NOT home-relative;
+    ``expand_path`` passes non-``~`` paths through unchanged so they resolve against cwd."""
+    from agent_scan.agents import AmpDiscoverer
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".amp" / "skills").mkdir(parents=True)
+    other_home = tmp_path / "elsewhere_home"
+    other_home.mkdir()
+
+    result = AmpDiscoverer(other_home).discover_skills()
+
+    assert any(k.endswith(".amp/skills") for k in result)
+
+
+# Opencode: existence-only (~/.config/opencode), no documented MCP or skills paths
+
+
+def test_opencode_discoverer_detects_installation(tmp_path):
+    from agent_scan.agents import OpencodeDiscoverer
+
+    (tmp_path / ".config" / "opencode").mkdir(parents=True)
+
+    assert OpencodeDiscoverer(tmp_path).client_exists().endswith("/.config/opencode")
+
+
+def test_opencode_discoverer_has_no_mcp_or_skills(tmp_path):
+    from agent_scan.agents import OpencodeDiscoverer
+
+    (tmp_path / ".config" / "opencode").mkdir(parents=True)
+
+    disc = OpencodeDiscoverer(tmp_path)
+    assert disc.discover_mcp_servers() == {}
+    assert disc.discover_skills() == {}
+
+
+# Openclaw: ~/.clawdbot or ~/.openclaw, multiple skills dirs, no MCP
+
+
+def test_openclaw_discoverer_detects_installation_via_clawdbot(tmp_path):
+    from agent_scan.agents import OpenclawDiscoverer
+
+    (tmp_path / ".clawdbot").mkdir()
+
+    assert OpenclawDiscoverer(tmp_path).client_exists().endswith("/.clawdbot")
+
+
+def test_openclaw_discoverer_detects_installation_via_openclaw(tmp_path):
+    from agent_scan.agents import OpenclawDiscoverer
+
+    (tmp_path / ".openclaw").mkdir()
+
+    assert OpenclawDiscoverer(tmp_path).client_exists().endswith("/.openclaw")
+
+
+def test_openclaw_discoverer_discovers_multiple_skills_dirs(tmp_path):
+    from agent_scan.agents import OpenclawDiscoverer
+
+    (tmp_path / ".openclaw" / "skills").mkdir(parents=True)
+    (tmp_path / ".openclaw" / "workspace" / "skills").mkdir(parents=True)
+
+    result = OpenclawDiscoverer(tmp_path).discover_skills()
+
+    assert any(k.endswith("/.openclaw/skills") for k in result)
+    assert any(k.endswith("/.openclaw/workspace/skills") for k in result)
+
+
+def test_openclaw_discoverer_has_no_mcp_servers(tmp_path):
+    from agent_scan.agents import OpenclawDiscoverer
+
+    (tmp_path / ".openclaw").mkdir()
+
+    assert OpenclawDiscoverer(tmp_path).discover_mcp_servers() == {}
+
+
+# Amazon Q: ~/.aws/amazonq, MCP in agents/default.json + agents/mcp.json + mcp.json; macOS/Linux only
+
+
+def test_amazon_q_discoverer_detects_installation(tmp_path):
+    from agent_scan.agents import AmazonQDiscoverer
+
+    (tmp_path / ".aws" / "amazonq").mkdir(parents=True)
+
+    assert AmazonQDiscoverer(tmp_path).client_exists().endswith("/.aws/amazonq")
+
+
+def test_amazon_q_discoverer_parses_mcp_from_default_json(tmp_path):
+    from agent_scan.agents import AmazonQDiscoverer
+
+    agents_dir = tmp_path / ".aws" / "amazonq" / "agents"
+    agents_dir.mkdir(parents=True)
+    (agents_dir / "default.json").write_text('{"mcpServers": {"q": {"command": "qcli"}}}')
+
+    mcp = AmazonQDiscoverer(tmp_path).discover_mcp_servers()
+
+    config_path = next(k for k in mcp if k.endswith("/agents/default.json"))
+    name, server = mcp[config_path][0]
+    assert name == "q"
+    assert isinstance(server, StdioServer)
+    assert server.command == "qcli"
+
+
+def test_amazon_q_discoverer_not_discovered_on_windows(tmp_path, monkeypatch):
+    """Amazon Q has no documented Windows install (the legacy Windows client list
+    omitted it), so it is not discovered on win32 even if the dir exists."""
+    from agent_scan.agents.partial import amazon_q as amazon_q_module
+
+    monkeypatch.setattr(amazon_q_module.sys, "platform", "win32")
+    (tmp_path / ".aws" / "amazonq").mkdir(parents=True)
+
+    assert amazon_q_module.AmazonQDiscoverer(tmp_path).client_exists() is None
+
+
+def test_amazon_q_discoverer_discovered_on_macos(tmp_path, monkeypatch):
+    from agent_scan.agents.partial import amazon_q as amazon_q_module
+
+    monkeypatch.setattr(amazon_q_module.sys, "platform", "darwin")
+    (tmp_path / ".aws" / "amazonq").mkdir(parents=True)
+
+    assert amazon_q_module.AmazonQDiscoverer(tmp_path).client_exists() is not None
+
+
+# --- get_client_from_path: registry-driven path -> agent-name classifier.
+# Best-effort; used to label --paths scans.
+
+
+def test_static_mcp_config_paths_default_is_empty(tmp_path):
+    """Codex has no documented standalone MCP config file (config is config.toml),
+    so it inherits the empty default and is not classified by path."""
+    from agent_scan.agents import CodexDiscoverer
+
+    assert CodexDiscoverer(tmp_path).static_mcp_config_paths() == []
+
+
+def test_static_mcp_config_paths_partial_reports_its_files(tmp_path):
+    from agent_scan.agents import GeminiCliDiscoverer
+
+    paths = GeminiCliDiscoverer(tmp_path).static_mcp_config_paths()
+
+    assert any(p.endswith("/.gemini/settings.json") for p in paths)
+
+
+def test_get_client_from_path_classifies_known_config_files():
+    """A ``~``-relative path expands against the current home on both sides, so the
+    realpath comparison matches regardless of the OS running the suite."""
+    from agent_scan.agents import get_client_from_path
+
+    assert get_client_from_path("~/.gemini/settings.json") == "gemini cli"
+    assert get_client_from_path("~/.claude.json") == "claude code"
+    assert get_client_from_path("~/.cursor/mcp.json") == "cursor"
+    assert get_client_from_path("~/.aws/amazonq/agents/default.json") == "amazon_q"
+
+
+def test_get_client_from_path_returns_none_for_unknown_path():
+    from agent_scan.agents import get_client_from_path
+
+    assert get_client_from_path("~/some/unrelated/file.json") is None
