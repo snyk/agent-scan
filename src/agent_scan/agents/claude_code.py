@@ -90,12 +90,12 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         return None
 
     def static_mcp_config_paths(self) -> list[str]:
-        # The user-global config file, plus every installed-plugin ``.mcp.json`` under
-        # ``~/.claude/plugins/{cache,repos}/**/.mcp.json`` — the files the deleted
-        # ``well_known_clients`` ``mcp_config_globs`` classified, so a ``--paths`` scan of
-        # a plugin config is still attributed to claude code. Globbed against the scanning
-        # user's own home (the classifier resolves ``~`` itself). Per-project ``.mcp.json``
-        # paths stay omitted: they live at arbitrary cwd locations, never a fixed path.
+        # Every fixed-location MCP file claude code owns: the user-global config plus each
+        # installed-plugin ``.mcp.json`` under ``~/.claude/plugins/{cache,repos}/**/.mcp.json``.
+        # Enumerating them keeps ``--paths`` attribution complete (a plugin config still
+        # labels as claude code). Globbed against the scanning user's own home (the classifier
+        # resolves ``~`` itself). Per-project ``.mcp.json`` paths stay omitted: they live at
+        # arbitrary cwd locations, never a fixed path.
         paths = [self._expand_path(Path(self._mcp_config_path)).as_posix()]
         for subdir in self._plugin_subdirs:
             pattern = os.path.expanduser(f"{self._install_path}/plugins/{subdir}/**/.mcp.json")

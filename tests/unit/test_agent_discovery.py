@@ -1245,7 +1245,8 @@ async def test_discover_clients_to_inspect_claude_code_keys_project_under_projec
     cti = claude_ctis[0]
     assert "/work/repo" in cti.mcp_configs
     assert [name for name, _ in cti.mcp_configs["/work/repo"]] == ["srv"]
-    # No legacy flattening: the project server is NOT also keyed under ~/.claude.json.
+    # The project server is keyed under its project path only, NOT also flattened under
+    # ~/.claude.json.
     assert not any(k.endswith("/.claude.json") for k in cti.mcp_configs)
 
 
@@ -2828,9 +2829,8 @@ def test_vscode_discovers_linux_userdata_mcp_on_win32(tmp_path, monkeypatch):
 
     Windows ``--scan-all-users`` enumerates WSL homes via
     ``utils.get_wsl_home_directories``; those homes use Linux-conventional userdata
-    paths. The deleted ``well_known_clients`` win32 branch merged the Linux client
-    rows to cover this; ``_user_data_dirs()`` now resolves the Linux convention on
-    win32 to preserve that coverage.
+    paths. So ``_user_data_dirs()`` must resolve the Linux ``~/.config`` convention on
+    win32 (alongside the native ``AppData/Roaming``) or WSL-home configs go unscanned.
     """
     import agent_scan.agents.vscode.base as base
     from agent_scan.agents import VSCodeDiscoverer
@@ -7224,7 +7224,7 @@ def test_amazon_q_discoverer_parses_mcp_from_default_json(tmp_path):
 def test_amazon_q_discoverer_detected_on_win32(tmp_path, monkeypatch):
     """Regression (PR #367): Amazon Q must be detected on win32. The path is
     platform-identical and a Windows ``--scan-all-users`` run enumerates WSL homes
-    (``utils.get_wsl_home_directories``), so ``client_exists`` is no longer gated on
+    (``utils.get_wsl_home_directories``), so ``client_exists`` must not be gated on
     the scanning machine's OS. Pinning the real ``sys.platform`` to win32 would catch
     a re-introduced platform gate."""
     from agent_scan.agents import AmazonQDiscoverer
@@ -7272,17 +7272,16 @@ def test_get_client_from_path_returns_none_for_unknown_path():
     assert get_client_from_path("~/some/unrelated/file.json") is None
 
 
-# --- get_client_from_path: full --paths labeling parity for the two dynamic scopes the
-# deleted ``well_known_clients`` table classified (VSCode userdata files via
-# ``mcp_config_paths``; Claude Code plugin ``.mcp.json`` via ``mcp_config_globs``).
-# These must keep being attributed to their agent or ``--paths`` mode falls back to the
-# raw path (regression for PR #367).
+# --- get_client_from_path: --paths labeling must cover the two dynamic scopes that have no
+# single literal path — VSCode userdata files (``User/mcp.json`` / ``User/settings.json``)
+# and Claude Code plugin ``.mcp.json`` globs. If either stops being attributed to its agent,
+# ``--paths`` mode falls back to the raw path (regression for PR #367).
 
 
 def test_static_mcp_config_paths_vscode_includes_userdata_files(tmp_path, monkeypatch):
     """The VSCode userdata standalone ``User/mcp.json`` and ``User/settings.json`` are
-    reported (in addition to ``_user_mcp_file_paths``), matching the old well_known
-    ``vscode`` ``mcp_config_paths`` rows."""
+    reported (in addition to ``_user_mcp_file_paths``), so a ``--paths`` scan of either
+    is attributed to ``vscode``."""
     import agent_scan.agents.vscode.base as base
     from agent_scan.agents import VSCodeDiscoverer
 
@@ -7296,7 +7295,7 @@ def test_static_mcp_config_paths_vscode_includes_userdata_files(tmp_path, monkey
 
 def test_get_client_from_path_classifies_vscode_userdata_mcp_and_settings(monkeypatch):
     """A ``--paths`` scan of the VSCode userdata ``mcp.json`` / ``settings.json`` is
-    attributed to ``vscode`` (the deleted table listed both as ``mcp_config_paths``)."""
+    attributed to ``vscode`` — both are fixed-location config files this agent owns."""
     import agent_scan.agents.vscode.base as base
     from agent_scan.agents import get_client_from_path
 
@@ -7308,8 +7307,9 @@ def test_get_client_from_path_classifies_vscode_userdata_mcp_and_settings(monkey
 
 def test_get_client_from_path_classifies_vscode_userdata_on_win32_both_conventions(monkeypatch):
     """On win32, both the native ``~/AppData/Roaming/Code`` userdata AND a WSL home's
-    Linux ``~/.config/Code`` userdata classify as vscode — the deleted win32 well_known
-    merge probed both, so ``--paths`` labeling must too."""
+    Linux ``~/.config/Code`` userdata classify as vscode: a Windows ``--scan-all-users``
+    run reaches WSL homes (Linux userdata convention), so ``--paths`` labeling must
+    resolve both conventions."""
     import agent_scan.agents.vscode.base as base
     from agent_scan.agents import get_client_from_path
 
@@ -7321,7 +7321,7 @@ def test_get_client_from_path_classifies_vscode_userdata_on_win32_both_conventio
 
 def test_get_client_from_path_classifies_claude_plugin_mcp_json(tmp_path, monkeypatch):
     """A plugin ``.mcp.json`` under ``~/.claude/plugins/cache`` is attributed to claude
-    code (the deleted ``mcp_config_globs`` ``~/.claude/plugins/cache/**/.mcp.json``)."""
+    code (matched by the ``~/.claude/plugins/cache/**/.mcp.json`` glob)."""
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     from agent_scan.agents import get_client_from_path
