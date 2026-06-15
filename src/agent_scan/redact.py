@@ -388,6 +388,46 @@ def redact_server(server_scan_result: ServerScanResult) -> ServerScanResult:
     return server_scan_result
 
 
+def redact_data(data: dict, redact_patterns: list[re.Pattern[str]]) -> dict:
+    """Deep-traverse a dictionary and apply *redact_patterns* to every string value.
+
+    Each pattern must use a capturing group around the sensitive portion.
+    The first capturing group match is replaced with ``**REDACTED**``.
+
+    Lists and nested dicts are traversed recursively.  The original
+    *data* dict is mutated in place **and** returned for convenience.
+    """
+
+    def _redact_str(s: str) -> str:
+        for pat in redact_patterns:
+
+            def _replace(m: re.Match[str]) -> str:
+                full = m.group(0)
+                start = m.start(1) - m.start(0)
+                end = m.end(1) - m.start(0)
+                return full[:start] + REDACTED + full[end:]
+
+            s = pat.sub(_replace, s)
+        return s
+
+    def _walk(obj: object) -> None:
+        if isinstance(obj, dict):
+            for key in obj:
+                if isinstance(obj[key], str):
+                    obj[key] = _redact_str(obj[key])
+                else:
+                    _walk(obj[key])
+        elif isinstance(obj, list):
+            for i, item in enumerate(obj):
+                if isinstance(item, str):
+                    obj[i] = _redact_str(item)
+                else:
+                    _walk(item)
+
+    _walk(data)
+    return data
+
+
 def redact_scan_result(result: ScanPathResult) -> ScanPathResult:
     """
     Redact sensitive information from a scan path result before upload.

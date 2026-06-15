@@ -6,7 +6,7 @@ from urllib.parse import parse_qsl, urlsplit
 import pytest
 
 from agent_scan.models import RemoteServer, ScanPathResult, ServerScanResult, StdioServer
-from agent_scan.redact import redact_absolute_paths, redact_args, redact_scan_result
+from agent_scan.redact import redact_absolute_paths, redact_args, redact_data, redact_scan_result
 
 # High-entropy 40-char mixed-case+digit literal that should be flagged by
 # detect-secrets' default high-entropy plugins. NOT a known-prefix token
@@ -377,6 +377,147 @@ class TestRedactArgs:
         args = ["--push-key", "foo123"]
         result = redact_args(args)
         assert result[1] == "**REDACTED_SECRET_SENSITIVEFLAGNAME**"
+
+
+class TestRedactData:
+    """Unit tests for redact_data function."""
+
+    def test_no_match_preserves_values(self):
+        patterns = [re.compile(r"SECRET=(\w+)")]
+        data = {"key": "no match here", "nested": {"deep": "also safe"}}
+        redact_data(data, patterns)
+        assert data == {"key": "no match here", "nested": {"deep": "also safe"}}
+
+    def test_simple_capture_group_replaced(self):
+        patterns = [re.compile(r"TOKEN=(\w+)")]
+        data = {"cmd": "TOKEN=abc123 OTHER=keep"}
+        redact_data(data, patterns)
+        assert data["cmd"] == "TOKEN=**REDACTED** OTHER=keep"
+
+    def test_multiple_patterns_applied(self):
+        patterns = [
+            re.compile(r"KEY='([^']*)'"),
+            re.compile(r"SECRET='([^']*)'"),
+        ]
+        data = {"cmd": "KEY='val1' SECRET='val2' FLAG=ok"}
+        redact_data(data, patterns)
+        assert data["cmd"] == "KEY='**REDACTED**' SECRET='**REDACTED**' FLAG=ok"
+
+    def test_deep_nested_dict(self):
+        patterns = [re.compile(r"password=(\S+)")]
+        data = {"a": {"b": {"c": "password=hunter2 user=admin"}}}
+        redact_data(data, patterns)
+        assert data["a"]["b"]["c"] == "password=**REDACTED** user=admin"
+
+    def test_list_values_traversed(self):
+        patterns = [re.compile(r"secret:(\w+)")]
+        data = {"items": ["secret:abc", "safe", "secret:def"]}
+        redact_data(data, patterns)
+        assert data["items"] == ["secret:**REDACTED**", "safe", "secret:**REDACTED**"]
+
+    def test_nested_list_of_dicts(self):
+        patterns = [re.compile(r"KEY='([^']*)'")]
+        data = {"hooks": [{"command": "KEY='secret1'"}, {"command": "KEY='secret2'"}]}
+        redact_data(data, patterns)
+        assert data["hooks"][0]["command"] == "KEY='**REDACTED**'"
+        assert data["hooks"][1]["command"] == "KEY='**REDACTED**'"
+
+    def test_multiple_matches_in_same_string(self):
+        patterns = [re.compile(r"TOKEN=([0-9a-f]+)", re.IGNORECASE)]
+        data = {"cmd": "TOKEN=aabb TOKEN=ccdd"}
+        redact_data(data, patterns)
+        assert data["cmd"] == "TOKEN=**REDACTED** TOKEN=**REDACTED**"
+
+    def test_capture_group_with_lookahead(self):
+        patterns = [re.compile(r"PUSH_KEY='([^']*)'")]
+        data = {"cmd": "PUSH_KEY='my-secret' URL='https://example.com'"}
+        redact_data(data, patterns)
+        assert data["cmd"] == "PUSH_KEY='**REDACTED**' URL='https://example.com'"
+
+    def test_uuid_pattern(self):
+        uuid_re = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+        patterns = [re.compile(rf"PUSH_KEY='({uuid_re})'", re.IGNORECASE)]
+        data = {"cmd": "PUSH_KEY='a1b2c3d4-e5f6-7890-abcd-ef1234567890' bash script.sh"}
+        redact_data(data, patterns)
+        assert data["cmd"] == "PUSH_KEY='**REDACTED**' bash script.sh"
+
+    def test_uuid_pattern_non_uuid_value_preserved(self):
+        uuid_re = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+        patterns = [re.compile(rf"PUSH_KEY='({uuid_re})'", re.IGNORECASE)]
+        data = {"cmd": "PUSH_KEY='not-a-uuid' bash script.sh"}
+        redact_data(data, patterns)
+        assert data["cmd"] == "PUSH_KEY='not-a-uuid' bash script.sh"
+
+    def test_non_string_values_ignored(self):
+        patterns = [re.compile(r"secret=(\w+)")]
+        data = {"count": 42, "flag": True, "empty": None, "text": "secret=abc"}
+        redact_data(data, patterns)
+        assert data["count"] == 42
+        assert data["flag"] is True
+        assert data["empty"] is None
+        assert data["text"] == "secret=**REDACTED**"
+
+    def test_empty_dict(self):
+        patterns = [re.compile(r"KEY=(\w+)")]
+        data: dict = {}
+        result = redact_data(data, patterns)
+        assert result == {}
+
+    def test_empty_patterns_list(self):
+        data = {"cmd": "KEY='secret' VALUE=123"}
+        redact_data(data, [])
+        assert data == {"cmd": "KEY='secret' VALUE=123"}
+
+    def test_mutates_in_place_and_returns(self):
+        patterns = [re.compile(r"KEY=(\w+)")]
+        data = {"cmd": "KEY=secret"}
+        result = redact_data(data, patterns)
+        assert result is data
+        assert data["cmd"] == "KEY=**REDACTED**"
+
+    def test_mixed_list_with_non_strings(self):
+        patterns = [re.compile(r"tok=(\w+)")]
+        data = {"items": ["tok=abc", 42, {"nested": "tok=def"}, True, None]}
+        redact_data(data, patterns)
+        assert data["items"][0] == "tok=**REDACTED**"
+        assert data["items"][1] == 42
+        assert data["items"][2] == {"nested": "tok=**REDACTED**"}
+        assert data["items"][3] is True
+        assert data["items"][4] is None
+
+    def test_hooks_diff_realistic_payload(self):
+        """Realistic hooks diff payload with push keys in command strings."""
+        uuid_re = r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+        patterns = [
+            re.compile(rf"PUSH_KEY='({uuid_re})'", re.IGNORECASE),
+            re.compile(rf"-PushKey\s+'({uuid_re})'", re.IGNORECASE),
+        ]
+        push_key = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        command = f"PUSH_KEY='{push_key}' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' bash /path/to/script.sh --client claude-code"
+        data = {
+            "hook_event_name": "hooksConfigured",
+            "session_id": "hooks-setup",
+            "first_install": False,
+            "config_changed": True,
+            "added": {},
+            "modified": {
+                "PreToolUse": {
+                    "expected_value": [{"hooks": [{"type": "command", "command": command}]}],
+                    "actual_value": [{"hooks": [{"type": "command", "command": "old-command"}]}],
+                },
+            },
+            "removed": {
+                "Stop": [{"hooks": [{"type": "command", "command": command}]}],
+            },
+        }
+        redact_data(data, patterns)
+        assert push_key not in str(data)
+        assert "**REDACTED**" in data["modified"]["PreToolUse"]["expected_value"][0]["hooks"][0]["command"]
+        assert (
+            "REMOTE_HOOKS_BASE_URL='https://api.snyk.io'"
+            in data["modified"]["PreToolUse"]["expected_value"][0]["hooks"][0]["command"]
+        )
+        assert data["session_id"] == "hooks-setup"
 
 
 def test_redact_remote_url_query_and_headers():
