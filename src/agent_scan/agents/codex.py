@@ -36,7 +36,6 @@ from agent_scan.models import (
     PluginMCPConfigFile,
 )
 from agent_scan.skill_client import inspect_skills_dir
-from agent_scan.well_known_clients import expand_path
 
 logger = logging.getLogger(__name__)
 
@@ -75,8 +74,8 @@ class CodexDiscoverer(AgentDiscoverer):
     unscanned. https://snyksec.atlassian.net/browse/ADS-422
     """
 
-    # MUST match the Codex entry in ``well_known_clients.py`` so the Phase-A /
-    # Phase-B merge in ``pipelines`` lines up on one client.
+    # Canonical agent name: this discoverer's key in ``agents.DISCOVERERS`` and the
+    # ``name`` on every ``ClientToInspect`` it produces.
     name = "codex"
 
     _install_path = "~/.codex"
@@ -361,7 +360,7 @@ class CodexDiscoverer(AgentDiscoverer):
         skills_dirs = (
             self._codex_home() / "skills",
             self._codex_home() / "skills" / ".system",
-            expand_path(Path(self._user_skills_relative), self.home_directory),
+            self._expand_path(Path(self._user_skills_relative)),
             Path(self._admin_skills_dir),
         )
         for skills_dir in skills_dirs:
@@ -391,7 +390,7 @@ class CodexDiscoverer(AgentDiscoverer):
             codex_home = os.environ.get("CODEX_HOME")
             if codex_home:
                 return Path(codex_home)
-        return expand_path(Path(self._install_path), self.home_directory)
+        return self._expand_path(Path(self._install_path))
 
     def _user_config_toml(self) -> dict | CouldNotParseMCPConfig | None:
         """Read and TOML-decode ``<codex_home>/config.toml`` (``None`` if missing/empty,

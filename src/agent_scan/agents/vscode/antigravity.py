@@ -7,7 +7,6 @@ from agent_scan.agents.vscode.base import (
     _file_uri_to_path,
     _nested_dict_get,
 )
-from agent_scan.well_known_clients import expand_path
 
 
 class AntigravityDiscoverer(VSCodeFamilyDiscoverer):
@@ -97,7 +96,7 @@ class AntigravityDiscoverer(VSCodeFamilyDiscoverer):
         so ``_extension_paths`` roots return their immediate subdirs (every present
         extension is scanned). Built-in/bundled dirs stay manifest-gated via
         ``super()``."""
-        extension_roots = {expand_path(Path(raw), self.home_directory) for raw in self._extension_paths}
+        extension_roots = {self._expand_path(Path(raw)) for raw in self._extension_paths}
         if base in extension_roots:
             return self._immediate_subdirs(base)
         return super()._installed_extension_dirs(base)
@@ -139,7 +138,7 @@ class AntigravityDiscoverer(VSCodeFamilyDiscoverer):
         surface as a discovery error (mirrors how the base skips a malformed
         ``workspace.json``).
         """
-        projects_dir = expand_path(Path(self._gemini_projects_dir), self.home_directory)
+        projects_dir = self._expand_path(Path(self._gemini_projects_dir))
         try:
             project_files = sorted(projects_dir.glob("*.json"))
         except (PermissionError, OSError):

@@ -39,7 +39,6 @@ from agent_scan.models import (
     VSCodeMCPConfig,
 )
 from agent_scan.skill_client import inspect_skills_dir
-from agent_scan.well_known_clients import expand_path
 
 logger = logging.getLogger(__name__)
 # Cap traversal into ``<userdata>/User/workspaceStorage/``. Layout is
@@ -284,7 +283,7 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
 
     def client_exists(self) -> str | None:
         for raw in self._install_paths:
-            path = expand_path(Path(raw), self.home_directory)
+            path = self._expand_path(Path(raw))
             try:
                 if path.exists():
                     return path.as_posix()
@@ -324,11 +323,26 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         result.update(self._discover_code_workspace_skills())
         return result
 
+    def static_mcp_config_paths(self) -> list[str]:
+        # Every fixed-location MCP file this agent owns: the home-relative standalone
+        # configs plus each userdata-dir standalone ``User/mcp.json`` and ``User/settings.json``,
+        # so ``--paths`` attribution stays complete. ``_user_data_dirs`` yields every
+        # documented userdata location for the current OS (both the native and the WSL
+        # ``~/.config`` convention on win32). Profile/workspace/extension MCP paths stay
+        # omitted (truly per-project/dynamic, never classifiable by a fixed path).
+        paths = [self._expand_path(Path(raw)).as_posix() for raw in self._user_mcp_file_paths]
+        for userdata in self._user_data_dirs():
+            if self._userdata_user_mcp_file:
+                paths.append((userdata / self._userdata_user_mcp_file).as_posix())
+            if self._user_settings_file:
+                paths.append((userdata / self._user_settings_file).as_posix())
+        return paths
+
     def _discover_home_skills_dirs(self) -> SkillsDirsResult:
         """Scan the home-relative skill directories declared in ``_skills_dir_paths``."""
         result: SkillsDirsResult = {}
         for raw in self._skills_dir_paths:
-            path = expand_path(Path(raw), self.home_directory)
+            path = self._expand_path(Path(raw))
             entries = self._scan_skills_dir(path)
             if entries is not None:
                 result[path.as_posix()] = entries
@@ -363,19 +377,27 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         so callers that pick the "first one" get the v1.x folder before any
         newer variants (e.g. Antigravity ``Antigravity`` before
         ``Antigravity IDE``).
+
+        On Windows we ALSO resolve the Linux ``~/.config`` convention: a Windows
+        ``--scan-all-users`` run enumerates WSL homes (``utils.get_wsl_home_directories``),
+        whose VSCode userdata lives at the Linux path. The native Windows template
+        stays first so the first-candidate convention is unchanged; non-existent
+        candidates are a cheap negative stat for native-Windows homes.
         """
         if not self._user_data_dir_names:
             return []
         if sys.platform == "darwin":
-            template = "~/Library/Application Support/{name}"
+            templates = ["~/Library/Application Support/{name}"]
         elif sys.platform in ("linux", "linux2"):
-            template = "~/.config/{name}"
+            templates = ["~/.config/{name}"]
         elif sys.platform == "win32":
-            template = "~/AppData/Roaming/{name}"
+            templates = ["~/AppData/Roaming/{name}", "~/.config/{name}"]
         else:
             return []
         dirs = [
-            expand_path(Path(template.format(name=name)), self.home_directory) for name in self._user_data_dir_names
+            self._expand_path(Path(template.format(name=name)))
+            for template in templates
+            for name in self._user_data_dir_names
         ]
         portable = self._portable_user_data_dir()
         if portable is not None:
@@ -428,7 +450,7 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
     def _discover_user_mcp_files(self) -> McpConfigsResult:
         """Parse every file in ``_user_mcp_file_paths`` plus the userdata standalone ``mcp.json``."""
         result: McpConfigsResult = {}
-        paths: list[Path] = [expand_path(Path(raw), self.home_directory) for raw in self._user_mcp_file_paths]
+        paths: list[Path] = [self._expand_path(Path(raw)) for raw in self._user_mcp_file_paths]
         if self._userdata_user_mcp_file:
             paths.extend(userdata / self._userdata_user_mcp_file for userdata in self._user_data_dirs())
 
@@ -657,7 +679,7 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         """
         if not self._agent_config_dir_paths and not self._workspace_agent_config_relative:
             return {}
-        dirs: list[Path] = [expand_path(Path(raw), self.home_directory) for raw in self._agent_config_dir_paths]
+        dirs: list[Path] = [self._expand_path(Path(raw)) for raw in self._agent_config_dir_paths]
         for root in self._project_paths_with_ancestors():
             dirs.extend(root / rel for rel in self._workspace_agent_config_relative)
         result: McpConfigsResult = {}
@@ -700,7 +722,7 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         home, plus the portable-mode extensions dir when active and the
         application's built-in (bundled) extensions dir(s) (see
         :meth:`_builtin_extension_dirs`)."""
-        dirs = [expand_path(Path(raw), self.home_directory) for raw in self._extension_paths]
+        dirs = [self._expand_path(Path(raw)) for raw in self._extension_paths]
         portable = self._portable_user_data_dir()
         if portable is not None:
             # Portable layout: ``<portable>/extensions`` is a sibling of ``user-data``.
@@ -724,9 +746,7 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         (a documented coverage gap, e.g. Linux tarball/AppImage installs).
         """
         key = "linux" if sys.platform in ("linux", "linux2") else sys.platform
-        return [
-            expand_path(Path(raw), self.home_directory) for raw in self._builtin_extension_dir_templates.get(key, ())
-        ]
+        return [self._expand_path(Path(raw)) for raw in self._builtin_extension_dir_templates.get(key, ())]
 
     # --- private: install-manifest gating (don't scan uninstalled extensions) ---
 
@@ -878,7 +898,7 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         locations = _read_chat_setting(settings, "agentSkillsLocations")
         for raw in _enabled_skill_location_paths(locations):
             if raw.startswith("~"):
-                path = expand_path(Path(raw), self.home_directory)
+                path = self._expand_path(Path(raw))
             elif Path(raw).is_absolute():
                 path = Path(raw)
             elif base_dir is not None:
@@ -925,7 +945,7 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         surface as parse failures."""
         result: McpConfigsResult = {}
         for raw in self._gated_home_settings_files:
-            path = expand_path(Path(raw), self.home_directory)
+            path = self._expand_path(Path(raw))
             entry = self._parse_settings_mcp_gated(path)
             if entry is not None:
                 result[path.as_posix()] = entry
