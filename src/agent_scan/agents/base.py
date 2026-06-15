@@ -233,9 +233,12 @@ class AgentDiscoverer(ABC):
 
         Default empty; overridden by discoverers that have well-known config files.
         Consumed by ``agents.get_client_from_path`` to label an explicitly-scanned
-        path (``--paths`` mode) with its owning agent name. Need not be exhaustive
-        (dynamic project/plugin paths are omitted) — it is a best-effort classifier
-        whose callers fall back to the already-known client name.
+        path (``--paths`` mode) with its owning agent name. Overrides should enumerate
+        every fixed-location file the agent owns — including dynamically resolved ones
+        (per-userdata-dir / installed-plugin configs) — so ``--paths`` attribution is
+        complete; only truly per-project paths (arbitrary cwd locations) are omitted.
+        It is a best-effort classifier: callers fall back to the already-known client
+        name when it returns ``None``.
         """
         return []
 

@@ -324,9 +324,20 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         return result
 
     def static_mcp_config_paths(self) -> list[str]:
-        # The standalone user-global MCP config files; userdata/profile/workspace
-        # and extension paths are dynamic and intentionally omitted (best-effort).
-        return [self._expand_path(Path(raw)).as_posix() for raw in self._user_mcp_file_paths]
+        # The home-relative standalone MCP config files plus the per-userdata-dir
+        # standalone ``User/mcp.json`` and ``User/settings.json`` — the same files the
+        # deleted ``well_known_clients`` ``mcp_config_paths`` rows classified, so a
+        # ``--paths`` scan of them is still attributed to this agent. ``_user_data_dirs``
+        # resolves every documented userdata location for the current OS (both the native
+        # and the WSL ``~/.config`` convention on win32). Profile/workspace/extension MCP
+        # paths stay omitted (truly per-project/dynamic, never classifiable by a fixed path).
+        paths = [self._expand_path(Path(raw)).as_posix() for raw in self._user_mcp_file_paths]
+        for userdata in self._user_data_dirs():
+            if self._userdata_user_mcp_file:
+                paths.append((userdata / self._userdata_user_mcp_file).as_posix())
+            if self._user_settings_file:
+                paths.append((userdata / self._user_settings_file).as_posix())
+        return paths
 
     def _discover_home_skills_dirs(self) -> SkillsDirsResult:
         """Scan the home-relative skill directories declared in ``_skills_dir_paths``."""

@@ -7270,3 +7270,78 @@ def test_get_client_from_path_returns_none_for_unknown_path():
     from agent_scan.agents import get_client_from_path
 
     assert get_client_from_path("~/some/unrelated/file.json") is None
+
+
+# --- get_client_from_path: full --paths labeling parity for the two dynamic scopes the
+# deleted ``well_known_clients`` table classified (VSCode userdata files via
+# ``mcp_config_paths``; Claude Code plugin ``.mcp.json`` via ``mcp_config_globs``).
+# These must keep being attributed to their agent or ``--paths`` mode falls back to the
+# raw path (regression for PR #367).
+
+
+def test_static_mcp_config_paths_vscode_includes_userdata_files(tmp_path, monkeypatch):
+    """The VSCode userdata standalone ``User/mcp.json`` and ``User/settings.json`` are
+    reported (in addition to ``_user_mcp_file_paths``), matching the old well_known
+    ``vscode`` ``mcp_config_paths`` rows."""
+    import agent_scan.agents.vscode.base as base
+    from agent_scan.agents import VSCodeDiscoverer
+
+    monkeypatch.setattr(base.sys, "platform", "darwin")
+
+    paths = VSCodeDiscoverer(tmp_path).static_mcp_config_paths()
+
+    assert any(p.endswith("/Code/User/mcp.json") for p in paths)
+    assert any(p.endswith("/Code/User/settings.json") for p in paths)
+
+
+def test_get_client_from_path_classifies_vscode_userdata_mcp_and_settings(monkeypatch):
+    """A ``--paths`` scan of the VSCode userdata ``mcp.json`` / ``settings.json`` is
+    attributed to ``vscode`` (the deleted table listed both as ``mcp_config_paths``)."""
+    import agent_scan.agents.vscode.base as base
+    from agent_scan.agents import get_client_from_path
+
+    monkeypatch.setattr(base.sys, "platform", "darwin")
+
+    assert get_client_from_path("~/Library/Application Support/Code/User/mcp.json") == "vscode"
+    assert get_client_from_path("~/Library/Application Support/Code/User/settings.json") == "vscode"
+
+
+def test_get_client_from_path_classifies_vscode_userdata_on_win32_both_conventions(monkeypatch):
+    """On win32, both the native ``~/AppData/Roaming/Code`` userdata AND a WSL home's
+    Linux ``~/.config/Code`` userdata classify as vscode — the deleted win32 well_known
+    merge probed both, so ``--paths`` labeling must too."""
+    import agent_scan.agents.vscode.base as base
+    from agent_scan.agents import get_client_from_path
+
+    monkeypatch.setattr(base.sys, "platform", "win32")
+
+    assert get_client_from_path("~/AppData/Roaming/Code/User/mcp.json") == "vscode"
+    assert get_client_from_path("~/.config/Code/User/mcp.json") == "vscode"
+
+
+def test_get_client_from_path_classifies_claude_plugin_mcp_json(tmp_path, monkeypatch):
+    """A plugin ``.mcp.json`` under ``~/.claude/plugins/cache`` is attributed to claude
+    code (the deleted ``mcp_config_globs`` ``~/.claude/plugins/cache/**/.mcp.json``)."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    from agent_scan.agents import get_client_from_path
+
+    plugin_mcp = tmp_path / ".claude" / "plugins" / "cache" / "market" / "plug" / ".mcp.json"
+    plugin_mcp.parent.mkdir(parents=True)
+    plugin_mcp.write_text('{"mcpServers": {}}')
+
+    assert get_client_from_path(str(plugin_mcp)) == "claude code"
+
+
+def test_get_client_from_path_classifies_claude_plugin_mcp_json_in_repos(tmp_path, monkeypatch):
+    """``repos`` is the other documented plugin install root, so its ``.mcp.json`` files
+    classify as claude code too (additive over the old cache-only glob; no drop)."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    from agent_scan.agents import get_client_from_path
+
+    plugin_mcp = tmp_path / ".claude" / "plugins" / "repos" / "market" / "plug" / ".mcp.json"
+    plugin_mcp.parent.mkdir(parents=True)
+    plugin_mcp.write_text('{"mcpServers": {}}')
+
+    assert get_client_from_path(str(plugin_mcp)) == "claude code"
