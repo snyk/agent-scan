@@ -367,18 +367,28 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         so callers that pick the "first one" get the v1.x folder before any
         newer variants (e.g. Antigravity ``Antigravity`` before
         ``Antigravity IDE``).
+
+        On Windows we ALSO resolve the Linux ``~/.config`` convention: a Windows
+        ``--scan-all-users`` run enumerates WSL homes (``utils.get_wsl_home_directories``),
+        whose VSCode userdata lives at the Linux path. The native Windows template
+        stays first so the first-candidate convention is unchanged; non-existent
+        candidates are a cheap negative stat for native-Windows homes.
         """
         if not self._user_data_dir_names:
             return []
         if sys.platform == "darwin":
-            template = "~/Library/Application Support/{name}"
+            templates = ["~/Library/Application Support/{name}"]
         elif sys.platform in ("linux", "linux2"):
-            template = "~/.config/{name}"
+            templates = ["~/.config/{name}"]
         elif sys.platform == "win32":
-            template = "~/AppData/Roaming/{name}"
+            templates = ["~/AppData/Roaming/{name}", "~/.config/{name}"]
         else:
             return []
-        dirs = [self._expand_path(Path(template.format(name=name))) for name in self._user_data_dir_names]
+        dirs = [
+            self._expand_path(Path(template.format(name=name)))
+            for template in templates
+            for name in self._user_data_dir_names
+        ]
         portable = self._portable_user_data_dir()
         if portable is not None:
             # Portable mode relocates the whole userdata tree; prepend it so it

@@ -1,7 +1,5 @@
 """Amazon Q discoverer."""
 
-import sys
-
 from agent_scan.agents.partial.base import PartialDiscoverer
 
 
@@ -10,9 +8,9 @@ class AmazonQDiscoverer(PartialDiscoverer):
     the wrapped ``mcpServers`` tables of ``agents/default.json``, ``agents/mcp.json``
     and ``mcp.json``. No skills path is documented.
 
-    macOS/Linux only: Amazon Q has no documented Windows install (the legacy Windows
-    client list omitted it), so ``client_exists`` returns ``None`` on ``win32`` even
-    if a same-named directory happens to exist.
+    The ``~/.aws/amazonq`` path is platform-identical and probed on every platform:
+    a Windows ``--scan-all-users`` run reaches WSL homes (``utils.get_wsl_home_directories``),
+    so detection must not be gated on the scanning machine's OS.
     """
 
     name = "amazon_q"
@@ -22,9 +20,3 @@ class AmazonQDiscoverer(PartialDiscoverer):
         "~/.aws/amazonq/agents/mcp.json",
         "~/.aws/amazonq/mcp.json",
     )
-
-    def client_exists(self) -> str | None:
-        # Branches on the scanning machine's OS (shared by every home on it).
-        if sys.platform == "win32":
-            return None
-        return super().client_exists()

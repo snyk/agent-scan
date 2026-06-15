@@ -2802,6 +2802,53 @@ def test_vscode_user_data_dir_returns_platform_specific_path(tmp_path):
         assert user_data.as_posix().endswith("/AppData/Roaming/Code")
 
 
+def test_vscode_user_data_dirs_on_win32_include_linux_config_dirs(tmp_path, monkeypatch):
+    """On win32, ``_user_data_dirs()`` resolves BOTH the native ``AppData/Roaming``
+    userdata dir AND the Linux ``~/.config`` convention.
+
+    A Windows ``--scan-all-users`` run enumerates WSL homes (``utils.get_wsl_home_directories``),
+    which use Linux-conventional userdata paths. The native Windows template stays
+    first so the first-candidate convention (``_user_data_dir()``) is unchanged.
+    """
+    import agent_scan.agents.vscode.base as base
+    from agent_scan.agents import VSCodeDiscoverer
+
+    monkeypatch.setattr(base.sys, "platform", "win32")
+
+    dirs = [d.as_posix() for d in VSCodeDiscoverer(tmp_path)._user_data_dirs()]
+
+    appdata = next(i for i, d in enumerate(dirs) if d.endswith("/AppData/Roaming/Code"))
+    config = next(i for i, d in enumerate(dirs) if d.endswith("/.config/Code"))
+    assert appdata < config, f"native Windows userdata dir must come first; got {dirs}"
+
+
+def test_vscode_discovers_linux_userdata_mcp_on_win32(tmp_path, monkeypatch):
+    """Regression (PR #367): a WSL home's ``~/.config/Code/User/mcp.json`` must be
+    discovered when scanning from Windows.
+
+    Windows ``--scan-all-users`` enumerates WSL homes via
+    ``utils.get_wsl_home_directories``; those homes use Linux-conventional userdata
+    paths. The deleted ``well_known_clients`` win32 branch merged the Linux client
+    rows to cover this; ``_user_data_dirs()`` now resolves the Linux convention on
+    win32 to preserve that coverage.
+    """
+    import agent_scan.agents.vscode.base as base
+    from agent_scan.agents import VSCodeDiscoverer
+
+    monkeypatch.setattr(base.sys, "platform", "win32")
+    (tmp_path / ".vscode").mkdir()
+    user_dir = tmp_path / ".config" / "Code" / "User"
+    user_dir.mkdir(parents=True)
+    (user_dir / "mcp.json").write_text('{"servers": {"wsl-srv": {"command": "echo"}}}')
+
+    mcp_configs = VSCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    keys = [k for k in mcp_configs if k.endswith("/.config/Code/User/mcp.json")]
+    assert len(keys) == 1, f"WSL-home Linux userdata mcp.json must be discovered on win32; got {list(mcp_configs)}"
+    name, _server = mcp_configs[keys[0]][0]
+    assert name == "wsl-srv"
+
+
 # --- shared ancestor-walk now lives on AgentDiscoverer ---
 
 
@@ -7145,18 +7192,17 @@ def test_openclaw_discoverer_has_no_mcp_servers(tmp_path):
     assert OpenclawDiscoverer(tmp_path).discover_mcp_servers() == {}
 
 
-# Amazon Q: ~/.aws/amazonq, MCP in agents/default.json + agents/mcp.json + mcp.json; macOS/Linux only
+# Amazon Q: ~/.aws/amazonq, MCP in agents/default.json + agents/mcp.json + mcp.json.
+# Paths are platform-identical and probed on every platform (a Windows --scan-all-users
+# run reaches WSL homes via utils.get_wsl_home_directories).
 
 
-def test_amazon_q_discoverer_detects_installation(tmp_path, monkeypatch):
-    # Amazon Q is macOS/Linux only (client_exists returns None on win32), so pin a
-    # non-Windows platform to keep this deterministic regardless of the runner OS.
-    from agent_scan.agents.partial import amazon_q as amazon_q_module
+def test_amazon_q_discoverer_detects_installation(tmp_path):
+    from agent_scan.agents import AmazonQDiscoverer
 
-    monkeypatch.setattr(amazon_q_module.sys, "platform", "darwin")
     (tmp_path / ".aws" / "amazonq").mkdir(parents=True)
 
-    assert amazon_q_module.AmazonQDiscoverer(tmp_path).client_exists().endswith("/.aws/amazonq")
+    assert AmazonQDiscoverer(tmp_path).client_exists().endswith("/.aws/amazonq")
 
 
 def test_amazon_q_discoverer_parses_mcp_from_default_json(tmp_path):
@@ -7175,24 +7221,18 @@ def test_amazon_q_discoverer_parses_mcp_from_default_json(tmp_path):
     assert server.command == "qcli"
 
 
-def test_amazon_q_discoverer_not_discovered_on_windows(tmp_path, monkeypatch):
-    """Amazon Q has no documented Windows install (the legacy Windows client list
-    omitted it), so it is not discovered on win32 even if the dir exists."""
-    from agent_scan.agents.partial import amazon_q as amazon_q_module
+def test_amazon_q_discoverer_detected_on_win32(tmp_path, monkeypatch):
+    """Regression (PR #367): Amazon Q must be detected on win32. The path is
+    platform-identical and a Windows ``--scan-all-users`` run enumerates WSL homes
+    (``utils.get_wsl_home_directories``), so ``client_exists`` is no longer gated on
+    the scanning machine's OS. Pinning the real ``sys.platform`` to win32 would catch
+    a re-introduced platform gate."""
+    from agent_scan.agents import AmazonQDiscoverer
 
-    monkeypatch.setattr(amazon_q_module.sys, "platform", "win32")
+    monkeypatch.setattr(sys, "platform", "win32")
     (tmp_path / ".aws" / "amazonq").mkdir(parents=True)
 
-    assert amazon_q_module.AmazonQDiscoverer(tmp_path).client_exists() is None
-
-
-def test_amazon_q_discoverer_discovered_on_macos(tmp_path, monkeypatch):
-    from agent_scan.agents.partial import amazon_q as amazon_q_module
-
-    monkeypatch.setattr(amazon_q_module.sys, "platform", "darwin")
-    (tmp_path / ".aws" / "amazonq").mkdir(parents=True)
-
-    assert amazon_q_module.AmazonQDiscoverer(tmp_path).client_exists() is not None
+    assert AmazonQDiscoverer(tmp_path).client_exists().endswith("/.aws/amazonq")
 
 
 # --- get_client_from_path: registry-driven path -> agent-name classifier.
