@@ -38,8 +38,8 @@ class SeedCommand:
     """One command the executor should run to seed a scope.
 
     ``run_in_project`` → run with cwd = the dummy project. ``non_fatal`` → a non-zero exit should warn,
-    not fail the leg (e.g. the headless trust step, or best-effort plugin installs); a failed *required*
-    seed instead surfaces downstream as a MISSING scope. Seed commands run against the fake home."""
+    not fail the leg (e.g. the headless trust step, or best-effort plugin installs); a *required* seed
+    (``non_fatal=False``) that fails should fail the leg. Seed commands run against the fake home."""
 
     argv: tuple[str, ...]
     run_in_project: bool = False
