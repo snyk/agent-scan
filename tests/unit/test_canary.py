@@ -18,6 +18,7 @@ EXPECTED_ITEMS = [
     ExpectedItem("mcp", "discord", "mcp/plugin"),
     ExpectedItem("skill", "access", "skill/plugin", ("$HOME/.claude/plugins/", "skills/access")),
     ExpectedItem("skill", "configure", "skill/plugin", ("$HOME/.claude/plugins/", "skills/configure")),
+    ExpectedItem("skill", "commit", "command/plugin", ("$HOME/.claude/plugins/", "commands/commit")),
     ExpectedItem(
         "skill", "canary-project-skill", "skill/project", ("$PROJECT/.claude/skills/", "canary-project-skill")
     ),
@@ -40,10 +41,18 @@ def test_expected_items_in_order():
 def test_scope_order_live_then_fixtures_then_gaps():
     scopes = ClaudeCodeCanary().scopes
     labels = [s.label for s in scopes]
-    assert labels[:5] == ["mcp/global", "mcp/project-inline", "mcp/project-file", "lifecycle/trust", "mcp+skill/plugin"]
-    assert labels[5:8] == ["skill/project", "command/project", "mcp/project-file-fixture"]
-    assert all(isinstance(s, FixtureScope) for s in scopes[5:8])
-    assert all(isinstance(s, Gap) for s in scopes[8:])
+    assert labels[:6] == [
+        "mcp/global",
+        "mcp/project-inline",
+        "mcp/project-file",
+        "lifecycle/trust",
+        "mcp+skill/plugin",
+        "command/plugin",
+    ]
+    assert all(isinstance(s, PluginScope) for s in scopes[4:6])  # both plugins are live installs
+    assert labels[6:9] == ["skill/project", "command/project", "mcp/project-file-fixture"]
+    assert all(isinstance(s, FixtureScope) for s in scopes[6:9])
+    assert all(isinstance(s, Gap) for s in scopes[9:])
 
 
 def test_mcp_scope_emits_claude_mcp_add():
@@ -53,8 +62,12 @@ def test_mcp_scope_emits_claude_mcp_add():
     assert cmd.run_in_project is True
 
 
+def _plugin_scope(label):
+    return next(s for s in ClaudeCodeCanary().scopes if isinstance(s, PluginScope) and s.label == label)
+
+
 def test_plugin_scope_marketplace_pin_then_installs_narrow_to_broad():
-    scope = next(s for s in ClaudeCodeCanary().scopes if isinstance(s, PluginScope))
+    scope = _plugin_scope("mcp+skill/plugin")
     argvs = [" ".join(c.argv) for c in scope.commands(CTX)]
     # Build the clone path the same way the code does, so the assertion holds on Windows too (backslashes).
     clone = str(CTX.home / ".claude" / "plugins" / "marketplaces" / "claude-plugins-official")
@@ -67,6 +80,21 @@ def test_plugin_scope_marketplace_pin_then_installs_narrow_to_broad():
         "claude plugin install discord@claude-plugins-official --scope user",
     ]
     assert all(c.non_fatal for c in scope.commands(CTX))
+
+
+def test_command_plugin_scope_installs_commit_commands_and_expects_the_command():
+    # command/plugin is filled by installing a SECOND pinned plugin (commit-commands) from the same
+    # official marketplace — discord ships no commands. One `--scope user` install populates the shared
+    # plugin cache that _discover_plugin_commands scans; detection ignores enablement.
+    scope = _plugin_scope("command/plugin")
+    argvs = [" ".join(c.argv) for c in scope.commands(CTX)]
+    assert "claude plugin marketplace add anthropics/claude-plugins-official" in argvs
+    assert argvs[-1] == "claude plugin install commit-commands@claude-plugins-official --scope user"
+    assert all(c.non_fatal for c in scope.commands(CTX))
+    assert scope.expected() == [
+        ExpectedItem("skill", "commit", "command/plugin", ("$HOME/.claude/plugins/", "commands/commit"))
+    ]
+    assert scope.mirrors == (ClaudeCodeCanary.discoverer._discover_plugin_commands,)
 
 
 def test_gaps_are_inert():

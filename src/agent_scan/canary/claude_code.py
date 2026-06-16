@@ -2,10 +2,11 @@
 
 One :class:`Scope` per scope-producing ``_discover_*`` method (``mirrors`` references the method object
 itself). Three tiers: the scopes a real ``claude`` can write are driven live (the three ``claude mcp add``
-MCP scopes + the pinned plugin's MCP/skills); the project-local skill/command/server scopes that no CLI
-writes are :class:`FixtureScope` s (the executor copies a committed fixture into the project, then inspect
-must detect it); the rest are :class:`Gap` s — mirrored for fidelity (so the coverage test sees them
-covered) but never seeded or asserted, because neither a CLI nor a sensible fixture can drive them.
+MCP scopes + two pinned marketplace plugins — ``discord`` for MCP/skills, ``commit-commands`` for plugin
+commands); the project-local skill/command/server scopes that no CLI writes are :class:`FixtureScope` s
+(the executor copies a committed fixture into the project, then inspect must detect it); the rest are
+:class:`Gap` s — mirrored for fidelity (so the coverage test sees them covered) but never seeded or
+asserted, because neither a CLI nor a sensible fixture can drive them.
 """
 
 from __future__ import annotations
@@ -32,6 +33,12 @@ CLAUDE_PLUGIN_MARKETPLACE = "claude-plugins-official"
 CLAUDE_PLUGIN_MARKETPLACE_REPO = "anthropics/claude-plugins-official"
 CLAUDE_PLUGIN = "discord"
 CLAUDE_PLUGIN_PIN_SHA = "66bca6b6f62e5023673feff699d9d99451ae9919"
+
+# `discord` ships no slash commands, so the plugin-command scope needs a second real plugin. `commit-commands`
+# is a pure command plugin in the SAME official marketplace (and present at PIN_SHA), bundling
+# `commands/commit.md` etc. — installing it lands a `commands/` dir in the plugin cache that
+# `_discover_plugin_commands` detects. Same marketplace + pin as `discord`, so still deterministic.
+CLAUDE_COMMAND_PLUGIN = "commit-commands"
 
 # Committed project fixtures, copied into the (registered) dummy project so inspect can detect the
 # project-local skill/command/server scopes no `claude` CLI writes. The src paths are relative to the
@@ -79,6 +86,18 @@ class ClaudeCodeCanary(AgentCanary):
                     ExpectedItem("skill", "access", "skill/plugin", ("$HOME/.claude/plugins/", "skills/access")),
                     ExpectedItem("skill", "configure", "skill/plugin", ("$HOME/.claude/plugins/", "skills/configure")),
                 ),
+            ),
+            PluginScope(
+                "command/plugin",
+                (_D._discover_plugin_commands,),
+                marketplace=CLAUDE_PLUGIN_MARKETPLACE,
+                marketplace_repo=CLAUDE_PLUGIN_MARKETPLACE_REPO,
+                plugin=CLAUDE_COMMAND_PLUGIN,
+                pin_sha=CLAUDE_PLUGIN_PIN_SHA,
+                expected_items=(
+                    ExpectedItem("skill", "commit", "command/plugin", ("$HOME/.claude/plugins/", "commands/commit")),
+                ),
+                scopes=("user",),  # one install populates the shared cache; command detection ignores enablement
             ),
             # --- Fixture scopes: project-local skill/command/server that no `claude` CLI writes. The
             #     executor copies the committed fixture into the (registered) project, then inspect must
@@ -131,7 +150,6 @@ class ClaudeCodeCanary(AgentCanary):
             #     in the report as known coverage gaps.
             Gap("skill/global", (_D._discover_global_skill,), "no claude CLI creates a standalone personal skill"),
             Gap("command/global", (_D._discover_global_commands,), "no claude CLI creates a slash command"),
-            Gap("command/plugin", (_D._discover_plugin_commands,), "the pinned discord plugin bundles no commands"),
             Gap("mcp/managed", (_D._discover_managed_mcp_servers,), "enterprise system path; no CLI writer"),
             Gap(
                 "mcp/plugin-manifest",
