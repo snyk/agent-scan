@@ -24,22 +24,22 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class CanaryContext:
-    """The per-leg context an executor supplies: the isolated home/project, the resolved agent binary,
-    and the install channel. Pure data — no execution."""
+    """The per-leg context an executor supplies: the isolated home/project and the resolved agent
+    binary. Pure data — no execution. Installing the binary (and providing any secrets) is the
+    executor's job, not the spec's."""
 
     home: Path
     project: Path
     bin: str
-    channel: str | None = None
 
 
 @dataclass(frozen=True)
 class SeedCommand:
-    """One command the executor should run to seed a scope (or install the agent).
+    """One command the executor should run to seed a scope.
 
     ``run_in_project`` → run with cwd = the dummy project. ``non_fatal`` → a non-zero exit should warn,
-    not fail the leg (e.g. the headless trust step, or best-effort plugin installs). Seed commands run
-    against the fake home; ``AgentCanary.install_commands`` run with the ambient env (real PATH)."""
+    not fail the leg (e.g. the headless trust step, or best-effort plugin installs); a failed *required*
+    seed instead surfaces downstream as a MISSING scope. Seed commands run against the fake home."""
 
     argv: tuple[str, ...]
     run_in_project: bool = False
@@ -169,8 +169,8 @@ class Gap(Scope):
 class AgentCanary(ABC):
     """The live-test counterpart of one ``AgentDiscoverer`` — one ``Scope`` per scope-producing method.
 
-    Subclasses set ``discoverer`` (the discoverer class), ``scopes`` (ordered), and optionally
-    ``install_commands`` (how to install the agent binary, run with the ambient env)."""
+    Subclasses set ``discoverer`` (the discoverer class) and ``scopes`` (ordered). Installing the agent
+    binary (and providing any secrets) is the executor's responsibility, not the spec's."""
 
     discoverer: type[AgentDiscoverer]
 
@@ -181,9 +181,6 @@ class AgentCanary(ABC):
     @property
     def scopes(self) -> list[Scope]:
         raise NotImplementedError
-
-    def install_commands(self, ctx: CanaryContext) -> list[SeedCommand]:
-        return []
 
     def expected(self) -> list[ExpectedItem]:
         return [item for scope in self.scopes for item in scope.expected()]

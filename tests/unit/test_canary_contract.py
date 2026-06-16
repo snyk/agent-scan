@@ -1,7 +1,7 @@
 """Executor-interface contract: every ``Scope`` subclass emits well-formed ``SeedCommand``s.
 
 The backoffice executor (agent-scan-backoffice ``canary.run_canary``) is a *generic interpreter*: it
-calls ``canary.install_commands(ctx)`` and ``scope.commands(ctx)`` for every scope and runs each returned
+calls ``scope.commands(ctx)`` for every scope and runs each returned
 :class:`~agent_scan.canary.base.SeedCommand` as a subprocess, reading ``argv`` / ``run_in_project`` /
 ``timeout`` / ``non_fatal``. This test pins that contract from the agent-scan side — every concrete
 :class:`~agent_scan.canary.base.Scope` subclass must be exercised by a real canary and must emit commands
@@ -19,7 +19,7 @@ import pytest
 from agent_scan.canary import CANARIES, CanaryContext, Scope, SeedCommand
 
 # A purely synthetic context: no path is touched and no command is run — commands() is pure.
-CTX = CanaryContext(home=Path("/canary/home"), project=Path("/canary/home/proj"), bin="claude", channel="nightly")
+CTX = CanaryContext(home=Path("/canary/home"), project=Path("/canary/home/proj"), bin="claude")
 
 _CANARIES = list(CANARIES.values())
 
@@ -59,14 +59,6 @@ def test_every_scope_emits_well_formed_seed_commands(canary):
         assert isinstance(cmds, list), f"{canary.name} [{scope.label}]: .commands() must return a list"
         for i, cmd in enumerate(cmds):
             _assert_well_formed(cmd, f"{canary.name} [{scope.label}] cmd#{i}")
-
-
-@pytest.mark.parametrize("canary", _CANARIES, ids=lambda c: c.name)
-def test_install_commands_are_well_formed(canary):
-    cmds = canary.install_commands(CTX)
-    assert isinstance(cmds, list), f"{canary.name}: install_commands() must return a list"
-    for i, cmd in enumerate(cmds):
-        _assert_well_formed(cmd, f"{canary.name} install cmd#{i}")
 
 
 def test_every_concrete_scope_subclass_is_exercised_by_a_canary():

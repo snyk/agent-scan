@@ -1,4 +1,4 @@
-"""Shape tests for the canary specs: derived expectations, seed commands, install dispatch, gaps."""
+"""Shape tests for the canary specs: derived expectations, seed commands, gaps."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from agent_scan.canary import CANARIES, CanaryContext
 from agent_scan.canary.base import ExpectedItem, Gap, McpScope, PluginScope
 from agent_scan.canary.claude_code import ClaudeCodeCanary
 
-CTX = CanaryContext(home=Path("/home"), project=Path("/home/proj"), bin="claude", channel="nightly")
+CTX = CanaryContext(home=Path("/home"), project=Path("/home/proj"), bin="claude")
 
 EXPECTED_SIX = [
     ExpectedItem("mcp", "canary-global-mcp", "mcp/global"),
@@ -64,14 +64,3 @@ def test_gaps_are_inert():
         assert gap.expected() == []
         assert gap.enforced is False
         assert gap.mirrors  # still references its discoverer method
-
-
-def test_install_commands_posix_and_windows(monkeypatch):
-    monkeypatch.setattr("agent_scan.canary.claude_code.os.name", "posix")
-    (posix,) = ClaudeCodeCanary().install_commands(CTX)
-    assert posix.argv == ("bash", "-lc", "curl -fsSL https://claude.ai/install.sh | bash -s nightly")
-
-    monkeypatch.setattr("agent_scan.canary.claude_code.os.name", "nt")
-    (win,) = ClaudeCodeCanary().install_commands(CTX)
-    assert win.argv[0] == "powershell.exe"
-    assert "install.ps1" in win.argv[-1] and '"nightly"' in win.argv[-1]

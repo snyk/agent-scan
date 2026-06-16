@@ -8,19 +8,15 @@ test sees them covered) but never seeded or asserted, because no ``claude`` CLI 
 
 from __future__ import annotations
 
-import os
-
 from agent_scan.agents.claude_code import ClaudeCodeDiscoverer
 from agent_scan.canary.base import (
     AgentCanary,
-    CanaryContext,
     ExpectedItem,
     Gap,
     LifecycleStep,
     McpScope,
     PluginScope,
     Scope,
-    SeedCommand,
 )
 
 # The live plugin canary installs a real plugin from Anthropic's official marketplace so the on-disk
@@ -94,15 +90,4 @@ class ClaudeCodeCanary(AgentCanary):
                 (_D._discover_plugin_manifest_skills,),
                 "needs a plugin with inline plugin.json skills",
             ),
-        ]
-
-    def install_commands(self, ctx: CanaryContext) -> list[SeedCommand]:
-        """Install the real ``claude`` binary (run by the executor with the AMBIENT env, so it lands on
-        the real PATH). POSIX ``curl … | bash -s <channel>``; Windows ``irm … | iex``."""
-        channel = ctx.channel or "latest"
-        if os.name == "nt":
-            script = f'& ([scriptblock]::Create((irm https://claude.ai/install.ps1))) "{channel}"'
-            return [SeedCommand(("powershell.exe", "-NoProfile", "-Command", script), non_fatal=True)]
-        return [
-            SeedCommand(("bash", "-lc", f"curl -fsSL https://claude.ai/install.sh | bash -s {channel}"), non_fatal=True)
         ]
