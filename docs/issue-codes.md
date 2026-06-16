@@ -165,3 +165,18 @@ The skill prompts the agent to compromise the security or integrity of the user'
 ### ![W014 | low](https://img.shields.io/badge/W014-low-lightgray) ![Skills](https://img.shields.io/badge/Skills-purple) Missing SKILL.md file
 
 The skill is missing the required SKILL.md file. This file provides essential metadata and documentation about the skill's purpose, capabilities, and security considerations. Without it, the security analysis may be incomplete and users cannot properly evaluate the skill before use.
+
+
+## Obfuscation & Hidden Content
+
+These issues apply to both MCP servers and skills. They flag content that has been deliberately obscured so that what a human reviewer sees differs from what the agent actually processes.
+
+<a id="W021"></a>
+
+### ![W021 | medium](https://img.shields.io/badge/W021-medium-yellow) ![MCP](https://img.shields.io/badge/MCP-blue) ![Skills](https://img.shields.io/badge/Skills-purple) Hidden Unicode characters
+
+Detected hidden or invisible Unicode characters (Format/Cf or Control/Cc categories) in the component's content.
+
+These characters are invisible when rendered but are still processed by AI models. Attackers use them to smuggle instructions past human review. For example, zero-width spaces, bidirectional overrides, invisible formatters, or Unicode Tag characters (`U+E0000`–`U+E007F`) that encode an entire hidden message. When such a tag sequence is found, the analysis decodes and surfaces the hidden message as evidence.
+
+The severity escalates to **high** when three or more distinct hidden character types are present, or when a hidden tag-encoded message is successfully decoded, as these strongly indicate intentional obfuscation rather than incidental formatting.
