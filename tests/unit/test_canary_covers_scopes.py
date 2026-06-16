@@ -9,6 +9,8 @@ matching method-name patterns.
 
 from __future__ import annotations
 
+import typing
+
 import pytest
 
 from agent_scan.agents import DISCOVERERS
@@ -20,13 +22,16 @@ _CANARIES = list(CANARIES.values())
 
 
 def _scope_methods(discoverer_cls) -> set:
-    """The scope-producing ``_discover_*`` methods defined directly on *discoverer_cls* (by return type)."""
+    """The scope-producing ``_discover_*`` methods defined directly on *discoverer_cls* (by return type).
+
+    Annotations are resolved via ``typing.get_type_hints`` rather than read raw from ``__annotations__``,
+    so the check survives ``from __future__ import annotations`` (PEP 563) in a discoverer module — which
+    would otherwise stringize every return annotation and silently make all scope methods invisible here.
+    """
     return {
         fn
         for name, fn in vars(discoverer_cls).items()
-        if name.startswith("_discover_")
-        and callable(fn)
-        and getattr(fn, "__annotations__", {}).get("return") in _SCOPE_RETURNS
+        if name.startswith("_discover_") and callable(fn) and typing.get_type_hints(fn).get("return") in _SCOPE_RETURNS
     }
 
 
