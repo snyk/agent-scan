@@ -18,7 +18,9 @@ EXPECTED_ITEMS = [
     ExpectedItem("mcp", "discord", "mcp/plugin"),
     ExpectedItem("skill", "access", "skill/plugin", ("$HOME/.claude/plugins/", "skills/access")),
     ExpectedItem("skill", "configure", "skill/plugin", ("$HOME/.claude/plugins/", "skills/configure")),
-    ExpectedItem("skill", "commit", "command/plugin", ("$HOME/.claude/plugins/", "commands/commit")),
+    ExpectedItem("skill", "commit", "command/plugin", ("$HOME/.claude/plugins/", "commands/commit.md")),
+    ExpectedItem("skill", "clean_gone", "command/plugin", ("$HOME/.claude/plugins/", "commands/clean_gone.md")),
+    ExpectedItem("skill", "commit-push-pr", "command/plugin", ("$HOME/.claude/plugins/", "commands/commit-push-pr.md")),
     ExpectedItem(
         "skill", "canary-project-skill", "skill/project", ("$PROJECT/.claude/skills/", "canary-project-skill")
     ),
@@ -91,8 +93,11 @@ def test_command_plugin_scope_installs_commit_commands_and_expects_the_command()
     assert "claude plugin marketplace add anthropics/claude-plugins-official" in argvs
     assert argvs[-1] == "claude plugin install commit-commands@claude-plugins-official --scope user"
     assert all(c.non_fatal for c in scope.commands(CTX))
-    assert scope.expected() == [
-        ExpectedItem("skill", "commit", "command/plugin", ("$HOME/.claude/plugins/", "commands/commit"))
+    # All three commands commit-commands ships at PIN_SHA are asserted (so the report has no EXTRA noise).
+    assert [(e.name, e.path_contains) for e in scope.expected()] == [
+        ("commit", ("$HOME/.claude/plugins/", "commands/commit.md")),
+        ("clean_gone", ("$HOME/.claude/plugins/", "commands/clean_gone.md")),
+        ("commit-push-pr", ("$HOME/.claude/plugins/", "commands/commit-push-pr.md")),
     ]
     assert scope.mirrors == (ClaudeCodeCanary.discoverer._discover_plugin_commands,)
 

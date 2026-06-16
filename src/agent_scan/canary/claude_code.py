@@ -94,8 +94,20 @@ class ClaudeCodeCanary(AgentCanary):
                 marketplace_repo=CLAUDE_PLUGIN_MARKETPLACE_REPO,
                 plugin=CLAUDE_COMMAND_PLUGIN,
                 pin_sha=CLAUDE_PLUGIN_PIN_SHA,
+                # commit-commands ships exactly these three commands at PIN_SHA — assert all of them so the
+                # report stays clean (no informational EXTRA) and a future command add/remove on a pin bump
+                # surfaces as drift.
                 expected_items=(
-                    ExpectedItem("skill", "commit", "command/plugin", ("$HOME/.claude/plugins/", "commands/commit")),
+                    ExpectedItem("skill", "commit", "command/plugin", ("$HOME/.claude/plugins/", "commands/commit.md")),
+                    ExpectedItem(
+                        "skill", "clean_gone", "command/plugin", ("$HOME/.claude/plugins/", "commands/clean_gone.md")
+                    ),
+                    ExpectedItem(
+                        "skill",
+                        "commit-push-pr",
+                        "command/plugin",
+                        ("$HOME/.claude/plugins/", "commands/commit-push-pr.md"),
+                    ),
                 ),
                 scopes=("user",),  # one install populates the shared cache; command detection ignores enablement
             ),
