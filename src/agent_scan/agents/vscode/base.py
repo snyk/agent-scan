@@ -269,15 +269,6 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
     # Cursor and Windsurf are verified on disk — every other entry is INFERRED
     # and tagged ``inferred — verify`` at its definition. See ADS-367.
     _builtin_extension_dir_templates: ClassVar[dict[str, tuple[str, ...]]] = {}
-    # Per-OS templates for the editor's *built-in* (bundled) skills directory — a
-    # ``skills`` folder shipped directly inside the application install (NOT under
-    # extensions). Keyed by the normalized platform ("darwin"/"win32"/"linux");
-    # ``~``-prefixed entries expand against the scanned user's home, absolute
-    # entries are used as-is. Empty by default so each fork opts in; a platform
-    # absent from a fork's map is a documented coverage gap. Cursor ships built-in
-    # skills (e.g. ``/migrate-to-skills``, ``/loop``) directly in
-    # ``resources/app/skills`` as of Cursor 2.4. See cursor.com/docs/skills.
-    _builtin_skills_dir_templates: ClassVar[dict[str, tuple[str, ...]]] = {}
     # Home-relative ``settings.json`` files that may carry MCP under a top-level
     # ``mcpServers``/``mcp`` key (e.g. Antigravity's ``~/.gemini/settings.json``).
     # Parsed with the same presence-gate as ``_discover_user_settings_mcp``.
@@ -329,7 +320,6 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         result.update(self._discover_system_skills_dirs())
         result.update(self._discover_workspace_skills())
         result.update(self._discover_extension_skills())
-        result.update(self._discover_builtin_skills())
         result.update(self._discover_settings_skill_locations())
         result.update(self._discover_code_workspace_skills())
         return result
@@ -738,23 +728,6 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
             expand_path(Path(raw), self.home_directory) for raw in self._builtin_extension_dir_templates.get(key, ())
         ]
 
-    def _builtin_skills_dirs(self) -> list[Path]:
-        """Absolute paths to the editor's *built-in* (bundled) skills dir(s).
-
-        These live directly inside the application install (e.g. Cursor ships
-        ``resources/app/skills`` with skills like ``/migrate-to-skills`` and
-        ``/loop`` as of Cursor 2.4), NOT under the extensions tree. They are
-        machine-global but the per-user install variants (e.g. macOS
-        ``~/Applications``) are expressed ``~``-relative and expand against the
-        scanned user's home. Resolved from :attr:`_builtin_skills_dir_templates`
-        for the current platform; empty when the fork declares nothing for it
-        (a documented coverage gap).
-        """
-        key = "linux" if sys.platform in ("linux", "linux2") else sys.platform
-        return [
-            expand_path(Path(raw), self.home_directory) for raw in self._builtin_skills_dir_templates.get(key, ())
-        ]
-
     # --- private: install-manifest gating (don't scan uninstalled extensions) ---
 
     @staticmethod
@@ -886,25 +859,6 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
             for skills_dir in _walk_under_depth(root, "skills", _MAX_PLUGIN_RGLOB_DEPTH, want_file=False):
                 if skills_dir.is_dir():
                     result[skills_dir.as_posix()] = inspect_skills_dir(str(skills_dir))
-        return result
-
-    def _discover_builtin_skills(self) -> SkillsDirsResult:
-        """Scan the application-bundled (built-in) skills directories from
-        :meth:`_builtin_skills_dirs`.
-
-        Unlike the extension walk, the built-in skills directory is a flat
-        ``skills/`` folder directly inside the app install (e.g. Cursor's
-        ``resources/app/skills``). It is treated as an unmanaged root —
-        every present subdir that carries a ``SKILL.md`` is a skill. The dir
-        itself (e.g. ``…/resources/app/skills``) is passed directly to
-        :meth:`_scan_skills_dir`, which calls ``inspect_skills_dir`` and skips
-        absent or unreadable paths gracefully.
-        """
-        result: SkillsDirsResult = {}
-        for skills_dir in self._builtin_skills_dirs():
-            entries = self._scan_skills_dir(skills_dir)
-            if entries is not None:
-                result[skills_dir.as_posix()] = entries
         return result
 
     # --- private: chat.agentSkillsLocations ---

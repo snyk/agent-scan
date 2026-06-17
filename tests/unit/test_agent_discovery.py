@@ -5649,31 +5649,31 @@ def test_vscode_builtin_extension_dirs_per_platform(tmp_path):
 # ---------------------------------------------------------------------------
 # Cursor ships built-in skills (``/migrate-to-skills``, ``/loop``, etc.) directly
 # in the application bundle at ``resources/app/skills``, NOT inside an extension
-# subdir. These require a dedicated discovery path:
-# ``_builtin_skills_dir_templates`` → ``_builtin_skills_dirs()`` →
-# ``_discover_builtin_skills()``, wired into ``discover_skills()``.
+# subdir. No other VSCode-family fork does this, so the logic lives entirely in
+# CursorDiscoverer: ``_builtin_skills_dir_paths`` (class-level path map) →
+# ``_builtin_skills_dirs()`` → overridden ``discover_skills()``.
 # See cursor.com/docs/skills ("Migrating rules and commands to skills").
 # ---------------------------------------------------------------------------
 
 
-def test_cursor_builtin_skills_dir_templates_non_empty():
-    """CursorDiscoverer declares ``_builtin_skills_dir_templates`` with at least
+def test_cursor_builtin_skills_dir_paths_non_empty():
+    """CursorDiscoverer declares ``_builtin_skills_dir_paths`` with at least
     the macOS, Windows, and Linux entries — one per platform Cursor ships on."""
     from agent_scan.agents import CursorDiscoverer
 
-    templates = CursorDiscoverer._builtin_skills_dir_templates
-    assert "darwin" in templates, "macOS (darwin) entry must be declared"
-    assert "win32" in templates, "Windows (win32) entry must be declared"
-    assert "linux" in templates, "Linux entry must be declared"
+    paths = CursorDiscoverer._builtin_skills_dir_paths
+    assert "darwin" in paths, "macOS (darwin) entry must be declared"
+    assert "win32" in paths, "Windows (win32) entry must be declared"
+    assert "linux" in paths, "Linux entry must be declared"
 
 
 def test_cursor_builtin_skills_dirs_macos_path(tmp_path, monkeypatch):
     """On macOS the system-wide Cursor install path includes
     ``/Applications/Cursor.app/Contents/Resources/app/skills``."""
-    import agent_scan.agents.vscode.base as base
+    import agent_scan.agents.vscode.cursor as cursor_mod
     from agent_scan.agents import CursorDiscoverer
 
-    monkeypatch.setattr(base.sys, "platform", "darwin")
+    monkeypatch.setattr(cursor_mod.sys, "platform", "darwin")
     dirs = [p.as_posix() for p in CursorDiscoverer(tmp_path)._builtin_skills_dirs()]
 
     expected = "/Applications/Cursor.app/Contents/Resources/app/skills"
@@ -5730,22 +5730,23 @@ def test_cursor_builtin_skills_absent_dir_not_surfaced(tmp_path, monkeypatch):
     )
 
 
-def test_family_base_builtin_skills_dir_templates_default_empty():
-    """The family base declares no built-in skills templates; each fork opts in.
-    Guards against a newly-added fork silently inheriting another fork's paths."""
+def test_family_base_has_no_builtin_skills_logic():
+    """``VSCodeFamilyDiscoverer`` has no ``_builtin_skills_dirs`` method — builtin
+    skills are Cursor-specific and live entirely in ``CursorDiscoverer``."""
     from agent_scan.agents.vscode.base import VSCodeFamilyDiscoverer
 
-    assert VSCodeFamilyDiscoverer._builtin_skills_dir_templates == {}
+    assert not hasattr(VSCodeFamilyDiscoverer, "_builtin_skills_dirs")
+    assert not hasattr(VSCodeFamilyDiscoverer, "_builtin_skills_dir_paths")
 
 
-def test_other_vscode_family_discoverers_have_no_builtin_skills_templates(tmp_path):
-    """VSCode, Windsurf, Kiro, and Antigravity declare no built-in skills templates
-    (only Cursor ships a dedicated app-bundled skills dir)."""
+def test_other_vscode_family_discoverers_have_no_builtin_skills_logic(tmp_path):
+    """VSCode, Windsurf, Kiro, and Antigravity have no ``_builtin_skills_dirs``
+    method — only Cursor ships a dedicated app-bundled skills dir."""
     from agent_scan.agents import AntigravityDiscoverer, KiroDiscoverer, VSCodeDiscoverer, WindsurfDiscoverer
 
     for cls in (VSCodeDiscoverer, WindsurfDiscoverer, KiroDiscoverer, AntigravityDiscoverer):
-        assert cls._builtin_skills_dir_templates == {}, (
-            f"{cls.__name__} must not declare _builtin_skills_dir_templates "
+        assert not hasattr(cls, "_builtin_skills_dirs"), (
+            f"{cls.__name__} must not define _builtin_skills_dirs "
             f"(only Cursor ships a dedicated app-bundled skills dir)"
         )
 
@@ -5754,10 +5755,10 @@ def test_other_vscode_family_discoverers_have_no_builtin_skills_templates(tmp_pa
 def test_cursor_builtin_skills_dirs_linux(tmp_path, monkeypatch, linux_platform):
     """On Linux the deb-installed Cursor path includes
     ``/usr/share/cursor/resources/app/skills``."""
-    import agent_scan.agents.vscode.base as base
+    import agent_scan.agents.vscode.cursor as cursor_mod
     from agent_scan.agents import CursorDiscoverer
 
-    monkeypatch.setattr(base.sys, "platform", linux_platform)
+    monkeypatch.setattr(cursor_mod.sys, "platform", linux_platform)
     dirs = [p.as_posix() for p in CursorDiscoverer(tmp_path)._builtin_skills_dirs()]
 
     assert any("/usr/share/cursor/resources/app/skills" in d for d in dirs), (
@@ -5768,10 +5769,10 @@ def test_cursor_builtin_skills_dirs_linux(tmp_path, monkeypatch, linux_platform)
 def test_cursor_builtin_skills_dirs_windows(tmp_path, monkeypatch):
     """On Windows the per-user NSIS install path includes
     ``AppData/Local/Programs/Cursor/resources/app/skills``."""
-    import agent_scan.agents.vscode.base as base
+    import agent_scan.agents.vscode.cursor as cursor_mod
     from agent_scan.agents import CursorDiscoverer
 
-    monkeypatch.setattr(base.sys, "platform", "win32")
+    monkeypatch.setattr(cursor_mod.sys, "platform", "win32")
     dirs = [p.as_posix() for p in CursorDiscoverer(tmp_path)._builtin_skills_dirs()]
 
     assert any("Cursor/resources/app/skills" in d for d in dirs), (
@@ -5781,10 +5782,10 @@ def test_cursor_builtin_skills_dirs_windows(tmp_path, monkeypatch):
 
 def test_cursor_builtin_skills_dirs_empty_on_unsupported_platform(tmp_path, monkeypatch):
     """An unrecognized platform yields no built-in skills dirs."""
-    import agent_scan.agents.vscode.base as base
+    import agent_scan.agents.vscode.cursor as cursor_mod
     from agent_scan.agents import CursorDiscoverer
 
-    monkeypatch.setattr(base.sys, "platform", "sunos5")
+    monkeypatch.setattr(cursor_mod.sys, "platform", "sunos5")
 
     assert CursorDiscoverer(tmp_path)._builtin_skills_dirs() == []
 

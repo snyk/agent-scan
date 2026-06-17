@@ -1,8 +1,11 @@
 """Cursor discoverer."""
 
+import sys
+from pathlib import Path
 from typing import ClassVar
 
-from agent_scan.agents.vscode.base import VSCodeFamilyDiscoverer
+from agent_scan.agents.vscode.base import SkillsDirsResult, VSCodeFamilyDiscoverer
+from agent_scan.well_known_clients import expand_path
 
 
 class CursorDiscoverer(VSCodeFamilyDiscoverer):
@@ -53,14 +56,13 @@ class CursorDiscoverer(VSCodeFamilyDiscoverer):
         # is omitted.
         "linux": ("/usr/share/cursor/resources/app/extensions",),
     }
-    # Built-in (bundled) skills shipped directly inside the Cursor application —
-    # at ``resources/app/skills``, parallel to ``resources/app/extensions``.
-    # Cursor 2.4 introduced built-in skills (``/migrate-to-skills``); later
-    # versions added more (``/loop``, ``/multitask``, ``/review``, …). These live
-    # in the app bundle, NOT under a user extensions dir, so they need their own
-    # discovery path separate from ``_builtin_extension_dir_templates``.
-    # See cursor.com/docs/skills ("Migrating rules and commands to skills").
-    _builtin_skills_dir_templates: ClassVar[dict[str, tuple[str, ...]]] = {
+    # Per-OS paths to the app-bundled ``skills/`` directory, parallel to
+    # ``resources/app/extensions`` above. Cursor 2.4 introduced built-in skills
+    # (``/migrate-to-skills``); later versions added more (``/loop``,
+    # ``/multitask``, ``/review``, …). No other VSCode-family fork ships a
+    # standalone app-level skills dir, so this is Cursor-specific rather than a
+    # base-class extension point. See cursor.com/docs/skills.
+    _builtin_skills_dir_paths: ClassVar[dict[str, tuple[str, ...]]] = {
         "darwin": (
             "/Applications/Cursor.app/Contents/Resources/app/skills",  # inferred — verify: mirrors extensions layout
             "~/Applications/Cursor.app/Contents/Resources/app/skills",  # inferred — verify (user-local install)
@@ -71,3 +73,19 @@ class CursorDiscoverer(VSCodeFamilyDiscoverer):
         # The Linux AppImage build has no stable path and is omitted.
         "linux": ("/usr/share/cursor/resources/app/skills",),
     }
+
+    def _builtin_skills_dirs(self) -> list[Path]:
+        """Resolve the per-OS app-bundled skills directories for this install."""
+        key = "linux" if sys.platform in ("linux", "linux2") else sys.platform
+        return [
+            expand_path(Path(raw), self.home_directory)
+            for raw in self._builtin_skills_dir_paths.get(key, ())
+        ]
+
+    def discover_skills(self) -> SkillsDirsResult:
+        result = super().discover_skills()
+        for skills_dir in self._builtin_skills_dirs():
+            entries = self._scan_skills_dir(skills_dir)
+            if entries is not None:
+                result[skills_dir.as_posix()] = entries
+        return result
