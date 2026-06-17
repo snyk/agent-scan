@@ -247,3 +247,32 @@ def test_inspect_skill_preserves_binary_file_hash(tmp_path):
     sig = inspect_skill(SkillServer(path=str(skill)))
 
     assert any((r.description or "") == expected for r in sig.resources)
+
+
+def test_binary_marker_prefix_owned_by_skill_client():
+    """The binary-marker prefix is defined in ``skill_client`` itself, and
+    ``redact``'s matcher accepts a marker built from it -- the two must not drift
+    apart."""
+    import agent_scan.skill_client as skill_client
+    from agent_scan.redact import _is_synthetic_binary_description
+
+    assert "BINARY_FILE_DESCRIPTION_PREFIX" in vars(skill_client)
+    digest = "a" * 64
+    assert _is_synthetic_binary_description(f"{skill_client.BINARY_FILE_DESCRIPTION_PREFIX}{digest}")
+
+
+def test_redact_and_skill_client_import_without_cycle():
+    """``redact`` imports the binary-marker prefix from ``skill_client`` lazily so
+    the two modules don't form an import cycle. Guard against a regression that
+    moves that import back to module scope: a fresh interpreter must import each
+    module first without error, in either order."""
+    import subprocess
+    import sys
+
+    for module in ("agent_scan.redact", "agent_scan.skill_client"):
+        result = subprocess.run(
+            [sys.executable, "-c", f"import {module}"],
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, f"importing {module} first failed:\n{result.stderr}"

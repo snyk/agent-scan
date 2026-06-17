@@ -17,9 +17,19 @@ from mcp.types import (
 from yaml.error import YAMLError
 
 from agent_scan.models import ServerSignature, SkillServer
-from agent_scan.redact import BINARY_FILE_DESCRIPTION_PREFIX, redact_signature
+from agent_scan.redact import redact_signature
 
 logger = logging.getLogger(__name__)
+
+# Synthetic description that ``traverse_skill_tree`` emits for a binary resource:
+# this fixed prefix followed by the file's sha256 hex digest. It is generated
+# entirely by us and contains no user content, so ``redact``'s
+# ``_is_synthetic_binary_description`` exempts it from secret redaction --
+# otherwise the 64-char digest trips the hex high-entropy detector and every
+# binary collapses to an identical, useless description. ``redact`` imports this
+# constant (lazily, to avoid an import cycle) so the marker and matcher cannot
+# drift apart.
+BINARY_FILE_DESCRIPTION_PREFIX = "Binary file. Hash: "
 
 # Cap traversal depth when walking a commands dir, mirroring the value used by
 # the discoverer plugin/extension walks (``agents.base._MAX_PLUGIN_RGLOB_DEPTH``).

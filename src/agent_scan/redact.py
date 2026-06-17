@@ -25,15 +25,12 @@ REDACTED = "**REDACTED**"
 
 _EXCLUDED_PLUGINS = frozenset({"IPPublicDetector"})
 
-# Synthetic description that ``skill_client.traverse_skill_tree`` emits for a
-# binary resource: this fixed prefix followed by the file's sha256 hex digest.
-# It is generated entirely by us and contains no user content, so it is exempt
-# from secret redaction (see ``_is_synthetic_binary_description``) -- otherwise
-# the 64-char digest trips the hex high-entropy detector and every binary
-# collapses to an identical, useless description. ``skill_client`` imports this
-# constant to build the marker so the two cannot drift apart.
-BINARY_FILE_DESCRIPTION_PREFIX = "Binary file. Hash: "
-_BINARY_FILE_DESCRIPTION_RE = re.compile(rf"^{re.escape(BINARY_FILE_DESCRIPTION_PREFIX)}[0-9a-f]{{64}}$")
+# Matches the synthetic binary-file marker that ``skill_client`` emits for a
+# binary resource (its ``BINARY_FILE_DESCRIPTION_PREFIX`` followed by a sha256
+# hex digest). Compiled lazily on first use: the prefix lives in
+# ``skill_client``, which imports ``redact_signature`` from this module, so
+# importing it at module scope here would create a circular import.
+_BINARY_FILE_DESCRIPTION_RE: re.Pattern[str] | None = None
 
 
 def _build_detect_secrets_config() -> dict:
@@ -444,11 +441,21 @@ def redact_text(text: str | None) -> str | None:
 
 def _is_synthetic_binary_description(text: str) -> bool:
     """True if ``text`` is the synthetic binary-file marker emitted for a binary
-    skill resource (see :data:`BINARY_FILE_DESCRIPTION_PREFIX`).
+    skill resource (see ``skill_client.BINARY_FILE_DESCRIPTION_PREFIX``).
 
     Such a description is self-generated (a fixed prefix + sha256 digest) and
     contains no user content, so it is left untouched by redaction.
+
+    The prefix is imported lazily and the compiled pattern cached, so the
+    per-entity redaction path stays off the import and ``skill_client`` (which
+    imports :func:`redact_signature` from this module) can own the constant
+    without a circular import.
     """
+    global _BINARY_FILE_DESCRIPTION_RE
+    if _BINARY_FILE_DESCRIPTION_RE is None:
+        from agent_scan.skill_client import BINARY_FILE_DESCRIPTION_PREFIX
+
+        _BINARY_FILE_DESCRIPTION_RE = re.compile(rf"^{re.escape(BINARY_FILE_DESCRIPTION_PREFIX)}[0-9a-f]{{64}}$")
     return bool(_BINARY_FILE_DESCRIPTION_RE.match(text))
 
 
