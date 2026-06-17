@@ -5644,6 +5644,151 @@ def test_vscode_builtin_extension_dirs_per_platform(tmp_path):
         assert any(d.endswith("Microsoft VS Code/resources/app/extensions") for d in dirs)
 
 
+# ---------------------------------------------------------------------------
+# Cursor built-in (application-bundled) skills
+# ---------------------------------------------------------------------------
+# Cursor ships built-in skills (``/migrate-to-skills``, ``/loop``, etc.) directly
+# in the application bundle at ``resources/app/skills``, NOT inside an extension
+# subdir. These require a dedicated discovery path:
+# ``_builtin_skills_dir_templates`` → ``_builtin_skills_dirs()`` →
+# ``_discover_builtin_skills()``, wired into ``discover_skills()``.
+# See cursor.com/docs/skills ("Migrating rules and commands to skills").
+# ---------------------------------------------------------------------------
+
+
+def test_cursor_builtin_skills_dir_templates_non_empty():
+    """CursorDiscoverer declares ``_builtin_skills_dir_templates`` with at least
+    the macOS, Windows, and Linux entries — one per platform Cursor ships on."""
+    from agent_scan.agents import CursorDiscoverer
+
+    templates = CursorDiscoverer._builtin_skills_dir_templates
+    assert "darwin" in templates, "macOS (darwin) entry must be declared"
+    assert "win32" in templates, "Windows (win32) entry must be declared"
+    assert "linux" in templates, "Linux entry must be declared"
+
+
+def test_cursor_builtin_skills_dirs_macos_path(tmp_path, monkeypatch):
+    """On macOS the system-wide Cursor install path includes
+    ``/Applications/Cursor.app/Contents/Resources/app/skills``."""
+    import agent_scan.agents.vscode.base as base
+    from agent_scan.agents import CursorDiscoverer
+
+    monkeypatch.setattr(base.sys, "platform", "darwin")
+    dirs = [p.as_posix() for p in CursorDiscoverer(tmp_path)._builtin_skills_dirs()]
+
+    expected = "/Applications/Cursor.app/Contents/Resources/app/skills"
+    assert any(d == expected for d in dirs), f"expected {expected!r} in built-in skills dirs; got: {dirs}"
+
+
+def test_cursor_builtin_skills_discovered_in_discover_skills(tmp_path, monkeypatch):
+    """Skills shipped inside the Cursor app bundle (``resources/app/skills``) are
+    surfaced by ``discover_skills`` — the ``/migrate-to-skills`` / ``/loop`` layout."""
+    from agent_scan.agents import CursorDiscoverer
+
+    # Simulate the application-level skills directory.
+    app_skills = tmp_path / "app" / "skills"
+    migrate_skill = app_skills / "migrate-to-skills"
+    migrate_skill.mkdir(parents=True)
+    (migrate_skill / "SKILL.md").write_text(
+        "---\nname: migrate-to-skills\ndescription: Migrate rules and commands to skills.\n---\n\nbody\n"
+    )
+    loop_skill = app_skills / "loop"
+    loop_skill.mkdir(parents=True)
+    (loop_skill / "SKILL.md").write_text(
+        "---\nname: loop\ndescription: Run a prompt on a schedule.\n---\n\nbody\n"
+    )
+    (tmp_path / ".cursor").mkdir()
+
+    discoverer = CursorDiscoverer(tmp_path)
+    monkeypatch.setattr(discoverer, "_builtin_skills_dirs", lambda: [app_skills])
+
+    skills_dirs = discoverer.discover_skills()
+
+    assert app_skills.as_posix() in skills_dirs, (
+        f"application-bundled skills dir must be surfaced; got: {list(skills_dirs)}"
+    )
+    skill_names = {name for name, _ in skills_dirs[app_skills.as_posix()]}
+    assert "migrate-to-skills" in skill_names, f"migrate-to-skills must be discovered; got: {skill_names}"
+    assert "loop" in skill_names, f"loop must be discovered; got: {skill_names}"
+
+
+def test_cursor_builtin_skills_absent_dir_not_surfaced(tmp_path, monkeypatch):
+    """A non-existent built-in skills dir produces no entry in ``discover_skills``
+    — the app is not installed on this machine."""
+    from agent_scan.agents import CursorDiscoverer
+
+    absent = tmp_path / "app" / "skills"  # not created
+    (tmp_path / ".cursor").mkdir()
+
+    discoverer = CursorDiscoverer(tmp_path)
+    monkeypatch.setattr(discoverer, "_builtin_skills_dirs", lambda: [absent])
+
+    skills_dirs = discoverer.discover_skills()
+
+    assert absent.as_posix() not in skills_dirs, (
+        "absent built-in skills dir must not produce a key; got: {list(skills_dirs)}"
+    )
+
+
+def test_family_base_builtin_skills_dir_templates_default_empty():
+    """The family base declares no built-in skills templates; each fork opts in.
+    Guards against a newly-added fork silently inheriting another fork's paths."""
+    from agent_scan.agents.vscode.base import VSCodeFamilyDiscoverer
+
+    assert VSCodeFamilyDiscoverer._builtin_skills_dir_templates == {}
+
+
+def test_other_vscode_family_discoverers_have_no_builtin_skills_templates(tmp_path):
+    """VSCode, Windsurf, Kiro, and Antigravity declare no built-in skills templates
+    (only Cursor ships a dedicated app-bundled skills dir)."""
+    from agent_scan.agents import AntigravityDiscoverer, KiroDiscoverer, VSCodeDiscoverer, WindsurfDiscoverer
+
+    for cls in (VSCodeDiscoverer, WindsurfDiscoverer, KiroDiscoverer, AntigravityDiscoverer):
+        assert cls._builtin_skills_dir_templates == {}, (
+            f"{cls.__name__} must not declare _builtin_skills_dir_templates "
+            f"(only Cursor ships a dedicated app-bundled skills dir)"
+        )
+
+
+@pytest.mark.parametrize("linux_platform", ["linux", "linux2"])
+def test_cursor_builtin_skills_dirs_linux(tmp_path, monkeypatch, linux_platform):
+    """On Linux the deb-installed Cursor path includes
+    ``/usr/share/cursor/resources/app/skills``."""
+    import agent_scan.agents.vscode.base as base
+    from agent_scan.agents import CursorDiscoverer
+
+    monkeypatch.setattr(base.sys, "platform", linux_platform)
+    dirs = [p.as_posix() for p in CursorDiscoverer(tmp_path)._builtin_skills_dirs()]
+
+    assert any("/usr/share/cursor/resources/app/skills" in d for d in dirs), (
+        f"Linux Cursor built-in skills path not found; got: {dirs}"
+    )
+
+
+def test_cursor_builtin_skills_dirs_windows(tmp_path, monkeypatch):
+    """On Windows the per-user NSIS install path includes
+    ``AppData/Local/Programs/Cursor/resources/app/skills``."""
+    import agent_scan.agents.vscode.base as base
+    from agent_scan.agents import CursorDiscoverer
+
+    monkeypatch.setattr(base.sys, "platform", "win32")
+    dirs = [p.as_posix() for p in CursorDiscoverer(tmp_path)._builtin_skills_dirs()]
+
+    assert any("Cursor/resources/app/skills" in d for d in dirs), (
+        f"Windows Cursor built-in skills path not found; got: {dirs}"
+    )
+
+
+def test_cursor_builtin_skills_dirs_empty_on_unsupported_platform(tmp_path, monkeypatch):
+    """An unrecognized platform yields no built-in skills dirs."""
+    import agent_scan.agents.vscode.base as base
+    from agent_scan.agents import CursorDiscoverer
+
+    monkeypatch.setattr(base.sys, "platform", "sunos5")
+
+    assert CursorDiscoverer(tmp_path)._builtin_skills_dirs() == []
+
+
 # --- _walk_under_depth: PermissionError tolerance (--scan-all-users) ---
 # Every depth-bounded directory walk goes through ``_walk_under_depth``, which
 # skips an unreadable base (the routine ``--scan-all-users`` case where an

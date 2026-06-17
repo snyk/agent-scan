@@ -53,3 +53,21 @@ class CursorDiscoverer(VSCodeFamilyDiscoverer):
         # is omitted.
         "linux": ("/usr/share/cursor/resources/app/extensions",),
     }
+    # Built-in (bundled) skills shipped directly inside the Cursor application —
+    # at ``resources/app/skills``, parallel to ``resources/app/extensions``.
+    # Cursor 2.4 introduced built-in skills (``/migrate-to-skills``); later
+    # versions added more (``/loop``, ``/multitask``, ``/review``, …). These live
+    # in the app bundle, NOT under a user extensions dir, so they need their own
+    # discovery path separate from ``_builtin_extension_dir_templates``.
+    # See cursor.com/docs/skills ("Migrating rules and commands to skills").
+    _builtin_skills_dir_templates: ClassVar[dict[str, tuple[str, ...]]] = {
+        "darwin": (
+            "/Applications/Cursor.app/Contents/Resources/app/skills",  # inferred — verify: mirrors extensions layout
+            "~/Applications/Cursor.app/Contents/Resources/app/skills",  # inferred — verify (user-local install)
+        ),
+        # inferred — verify: per-user NSIS install; mirrors extensions layout.
+        "win32": ("~/AppData/Local/Programs/Cursor/resources/app/skills",),
+        # inferred — verify: deb install root; mirrors extensions layout.
+        # The Linux AppImage build has no stable path and is omitted.
+        "linux": ("/usr/share/cursor/resources/app/skills",),
+    }
