@@ -18,12 +18,6 @@ file itself belongs to the Claude Desktop chat surface and is only discovered
 here -- which is why this is a separate discoverer rather than part of
 ``ClaudeCodeDiscoverer``. See https://code.claude.com/docs/en/desktop.
 
-These two paths already exist as the Phase-A ``"claude desktop"`` rows in
-``well_known_clients.py``; this discoverer is the Phase-B (code-driven) analogue,
-mirroring how ``ClaudeCodeDiscoverer`` lives in both phases. Both use
-``name = "claude desktop"`` so ``pipelines.discover_clients_to_inspect`` merges them
-onto a single client (keyed by ``(name, username)`` + absolute config path).
-
 Deliberately not covered (no officially-documented filesystem path -- not guessed
 by convention):
 
@@ -60,7 +54,6 @@ from agent_scan.agents.base import (
     SkillsDirsResult,
 )
 from agent_scan.models import CouldNotParseMCPConfig
-from agent_scan.well_known_clients import expand_path
 
 logger = logging.getLogger(__name__)
 
@@ -80,14 +73,12 @@ class ClaudeDesktopDiscoverer(AgentDiscoverer):
     file is multi-purpose (e.g. ``globalShortcut``).
     """
 
-    # MUST match the "claude desktop" entry in ``well_known_clients.py`` so the
-    # Phase-A (data-driven) / Phase-B (this discoverer) merge in
-    # ``pipelines.discover_clients_to_inspect`` lines up on a single client.
+    # Canonical agent name: this discoverer's key in ``agents.DISCOVERERS`` and the
+    # ``name`` on every ``ClientToInspect`` it produces.
     name = "claude desktop"
 
     _config_filename = "claude_desktop_config.json"
-    # Documented per-OS install/config directories (the same paths the Phase-A
-    # ``well_known_clients`` "claude desktop" rows use). ``~`` is expanded against the
+    # Documented per-OS install/config directories. ``~`` is expanded against the
     # discoverer's bound home, so it resolves correctly per-home under
     # ``--scan-all-users``.
     _macos_dir = "~/Library/Application Support/Claude"
@@ -136,6 +127,10 @@ class ClaudeDesktopDiscoverer(AgentDiscoverer):
         module docstring."""
         return {}
 
+    def static_mcp_config_paths(self) -> list[str]:
+        config_path = self._config_path()
+        return [config_path.as_posix()] if config_path is not None else []
+
     # --- private: per-OS path resolution ---
 
     def _install_dir(self) -> Path | None:
@@ -147,9 +142,9 @@ class ClaudeDesktopDiscoverer(AgentDiscoverer):
         scanning from Windows; Linux has no documented Claude Desktop install.
         """
         if sys.platform == "darwin":
-            return expand_path(Path(self._macos_dir), self.home_directory)
+            return self._expand_path(Path(self._macos_dir))
         if sys.platform == "win32":
-            return expand_path(Path(self._windows_dir), self.home_directory)
+            return self._expand_path(Path(self._windows_dir))
         return None
 
     def _config_path(self) -> Path | None:

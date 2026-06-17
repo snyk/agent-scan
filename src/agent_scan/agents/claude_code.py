@@ -1,6 +1,7 @@
 """Claude Code discoverer: ``~/.claude.json`` + ``~/.claude/skills`` + per-project,
 plugin, command, and enterprise (managed-mcp) scopes."""
 
+import glob
 import logging
 import os
 import sys
@@ -20,9 +21,12 @@ from agent_scan.models import (
     PluginMCPConfigFile,
 )
 from agent_scan.skill_client import inspect_commands_dir, inspect_skills_dir
-from agent_scan.well_known_clients import CLAUDE_CODE_NAME, expand_path
 
 logger = logging.getLogger(__name__)
+
+# Canonical agent name for Claude Code, used as this discoverer's ``name`` and the
+# key under which it registers in ``agents.DISCOVERERS``.
+CLAUDE_CODE_NAME = "claude code"
 
 # Format-union for Claude Code ``.mcp.json`` files (project + plugin scope), tried
 # in order by ``_parse_mcp_file``: the wrapped ``{"mcpServers": {...}}`` shape
@@ -85,6 +89,19 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
             logger.warning("Permission error for path %s", path.as_posix())
         return None
 
+    def static_mcp_config_paths(self) -> list[str]:
+        # Every fixed-location MCP file claude code owns: the user-global config plus each
+        # installed-plugin ``.mcp.json`` under ``~/.claude/plugins/{cache,repos}/**/.mcp.json``.
+        # Enumerating them keeps ``--paths`` attribution complete (a plugin config still
+        # labels as claude code). Globbed against the scanning user's own home (the classifier
+        # resolves ``~`` itself). Per-project ``.mcp.json`` paths stay omitted: they live at
+        # arbitrary cwd locations, never a fixed path.
+        paths = [self._expand_path(Path(self._mcp_config_path)).as_posix()]
+        for subdir in self._plugin_subdirs:
+            pattern = os.path.expanduser(f"{self._install_path}/plugins/{subdir}/**/.mcp.json")
+            paths.extend(glob.glob(pattern, recursive=True))
+        return paths
+
     def discover_mcp_servers(self) -> McpConfigsResult:
         result: McpConfigsResult = {}
         result.update(self._discover_global_mcp_servers())
@@ -128,7 +145,7 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
             config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
             if config_dir:
                 return Path(config_dir)
-        return expand_path(Path(self._install_path), self.home_directory)
+        return self._expand_path(Path(self._install_path))
 
     def _config_json_path(self) -> Path:
         """Path to the global ``.claude.json``.
@@ -141,7 +158,7 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
             relocated = self._claude_base_dir() / ".claude.json"
             if relocated.exists():
                 return relocated
-        return expand_path(Path(self._mcp_config_path), self.home_directory)
+        return self._expand_path(Path(self._mcp_config_path))
 
     # --- private: folder enumeration ---
 

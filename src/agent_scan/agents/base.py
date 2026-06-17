@@ -1,11 +1,11 @@
 """Abstract per-agent discoverer and shared discovery infrastructure.
 
-This package sits alongside the data-driven discovery pipeline
-(`well_known_clients.py` + `inspect.py`). ``AgentDiscoverer`` is the abstract
-base every concrete discoverer extends; each subclass owns the agent-specific
+``AgentDiscoverer`` is the abstract base every concrete discoverer extends, and
+the registry of these discoverers (``agents.DISCOVERERS``) is the single source
+of truth for which agents a scan covers. Each subclass owns the agent-specific
 knowledge of where to look for config files and skills directories. The
-module-level helpers here are shared infrastructure consumed
-by the concrete discoverers in sibling modules.
+module-level helpers here are shared infrastructure consumed by the concrete
+discoverers in sibling modules.
 """
 
 import logging
@@ -129,17 +129,16 @@ class AgentDiscoverer(ABC):
     Concrete subclasses encapsulate one agent's filesystem layout: where the
     install lives, which JSON file(s) hold its MCP servers, and which directory
     holds its skills. Subclasses MUST set the ``name`` class attribute to the
-    canonical agent name used in ``well_known_clients``; this is enforced in
+    agent's canonical name (its key in ``agents.DISCOVERERS`` and the ``name`` on
+    every ``ClientToInspect`` it produces); this is enforced in
     ``__init_subclass__``.
 
     A discoverer is bound to a single user's ``home_directory`` at construction;
     the multi-user (``--scan-all-users``) loop in ``pipelines`` constructs one
     discoverer per home directory.
 
-    Unlike the legacy ``inspect.py`` pipeline, this abstraction does NOT consult
-    the ``CandidateClient`` row's ``mcp_config_globs`` / ``skills_dir_globs``;
-    subclasses encode their layout directly. An agent that genuinely needs
-    glob-based discovery should override ``discover_mcp_servers`` /
+    Subclasses encode their filesystem layout directly in code. An agent that
+    needs glob-based discovery should override ``discover_mcp_servers`` /
     ``discover_skills`` to handle it explicitly.
     """
 
@@ -228,7 +227,47 @@ class AgentDiscoverer(ABC):
             skills_dirs=skills_dirs,
         )
 
+    def static_mcp_config_paths(self) -> list[str]:
+        """Documented standalone MCP config *file* paths this agent owns, with ``~``
+        expanded against the bound home.
+
+        Default empty; overridden by discoverers that have well-known config files.
+        Consumed by ``agents.get_client_from_path`` to label an explicitly-scanned
+        path (``--paths`` mode) with its owning agent name. Overrides should enumerate
+        every fixed-location file the agent owns — including dynamically resolved ones
+        (per-userdata-dir / installed-plugin configs) — so ``--paths`` attribution is
+        complete; only truly per-project paths (arbitrary cwd locations) are omitted.
+        It is a best-effort classifier: callers fall back to the already-known client
+        name when it returns ``None``.
+        """
+        return []
+
     # --- shared helpers (inherited by every concrete subclass) ---
+
+    @staticmethod
+    def expand_path(path: Path, home_directory: Path | None) -> Path:
+        """Resolve a ``~``-prefixed path against a specific ``home_directory``.
+
+        Unlike ``Path.expanduser`` (which always uses the current process's
+        ``$HOME``), this expands against the *given* home so a discoverer bound to
+        another user's home under ``--scan-all-users`` resolves ``~/...`` correctly.
+        A ``None`` home (unknown) or a non-``~`` path (absolute or cwd-relative,
+        e.g. ``.amp/skills``) is returned unchanged.
+
+        Static (rather than reading ``self.home_directory``) because the legacy
+        ``inspect.py`` engine also resolves explicit ``--paths`` against multiple
+        homes without a discoverer instance; subclasses use the bound-home
+        convenience :meth:`_expand_path` instead.
+        """
+        if home_directory is None or not str(path).startswith("~"):
+            return path
+
+        suffix = path.parts[1:]
+        return home_directory / Path(*suffix)
+
+    def _expand_path(self, path: Path) -> Path:
+        """:meth:`expand_path` against this discoverer's bound ``home_directory``."""
+        return self.expand_path(path, self.home_directory)
 
     def _load_json_file(self, path: Path) -> dict | CouldNotParseMCPConfig | None:
         """JSON-decode an arbitrary file. ``None`` if missing, unreadable (denied

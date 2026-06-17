@@ -5,6 +5,7 @@ from pathlib import Path
 
 from httpx import HTTPStatusError
 
+from agent_scan.agents.base import AgentDiscoverer
 from agent_scan.mcp_client import check_server, scan_mcp_config_file
 from agent_scan.models import (
     CandidateClient,
@@ -33,7 +34,6 @@ from agent_scan.runtime_config import get_runtime_config
 from agent_scan.signed_binary import check_server_signature
 from agent_scan.skill_client import inspect_skill, inspect_skills_dir
 from agent_scan.traffic_capture import TrafficCapture
-from agent_scan.well_known_clients import expand_path
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +87,7 @@ async def get_mcp_config_per_home_directory(
     # check if client exists
     client_path: str | None = None
     for path in client.client_exists_paths:
-        path_expanded = expand_path(Path(path), home_directory) if home_directory is not None else Path(path)
+        path_expanded = AgentDiscoverer.expand_path(Path(path), home_directory)
         try:
             if path_expanded.exists():
                 client_path = path_expanded.as_posix()
@@ -110,14 +110,14 @@ async def get_mcp_config_per_home_directory(
 
     all_mcp_config_paths: list[str] = list(client.mcp_config_paths)
     for glob_pattern in client.mcp_config_globs:
-        expanded_glob = str(expand_path(Path(glob_pattern), home_directory))
+        expanded_glob = str(AgentDiscoverer.expand_path(Path(glob_pattern), home_directory))
         all_mcp_config_paths.extend(_resolve_glob_with_depth(expanded_glob, client.max_glob_depth))
     all_mcp_config_paths = list(
-        dict.fromkeys(str(expand_path(Path(p), home_directory).resolve()) for p in all_mcp_config_paths)
+        dict.fromkeys(str(AgentDiscoverer.expand_path(Path(p), home_directory).resolve()) for p in all_mcp_config_paths)
     )
 
     for mcp_config_path in all_mcp_config_paths:
-        mcp_config_path_expanded = expand_path(Path(mcp_config_path), home_directory)
+        mcp_config_path_expanded = AgentDiscoverer.expand_path(Path(mcp_config_path), home_directory)
         if not mcp_config_path_expanded.exists():
             if create_file_not_found_error:
                 mcp_configs[mcp_config_path_expanded.as_posix()] = FileNotFoundConfig(
@@ -154,16 +154,16 @@ async def get_mcp_config_per_home_directory(
 
     all_skills_dir_paths: list[str] = list(client.skills_dir_paths)
     for glob_pattern in client.skills_dir_globs:
-        expanded_glob = str(expand_path(Path(glob_pattern), home_directory))
+        expanded_glob = str(AgentDiscoverer.expand_path(Path(glob_pattern), home_directory))
         for match in _resolve_glob_with_depth(expanded_glob, client.max_glob_depth):
             if Path(match).is_dir():
                 all_skills_dir_paths.append(match)
     all_skills_dir_paths = list(
-        dict.fromkeys(str(expand_path(Path(p), home_directory).resolve()) for p in all_skills_dir_paths)
+        dict.fromkeys(str(AgentDiscoverer.expand_path(Path(p), home_directory).resolve()) for p in all_skills_dir_paths)
     )
 
     for skills_dir_path in all_skills_dir_paths:
-        skills_dir_path_expanded = expand_path(Path(skills_dir_path), home_directory)
+        skills_dir_path_expanded = AgentDiscoverer.expand_path(Path(skills_dir_path), home_directory)
         if skills_dir_path_expanded.exists():
             skills_dirs[skills_dir_path_expanded.as_posix()] = inspect_skills_dir(str(skills_dir_path_expanded))
         elif create_file_not_found_error:

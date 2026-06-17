@@ -9,6 +9,7 @@ import aiohttp
 import certifi
 import rich
 
+from agent_scan.agents import get_client_from_path
 from agent_scan.models import (
     ScalarToolLabels,
     ScanError,
@@ -17,7 +18,6 @@ from agent_scan.models import (
     ScanUserInfo,
 )
 from agent_scan.utils import get_environment, get_relative_path
-from agent_scan.well_known_clients import get_client_from_path
 
 logger = logging.getLogger(__name__)
 
