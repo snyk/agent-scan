@@ -4785,40 +4785,6 @@ def test_managed_mcp_path_falls_back_to_default_program_files_on_windows(tmp_pat
     assert "Program Files" in path.as_posix()
 
 
-def test_claude_code_discovers_global_command_files(tmp_path):
-    """``~/.claude/commands/*.md`` are surfaced as skill entries."""
-    from agent_scan.agents import ClaudeCodeDiscoverer
-
-    commands = tmp_path / ".claude" / "commands"
-    commands.mkdir(parents=True)
-    (commands / "deploy.md").write_text("# Deploy")
-
-    skills = ClaudeCodeDiscoverer(tmp_path).discover_skills()
-
-    keys = [k for k in skills if k.endswith("/.claude/commands")]
-    assert len(keys) == 1
-    names = {n for n, _ in skills[keys[0]]}
-    assert names == {"deploy"}
-
-
-def test_claude_code_discovers_project_command_files(tmp_path):
-    """``<project>/.claude/commands/*.md`` are surfaced for opened projects."""
-    from agent_scan.agents import ClaudeCodeDiscoverer
-
-    project = tmp_path / "repo"
-    cmds = project / ".claude" / "commands"
-    cmds.mkdir(parents=True)
-    (cmds / "test.md").write_text("# Test")
-    (tmp_path / ".claude").mkdir()
-    (tmp_path / ".claude.json").write_text(f'{{"projects": {{"{project.as_posix()}": {{"mcpServers": {{}}}}}}}}')
-
-    skills = ClaudeCodeDiscoverer(tmp_path).discover_skills()
-
-    keys = [k for k in skills if k.endswith("/repo/.claude/commands")]
-    assert len(keys) == 1
-    assert {n for n, _ in skills[keys[0]]} == {"test"}
-
-
 def test_claude_code_honors_claude_config_dir_on_own_home_scan(tmp_path, monkeypatch):
     """When CLAUDE_CONFIG_DIR is set and no explicit home is passed (own-home
     scan), MCP config is read from ``<CLAUDE_CONFIG_DIR>/.claude.json``."""
