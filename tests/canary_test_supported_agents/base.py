@@ -11,7 +11,7 @@ enforces that every scope-producing ``_discover_*`` method has a canary :class:`
 
 from __future__ import annotations
 
-from abc import ABC
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -209,13 +209,23 @@ class AgentCanary(ABC):
     """The live-test counterpart of one ``AgentDiscoverer`` — one ``Scope`` per scope-producing method.
 
     Subclasses set ``discoverer`` (the discoverer class) and ``scopes`` (ordered). Installing the agent
-    binary (and providing any secrets) is the executor's responsibility, not the spec's."""
+    binary (and providing any secrets) is the executor's responsibility, not the spec's.
+
+    ``bin_candidates`` declares the ordered list of binary names the executor should probe on PATH
+    (most-specific first) to locate this agent's CLI. The executor resolves the first hit and passes
+    it as ``CanaryContext.bin``; having it here keeps binary knowledge in the same place as the scopes
+    that use it, and prevents the executor from accidentally using one agent's binary for another."""
 
     discoverer: type[AgentDiscoverer]
 
     @property
     def name(self) -> str:
         return self.discoverer.name
+
+    @property
+    @abstractmethod
+    def bin_candidates(self) -> tuple[str, ...]:
+        """Ordered binary names to probe for this agent's CLI (most-specific first)."""
 
     @property
     def scopes(self) -> list[Scope]:

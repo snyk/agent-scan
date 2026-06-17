@@ -151,5 +151,8 @@ def test_committed_fixtures_are_locatable():
     for canary in CANARIES.values():
         for scope in canary.scopes:
             for f in scope.files():
-                src = root / f.src
+                # Join segment-by-segment (root.joinpath(*src.split("/"))) the way the backoffice
+                # executor resolves it, rather than as one slash-bearing string, so the lookup is
+                # identical on Windows.
+                src = root.joinpath(*f.src.split("/"))
                 assert src.is_dir() or src.is_file(), f"fixture not locatable: {f.src}"

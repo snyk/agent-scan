@@ -53,6 +53,7 @@ _D = ClaudeCodeDiscoverer  # the scope methods this canary mirrors, by object re
 
 class ClaudeCodeCanary(AgentCanary):
     discoverer = ClaudeCodeDiscoverer
+    bin_candidates = ("claude",)
 
     @property
     def scopes(self) -> list[Scope]:
