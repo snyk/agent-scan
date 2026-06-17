@@ -36,8 +36,12 @@ class CursorDiscoverer(VSCodeFamilyDiscoverer):
     )
     # Per cursor.com/docs/skills the same four paths apply at the user/home level
     # for skills available across all workspaces.
+    # ``~/.cursor/skills-cursor/`` is not documented but observed on disk as
+    # the location Cursor uses for its own built-in (synced/managed) skills at
+    # the user level — distinct from user-authored ``~/.cursor/skills/``.
     _skills_dir_paths = (
         "~/.cursor/skills",
+        "~/.cursor/skills-cursor",
         "~/.agents/skills",
         "~/.claude/skills",
         "~/.codex/skills",
