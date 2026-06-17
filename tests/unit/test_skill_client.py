@@ -226,3 +226,24 @@ def test_inspect_skill_preserves_clean_content(tmp_path):
     sig = inspect_skill(SkillServer(path=str(cmd)))
 
     assert any("Do the deploy." in (p.description or "") for p in sig.prompts)
+
+
+def test_inspect_skill_preserves_binary_file_hash(tmp_path):
+    """A binary resource is surfaced as a synthetic 'Binary file. Hash: <sha256>'
+    description. That digest is self-generated and secret-free, so redaction at
+    read time must leave it intact -- otherwise the 64-char hash trips the hex
+    high-entropy detector and every binary collapses to an identical, useless
+    description. Also guards against the binary-marker prefix drifting between
+    skill_client (which writes it) and redact (which exempts it)."""
+    import hashlib
+
+    skill = tmp_path / "myskill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("---\nname: myskill\ndescription: a skill\n---\n# Heading\n")
+    blob = b"\xff\xfe\x00\x01\x02 not utf-8 \x80\x81"
+    (skill / "logo.bin").write_bytes(blob)
+    expected = f"Binary file. Hash: {hashlib.sha256(blob).hexdigest()}"
+
+    sig = inspect_skill(SkillServer(path=str(skill)))
+
+    assert any((r.description or "") == expected for r in sig.resources)

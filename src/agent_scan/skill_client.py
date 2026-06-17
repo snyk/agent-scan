@@ -17,7 +17,7 @@ from mcp.types import (
 from yaml.error import YAMLError
 
 from agent_scan.models import ServerSignature, SkillServer
-from agent_scan.redact import redact_signature
+from agent_scan.redact import BINARY_FILE_DESCRIPTION_PREFIX, redact_signature
 
 logger = logging.getLogger(__name__)
 
@@ -195,7 +195,7 @@ def traverse_skill_tree(skill_path: str, relative_path: str | None) -> tuple[lis
                 logger.exception(f"Error reading file: {file}. The file is not a bianry")
                 with open(os.path.expanduser(full_path), "rb") as f:
                     content_hash = hashlib.sha256(f.read()).hexdigest()
-                content = f"Binary file. Hash: {content_hash}"
+                content = f"{BINARY_FILE_DESCRIPTION_PREFIX}{content_hash}"
             resources.append(
                 Resource(
                     name=file,

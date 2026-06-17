@@ -25,6 +25,16 @@ REDACTED = "**REDACTED**"
 
 _EXCLUDED_PLUGINS = frozenset({"IPPublicDetector"})
 
+# Synthetic description that ``skill_client.traverse_skill_tree`` emits for a
+# binary resource: this fixed prefix followed by the file's sha256 hex digest.
+# It is generated entirely by us and contains no user content, so it is exempt
+# from secret redaction (see ``_is_synthetic_binary_description``) -- otherwise
+# the 64-char digest trips the hex high-entropy detector and every binary
+# collapses to an identical, useless description. ``skill_client`` imports this
+# constant to build the marker so the two cannot drift apart.
+BINARY_FILE_DESCRIPTION_PREFIX = "Binary file. Hash: "
+_BINARY_FILE_DESCRIPTION_RE = re.compile(rf"^{re.escape(BINARY_FILE_DESCRIPTION_PREFIX)}[0-9a-f]{{64}}$")
+
 
 def _build_detect_secrets_config() -> dict:
     """
@@ -106,12 +116,10 @@ def _wrap_for_entropy(value: str) -> str:
     return '"' + value.replace('"', r"\"") + '"'
 
 
-def _detect_secret(value: str) -> str | None:
-    """
-    Return the class name of the first detect-secrets plugin that flags
-    ``value``, or ``None`` if no plugin flags it.
+def _detect_secret_in_plugins(value: str, plugins: list) -> str | None:
+    """Two-pass scan of ``value`` against an already-built ``plugins`` list.
 
-    Two-pass scan to give each plugin family the input format it expects:
+    Each plugin family gets the input format it expects:
 
     1. Named-format detectors (``AWSKeyDetector``, ``GitHubTokenDetector``,
        etc.) match self-contained format patterns and work on the raw
@@ -121,25 +129,49 @@ def _detect_secret(value: str) -> str | None:
        wrapped as ``"<value>"``, ``'<value>'``, or ``"<escaped>"`` so
        their regex tokenizes the whole value, then the entropy ``limit``
        filter is applied.
+
+    The caller is responsible for holding an active
+    ``transient_settings(_DETECT_SECRETS_CONFIG)`` context that ``plugins``
+    was built under.
+    """
+    # Pass 1: format-based named detectors on the bare value.
+    for plugin in plugins:
+        if isinstance(plugin, HighEntropyStringsPlugin):
+            continue
+        if plugin.analyze_line(filename="adhoc", line=value, line_number=1):
+            return type(plugin).__name__
+    # Pass 2: entropy plugins on the quote-wrapped value.
+    wrapped = _wrap_for_entropy(value)
+    for plugin in plugins:
+        if not isinstance(plugin, HighEntropyStringsPlugin):
+            continue
+        if plugin.analyze_line(filename="adhoc", line=wrapped, line_number=1):
+            return type(plugin).__name__
+    return None
+
+
+def _detect_secret(value: str, plugins: list | None = None) -> str | None:
+    """
+    Return the class name of the first detect-secrets plugin that flags
+    ``value``, or ``None`` if no plugin flags it. See
+    :func:`_detect_secret_in_plugins` for the two-pass detection logic.
+
+    When ``plugins`` is supplied, the caller is assumed to already hold an
+    active ``transient_settings(_DETECT_SECRETS_CONFIG)`` context (as
+    :func:`redact_text` does), so this reuses that plugin set and does NOT
+    re-enter the context. Re-entering it per call runs detect-secrets'
+    ``cache_bust`` twice each time (~1.3ms), so a per-token caller would be
+    O(tokens) in context churn -- tens of seconds for a large bundled script.
+
+    With ``plugins=None`` (the :func:`redact_args` path) it builds and tears
+    down its own context per call, exactly as before.
     """
     if not value:
         return None
+    if plugins is not None:
+        return _detect_secret_in_plugins(value, plugins)
     with transient_settings(_DETECT_SECRETS_CONFIG):
-        plugins = list(get_plugins())
-        # Pass 1: format-based named detectors on the bare value.
-        for plugin in plugins:
-            if isinstance(plugin, HighEntropyStringsPlugin):
-                continue
-            if plugin.analyze_line(filename="adhoc", line=value, line_number=1):
-                return type(plugin).__name__
-        # Pass 2: entropy plugins on the quote-wrapped value.
-        wrapped = _wrap_for_entropy(value)
-        for plugin in plugins:
-            if not isinstance(plugin, HighEntropyStringsPlugin):
-                continue
-            if plugin.analyze_line(filename="adhoc", line=wrapped, line_number=1):
-                return type(plugin).__name__
-    return None
+        return _detect_secret_in_plugins(value, list(get_plugins()))
 
 
 def _detect_keyword(prev_normalized: str, curr_raw: str) -> str | None:
@@ -374,11 +406,13 @@ def _redact_secrets_in_line(line: str, plugins: list) -> str:
             if value:
                 replacements.setdefault(value, _redaction_marker(type(plugin).__name__))
 
-    # Pass 2: whole-token detection for format/entropy-shaped tokens.
+    # Pass 2: whole-token detection for format/entropy-shaped tokens. Reuse the
+    # caller's already-built ``plugins`` (under its single transient_settings
+    # context) so we don't re-enter that context per token.
     for token in line.split():
         if token in replacements:
             continue
-        plugin_name = _detect_secret(token)
+        plugin_name = _detect_secret(token, plugins)
         if plugin_name is not None:
             replacements[token] = _redaction_marker(plugin_name)
 
@@ -408,6 +442,16 @@ def redact_text(text: str | None) -> str | None:
     return redact_absolute_paths(redacted)
 
 
+def _is_synthetic_binary_description(text: str) -> bool:
+    """True if ``text`` is the synthetic binary-file marker emitted for a binary
+    skill resource (see :data:`BINARY_FILE_DESCRIPTION_PREFIX`).
+
+    Such a description is self-generated (a fixed prefix + sha256 digest) and
+    contains no user content, so it is left untouched by redaction.
+    """
+    return bool(_BINARY_FILE_DESCRIPTION_RE.match(text))
+
+
 def redact_signature(signature: ServerSignature) -> ServerSignature:
     """Redact secrets and absolute paths from a (skill) ``ServerSignature`` in place.
 
@@ -415,7 +459,9 @@ def redact_signature(signature: ServerSignature) -> ServerSignature:
     ``description`` fields, and the skill's frontmatter description in
     ``metadata.instructions``. Any of these can carry secrets, so every
     free-text field is run through :func:`redact_text` before the signature
-    leaves the machine.
+    leaves the machine. The one exception is a resource whose description is the
+    synthetic binary-file marker (see :func:`_is_synthetic_binary_description`),
+    which is left intact so the file's hash digest survives.
 
     This is the single redaction point for skill content: it runs once when the
     skill is read (in ``skill_client.inspect_skill``), so the later
@@ -425,7 +471,7 @@ def redact_signature(signature: ServerSignature) -> ServerSignature:
     if signature.metadata is not None and signature.metadata.instructions:
         signature.metadata.instructions = redact_text(signature.metadata.instructions)
     for entity in (*signature.prompts, *signature.resources, *signature.resource_templates, *signature.tools):
-        if entity.description:
+        if entity.description and not _is_synthetic_binary_description(entity.description):
             entity.description = redact_text(entity.description)
     return signature
 

@@ -452,6 +452,44 @@ class TestRedactText:
         assert is_secret_marker(lines[1])
         assert lines[2] == "line three"
 
+    def test_redact_text_enters_detect_secrets_context_once(self, monkeypatch):
+        """redact_text must enter the detect-secrets settings context exactly
+        once for the whole text, not once per token.
+
+        Re-entering ``transient_settings`` runs detect-secrets' ``cache_bust``
+        twice each time (~1.3ms), so a per-token re-entry makes redaction
+        O(tokens) -- a large bundled script then takes tens of seconds. The
+        per-token detection path must reuse the already-built plugin set under
+        the single outer context instead.
+        """
+        import contextlib
+
+        import agent_scan.redact as redact_mod
+
+        real_transient_settings = redact_mod.transient_settings
+        entries = 0
+
+        @contextlib.contextmanager
+        def counting_transient_settings(*args, **kwargs):
+            nonlocal entries
+            entries += 1
+            with real_transient_settings(*args, **kwargs) as value:
+                yield value
+
+        monkeypatch.setattr(redact_mod, "transient_settings", counting_transient_settings)
+
+        # Many whitespace tokens across several lines, including a real secret,
+        # so the per-token detection pass runs repeatedly.
+        text = "\n".join("alpha beta gamma delta epsilon zeta" for _ in range(20))
+        text += f"\nthe secret is {FAKE_API_KEY}\n"
+
+        result = redact_mod.redact_text(text)
+
+        assert entries == 1
+        # ...and detection still works under the single-context path.
+        assert FAKE_API_KEY not in result
+        assert "**REDACTED_SECRET_" in result
+
 
 def _skill_signature(*, instructions="", prompts=None, resources=None, tools=None) -> ServerSignature:
     return ServerSignature(
@@ -501,6 +539,31 @@ class TestRedactSignature:
         redact_signature(sig)
         assert sig.metadata.instructions == "A helpful skill"
         assert sig.prompts[0].description == "# Title\nDoes something useful."
+
+    def test_redact_signature_preserves_binary_file_hash(self):
+        """The synthetic 'Binary file. Hash: <sha256>' marker is self-generated
+        and secret-free, so redaction must leave the digest intact -- otherwise
+        the 64-char hash trips the hex high-entropy detector and every binary
+        collapses to an identical, useless description."""
+        import hashlib
+
+        digest = hashlib.sha256(b"\x00\x01\x02 binary blob \x80\x81").hexdigest()
+        desc = f"Binary file. Hash: {digest}"
+        sig = _skill_signature(resources=[Resource(name="logo.bin", uri="skill://logo.bin", description=desc)])
+        redact_signature(sig)
+        assert sig.resources[0].description == desc
+
+    def test_redact_signature_still_redacts_text_resembling_binary_marker(self):
+        """The exemption is an exact whole-string match: a description that only
+        starts like the binary marker but carries extra (possibly secret) text
+        is NOT exempt and is still redacted."""
+        import hashlib
+
+        digest = hashlib.sha256(b"blob").hexdigest()
+        desc = f"Binary file. Hash: {digest} -- also token {FAKE_API_KEY}"
+        sig = _skill_signature(resources=[Resource(name="logo.bin", uri="skill://logo.bin", description=desc)])
+        redact_signature(sig)
+        assert FAKE_API_KEY not in (sig.resources[0].description or "")
 
 
 def test_redact_remote_url_query_and_headers():
