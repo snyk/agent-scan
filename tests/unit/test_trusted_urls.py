@@ -37,6 +37,14 @@ class TestClassifyTrustedPatterns:
         assert networks == []
         assert domains == ["nexus.corp"]
 
+    def test_bare_glob_does_not_produce_empty_domain(self):
+        # "*." strips to "" — must not become a trusted domain (would match
+        # almost any host via endswith(".")).
+        networks, domains = _classify_trusted_patterns(["*.", " *. ", "nexus.corp"])
+        assert networks == []
+        assert "" not in domains
+        assert domains == ["nexus.corp"]
+
 
 class TestHostIsTrusted:
     @pytest.fixture
@@ -71,6 +79,16 @@ class TestHostIsTrusted:
     def test_ipv6_brackets_stripped(self):
         networks, domains = _classify_trusted_patterns(["::1/128"])
         assert _host_is_trusted("[::1]", networks, domains)
+
+    def test_trailing_dot_fqdn_matches(self, buckets):
+        # A fully-qualified host with a trailing dot must match the trusted domain.
+        assert _host_is_trusted("nexus.corp.", *buckets)
+        assert _host_is_trusted("artifacts.internal.", *buckets)
+
+    def test_bare_glob_pattern_does_not_match_arbitrary_host(self):
+        # Regression: "*." must not be usable to trust everything.
+        networks, domains = _classify_trusted_patterns(["*."])
+        assert not _host_is_trusted("anything.evil.com", networks, domains)
 
 
 class TestMessageUrlsAllTrusted:

@@ -894,10 +894,12 @@ def _classify_trusted_patterns(
     domains: list[str] = []
     for raw in patterns:
         p = raw.strip().lower()
-        if not p:
-            continue
         if p.startswith("*."):
             p = p[2:]
+        if not p:
+            # Skip blanks and bare globs ("*.") that would strip to an empty
+            # domain, which would otherwise match almost any host via endswith(".").
+            continue
         try:
             networks.append(ipaddress.ip_network(p, strict=False))
             continue
@@ -915,7 +917,9 @@ def _host_is_trusted(
     """True if ``host`` is an IP inside a trusted network, or a trusted domain/subdomain."""
     if not host:
         return False
-    host = host.lower().strip("[]")  # strip IPv6 literal brackets
+    # Lowercase, strip IPv6 literal brackets, and drop a trailing dot so a
+    # fully-qualified host ("nexus.corp.") matches the trusted "nexus.corp".
+    host = host.lower().strip("[]").rstrip(".")
     try:
         ip = ipaddress.ip_address(host)
         return any(ip in net for net in networks)
@@ -942,6 +946,33 @@ def _message_urls_all_trusted(
     return all(_host_is_trusted(urlparse(url).hostname or "", networks, domains) for url in urls)
 
 
+def _trusted_urls_config_error(message: str) -> None:
+    """Report an invalid trusted-urls configuration and exit with the usage code."""
+    rich.print(f"[bold red]Error: {message}[/bold red]", file=sys.stderr)
+    sys.exit(2)
+
+
+def _load_trusted_urls_file(file_path: str) -> list[str]:
+    """Read and validate the trusted-urls JSON file, returning its patterns."""
+    try:
+        with open(file_path) as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        _trusted_urls_config_error(f"--trusted-urls-file not found: {file_path}")
+    except json.JSONDecodeError as e:
+        _trusted_urls_config_error(f"--trusted-urls-file is not valid JSON: {e}")
+
+    if not isinstance(data, dict) or "trusted_urls" not in data:
+        _trusted_urls_config_error(
+            f'--trusted-urls-file must contain a JSON object with a "trusted_urls" '
+            f"list (got: {type(data).__name__})."
+        )
+    file_patterns = data["trusted_urls"]
+    if not isinstance(file_patterns, list):
+        _trusted_urls_config_error('"trusted_urls" in --trusted-urls-file must be a list.')
+    return [p for p in file_patterns if isinstance(p, str) and p.strip()]
+
+
 def _load_trusted_urls(args) -> list[str]:
     """Merge trusted URL patterns from --trusted-urls and --trusted-urls-file."""
     patterns: list[str] = []
@@ -952,36 +983,7 @@ def _load_trusted_urls(args) -> list[str]:
 
     file_path = getattr(args, "trusted_urls_file", None)
     if file_path:
-        try:
-            with open(file_path) as f:
-                data = json.load(f)
-            if not isinstance(data, dict) or "trusted_urls" not in data:
-                rich.print(
-                    f"[bold red]Error: --trusted-urls-file must contain a JSON object with a "
-                    f'"trusted_urls" list (got: {type(data).__name__}).[/bold red]',
-                    file=sys.stderr,
-                )
-                sys.exit(2)
-            file_patterns = data["trusted_urls"]
-            if not isinstance(file_patterns, list):
-                rich.print(
-                    '[bold red]Error: "trusted_urls" in --trusted-urls-file must be a list.[/bold red]',
-                    file=sys.stderr,
-                )
-                sys.exit(2)
-            patterns.extend(p for p in file_patterns if isinstance(p, str) and p.strip())
-        except FileNotFoundError:
-            rich.print(
-                f"[bold red]Error: --trusted-urls-file not found: {file_path}[/bold red]",
-                file=sys.stderr,
-            )
-            sys.exit(2)
-        except json.JSONDecodeError as e:
-            rich.print(
-                f"[bold red]Error: --trusted-urls-file is not valid JSON: {e}[/bold red]",
-                file=sys.stderr,
-            )
-            sys.exit(2)
+        patterns.extend(_load_trusted_urls_file(file_path))
 
     return patterns
 
