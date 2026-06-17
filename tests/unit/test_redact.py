@@ -438,11 +438,14 @@ class TestRedactText:
         assert FAKE_API_KEY not in result
         assert "**REDACTED_SECRET_" in result
 
-    def test_redact_text_redacts_absolute_paths(self):
+    def test_redact_text_preserves_absolute_paths(self):
+        """Skill content (docs/code) routinely references real paths as legitimate
+        context, so redact_text leaves absolute paths intact and only strips
+        secrets. (Tracebacks and server output still get path redaction via
+        redact_server / redact_scan_result.)"""
         text = "Loading from /Users/alice/project/config.json"
         result = redact_text(text)
-        assert "/Users/alice/project/config.json" not in result
-        assert "**REDACTED**" in result
+        assert result == text
 
     def test_redact_text_preserves_line_structure(self):
         text = f"line one\n{FAKE_API_KEY}\nline three"

@@ -420,23 +420,27 @@ def _redact_secrets_in_line(line: str, plugins: list) -> str:
 
 
 def redact_text(text: str | None) -> str | None:
-    """Redact secrets and absolute paths from a block of free text.
+    """Redact secrets from a block of free text.
 
     Used for content read out of skill files (SKILL.md, command markdown,
     bundled scripts, and other resources), which may contain credentials a
-    user pasted into a skill, as well as absolute paths that leak usernames.
+    user pasted into a skill.
+
+    Absolute paths are intentionally left intact: skill content is documentation
+    and code that legitimately references real paths, and stripping them would
+    remove context the downstream analysis relies on. (Path redaction still
+    applies to tracebacks and server output via :func:`redact_server` /
+    :func:`redact_scan_result`, where paths are noise rather than user content.)
 
     Detection runs line by line so the plugin set is built once and reused;
-    secret values are spliced out in place (see :func:`_redact_secrets_in_line`)
-    and the whole result then has absolute paths redacted. Returns ``None`` for
-    ``None`` input and the input unchanged when it is empty.
+    secret values are spliced out in place (see :func:`_redact_secrets_in_line`).
+    Returns ``None`` for ``None`` input and the input unchanged when it is empty.
     """
     if not text:
         return text
     with transient_settings(_DETECT_SECRETS_CONFIG):
         plugins = list(get_plugins())
-        redacted = "\n".join(_redact_secrets_in_line(line, plugins) for line in text.split("\n"))
-    return redact_absolute_paths(redacted)
+        return "\n".join(_redact_secrets_in_line(line, plugins) for line in text.split("\n"))
 
 
 def _is_synthetic_binary_description(text: str) -> bool:
