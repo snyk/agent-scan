@@ -9,10 +9,13 @@ truststore.inject_into_ssl()
 
 import argparse
 import asyncio
+import ipaddress
 import json
 import logging
+import re
 import sys
 from dataclasses import dataclass
+from urllib.parse import urlparse
 
 import psutil
 import rich
@@ -234,6 +237,30 @@ def add_common_arguments(parser):
         type=str,
         default=None,
         help="Comma-separated list of issue codes to ignore (e.g. W001,W015)",
+    )
+    parser.add_argument(
+        "--trusted-urls",
+        type=str,
+        default=None,
+        metavar="PATTERNS",
+        help=(
+            "Comma-separated list of trusted hosts. Matching is host-aware: "
+            "domains match the host or any subdomain (e.g. 'nexus.corp', '*.internal'); "
+            "IPs/CIDRs match by address (e.g. '10.0.0.0/8', '192.168.1.5'). "
+            "Findings for E005, W011, and W012 are suppressed only when every URL "
+            "they cite resolves to a trusted host."
+        ),
+    )
+    parser.add_argument(
+        "--trusted-urls-file",
+        type=str,
+        default=None,
+        metavar="PATH",
+        help=(
+            "Path to a JSON file containing trusted hosts. "
+            'Expected format: {"trusted_urls": ["nexus.corp", "*.internal", "10.0.0.0/8"]}. '
+            "Combined with --trusted-urls if both are provided."
+        ),
     )
 
 
@@ -845,6 +872,142 @@ def _apply_ignore_codes(result: list[ScanPathResult], ignore_codes: set[str]) ->
         scan_result.issues = [i for i in scan_result.issues if i.code not in ignore_codes]
 
 
+# Issue codes that carry URL evidence and are candidates for trusted-URL suppression.
+_URL_BEARING_CODES = frozenset({"E005", "W011", "W012"})
+
+# Extract http(s) URLs from a free-text issue message. Stops at whitespace and
+# common message-punctuation delimiters so trailing quotes/brackets/commas in the
+# surrounding prose are not pulled into the host.
+_URL_RE = re.compile(r"https?://[^\s'\"<>)\]}]+", re.IGNORECASE)
+
+
+def _classify_trusted_patterns(
+    patterns: list[str],
+) -> tuple[list[ipaddress.IPv4Network | ipaddress.IPv6Network], list[str]]:
+    """Split raw trusted patterns into IP networks and domain suffixes.
+
+    A pattern that parses as an IP or CIDR (e.g. ``10.0.0.0/8``, ``192.168.1.5``)
+    becomes a network; everything else is treated as a domain suffix. A leading
+    ``*.`` glob is stripped (``*.internal`` -> ``internal``).
+    """
+    networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+    domains: list[str] = []
+    for raw in patterns:
+        p = raw.strip().lower()
+        if not p:
+            continue
+        if p.startswith("*."):
+            p = p[2:]
+        try:
+            networks.append(ipaddress.ip_network(p, strict=False))
+            continue
+        except ValueError:
+            pass
+        domains.append(p)
+    return networks, domains
+
+
+def _host_is_trusted(
+    host: str,
+    networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network],
+    domains: list[str],
+) -> bool:
+    """True if ``host`` is an IP inside a trusted network, or a trusted domain/subdomain."""
+    if not host:
+        return False
+    host = host.lower().strip("[]")  # strip IPv6 literal brackets
+    try:
+        ip = ipaddress.ip_address(host)
+        return any(ip in net for net in networks)
+    except ValueError:
+        pass
+    # Exact host or a subdomain of a trusted domain (suffix match on a label
+    # boundary, so "internal" does NOT match "internal.attacker.io").
+    return any(host == d or host.endswith("." + d) for d in domains)
+
+
+def _message_urls_all_trusted(
+    message: str,
+    networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network],
+    domains: list[str],
+) -> bool:
+    """True only if every URL in ``message`` resolves to a trusted host.
+
+    Fails closed: a message with no parseable URL, or any single untrusted URL,
+    is not suppressed.
+    """
+    urls = _URL_RE.findall(message)
+    if not urls:
+        return False
+    return all(_host_is_trusted(urlparse(url).hostname or "", networks, domains) for url in urls)
+
+
+def _load_trusted_urls(args) -> list[str]:
+    """Merge trusted URL patterns from --trusted-urls and --trusted-urls-file."""
+    patterns: list[str] = []
+
+    flag_value = getattr(args, "trusted_urls", None)
+    if flag_value:
+        patterns.extend(p.strip() for p in flag_value.split(",") if p.strip())
+
+    file_path = getattr(args, "trusted_urls_file", None)
+    if file_path:
+        try:
+            with open(file_path) as f:
+                data = json.load(f)
+            if not isinstance(data, dict) or "trusted_urls" not in data:
+                rich.print(
+                    f"[bold red]Error: --trusted-urls-file must contain a JSON object with a "
+                    f'"trusted_urls" list (got: {type(data).__name__}).[/bold red]',
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            file_patterns = data["trusted_urls"]
+            if not isinstance(file_patterns, list):
+                rich.print(
+                    '[bold red]Error: "trusted_urls" in --trusted-urls-file must be a list.[/bold red]',
+                    file=sys.stderr,
+                )
+                sys.exit(2)
+            patterns.extend(p for p in file_patterns if isinstance(p, str) and p.strip())
+        except FileNotFoundError:
+            rich.print(
+                f"[bold red]Error: --trusted-urls-file not found: {file_path}[/bold red]",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+        except json.JSONDecodeError as e:
+            rich.print(
+                f"[bold red]Error: --trusted-urls-file is not valid JSON: {e}[/bold red]",
+                file=sys.stderr,
+            )
+            sys.exit(2)
+
+    return patterns
+
+
+def _apply_trusted_urls(result: list[ScanPathResult], trusted_urls: list[str]) -> None:
+    """Suppress URL-bearing findings whose URLs all resolve to trusted hosts.
+
+    Matching is host-aware: each URL in the finding message is parsed and its
+    host compared against trusted IP networks (CIDR/IP) and domain suffixes,
+    rather than a raw substring test against the whole message. A finding is
+    suppressed only when *every* URL it cites is trusted.
+    """
+    if not trusted_urls:
+        return
+    networks, domains = _classify_trusted_patterns(trusted_urls)
+    if not networks and not domains:
+        return
+    for scan_result in result:
+        scan_result.issues = [
+            issue
+            for issue in scan_result.issues
+            if issue.code not in _URL_BEARING_CODES
+            or not _message_urls_all_trusted(issue.message, networks, domains)
+        ]
+
+
 def _handle_ci_exit(result: list[ScanPathResult], json_output: bool, ignore_codes: set[str]) -> None:
     """In CI mode, exit with code 1 if any issues or unignored failures remain."""
     has_issues = any(scan_result.issues for scan_result in result)
@@ -872,12 +1035,16 @@ async def print_scan_inspect(mode="scan", args=None):
     verbose: bool = hasattr(args, "verbose") and args.verbose
     ci_mode: bool = hasattr(args, "ci") and args.ci
     ignore_codes = _parse_ignore_codes(args, ci_mode)
+    trusted_urls = _load_trusted_urls(args)
 
     if json_output:
         with suppress_stdout():
             result = await run_scan(args, mode=mode)
     else:
         result = await run_scan(args, mode=mode)
+
+    if trusted_urls:
+        _apply_trusted_urls(result, trusted_urls)
 
     if ci_mode and ignore_codes:
         _apply_ignore_codes(result, ignore_codes)
