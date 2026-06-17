@@ -15,8 +15,11 @@ from mcp.types import (
 
 from agent_scan.models import RemoteServer, ScanPathResult, ServerScanResult, ServerSignature, StdioServer
 from agent_scan.redact import (
+    _is_uuid_like,
     redact_absolute_paths,
     redact_args,
+    redact_push_keys,
+    redact_push_keys_in_data,
     redact_scan_result,
     redact_signature,
     redact_text,
@@ -715,3 +718,282 @@ def test_redact_scan_result_removes_api_key(server, kind):
         flag, sep, value = srv.server.args[-1].partition("=")
         assert (flag, sep) == ("--api-key", "=")
         assert is_secret_marker(value)
+
+
+# ---------------------------------------------------------------------------
+# _is_uuid_like
+# ---------------------------------------------------------------------------
+
+
+class TestIsUuidLike:
+    """Tests for the malformed-UUID detection helper."""
+
+    def test_well_formed_uuid(self):
+        assert _is_uuid_like("a1b2c3d4-e5f6-7890-abcd-ef1234567890") is True
+
+    def test_uppercase_uuid(self):
+        assert _is_uuid_like("A1B2C3D4-E5F6-7890-ABCD-EF1234567890") is True
+
+    def test_no_dashes(self):
+        assert _is_uuid_like("a1b2c3d4e5f67890abcdef1234567890") is True
+
+    def test_extra_dashes(self):
+        assert _is_uuid_like("a1b2c3d4--e5f6--7890--abcd--ef1234567890") is True
+
+    def test_spaces_instead_of_dashes(self):
+        assert _is_uuid_like("a1b2c3d4 e5f6 7890 abcd ef1234567890") is True
+
+    def test_underscores_instead_of_dashes(self):
+        assert _is_uuid_like("a1b2c3d4_e5f6_7890_abcd_ef1234567890") is True
+
+    def test_dots_as_separators(self):
+        assert _is_uuid_like("a1b2c3d4.e5f6.7890.abcd.ef1234567890") is True
+
+    def test_mixed_noise_characters(self):
+        assert _is_uuid_like("a1b2-c3d4 e5f6_7890.abcd-ef12 3456 7890") is True
+
+    def test_one_extra_hex_digit(self):
+        # 33 hex digits — recoverable by trying 33 combinations
+        assert _is_uuid_like("a1b2c3d4-e5f6-7890-abcd-ef1234567890f") is True
+
+    def test_two_extra_hex_digits(self):
+        # 34 hex digits — C(34,2) = 561 attempts
+        assert _is_uuid_like("a1b2c3d4-e5f6-7890-abcd-ef1234567890ff") is True
+
+    def test_three_extra_hex_digits(self):
+        # 35 hex digits — C(35,3) = 6545 attempts
+        assert _is_uuid_like("a1b2c3d4-e5f6-7890-abcd-ef1234567890fff") is True
+
+    def test_four_extra_hex_digits_rejected(self):
+        # 36 hex digits — beyond the brute-force threshold
+        assert _is_uuid_like("a1b2c3d4-e5f6-7890-abcd-ef1234567890ffff") is False
+
+    def test_extra_hex_digits_with_noise(self):
+        # 33 hex digits + noise separators
+        assert _is_uuid_like("a1b2c3d4--e5f6-7890-abcd-ef12345678900") is True
+
+    def test_extra_hex_scattered_with_noise(self):
+        # 34 hex digits scattered among underscores
+        assert _is_uuid_like("a1b2c3d4_e5f6_7890_abcd_ef1234567890_ab") is True
+
+    def test_too_few_hex_digits(self):
+        assert _is_uuid_like("a1b2c3d4-e5f6-7890-abcd") is False
+
+    def test_empty_string(self):
+        assert _is_uuid_like("") is False
+
+    def test_plain_text(self):
+        assert _is_uuid_like("hello-world") is False
+
+    def test_short_hex(self):
+        assert _is_uuid_like("abcdef12") is False
+
+
+# ---------------------------------------------------------------------------
+# redact_push_keys (string-level)
+# ---------------------------------------------------------------------------
+
+
+class TestRedactPushKeys:
+    """Tests for redact_push_keys covering well-formed and malformed UUIDs."""
+
+    VALID_UUID = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+
+    def test_well_formed_push_key_env(self):
+        text = f"PUSH_KEY='{self.VALID_UUID}' bash script.sh"
+        result = redact_push_keys(text)
+        assert self.VALID_UUID not in result
+        assert "PUSH_KEY='**REDACTED**'" in result
+        assert "bash script.sh" in result
+
+    def test_well_formed_push_key_powershell(self):
+        text = f"-PushKey '{self.VALID_UUID}'"
+        result = redact_push_keys(text)
+        assert self.VALID_UUID not in result
+        assert "-PushKey '**REDACTED**'" in result
+
+    def test_malformed_extra_dashes(self):
+        malformed = "a1b2c3d4--e5f6--7890--abcd--ef1234567890"
+        text = f"PUSH_KEY='{malformed}'"
+        result = redact_push_keys(text)
+        assert malformed not in result
+        assert "**REDACTED**" in result
+
+    def test_malformed_spaces(self):
+        malformed = "a1b2c3d4 e5f6 7890 abcd ef1234567890"
+        text = f"PUSH_KEY='{malformed}'"
+        result = redact_push_keys(text)
+        assert malformed not in result
+        assert "**REDACTED**" in result
+
+    def test_malformed_underscores(self):
+        malformed = "a1b2c3d4_e5f6_7890_abcd_ef1234567890"
+        text = f"PUSH_KEY='{malformed}'"
+        result = redact_push_keys(text)
+        assert malformed not in result
+        assert "**REDACTED**" in result
+
+    def test_malformed_dots(self):
+        malformed = "a1b2c3d4.e5f6.7890.abcd.ef1234567890"
+        text = f"PUSH_KEY='{malformed}'"
+        result = redact_push_keys(text)
+        assert malformed not in result
+        assert "**REDACTED**" in result
+
+    def test_malformed_no_separators(self):
+        malformed = "a1b2c3d4e5f67890abcdef1234567890"
+        text = f"PUSH_KEY='{malformed}'"
+        result = redact_push_keys(text)
+        assert malformed not in result
+        assert "**REDACTED**" in result
+
+    def test_malformed_mixed_noise(self):
+        malformed = "a1b2-c3d4 e5f6_7890.abcd-ef12 3456 7890"
+        text = f"PUSH_KEY='{malformed}'"
+        result = redact_push_keys(text)
+        assert malformed not in result
+        assert "**REDACTED**" in result
+
+    def test_malformed_powershell(self):
+        malformed = "a1b2c3d4__e5f6__7890__abcd__ef1234567890"
+        text = f"-PushKey  '{malformed}'"
+        result = redact_push_keys(text)
+        assert malformed not in result
+        assert "**REDACTED**" in result
+
+    def test_one_extra_hex_digit(self):
+        malformed = "a1b2c3d4-e5f6-7890-abcd-ef1234567890a"
+        text = f"PUSH_KEY='{malformed}'"
+        result = redact_push_keys(text)
+        assert malformed not in result
+        assert "**REDACTED**" in result
+
+    def test_two_extra_hex_digits(self):
+        malformed = "a1b2c3d4-e5f6-7890-abcd-ef1234567890ab"
+        text = f"PUSH_KEY='{malformed}'"
+        result = redact_push_keys(text)
+        assert malformed not in result
+        assert "**REDACTED**" in result
+
+    def test_three_extra_hex_digits(self):
+        malformed = "a1b2c3d4-e5f6-7890-abcd-ef1234567890abc"
+        text = f"PUSH_KEY='{malformed}'"
+        result = redact_push_keys(text)
+        assert malformed not in result
+        assert "**REDACTED**" in result
+
+    def test_four_extra_hex_digits_preserved(self):
+        value = "a1b2c3d4-e5f6-7890-abcd-ef1234567890abcd"
+        text = f"PUSH_KEY='{value}'"
+        assert redact_push_keys(text) == text
+
+    def test_extra_hex_with_noise_powershell(self):
+        malformed = "a1b2c3d4__e5f6__7890__abcd__ef1234567890_ab"
+        text = f"-PushKey '{malformed}'"
+        result = redact_push_keys(text)
+        assert malformed not in result
+        assert "**REDACTED**" in result
+
+    def test_non_uuid_value_preserved(self):
+        text = "PUSH_KEY='not-a-uuid-at-all'"
+        assert redact_push_keys(text) == text
+
+    def test_short_value_preserved(self):
+        text = "PUSH_KEY='abcd1234'"
+        assert redact_push_keys(text) == text
+
+    def test_no_push_key_context_preserved(self):
+        text = f"OTHER_KEY='{self.VALID_UUID}'"
+        assert redact_push_keys(text) == text
+
+    def test_custom_replacement(self):
+        text = f"PUSH_KEY='{self.VALID_UUID}'"
+        result = redact_push_keys(text, "<PUSH_KEY>")
+        assert self.VALID_UUID not in result
+        assert "PUSH_KEY='<PUSH_KEY>'" in result
+
+    def test_multiple_push_keys_in_same_string(self):
+        uuid2 = "11111111-2222-3333-4444-555555555555"
+        text = f"PUSH_KEY='{self.VALID_UUID}' then PUSH_KEY='{uuid2}'"
+        result = redact_push_keys(text)
+        assert self.VALID_UUID not in result
+        assert uuid2 not in result
+        assert result.count("**REDACTED**") == 2
+
+    def test_case_insensitive_push_key(self):
+        text = f"push_key='{self.VALID_UUID}'"
+        result = redact_push_keys(text)
+        assert self.VALID_UUID not in result
+        assert "**REDACTED**" in result
+
+    def test_surrounding_text_preserved(self):
+        text = f"REMOTE_URL='https://api.snyk.io' PUSH_KEY='{self.VALID_UUID}' bash script.sh --client claude-code"
+        result = redact_push_keys(text)
+        assert "REMOTE_URL='https://api.snyk.io'" in result
+        assert "bash script.sh --client claude-code" in result
+        assert self.VALID_UUID not in result
+
+
+# ---------------------------------------------------------------------------
+# redact_push_keys_in_data (deep-traversal)
+# ---------------------------------------------------------------------------
+
+
+class TestRedactPushKeysInData:
+    """Tests for redact_push_keys_in_data with malformed UUIDs in nested structures."""
+
+    VALID_UUID = "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+
+    def test_flat_dict(self):
+        data = {"cmd": f"PUSH_KEY='{self.VALID_UUID}' bash script.sh"}
+        redact_push_keys_in_data(data)
+        assert self.VALID_UUID not in data["cmd"]
+        assert "**REDACTED**" in data["cmd"]
+
+    def test_nested_dict(self):
+        data = {"outer": {"inner": f"PUSH_KEY='{self.VALID_UUID}'"}}
+        redact_push_keys_in_data(data)
+        assert self.VALID_UUID not in data["outer"]["inner"]
+
+    def test_list_values(self):
+        data = {"items": [f"PUSH_KEY='{self.VALID_UUID}'", "safe"]}
+        redact_push_keys_in_data(data)
+        assert self.VALID_UUID not in data["items"][0]
+        assert data["items"][1] == "safe"
+
+    def test_nested_list_of_dicts(self):
+        malformed = "a1b2c3d4--e5f6--7890--abcd--ef1234567890"
+        data = {"hooks": [{"command": f"PUSH_KEY='{malformed}' bash script.sh"}]}
+        redact_push_keys_in_data(data)
+        assert malformed not in data["hooks"][0]["command"]
+        assert "bash script.sh" in data["hooks"][0]["command"]
+
+    def test_mutates_in_place_and_returns(self):
+        data = {"cmd": f"PUSH_KEY='{self.VALID_UUID}'"}
+        result = redact_push_keys_in_data(data)
+        assert result is data
+
+    def test_non_string_values_ignored(self):
+        data = {"count": 42, "flag": True, "empty": None}
+        redact_push_keys_in_data(data)
+        assert data == {"count": 42, "flag": True, "empty": None}
+
+    def test_realistic_hooks_diff_with_malformed_uuid(self):
+        malformed = "a1b2c3d4.e5f6.7890.abcd.ef1234567890"
+        command = f"PUSH_KEY='{malformed}' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' bash /path/to/script.sh"
+        data = {
+            "hook_event_name": "hooksConfigured",
+            "session_id": "hooks-setup",
+            "modified": {
+                "PreToolUse": {
+                    "expected_value": [{"hooks": [{"type": "command", "command": command}]}],
+                },
+            },
+        }
+        redact_push_keys_in_data(data)
+        assert malformed not in str(data)
+        assert (
+            "REMOTE_HOOKS_BASE_URL='https://api.snyk.io'"
+            in data["modified"]["PreToolUse"]["expected_value"][0]["hooks"][0]["command"]
+        )
+        assert data["session_id"] == "hooks-setup"

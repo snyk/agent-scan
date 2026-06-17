@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import contextlib
+import copy
 import json
 import os
 import re
@@ -21,6 +23,7 @@ from agent_scan.pushkeys import (
     mint_push_key,
     revoke_push_key,
 )
+from agent_scan.redact import redact_push_keys, redact_push_keys_in_data
 
 IS_WINDOWS = sys.platform == "win32"
 
@@ -29,7 +32,10 @@ IS_WINDOWS = sys.platform == "win32"
 # ---------------------------------------------------------------------------
 
 DEFAULT_REMOTE_URL = "https://api.snyk.io"
-DETECTION_MARKER = "snyk-agent-guard"
+_DETECTION_RE = re.compile(
+    r"PUSH_KEY=.*snyk-agent-guard"
+    r"|snyk-agent-guard.*-PushKey\b"
+)
 _PERMISSION_DENIED = "__permission_denied__"
 
 CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
@@ -228,7 +234,17 @@ def _run_install(args) -> None:
 
     try:
         _install_hooks(
-            args, client, hook_client, push_key, url, config_path, scope, label, minted, tenant_id, snyk_token
+            client,
+            hook_client,
+            push_key,
+            url,
+            config_path,
+            scope,
+            label,
+            minted,
+            tenant_id,
+            snyk_token,
+            test=getattr(args, "test", False),
         )
     except (SystemExit, KeyboardInterrupt):
         raise
@@ -238,8 +254,61 @@ def _run_install(args) -> None:
         raise
 
 
+def _prepare_client_config(client: str, command: str, config_path: Path) -> tuple[dict | None, str | None, dict, int]:
+    """Dispatch to the client-specific config preparation function.
+
+    Returns (prepared_config, prepared_content, hooks_diff, preserved).
+    """
+    prepared_content: str | None = None
+    prepared_config: dict | None = None
+    preserved = 0
+    if client == "claude":
+        prepared_config, hooks_diff, preserved = _prepare_claude_config(command, config_path)
+    elif client == "cursor":
+        prepared_config, hooks_diff, preserved = _prepare_cursor_config(command, config_path)
+    elif client == "codex":
+        if _is_codex_requirements_toml(config_path):
+            prepared_content, hooks_diff = _prepare_codex_managed_config(command, config_path)
+        else:
+            prepared_config, hooks_diff, preserved = _prepare_codex_config(command, config_path)
+    else:
+        raise ValueError(f"Unknown client: {client}")
+    return prepared_config, prepared_content, hooks_diff, preserved
+
+
+def _write_client_config(
+    client: str,
+    config_path: Path,
+    prepared_config: dict | None,
+    prepared_content: str | None,
+    preserved: int,
+) -> bool:
+    """Dispatch to the client-specific config writing function."""
+    if client == "claude":
+        assert prepared_config is not None
+        return _write_claude_config(prepared_config, config_path, preserved)
+    if client == "cursor":
+        assert prepared_config is not None
+        return _write_cursor_config(prepared_config, config_path, preserved)
+    if client == "codex":
+        if _is_codex_requirements_toml(config_path):
+            assert prepared_content is not None
+            return _write_codex_managed_config(prepared_content, config_path)
+        assert prepared_config is not None
+        return _write_codex_config(prepared_config, config_path, preserved)
+    raise ValueError(f"Unknown client: {client}")
+
+
+def _detect_existing_install(client: str, config_path: Path) -> dict | None:
+    """Return the existing install info for *client*, or None if not installed."""
+    if client == "claude":
+        return _detect_claude_install(config_path)
+    if client == "cursor":
+        return _detect_cursor_install(config_path)
+    return _detect_codex_install(config_path)
+
+
 def _install_hooks(
-    args,
     client: str,
     hook_client: str,
     push_key: str,
@@ -250,38 +319,41 @@ def _install_hooks(
     minted: bool,
     tenant_id: str,
     snyk_token: str,
+    *,
+    test: bool = False,
 ) -> None:
     """Post-mint install steps.  Extracted so _run_install can revoke on failure."""
-    # Copy hook script first so we can use it for the test event
+    existing_info = _detect_existing_install(client, config_path)
+    old_push_key = existing_info.get("auth_value", "") if existing_info else ""
+    push_key_changed = bool(old_push_key) and old_push_key != push_key
+
     dest_path, script_existed, script_updated = _copy_hook_script(client, config_path)
+    command = _build_hook_command(push_key, url, dest_path, hook_client, tenant_id=tenant_id)
+    prepared_config, prepared_content, hooks_diff, preserved = _prepare_client_config(client, command, config_path)
 
-    first_install = not config_path.exists() or not script_existed
-    run_test = first_install or minted or getattr(args, "test", False)
+    first_install = not script_existed
+    config_changed = bool(hooks_diff["added"] or hooks_diff["modified"] or hooks_diff["removed"])
 
-    # Verify connectivity by invoking the actual hook script
-    if run_test and not _send_test_event(push_key, url, hook_client, dest_path):
-        # Clean up copied script only if it didn't exist before
+    if not test and not _send_test_event(
+        push_key,
+        url,
+        hook_client,
+        dest_path,
+        first_install=first_install,
+        config_changed=config_changed,
+        hooks_diff=hooks_diff,
+        push_key_changed=push_key_changed,
+    ):
         if not script_existed:
             dest_path.unlink(missing_ok=True)
         if minted:
             _revoke_after_failure(url, tenant_id, snyk_token, push_key)
-        rich.print("[bold red]Aborting install — test event failed.[/bold red]")
+        rich.print("[bold red]Aborting install \u2014 test event failed.[/bold red]")
         raise SystemExit(1)
 
-    # Build command string and edit client config
-    command = _build_hook_command(push_key, url, dest_path, hook_client, tenant_id=tenant_id)
+    config_written = _write_client_config(client, config_path, prepared_config, prepared_content, preserved)
 
-    if client == "claude":
-        config_changed = _install_claude(command, config_path)
-    elif client == "cursor":
-        config_changed = _install_cursor(command, config_path)
-    elif client == "codex":
-        if _is_codex_requirements_toml(config_path):
-            config_changed = _install_codex_managed(command, config_path, dest_path)
-        else:
-            config_changed = _install_codex(command, config_path)
-
-    if script_updated or config_changed or minted:
+    if script_updated or config_written or minted:
         rich.print(f"[green]\u2713[/green]  {scope.title()} hooks installed for [bold]{label}[/bold]")
     else:
         rich.print(f"[green]\u2713[/green]  {label} {scope} hook integration up to date")
@@ -292,13 +364,17 @@ def _install_hooks(
     rich.print()
 
 
-def _install_claude(command: str, path: Path) -> bool:
-    """Install Claude hooks. Returns True if the file was changed."""
-    settings = _read_json_or_empty(path)
-    hooks = settings.get("hooks", {})
+def _prepare_claude_config(command: str, path: Path) -> tuple[dict, dict, int]:
+    """Build new Claude settings with hooks and compute diff, without writing.
 
-    preserved = _count_non_agent_scan_claude(hooks)
-    hooks = _filter_claude_hooks(hooks)
+    Returns (new_settings, hooks_diff, preserved_count).
+    """
+    settings = _read_json_or_empty(path)
+    old_hooks = settings.get("hooks", {})
+
+    filtered = _filter_claude_hooks(old_hooks)
+    preserved = sum(len(filtered.get(event, [])) for event in CLAUDE_HOOK_EVENTS)
+    hooks = {}
 
     for event in CLAUDE_HOOK_EVENTS:
         entry = {"type": "command", "command": command}
@@ -307,12 +383,21 @@ def _install_claude(command: str, path: Path) -> bool:
         group: dict = {"hooks": [entry]}
         if event in CLAUDE_EVENTS_WITH_MATCHER:
             group["matcher"] = "*"
-        existing = hooks.get(event, [])
+        existing = list(filtered.get(event, []))
         existing.append(group)
         hooks[event] = existing
 
-    settings["hooks"] = hooks
+    for event, groups in filtered.items():
+        if event not in hooks:
+            hooks[event] = groups
 
+    settings["hooks"] = hooks
+    diff = _compute_hooks_diff(old_hooks, hooks)
+    return settings, diff, preserved
+
+
+def _write_claude_config(settings: dict, path: Path, preserved: int) -> bool:
+    """Write Claude settings to disk. Returns True if file changed."""
     if not _write_json_if_changed(path, settings):
         return False
     note = _preserved_note(preserved)
@@ -320,23 +405,36 @@ def _install_claude(command: str, path: Path) -> bool:
     return True
 
 
-def _install_cursor(command: str, path: Path) -> bool:
-    """Install Cursor hooks. Returns True if the file was changed."""
+def _prepare_cursor_config(command: str, path: Path) -> tuple[dict, dict, int]:
+    """Build new Cursor config with hooks and compute diff, without writing.
+
+    Returns (new_data, hooks_diff, preserved_count).
+    """
     data = _read_json_or_empty(path)
     if "version" not in data:
         data["version"] = 1
-    hooks = data.get("hooks", {})
+    old_hooks = data.get("hooks", {})
 
-    preserved = _count_non_agent_scan_cursor(hooks)
-    hooks = _filter_cursor_hooks(hooks)
+    filtered = _filter_cursor_hooks(old_hooks)
+    preserved = sum(len(filtered.get(event, [])) for event in CURSOR_HOOK_EVENTS)
+    hooks = {}
 
     for event in CURSOR_HOOK_EVENTS:
-        existing = hooks.get(event, [])
+        existing = list(filtered.get(event, []))
         existing.append({"command": command})
         hooks[event] = existing
 
-    data["hooks"] = hooks
+    for event, entries in filtered.items():
+        if event not in hooks:
+            hooks[event] = entries
 
+    data["hooks"] = hooks
+    diff = _compute_hooks_diff(old_hooks, hooks)
+    return data, diff, preserved
+
+
+def _write_cursor_config(data: dict, path: Path, preserved: int) -> bool:
+    """Write Cursor config to disk. Returns True if file changed."""
     if not _write_json_if_changed(path, data):
         return False
     note = _preserved_note(preserved)
@@ -344,27 +442,36 @@ def _install_cursor(command: str, path: Path) -> bool:
     return True
 
 
-def _install_codex(command: str, path: Path) -> bool:
-    """Install Codex hooks. Returns True if the file was changed.
+def _prepare_codex_config(command: str, path: Path) -> tuple[dict, dict, int]:
+    """Build new Codex config with hooks and compute diff, without writing.
 
-    Codex uses the same hooks.json shape as Claude Code: each event maps to a
-    list of matcher groups, each containing a list of command hooks.
+    Returns (new_data, hooks_diff, preserved_count).
+    Codex uses the same hooks.json shape as Claude Code.
     """
     data = _read_json_or_empty(path)
-    hooks = data.get("hooks", {})
+    old_hooks = data.get("hooks", {})
 
-    preserved = _count_non_agent_scan_claude(hooks)
-    hooks = _filter_claude_hooks(hooks)
+    filtered = _filter_claude_hooks(old_hooks)
+    preserved = sum(len(filtered.get(event, [])) for event in CODEX_HOOK_EVENTS)
+    hooks = {}
 
-    # Codex matches every event when "matcher" is omitted, so we don't set it.
     for event in CODEX_HOOK_EVENTS:
         entry = {"type": "command", "command": command}
-        existing = hooks.get(event, [])
+        existing = list(filtered.get(event, []))
         existing.append({"hooks": [entry]})
         hooks[event] = existing
 
-    data["hooks"] = hooks
+    for event, groups in filtered.items():
+        if event not in hooks:
+            hooks[event] = groups
 
+    data["hooks"] = hooks
+    diff = _compute_hooks_diff(old_hooks, hooks)
+    return data, diff, preserved
+
+
+def _write_codex_config(data: dict, path: Path, preserved: int) -> bool:
+    """Write Codex config to disk. Returns True if file changed."""
     if not _write_json_if_changed(path, data):
         return False
     note = _preserved_note(preserved)
@@ -415,15 +522,45 @@ def _render_codex_requirements_toml(command: str, config_path: Path) -> str:
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
-def _install_codex_managed(command: str, path: Path, script_path: Path) -> bool:
-    """Write Codex managed hooks as requirements.toml. Returns True if changed."""
+def _prepare_codex_managed_config(command: str, path: Path) -> tuple[str, dict]:
+    """Build new Codex managed TOML content and compute diff, without writing.
+
+    Returns (new_content, hooks_diff).
+    """
     new_content = _render_codex_requirements_toml(command, path)
-    if path.exists() and path.read_text() == new_content:
+
+    old_events: list[str] = []
+    old_cmd: str | None = None
+    if path.exists():
+        old_text = path.read_text()
+        with contextlib.suppress(UnicodeDecodeError, ValueError):
+            old_events, old_cmd = _parse_codex_requirements_toml(old_text)
+
+    old_event_set = set(old_events)
+    new_event_set = set(CODEX_HOOK_EVENTS)
+
+    removed = {e: [{"type": "command", "command": command}] for e in sorted(new_event_set - old_event_set)}
+    added = {e: [{"type": "command", "command": old_cmd or ""}] for e in sorted(old_event_set - new_event_set)}
+    modified = {}
+    if old_cmd is not None and old_cmd != command:
+        expected = [{"type": "command", "command": command}]
+        actual = [{"type": "command", "command": old_cmd}]
+        modified = {
+            e: {"expected_value": expected, "actual_value": actual} for e in sorted(old_event_set & new_event_set)
+        }
+
+    diff = {"added": added, "modified": modified, "removed": removed}
+    return new_content, diff
+
+
+def _write_codex_managed_config(content: str, path: Path) -> bool:
+    """Write Codex managed TOML to disk. Returns True if file changed."""
+    if path.exists() and path.read_text() == content:
         return False
     if path.exists():
         _backup_file(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(new_content)
+    path.write_text(content)
     rich.print(f"[green]✓[/green]  Written [dim]{path}[/dim]")
     return True
 
@@ -447,7 +584,7 @@ def _parse_codex_requirements_toml(text: str) -> tuple[list[str], str | None]:
             continue
         m = command_re.match(line)
         if m and current_event:
-            cmd = m.group(1).encode("utf-8").decode("unicode_escape")
+            cmd = m.group(1).replace("\\\\", "\0").replace('\\"', '"').replace("\0", "\\")
             if _is_agent_scan_command(cmd) and current_event not in events:
                 events.append(current_event)
                 if found_cmd is None:
@@ -765,14 +902,35 @@ def _detect_cursor_install(path: Path = CURSOR_HOOKS_PATH) -> dict | None:
 # ---------------------------------------------------------------------------
 
 
-def _send_test_event(push_key: str, url: str, hook_client: str, script_path: Path) -> bool:
+def _send_test_event(
+    push_key: str,
+    url: str,
+    hook_client: str,
+    script_path: Path,
+    *,
+    first_install: bool = False,
+    config_changed: bool = False,
+    hooks_diff: dict | None = None,
+    push_key_changed: bool = False,
+) -> bool:
     """Send a test hooksConfigured event by invoking the hook script. Returns True on success."""
     import subprocess
 
+    payload_dict: dict = {"hook_event_name": "hooksConfigured"}
     if hook_client == "claude-code" or hook_client == "codex":
-        payload = '{"hook_event_name":"hooksConfigured","session_id":"hooks-setup"}'
+        payload_dict["session_id"] = "hooks-setup"
     else:
-        payload = '{"hook_event_name":"hooksConfigured","conversation_id":"hooks-setup"}'
+        payload_dict["conversation_id"] = "hooks-setup"
+    payload_dict["first_install"] = first_install
+    payload_dict["push_key_changed"] = push_key_changed
+    if not first_install:
+        payload_dict["config_changed"] = config_changed
+        if hooks_diff:
+            payload_dict["added"] = hooks_diff.get("added", {})
+            payload_dict["modified"] = hooks_diff.get("modified", {})
+            payload_dict["removed"] = hooks_diff.get("removed", {})
+    redact_push_keys_in_data(payload_dict)
+    payload = json.dumps(payload_dict)
 
     if IS_WINDOWS:
         cmd = [
@@ -823,8 +981,69 @@ def _send_test_event(push_key: str, url: str, hook_client: str, script_path: Pat
 # ---------------------------------------------------------------------------
 
 
+def _normalize_push_keys(value: object) -> object:
+    """Replace push-key UUIDs with a placeholder for comparison purposes."""
+    if isinstance(value, str):
+        return redact_push_keys(value, "<PUSH_KEY>")
+    if isinstance(value, dict):
+        return {k: _normalize_push_keys(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_normalize_push_keys(item) for item in value]
+    return value
+
+
+def _extract_guard_hooks(entries: list) -> list:
+    """Extract only guard (agent-scan) hooks from a list of hook entries/groups."""
+    result = []
+    for item in entries:
+        if isinstance(item, dict) and "hooks" in item:
+            if any(_is_agent_scan_command(h.get("command", "")) for h in item.get("hooks", [])):
+                result.append(item)
+        elif isinstance(item, dict) and _is_agent_scan_command(item.get("command", "")):
+            result.append(item)
+    return result
+
+
+def _compute_hooks_diff(old_hooks: dict, new_hooks: dict) -> dict:
+    """Compare existing hooks (old) against expected hooks (new).
+
+    Only guard (agent-scan) hooks are compared; customer hooks are ignored.
+
+    The diff reflects what someone changed in the existing config relative to
+    what we expect:
+    - "removed": expected keys missing from the existing config
+    - "added": unexpected keys present in the existing config
+    - "modified": keys present in both but with different values
+      (each entry has "expected_value" and "actual_value")
+
+    Differences that consist solely of a push-key change are ignored.
+    """
+    added = {}
+    modified = {}
+    removed = {}
+    for key in set(old_hooks) | set(new_hooks):
+        old_guard = _extract_guard_hooks(old_hooks.get(key, []) if isinstance(old_hooks.get(key), list) else [])
+        new_guard = _extract_guard_hooks(new_hooks.get(key, []) if isinstance(new_hooks.get(key), list) else [])
+
+        if not old_guard and not new_guard:
+            continue
+        if not old_guard and new_guard:
+            removed[key] = copy.deepcopy(new_guard)
+        elif old_guard and not new_guard:
+            added[key] = copy.deepcopy(old_guard)
+        else:
+            old_norm = _normalize_push_keys(copy.deepcopy(old_guard))
+            new_norm = _normalize_push_keys(copy.deepcopy(new_guard))
+            if old_norm != new_norm:
+                modified[key] = {
+                    "expected_value": copy.deepcopy(new_guard),
+                    "actual_value": copy.deepcopy(old_guard),
+                }
+    return {"added": added, "modified": modified, "removed": removed}
+
+
 def _is_agent_scan_command(cmd: str) -> bool:
-    return DETECTION_MARKER in cmd
+    return bool(_DETECTION_RE.search(cmd))
 
 
 def _filter_claude_hooks(hooks: dict) -> dict:
@@ -845,24 +1064,6 @@ def _filter_cursor_hooks(hooks: dict) -> dict:
         if filtered:
             result[event] = filtered
     return result
-
-
-def _count_non_agent_scan_claude(hooks: dict) -> int:
-    n = 0
-    for groups in hooks.values():
-        for g in groups:
-            if not any(_is_agent_scan_command(h.get("command", "")) for h in g.get("hooks", [])):
-                n += 1
-    return n
-
-
-def _count_non_agent_scan_cursor(hooks: dict) -> int:
-    n = 0
-    for entries in hooks.values():
-        for e in entries:
-            if not _is_agent_scan_command(e.get("command", "")):
-                n += 1
-    return n
 
 
 # ---------------------------------------------------------------------------
