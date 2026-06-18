@@ -33,6 +33,13 @@ from tests.unit._secret_fixtures import synthetic_secret
 # known-prefix token (ghp_/sk-proj-/etc. are intentionally avoided).
 FAKE_API_KEY = synthetic_secret()
 
+# Artifactory-format fake token (matches ``AKC[A-Za-z0-9]{10,}``). Built from a
+# synthetic seed so no high-entropy literal is checked in. ArtifactoryDetector
+# anchors on the char *before* ``AKC`` (must be one of ``\s = : " ^``), so a bare
+# token is flagged but a backtick-wrapped one is not -- the edge-strip fallback
+# is what closes that gap.
+FAKE_ARTIFACTORY_TOKEN = "AKC" + synthetic_secret(b"artifactory fixture token")
+
 # Match the **REDACTED_SECRET_<PLUGIN>** marker shape without hardcoding which
 # detect-secrets plugin won the race. The plugin set may change across
 # detect-secrets versions; the marker shape will not.
@@ -637,6 +644,51 @@ class TestRedactText:
         # ...and detection still works under the single-context path.
         assert FAKE_API_KEY not in result
         assert "**REDACTED_SECRET_" in result
+
+    @pytest.mark.parametrize(
+        "wrapped",
+        [
+            'key: "the deploy value is {tok}"',  # token last word in a longer quoted string
+            "use `{tok}` now",  # markdown code span
+            "see ({tok}) here",  # parenthesised
+            "see [{tok}] here",  # bracketed
+            "token {tok}. done",  # trailing sentence period
+            "token {tok}, done",  # trailing comma
+        ],
+    )
+    def test_redact_text_redacts_wrapped_high_entropy_token(self, wrapped):
+        """A high-entropy token wrapped in markup/punctuation is still redacted.
+
+        Pass 2 splits on whitespace, so wrapping characters ride along with the
+        token: a trailing ``"`` defeats the entropy plugin's quoted-literal
+        regex, and a long low-entropy quoted string hides the secret from the
+        raw-line scan. The edge-strip fallback recovers the bare core and
+        redacts it. (Fully-quoted single-token forms like ``"<tok>"`` are
+        already covered by the Pass-1 raw-line scan and are not retested here.)
+        """
+        text = wrapped.format(tok=FAKE_API_KEY)
+        result = redact_text(text)
+        assert FAKE_API_KEY not in result
+        assert "**REDACTED_SECRET_" in result
+
+    def test_redact_text_redacts_backtick_wrapped_format_token(self):
+        r"""A boundary-anchored format token (Artifactory) in a markdown code span
+        is redacted via the edge-strip fallback.
+
+        ``ArtifactoryDetector`` requires the char before ``AKC`` to be one of
+        ``\s = : " ^``; a backtick is not, so the raw backtick-wrapped token
+        never matched. Stripping the backticks recovers a detectable core.
+        """
+        text = f"use the token `{FAKE_ARTIFACTORY_TOKEN}` to publish"
+        result = redact_text(text)
+        assert FAKE_ARTIFACTORY_TOKEN not in result
+        assert "**REDACTED_SECRET_ARTIFACTORYDETECTOR**" in result
+
+    def test_redact_text_preserves_wrapped_non_secret(self):
+        """Edge-stripping must not over-redact: non-secret tokens wrapped in
+        punctuation are returned unchanged."""
+        text = "see (example) and `config` here, then stop."
+        assert redact_text(text) == text
 
 
 def _skill_signature(*, instructions="", prompts=None, resources=None, tools=None) -> ServerSignature:

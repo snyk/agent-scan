@@ -432,6 +432,27 @@ def redact_args(args: list[str]) -> list[str]:
     return out
 
 
+# Markup/punctuation that commonly *wraps* a secret in skill docs/code but is
+# never part of the secret itself: matched-pair wrappers (quotes, backticks,
+# brackets, parens, angle brackets) plus trailing sentence punctuation. Used to
+# recover a detectable "core" from a whitespace token whose glued wrappers defeat
+# detection (a trailing ``"`` breaks the entropy plugin's quoted-literal regex; a
+# leading backtick fails a format detector's boundary class). Deliberately
+# excludes ``= + / - _`` (legitimate secret characters); ``.`` is only removed as
+# an edge character (``str.strip`` touches the ends only), never internally.
+_TOKEN_EDGE_CHARS = "`'\"()[]{}<>.,;:!?"
+
+
+def _strip_token_edges(token: str) -> str | None:
+    """Return ``token`` stripped of wrapping markup/punctuation.
+
+    Returns ``None`` when stripping changes nothing, so the caller can skip a
+    redundant re-scan of the identical value.
+    """
+    core = token.strip(_TOKEN_EDGE_CHARS)
+    return core if core and core != token else None
+
+
 def _redact_secrets_in_line(line: str, plugins: list) -> str:
     """Redact secret-bearing substrings within a single line of free text.
 
@@ -447,7 +468,12 @@ def _redact_secrets_in_line(line: str, plugins: list) -> str:
        detectors on the bare token and entropy detectors on a quote-wrapped
        copy. A whole secret-shaped token (AWS key, GitHub token, bare
        high-entropy string) is therefore replaced wholesale -- no partial
-       prefix can leak.
+       prefix can leak. The raw token is tried first; when it is not flagged,
+       an edge-stripped *core* (see :func:`_strip_token_edges`) is tried as a
+       fallback, so a secret wrapped in markdown/punctuation (a backtick code
+       span, or a trailing ``"`` from a longer quoted string) is still
+       detected. Only the matched candidate substring is replaced, so the
+       surrounding markup stays intact.
 
     ``KeywordDetector`` is intentionally NOT used here. Unlike :func:`redact_args`
     (where a flag's value is almost always a credential), skill content is
@@ -474,13 +500,21 @@ def _redact_secrets_in_line(line: str, plugins: list) -> str:
 
     # Pass 2: whole-token detection for format/entropy-shaped tokens. Reuse the
     # caller's already-built ``plugins`` (under its single transient_settings
-    # context) so we don't re-enter that context per token.
+    # context) so we don't re-enter that context per token. The raw token is
+    # tried first (preserving prior behaviour); only when it is not flagged is
+    # the edge-stripped core consulted as a fallback.
     for token in line.split():
-        if token in replacements:
-            continue
-        plugin_name = _detect_secret(token, plugins)
-        if plugin_name is not None:
-            replacements[token] = _redaction_marker(plugin_name)
+        candidates = [token]
+        core = _strip_token_edges(token)
+        if core is not None:
+            candidates.append(core)
+        for candidate in candidates:
+            if candidate in replacements:
+                break
+            plugin_name = _detect_secret(candidate, plugins)
+            if plugin_name is not None:
+                replacements[candidate] = _redaction_marker(plugin_name)
+                break
 
     redacted = line
     for value in sorted(replacements, key=len, reverse=True):
