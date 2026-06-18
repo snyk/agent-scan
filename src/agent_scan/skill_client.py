@@ -96,9 +96,9 @@ def _inspect_skill_file(expanded_path: str) -> ServerSignature:
 def inspect_skill(config: SkillServer) -> ServerSignature:
     """Read a skill (single file or ``<name>/SKILL.md`` directory) into a signature.
 
-    Secrets and absolute paths in the skill's contents are redacted in place
-    here -- the single point where skill files are read -- so the signature is
-    already sanitized by the time it reaches the analysis / upload calls.
+    Secrets in the skill's contents are redacted in place here -- the single
+    point where skill files are read -- so the signature is already sanitized by
+    the time it reaches the analysis / upload calls.
     """
     return redact_signature(_inspect_skill(config))
 

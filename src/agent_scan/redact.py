@@ -599,14 +599,14 @@ def redact_signature(signature: ServerSignature) -> ServerSignature:
     synthetic binary-file marker (see :func:`_is_synthetic_binary_description`),
     which is left intact so the file's hash digest survives.
 
-    This is the single redaction point for skill content: it runs once when the
-    skill is read (in ``skill_client.inspect_skill``), so the later
-    ``redact_scan_result`` passes on the upload / analysis paths find the
-    signature already sanitized.
+    This is the single redaction point for skill content: nothing downstream
+    redacts the signature (``redact_scan_result`` / ``redact_server`` only touch
+    the server config and errors, never ``.signature``), so it must be sanitized
+    here. It runs once when the skill is read (in ``skill_client.inspect_skill``).
     """
     if signature.metadata is not None and signature.metadata.instructions:
         signature.metadata.instructions = redact_text(signature.metadata.instructions)
-    for entity in (*signature.prompts, *signature.resources, *signature.resource_templates, *signature.tools):
+    for entity in signature.entities:
         if entity.description and not _is_synthetic_binary_description(entity.description):
             entity.description = redact_text(entity.description)
     return signature
