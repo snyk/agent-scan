@@ -443,11 +443,14 @@ def redact_args(args: list[str]) -> list[str]:
 _TOKEN_EDGE_CHARS = "`'\"()[]{}<>.,;:!?"
 
 
-def _strip_token_edges(token: str) -> str | None:
-    """Return ``token`` stripped of wrapping markup/punctuation.
+def _unwrapped_token_core(token: str) -> str | None:
+    """Return ``token``'s inner core with wrapping markup/punctuation stripped
+    from its edges -- a fresh candidate to re-scan for secrets.
 
-    Returns ``None`` when stripping changes nothing, so the caller can skip a
-    redundant re-scan of the identical value.
+    Returns ``None`` when stripping yields nothing new: either no wrapper was
+    present (the core equals ``token``) or the token was all edge characters
+    (the core is empty). In both cases the caller has already scanned that exact
+    value, so it can skip a redundant re-scan.
     """
     core = token.strip(_TOKEN_EDGE_CHARS)
     return core if core and core != token else None
@@ -482,7 +485,7 @@ def _redact_secrets_in_line(line: str, plugins: list) -> str:
        copy. A whole secret-shaped token (AWS key, GitHub token, bare
        high-entropy string) is therefore replaced wholesale -- no partial
        prefix can leak. The raw token is tried first; when it is not flagged,
-       an edge-stripped *core* (see :func:`_strip_token_edges`) is tried as a
+       an edge-stripped *core* (see :func:`_unwrapped_token_core`) is tried as a
        fallback, so a secret wrapped in markdown/punctuation (a backtick code
        span, or a trailing ``"`` from a longer quoted string) is still
        detected. Only the matched candidate substring is replaced, so the
@@ -512,7 +515,7 @@ def _redact_secrets_in_line(line: str, plugins: list) -> str:
     # tried first (preserving prior behaviour); only when it is not flagged is
     # the edge-stripped core consulted as a fallback.
     for token in line.split():
-        core = _strip_token_edges(token)
+        core = _unwrapped_token_core(token)
         candidates = [token] if core is None else [token, core]
         handled = False
         for candidate in candidates:
