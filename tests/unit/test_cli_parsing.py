@@ -566,6 +566,76 @@ class TestCIMode:
             await print_scan_inspect(mode="scan", args=args)
 
 
+class TestCIExitShowFindings:
+    """--no-findings keeps CI gating (exit 1) but hides finding codes from the CI summary line."""
+
+    def _result_with_finding(self) -> ScanPathResult:
+        return ScanPathResult(
+            path="/test/path",
+            issues=[Issue(code="E001", message="finding", reference=None)],
+        )
+
+    def test_ci_summary_shows_finding_codes_by_default(self, capsys):
+        from agent_scan.cli import _handle_ci_exit
+
+        with pytest.raises(SystemExit) as exc_info:
+            _handle_ci_exit([self._result_with_finding()], json_output=False, ignore_codes=set())
+        assert exc_info.value.code == 1
+        assert "E001" in capsys.readouterr().err
+
+    def test_ci_summary_hides_finding_codes_when_no_findings(self, capsys):
+        from agent_scan.cli import _handle_ci_exit
+
+        with pytest.raises(SystemExit) as exc_info:
+            _handle_ci_exit([self._result_with_finding()], json_output=False, ignore_codes=set(), show_findings=False)
+        # gating is preserved: still exits 1
+        assert exc_info.value.code == 1
+        # the finding code is not leaked to the CI summary
+        assert "E001" not in capsys.readouterr().err
+
+    def test_ci_keeps_error_codes_when_no_findings(self, capsys):
+        """Scan errors are not findings; their failure codes stay in the CI summary even with --no-findings."""
+        from agent_scan.cli import _handle_ci_exit
+
+        result = ScanPathResult(
+            path="/test/path",
+            issues=[Issue(code="E001", message="finding", reference=None)],
+            error=ScanError(message="parse failed", is_failure=True, category="parse_error"),
+        )
+        with pytest.raises(SystemExit) as exc_info:
+            _handle_ci_exit([result], json_output=False, ignore_codes=set(), show_findings=False)
+        assert exc_info.value.code == 1
+        err = capsys.readouterr().err
+        assert "E001" not in err  # finding code hidden
+        assert "X005" in err  # parse_error failure code preserved
+
+    @pytest.mark.asyncio
+    async def test_no_findings_threads_through_to_ci_summary(self, capsys):
+        """--no-findings + --ci (rich) exits 1 without leaking finding codes to stdout or stderr."""
+        from argparse import Namespace
+
+        from agent_scan.cli import print_scan_inspect
+
+        mock_result = ScanPathResult(
+            path="/test/path",
+            issues=[Issue(code="E001", message="finding", reference=None)],
+        )
+        with patch("agent_scan.cli.run_scan", new_callable=AsyncMock, return_value=[mock_result]):
+            args = Namespace(
+                json=False,
+                findings=False,
+                print_errors=False,
+                print_full_descriptions=False,
+                verbose=False,
+                ci=True,
+            )
+            with pytest.raises(SystemExit) as exc_info:
+                await print_scan_inspect(mode="scan", args=args)
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert "E001" not in (captured.out + captured.err)
+
+
 class TestJSONOutput:
     """Test suite for JSON output functionality."""
 

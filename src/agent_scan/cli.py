@@ -855,7 +855,12 @@ def _apply_ignore_codes(result: list[ScanPathResult], ignore_codes: set[str]) ->
         scan_result.issues = [i for i in scan_result.issues if i.code not in ignore_codes]
 
 
-def _handle_ci_exit(result: list[ScanPathResult], json_output: bool, ignore_codes: set[str]) -> None:
+def _handle_ci_exit(
+    result: list[ScanPathResult],
+    json_output: bool,
+    ignore_codes: set[str],
+    show_findings: bool = True,
+) -> None:
     """In CI mode, exit with code 1 if any issues or unignored failures remain."""
     has_issues = any(scan_result.issues for scan_result in result)
     failure_codes = _collect_failure_codes(result) - ignore_codes
@@ -863,9 +868,18 @@ def _handle_ci_exit(result: list[ScanPathResult], json_output: bool, ignore_code
         return
 
     if not json_output:
-        issue_codes = {issue.code for scan_result in result for issue in scan_result.issues if issue.code}
+        # --no-findings hides security finding codes from the CI summary too; the
+        # non-zero exit (gating) is unaffected and scan-error codes stay visible.
+        issue_codes = (
+            {issue.code for scan_result in result for issue in scan_result.issues if issue.code}
+            if show_findings
+            else set()
+        )
         all_codes = sorted(issue_codes | failure_codes)
-        codes_part = ", ".join(all_codes) if all_codes else "none"
+        # When nothing remains to show, distinguish a genuinely clean run ("none")
+        # from one whose finding codes were withheld by --no-findings ("hidden").
+        empty_label = "none" if show_findings else "hidden"
+        codes_part = ", ".join(all_codes) if all_codes else empty_label
         rich.print(
             f"[bold red]CI (--ci): exiting with code 1 (issue codes: {codes_part}).[/bold red]",
             file=sys.stderr,
@@ -917,7 +931,7 @@ async def print_scan_inspect(mode="scan", args=None):
         )
 
     if ci_mode:
-        _handle_ci_exit(result, json_output, ignore_codes)
+        _handle_ci_exit(result, json_output, ignore_codes, show_findings)
 
 
 if __name__ == "__main__":
