@@ -914,9 +914,11 @@ async def print_scan_inspect(mode="scan", args=None):
         for r in result:
             dumped = r.model_dump(mode="json")
             if not show_findings:
-                # Empty the issues list on the serialized copy only; the live
-                # result object keeps its issues for --ci / control-server push.
+                # Empty findings (issues + their toxic-flow label scores) on the
+                # serialized copy only; the live result object keeps them for
+                # --ci / control-server push.
                 dumped["issues"] = []
+                dumped["labels"] = []
             result_dict[r.path] = dumped
         print(json.dumps(result_dict, indent=2))
     else:

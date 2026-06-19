@@ -6,7 +6,15 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from agent_scan.cli import MissingIdentifierError, parse_control_servers
-from agent_scan.models import ControlServer, Issue, RemoteServer, ScanError, ScanPathResult, ServerScanResult
+from agent_scan.models import (
+    ControlServer,
+    Issue,
+    RemoteServer,
+    ScalarToolLabels,
+    ScanError,
+    ScanPathResult,
+    ServerScanResult,
+)
 
 
 class TestControlServerParsing:
@@ -716,8 +724,8 @@ class TestJSONOutput:
             assert isinstance(parsed, dict)
 
     @pytest.mark.asyncio
-    async def test_no_findings_strips_issues_from_json(self):
-        """--no-findings empties the issues list in JSON output without mutating the source result."""
+    async def test_no_findings_strips_issues_and_labels_from_json(self):
+        """--no-findings empties issues and labels in JSON output without mutating the source result."""
         import io
         import json
         from argparse import Namespace
@@ -727,6 +735,7 @@ class TestJSONOutput:
         mock_result = ScanPathResult(
             path="/test/path.json",
             issues=[Issue(code="E001", message="finding", reference=None)],
+            labels=[[ScalarToolLabels(is_public_sink=1, destructive=0, untrusted_content=0, private_data=0)]],
         )
 
         with patch("agent_scan.cli.run_scan", new_callable=AsyncMock, return_value=[mock_result]):
@@ -748,12 +757,14 @@ class TestJSONOutput:
 
             parsed = json.loads(captured_output.getvalue())
             assert parsed["/test/path.json"]["issues"] == []
+            assert parsed["/test/path.json"]["labels"] == []
             # the live result object is not mutated (guards --ci / push behavior)
             assert [i.code for i in mock_result.issues] == ["E001"]
+            assert len(mock_result.labels) == 1
 
     @pytest.mark.asyncio
-    async def test_findings_kept_in_json_by_default(self):
-        """Without --no-findings, JSON output keeps the issues."""
+    async def test_findings_and_labels_kept_in_json_by_default(self):
+        """Without --no-findings, JSON output keeps the issues and labels."""
         import io
         import json
         from argparse import Namespace
@@ -763,6 +774,7 @@ class TestJSONOutput:
         mock_result = ScanPathResult(
             path="/test/path.json",
             issues=[Issue(code="E001", message="finding", reference=None)],
+            labels=[[ScalarToolLabels(is_public_sink=1, destructive=0, untrusted_content=0, private_data=0)]],
         )
 
         with patch("agent_scan.cli.run_scan", new_callable=AsyncMock, return_value=[mock_result]):
@@ -785,6 +797,7 @@ class TestJSONOutput:
             parsed = json.loads(captured_output.getvalue())
             codes = [i["code"] for i in parsed["/test/path.json"]["issues"]]
             assert "E001" in codes
+            assert len(parsed["/test/path.json"]["labels"]) == 1
 
 
 class TestIgnoreIssuesCodes:
