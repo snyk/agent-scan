@@ -301,20 +301,15 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
 
         Plugin ``.mcp.json`` files use the flat ``{name: serverConfig}`` format
         (no ``mcpServers`` wrapper). A top-level ``mcpServers`` key is also
-        tolerated for plugins that ship the wrapped format.
+        tolerated for plugins that ship the wrapped format. Walk skeleton is the
+        shared :meth:`_discover_plugin_mcp_files`; only the format union is
+        Claude-Code-specific.
         """
-        result: McpConfigsResult = {}
-        for base in self._plugin_base_dirs():
-            for mcp_file in _walk_under_depth(base, ".mcp.json", _MAX_PLUGIN_RGLOB_DEPTH, want_file=True):
-                if not mcp_file.is_file():
-                    continue
-                parsed = self._parse_mcp_file(mcp_file, formats=_CLAUDE_MCP_FORMATS)
-                # Skip on None (missing/empty file) or an empty server list; a parse
-                # failure is a truthy ``CouldNotParseMCPConfig`` and is still recorded.
-                if not parsed:
-                    continue
-                result[mcp_file.as_posix()] = parsed
-        return result
+        return self._discover_plugin_mcp_files(
+            self._plugin_base_dirs(),
+            (".mcp.json",),
+            lambda f: self._parse_mcp_file(f, formats=_CLAUDE_MCP_FORMATS),
+        )
 
     def _discover_plugin_skills(self) -> SkillsDirsResult:
         """Scan ``skills/`` subdirs under every plugin base dir."""

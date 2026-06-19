@@ -184,17 +184,10 @@ class CodexDiscoverer(AgentDiscoverer):
         return [self._codex_home() / "plugins"]
 
     def _discover_plugin_mcp_servers(self) -> McpConfigsResult:
-        """Scan every plugin tree for ``.mcp.json`` files."""
-        result: McpConfigsResult = {}
-        for base in self._plugin_base_dirs():
-            for mcp_file in _walk_under_depth(base, ".mcp.json", _MAX_PLUGIN_RGLOB_DEPTH, want_file=True):
-                if not mcp_file.is_file():
-                    continue
-                parsed = self._parse_plugin_mcp_json(mcp_file)
-                if not parsed:
-                    continue
-                result[mcp_file.as_posix()] = parsed
-        return result
+        """Scan every plugin tree for ``.mcp.json`` files via the shared
+        :meth:`_discover_plugin_mcp_files` walk; ``_parse_plugin_mcp_json`` carries
+        Codex's snake-case/camelCase/flat handling."""
+        return self._discover_plugin_mcp_files(self._plugin_base_dirs(), (".mcp.json",), self._parse_plugin_mcp_json)
 
     def _discover_plugin_skills(self) -> SkillsDirsResult:
         """Scan ``skills/`` subdirs under every plugin tree (the default location). A

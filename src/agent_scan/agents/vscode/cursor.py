@@ -3,11 +3,7 @@
 from pathlib import Path
 from typing import ClassVar
 
-from agent_scan.agents.base import (
-    _MAX_PLUGIN_RGLOB_DEPTH,
-    McpConfigsResult,
-    _walk_under_depth,
-)
+from agent_scan.agents.base import McpConfigsResult
 from agent_scan.agents.vscode.base import (
     _VSCODE_FAMILY_FORMATS,
     SkillsDirsResult,
@@ -131,7 +127,8 @@ class CursorDiscoverer(VSCodeFamilyDiscoverer):
         return [root / sub for sub in self._plugin_subdirs]
 
     def _discover_plugin_mcp_servers(self) -> McpConfigsResult:
-        """Scan ``mcp.json`` / ``.mcp.json`` under each installed plugin.
+        """Scan ``mcp.json`` / ``.mcp.json`` under each installed plugin via the
+        shared :meth:`_discover_plugin_mcp_files` walk.
 
         Cursor plugins ship MCP config under either filename and in either the flat
         ``{name: serverConfig}`` or wrapped ``{"mcpServers": {...}}`` shape, so both
@@ -139,26 +136,15 @@ class CursorDiscoverer(VSCodeFamilyDiscoverer):
         ``skip_unrecognized=True`` drops stray files merely *named* ``mcp.json`` (a
         plugin may ship a JSON schema / fixture) rather than surfacing them as
         ``CouldNotParseMCPConfig`` false positives; a genuinely-malformed MCP file
-        is still reported. Mirrors
-        :meth:`ClaudeCodeDiscoverer._discover_plugin_mcp_servers`."""
-        result: McpConfigsResult = {}
-        for base in self._plugin_base_dirs():
-            for name in ("mcp.json", ".mcp.json"):
-                for mcp_file in _walk_under_depth(base, name, _MAX_PLUGIN_RGLOB_DEPTH, want_file=True):
-                    if not mcp_file.is_file():
-                        continue
-                    parsed = self._parse_mcp_file(mcp_file, formats=_VSCODE_FAMILY_FORMATS, skip_unrecognized=True)
-                    if parsed is None:
-                        continue
-                    result[mcp_file.as_posix()] = parsed
-        return result
+        is still reported."""
+        return self._discover_plugin_mcp_files(
+            self._plugin_base_dirs(),
+            ("mcp.json", ".mcp.json"),
+            lambda f: self._parse_mcp_file(f, formats=_VSCODE_FAMILY_FORMATS, skip_unrecognized=True),
+        )
 
     def _discover_plugin_skills(self) -> SkillsDirsResult:
-        """Scan ``skills/`` subdirs under each installed plugin (parity with
-        :meth:`VSCodeFamilyDiscoverer._discover_extension_skills`)."""
-        result: SkillsDirsResult = {}
-        for base in self._plugin_base_dirs():
-            for skills_dir in _walk_under_depth(base, "skills", _MAX_PLUGIN_RGLOB_DEPTH, want_file=False):
-                if skills_dir.is_dir():
-                    result[skills_dir.as_posix()] = inspect_skills_dir(str(skills_dir))
-        return result
+        """Scan ``skills/`` subdirs under each installed plugin via the shared
+        :meth:`_discover_skill_and_command_dirs` walk (parity with the Claude Code /
+        Codex plugin-skill walks)."""
+        return self._discover_skill_and_command_dirs(self._plugin_base_dirs(), "skills", inspect_skills_dir)
