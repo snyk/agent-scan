@@ -300,6 +300,7 @@ def print_scan_path_result(
     print_errors: bool = False,
     inspect_mode: bool = False,
     full_description: bool = False,
+    show_findings: bool = True,
     args=None,
 ) -> None:
     issues = []
@@ -333,12 +334,19 @@ def print_scan_path_result(
     path_print_tree = Tree("│")
     server_tracebacks = []
     for server_idx, server in enumerate(result.servers or []):
-        server_issues = [issue for issue in result.issues if issue.reference == (server_idx, None)]
-        severities = [
-            get_severity(issue)
-            for issue in result.issues
-            if issue.reference is not None and issue.reference[0] == server_idx
-        ]
+        # When --no-findings is set, suppress the security findings (per-server
+        # summary, per-entity issue lines, and global issues below) while still
+        # showing the discovered servers/skills and any errors.
+        if show_findings:
+            server_issues = [issue for issue in result.issues if issue.reference == (server_idx, None)]
+            severities = [
+                get_severity(issue)
+                for issue in result.issues
+                if issue.reference is not None and issue.reference[0] == server_idx
+            ]
+        else:
+            server_issues = []
+            severities = []
         if server.error is not None:
             error_issue, traceback = format_error(server.error, server_idx)
             server_issues.append(error_issue)
@@ -347,7 +355,11 @@ def print_scan_path_result(
             severities.append("info")
         server_print = path_print_tree.add(format_servers_line(server.name or "", severities, server_issues))
         for entity_idx, entity in enumerate(server.entities):
-            issues = [issue for issue in result.issues if issue.reference == (server_idx, entity_idx)]
+            issues = (
+                [issue for issue in result.issues if issue.reference == (server_idx, entity_idx)]
+                if show_findings
+                else []
+            )
             server_print.add(
                 format_entity_line(
                     entity,
@@ -362,9 +374,10 @@ def print_scan_path_result(
         rich.print(path_print_tree)
 
     # print global issues
-    for issue in result.issues:
-        if issue.reference is None:
-            rich.print(format_global_issue(result, issue, True))
+    if show_findings:
+        for issue in result.issues:
+            if issue.reference is None:
+                rich.print(format_global_issue(result, issue, True))
 
     if print_errors and len(server_tracebacks) > 0:
         console = rich.console.Console()
@@ -381,6 +394,7 @@ def print_scan_result(
     inspect_mode: bool = False,
     internal_issues: bool = False,
     full_description: bool = False,
+    show_findings: bool = True,
     args=None,
 ) -> None:
     if not result:
@@ -390,7 +404,7 @@ def print_scan_result(
         for res in result:
             res.issues = [issue for issue in res.issues if issue.code not in ["W003", "W004", "W005", "W006"]]
     for i, path_result in enumerate(result):
-        print_scan_path_result(path_result, print_errors, inspect_mode, full_description, args)
+        print_scan_path_result(path_result, print_errors, inspect_mode, full_description, show_findings, args)
         if i < len(result) - 1:
             rich.print()
     print(end="", flush=True)

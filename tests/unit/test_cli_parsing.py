@@ -236,6 +236,31 @@ class TestSkillsFlag:
         assert self._parse(["--no-skills", "--skills"]) is True
 
 
+class TestFindingsFlag:
+    """--findings is on by default; --no-findings opts out; --findings is still accepted."""
+
+    def _parse(self, extra_argv: list[str]) -> bool:
+        import argparse
+
+        from agent_scan.cli import add_common_arguments
+
+        parser = argparse.ArgumentParser()
+        add_common_arguments(parser)
+        return parser.parse_args(extra_argv).findings
+
+    def test_findings_default_is_true(self):
+        assert self._parse([]) is True
+
+    def test_findings_flag_keeps_true(self):
+        assert self._parse(["--findings"]) is True
+
+    def test_no_findings_disables(self):
+        assert self._parse(["--no-findings"]) is False
+
+    def test_no_findings_then_findings_re_enables(self):
+        assert self._parse(["--no-findings", "--findings"]) is True
+
+
 class TestControlServerHeaderParsing:
     """Test suite for header parsing in control servers."""
 
@@ -619,6 +644,77 @@ class TestJSONOutput:
 
             parsed = json.loads(output)
             assert isinstance(parsed, dict)
+
+    @pytest.mark.asyncio
+    async def test_no_findings_strips_issues_from_json(self):
+        """--no-findings empties the issues list in JSON output without mutating the source result."""
+        import io
+        import json
+        from argparse import Namespace
+
+        from agent_scan.cli import print_scan_inspect
+
+        mock_result = ScanPathResult(
+            path="/test/path.json",
+            issues=[Issue(code="E001", message="finding", reference=None)],
+        )
+
+        with patch("agent_scan.cli.run_scan", new_callable=AsyncMock, return_value=[mock_result]):
+            args = Namespace(
+                json=True,
+                findings=False,
+                print_errors=False,
+                print_full_descriptions=False,
+                verbose=False,
+            )
+
+            captured_output = io.StringIO()
+            original_stdout = sys.stdout
+            try:
+                sys.stdout = captured_output
+                await print_scan_inspect(mode="scan", args=args)
+            finally:
+                sys.stdout = original_stdout
+
+            parsed = json.loads(captured_output.getvalue())
+            assert parsed["/test/path.json"]["issues"] == []
+            # the live result object is not mutated (guards --ci / push behavior)
+            assert [i.code for i in mock_result.issues] == ["E001"]
+
+    @pytest.mark.asyncio
+    async def test_findings_kept_in_json_by_default(self):
+        """Without --no-findings, JSON output keeps the issues."""
+        import io
+        import json
+        from argparse import Namespace
+
+        from agent_scan.cli import print_scan_inspect
+
+        mock_result = ScanPathResult(
+            path="/test/path.json",
+            issues=[Issue(code="E001", message="finding", reference=None)],
+        )
+
+        with patch("agent_scan.cli.run_scan", new_callable=AsyncMock, return_value=[mock_result]):
+            args = Namespace(
+                json=True,
+                findings=True,
+                print_errors=False,
+                print_full_descriptions=False,
+                verbose=False,
+            )
+
+            captured_output = io.StringIO()
+            original_stdout = sys.stdout
+            try:
+                sys.stdout = captured_output
+                await print_scan_inspect(mode="scan", args=args)
+            finally:
+                sys.stdout = original_stdout
+
+            parsed = json.loads(captured_output.getvalue())
+            codes = [i["code"] for i in parsed["/test/path.json"]["issues"]]
+            assert "E001" in codes
 
 
 class TestIgnoreIssuesCodes:

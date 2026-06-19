@@ -1,6 +1,7 @@
-from mcp.types import Prompt, Tool
+from mcp.types import Implementation, InitializeResult, Prompt, ServerCapabilities, Tool
 
-from agent_scan.printer import format_entity_line, format_servers_line
+from agent_scan.models import Issue, ScanPathResult, ServerScanResult, ServerSignature, StdioServer
+from agent_scan.printer import format_entity_line, format_servers_line, print_scan_result
 
 
 class TestFormatServersLine:
@@ -79,3 +80,64 @@ class TestFormatEntityLine:
         result = format_entity_line(entity, issues=[], is_skill=True, full_description=True).plain
         assert "instruction SKILL.md" in result
         assert "instructionSKILL.md" not in result
+
+
+def _result_with_findings() -> ScanPathResult:
+    """A scan result with a server, one tool entity, and both an entity-level
+    and a server-level security finding."""
+    server = ServerScanResult(
+        name="github",
+        server=StdioServer(command="run"),
+        signature=ServerSignature(
+            metadata=InitializeResult(
+                protocolVersion="2024-11-05",
+                capabilities=ServerCapabilities(),
+                serverInfo=Implementation(name="github", version="1.0"),
+            ),
+            tools=[Tool(name="create_issue", description="dangerous tool", inputSchema={"type": "object"})],
+        ),
+    )
+    return ScanPathResult(
+        path="/test/path",
+        servers=[server],
+        issues=[
+            Issue(code="E001", message="entity finding", reference=(0, 0), extra_data={"severity": "high"}),
+            Issue(code="W001", message="server finding", reference=(0, None), extra_data={"severity": "medium"}),
+        ],
+    )
+
+
+class TestPrintScanResultShowFindings:
+    """--no-findings hides security findings while keeping the discovery tree."""
+
+    def test_findings_shown_by_default(self, capsys):
+        print_scan_result([_result_with_findings()])
+        out = capsys.readouterr().out
+        # discovery + findings both present
+        assert "github" in out
+        assert "create_issue" in out
+        assert "E001" in out
+        assert "entity finding" in out
+        assert "finding" in out  # severity summary line
+
+    def test_show_findings_true_prints_issue(self, capsys):
+        print_scan_result([_result_with_findings()], show_findings=True)
+        out = capsys.readouterr().out
+        assert "E001" in out
+        assert "entity finding" in out
+
+    def test_no_findings_hides_issues_keeps_discovery(self, capsys):
+        result = _result_with_findings()
+        print_scan_result([result], show_findings=False)
+        out = capsys.readouterr().out
+        # discovery is preserved
+        assert "github" in out
+        assert "create_issue" in out
+        # findings are suppressed
+        assert "E001" not in out
+        assert "W001" not in out
+        assert "entity finding" not in out
+        assert "server finding" not in out
+        assert "finding" not in out  # severity summary gone
+        # the live result object is not mutated (guards --ci / push behavior)
+        assert sorted(i.code for i in result.issues) == ["E001", "W001"]

@@ -216,6 +216,15 @@ def add_common_arguments(parser):
         action=argparse.BooleanOptionalAction,
         help="Scan skills beyond mcp servers (default: enabled). Use --no-skills to disable.",
     )
+    parser.add_argument(
+        "--findings",
+        default=True,
+        action=argparse.BooleanOptionalAction,
+        help=(
+            "Print security findings (default: enabled). Use --no-findings to hide findings "
+            "while still showing discovered servers and skills."
+        ),
+    )
     add_bootstrap_argument(parser)
     parser.add_argument(
         "--scan-all-users",
@@ -448,6 +457,7 @@ def main():
             f"  {program_name} ~/custom/config.json # Scan a specific config file\n"
             f"  {program_name} inspect              # Just inspect tools without verification\n"
             f"  {program_name} --no-skills          # Scan only mcp servers, skip skills.\n"
+            f"  {program_name} --no-findings        # Hide security findings, still list discovered servers/skills\n"
             f"  {program_name} --verbose            # Enable detailed logging output\n"
             f"  {program_name} --print-errors       # Show error details and tracebacks\n"
             f"  {program_name} --json               # Output results in JSON format\n"
@@ -871,6 +881,9 @@ async def print_scan_inspect(mode="scan", args=None):
     full_description: bool = hasattr(args, "print_full_descriptions") and args.print_full_descriptions
     verbose: bool = hasattr(args, "verbose") and args.verbose
     ci_mode: bool = hasattr(args, "ci") and args.ci
+    # --no-findings hides findings from the output only; it never mutates the
+    # scan result, so --ci exit codes and control-server uploads are unaffected.
+    show_findings: bool = getattr(args, "findings", True)
     ignore_codes = _parse_ignore_codes(args, ci_mode)
 
     if json_output:
@@ -883,7 +896,14 @@ async def print_scan_inspect(mode="scan", args=None):
         _apply_ignore_codes(result, ignore_codes)
 
     if json_output:
-        result_dict = {r.path: r.model_dump(mode="json") for r in result}
+        result_dict = {}
+        for r in result:
+            dumped = r.model_dump(mode="json")
+            if not show_findings:
+                # Empty the issues list on the serialized copy only; the live
+                # result object keeps its issues for --ci / control-server push.
+                dumped["issues"] = []
+            result_dict[r.path] = dumped
         print(json.dumps(result_dict, indent=2))
     else:
         print_scan_result(
@@ -892,6 +912,7 @@ async def print_scan_inspect(mode="scan", args=None):
             inspect_mode=mode == "inspect",
             internal_issues=verbose,
             full_description=full_description,
+            show_findings=show_findings,
             args=args,
         )
 

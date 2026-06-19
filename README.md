@@ -221,6 +221,7 @@ These options are available for all commands:
 --verbose              Enable detailed logging output
 --print-errors         Show error details and tracebacks
 --json                 Output results in JSON format instead of rich text
+--no-findings          Hide security findings from the output while still listing discovered servers/skills
 --no-bootstrap         Disable the startup bootstrap call to the control server
 ```
 
