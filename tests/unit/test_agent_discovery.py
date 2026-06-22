@@ -3493,20 +3493,32 @@ def test_windsurf_extension_mcp_discovers_mcp_json(tmp_path):
 
 def test_vscode_extension_empty_mcpservers_map_skipped(tmp_path, monkeypatch):
     """An installed extension's ``mcp.json`` with an empty ``mcpServers`` map yields
-    no servers and is omitted rather than recorded as an empty entry. The extension
-    walk drops empty-but-valid configs via the shared ``if not parsed`` skip, the
-    same as the plugin walks (cf. ``test_claude_mcp_formats_empty_mcpservers_map_skipped``)."""
+    no servers and is omitted rather than recorded as an empty entry, while a
+    populated sibling under the same manifest IS recorded — so the absence is the
+    empty-config drop (the shared ``if not parsed`` skip), not the extension going
+    unscanned. Cf. ``test_claude_mcp_formats_empty_mcpservers_map_skipped``."""
     from agent_scan.agents import VSCodeDiscoverer
 
     monkeypatch.setattr(VSCodeDiscoverer, "_builtin_extension_dirs", lambda self: [])
     exts = tmp_path / ".vscode" / "extensions"
-    ext_dir = exts / "pub.empty-1.0.0"
-    ext_dir.mkdir(parents=True)
-    (ext_dir / "mcp.json").write_text('{"mcpServers": {}}')
-    (exts / "extensions.json").write_text('[{"relativeLocation": "pub.empty-1.0.0"}]')
+    empty = exts / "pub.empty-1.0.0"
+    populated = exts / "pub.populated-1.0.0"
+    empty.mkdir(parents=True)
+    populated.mkdir(parents=True)
+    (empty / "mcp.json").write_text('{"mcpServers": {}}')
+    (populated / "mcp.json").write_text('{"mcpServers": {"real-srv": {"command": "r"}}}')
+    (exts / "extensions.json").write_text(
+        '[{"relativeLocation": "pub.empty-1.0.0"}, {"relativeLocation": "pub.populated-1.0.0"}]'
+    )
 
     mcp_configs = VSCodeDiscoverer(tmp_path).discover_mcp_servers()
 
+    # Positive control: the populated sibling IS scanned and recorded...
+    populated_keys = [k for k in mcp_configs if k.endswith("/pub.populated-1.0.0/mcp.json")]
+    assert len(populated_keys) == 1
+    name, _ = mcp_configs[populated_keys[0]][0]
+    assert name == "real-srv"
+    # ...so the empty config's absence is the drop, not an unscanned dir.
     assert [k for k in mcp_configs if k.endswith("/pub.empty-1.0.0/mcp.json")] == []
 
 
