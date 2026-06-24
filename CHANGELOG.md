@@ -85,3 +85,4 @@
 - `0.5.9` Don't handshake (launch) stdio MCP servers by default. Add VSCode family discoverers (VSCode, Cursor, Windsurf, Kiro, Antigravity); only scan installed extensions and plugins. Upgrade aiohttp to fix CVEs.
 - `0.5.10` Add Codex discoverer for MCP servers and skills. Add Claude Desktop support. Attach config-file path to each MCP server on upload. Fix remote URL handling. Stop probing host tool versions and enumerating home directories during bootstrap.
 - `0.5.11` Discover Cursor's built-in/managed skills. Redact secrets from skill file contents. Extend guard hook change detection. Remove commands discovery from the Claude Code discoverer.
+- `0.5.12` Start CLI binary uploads to S3.
