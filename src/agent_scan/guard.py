@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import copy
+import hashlib
 import json
 import os
 import re
@@ -324,7 +325,7 @@ def _install_hooks(
     old_push_key = existing_info.get("auth_value", "") if existing_info else ""
     push_key_changed = bool(old_push_key) and old_push_key != push_key
 
-    dest_path, script_existed, script_updated = _copy_hook_script(client, config_path)
+    dest_path, script_existed, script_updated, current_checksum, new_checksum = _copy_hook_script(client, config_path)
     command = _build_hook_command(push_key, url, dest_path, hook_client, tenant_id=tenant_id)
     prepared_config, prepared_content, hooks_diff, preserved = _prepare_client_config(client, command, config_path)
 
@@ -340,6 +341,8 @@ def _install_hooks(
         config_changed=config_changed,
         hooks_diff=hooks_diff,
         push_key_changed=push_key_changed,
+        current_checksum=current_checksum,
+        new_checksum=new_checksum,
     ):
         if not script_existed:
             dest_path.unlink(missing_ok=True)
@@ -909,6 +912,8 @@ def _send_test_event(
     config_changed: bool = False,
     hooks_diff: dict | None = None,
     push_key_changed: bool = False,
+    current_checksum: str | None = None,
+    new_checksum: str | None = None,
 ) -> bool:
     """Send a test hooksConfigured event by invoking the hook script. Returns True on success."""
     import subprocess
@@ -926,6 +931,13 @@ def _send_test_event(
             payload_dict["added"] = hooks_diff.get("added", {})
             payload_dict["modified"] = hooks_diff.get("modified", {})
             payload_dict["removed"] = hooks_diff.get("removed", {})
+    hooks_script: dict[str, str] = {}
+    if current_checksum is not None:
+        hooks_script["current_checksum"] = current_checksum
+    if new_checksum is not None:
+        hooks_script["new_checksum"] = new_checksum
+    if hooks_script:
+        payload_dict["hooks_script"] = hooks_script
     redact_push_keys_in_data(payload_dict)
     payload = json.dumps(payload_dict)
 
@@ -1203,10 +1215,11 @@ def _compact_events(events: list[str]) -> str:
     return f"({', '.join(events[:show])} + {len(events) - show} more)"
 
 
-def _copy_hook_script(client: str, config_path: Path) -> tuple[Path, bool, bool]:
+def _copy_hook_script(config_path: Path) -> tuple[Path, bool, bool, str | None, str]:
     """Copy bundled hook script to a hooks/ dir next to the config file.
 
-    Returns (path, already_existed, was_updated).
+    Returns (path, already_existed, was_updated, current_checksum, new_checksum).
+    current_checksum is None when the script did not exist before.
     """
     dest_dir = config_path.parent / "hooks"
 
@@ -1215,19 +1228,24 @@ def _copy_hook_script(client: str, config_path: Path) -> tuple[Path, bool, bool]
     dest = dest_dir / script_name
     existed = dest.exists()
 
+    current_checksum: str | None = None
+    if existed:
+        current_checksum = hashlib.sha256(dest.read_bytes()).hexdigest()
+
     from agent_scan.version import version_info
 
     hook_pkg = importlib_resources.files("agent_scan.hooks")
     source = hook_pkg.joinpath(script_name)
     new_content = source.read_bytes().replace(b"__AGENT_SCAN_VERSION__", version_info.encode())
+    new_checksum = hashlib.sha256(new_content).hexdigest()
 
-    if existed and dest.read_bytes() == new_content:
-        return dest, existed, False
+    if existed and current_checksum == new_checksum:
+        return dest, existed, False, current_checksum, new_checksum
 
     dest.write_bytes(new_content)
     dest.chmod(dest.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     rich.print(f"[green]\u2713[/green]  Copied hook script to [dim]{dest}[/dim]")
-    return dest, existed, True
+    return dest, existed, True, current_checksum, new_checksum
 
 
 def _remove_hook_script(client: str, config_path: Path) -> None:
