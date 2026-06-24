@@ -63,6 +63,11 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Put tests/ on sys.path so the (unshipped) canary executor imports as the top-level `canary_runner`
+# package — the same name the agent-scan-backoffice canary imports it under (it clones this repo and
+# runs with PYTHONPATH=<clone>/tests). The executor is test/CI tooling, co-located with the discoverers
+# but deliberately NOT part of the shipped agent_scan wheel.
+pythonpath = ["tests"]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"

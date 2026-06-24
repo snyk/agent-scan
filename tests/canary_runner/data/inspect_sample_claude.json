@@ -1,0 +1,230 @@
+{
+  "/tmp/canary-fakehome/.claude": {
+    "client": "claude code",
+    "path": "/tmp/canary-fakehome/.claude",
+    "servers": [
+      {
+        "name": "canary-project-inline-mcp",
+        "server": {
+          "command": "/bin/echo",
+          "args": [
+            "inline"
+          ],
+          "type": "stdio",
+          "env": null,
+          "binary_identifier": "com.apple.echo"
+        },
+        "signature": null,
+        "error": {
+          "message": "Skipped by user consent (stdio server was not started)",
+          "category": "user_declined",
+          "is_failure": true
+        }
+      },
+      {
+        "name": "canary-global-mcp",
+        "server": {
+          "command": "/bin/echo",
+          "args": [
+            "global"
+          ],
+          "type": "stdio",
+          "env": null,
+          "binary_identifier": "com.apple.echo"
+        },
+        "signature": null,
+        "error": {
+          "message": "Skipped by user consent (stdio server was not started)",
+          "category": "user_declined",
+          "is_failure": true
+        }
+      },
+      {
+        "name": "canary-project-inline-mcp",
+        "server": {
+          "command": "/bin/echo",
+          "args": [
+            "inline"
+          ],
+          "type": "stdio",
+          "env": null,
+          "binary_identifier": "com.apple.echo"
+        },
+        "signature": null,
+        "error": {
+          "message": "Skipped by user consent (stdio server was not started)",
+          "category": "user_declined",
+          "is_failure": true
+        }
+      },
+      {
+        "name": "canary-project-file-mcp",
+        "server": {
+          "command": "/bin/echo",
+          "args": [
+            "file"
+          ],
+          "type": "stdio",
+          "env": null,
+          "binary_identifier": "com.apple.echo"
+        },
+        "signature": null,
+        "error": {
+          "message": "Skipped by user consent (stdio server was not started)",
+          "category": "user_declined",
+          "is_failure": true
+        }
+      },
+      {
+        "name": "discord",
+        "config_path": "/private/tmp/canary-fakehome/.claude/plugins/cache/claude-plugins-official/discord/0.0.4/.mcp.json",
+        "server": {
+          "command": "bun",
+          "args": [
+            "run",
+            "--cwd",
+            "${CLAUDE_PLUGIN_ROOT}",
+            "--shell=bun",
+            "--silent",
+            "start"
+          ],
+          "type": "stdio",
+          "env": null,
+          "binary_identifier": null
+        },
+        "signature": null,
+        "error": {
+          "message": "Skipped by user consent (stdio server was not started)",
+          "category": "user_declined",
+          "is_failure": true
+        }
+      },
+      {
+        "name": "discord",
+        "config_path": "/tmp/canary-fakehome/.claude/plugins/cache/claude-plugins-official/discord/0.0.4/.mcp.json",
+        "server": {
+          "command": "bun",
+          "args": [
+            "run",
+            "--cwd",
+            "${CLAUDE_PLUGIN_ROOT}",
+            "--shell=bun",
+            "--silent",
+            "start"
+          ],
+          "type": "stdio",
+          "env": null,
+          "binary_identifier": null
+        },
+        "signature": null,
+        "error": {
+          "message": "Skipped by user consent (stdio server was not started)",
+          "category": "user_declined",
+          "is_failure": true
+        }
+      },
+      {
+        "name": "canary-global-skill",
+        "server": {
+          "path": "/private/tmp/canary-fakehome/.claude/skills/canary-global-skill",
+          "type": "skill"
+        },
+        "signature": {
+          "_stripped": true
+        },
+        "error": null
+      },
+      {
+        "name": "canary-global-skill",
+        "server": {
+          "path": "/tmp/canary-fakehome/.claude/skills/canary-global-skill",
+          "type": "skill"
+        },
+        "signature": {
+          "_stripped": true
+        },
+        "error": null
+      },
+      {
+        "name": "canary-project-skill",
+        "server": {
+          "path": "/tmp/canary-fakehome/projects/dummy-project/.claude/skills/canary-project-skill",
+          "type": "skill"
+        },
+        "signature": {
+          "_stripped": true
+        },
+        "error": null
+      },
+      {
+        "name": "access",
+        "server": {
+          "path": "/private/tmp/canary-fakehome/.claude/plugins/cache/claude-plugins-official/discord/0.0.4/skills/access",
+          "type": "skill"
+        },
+        "signature": {
+          "_stripped": true
+        },
+        "error": null
+      },
+      {
+        "name": "access",
+        "server": {
+          "path": "/tmp/canary-fakehome/.claude/plugins/cache/claude-plugins-official/discord/0.0.4/skills/access",
+          "type": "skill"
+        },
+        "signature": {
+          "_stripped": true
+        },
+        "error": null
+      },
+      {
+        "name": "configure",
+        "server": {
+          "path": "/private/tmp/canary-fakehome/.claude/plugins/cache/claude-plugins-official/discord/0.0.4/skills/configure",
+          "type": "skill"
+        },
+        "signature": {
+          "_stripped": true
+        },
+        "error": null
+      },
+      {
+        "name": "configure",
+        "server": {
+          "path": "/tmp/canary-fakehome/.claude/plugins/cache/claude-plugins-official/discord/0.0.4/skills/configure",
+          "type": "skill"
+        },
+        "signature": {
+          "_stripped": true
+        },
+        "error": null
+      },
+      {
+        "name": "canary-global-command",
+        "server": {
+          "path": "/tmp/canary-fakehome/.claude/commands/canary-global-command.md",
+          "type": "skill"
+        },
+        "signature": {
+          "_stripped": true
+        },
+        "error": null
+      },
+      {
+        "name": "canary-project-command",
+        "server": {
+          "path": "/tmp/canary-fakehome/projects/dummy-project/.claude/commands/canary-project-command.md",
+          "type": "skill"
+        },
+        "signature": {
+          "_stripped": true
+        },
+        "error": null
+      }
+    ],
+    "issues": [],
+    "labels": [],
+    "error": null
+  }
+}
