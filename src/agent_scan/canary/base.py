@@ -1,4 +1,4 @@
-"""Live-test ("canary") specs, co-located with the discoverers under ``tests/`` — see :mod:`canary_test_supported_agents`.
+"""Live-test ("canary") specs, co-located with the discoverers in the ``agent_scan`` package — see :mod:`agent_scan.canary`.
 
 These are **declarative and runner-agnostic**: a :class:`Scope` says how to drive the real agent binary
 to write a detection scope (a list of :class:`SeedCommand`) and what ``inspect`` must then detect
@@ -63,7 +63,7 @@ class ExpectedItem:
 class FixtureFile:
     """One committed fixture to materialize into the project before the scan — for scopes no ``claude``
     CLI writes (a project-local skill, or a hand-committed project ``.mcp.json``). ``src`` is a
-    path under the ``canary_test_supported_agents`` package dir (the committed ``test_projects/`` tree); ``dest`` is its
+    path under the ``agent_scan.canary`` package dir (the committed ``fixtures/`` tree); ``dest`` is its
     landing path under the dummy project. Pure data — the executor resolves ``src`` against that package
     dir on disk and copies it into ``project / dest`` (a directory is copied recursively).
     Unlike a binary-written scope this cannot catch on-disk *format* drift (we author the file); it gives
@@ -179,22 +179,48 @@ class FixtureScope(Scope):
 
 
 @dataclass(frozen=True)
-class LifecycleStep(Scope):
-    """A non-asserting prerequisite: run the agent headlessly so it trusts/registers the project. Mirrors
-    no discoverer scope (``mirrors=()``); asserts nothing."""
+class CommandScope(Scope):
+    """A scope written by a single explicit binary command that is NOT ``mcp add``-shaped — e.g. VS
+    Code's ``code --add-mcp``. ``build_argv`` builds the full argv from the :class:`CanaryContext` (so the
+    resolved binary and any OS-specific paths resolve at run time, where ``home``/``bin`` are known), and
+    ``expected_items`` are what ``inspect`` must then detect. Use this where :class:`McpScope` (the claude
+    ``mcp add`` shape) doesn't fit."""
 
-    label: str = "lifecycle/trust"
-    mirrors: tuple[Callable, ...] = ()
-    prompt: str = "List the files in this directory."
+    label: str
+    mirrors: tuple[Callable, ...]
+    build_argv: Callable[[CanaryContext], tuple[str, ...]]
+    expected_items: tuple[ExpectedItem, ...] = ()
+    run_in_project: bool = False
+    non_fatal: bool = False
+    timeout: int = 180
 
     def commands(self, ctx: CanaryContext) -> list[SeedCommand]:
         return [
             SeedCommand(
-                argv=(ctx.bin, "-p", self.prompt, "--permission-mode", "bypassPermissions"),
-                run_in_project=True,
-                non_fatal=True,
+                argv=self.build_argv(ctx),
+                run_in_project=self.run_in_project,
+                non_fatal=self.non_fatal,
+                timeout=self.timeout,
             )
         ]
+
+    def expected(self) -> list[ExpectedItem]:
+        return list(self.expected_items)
+
+
+@dataclass(frozen=True)
+class LifecycleStep(Scope):
+    """A non-asserting prerequisite: run the agent headlessly so it trusts/registers the project (or
+    merely materializes its on-disk state). Mirrors no discoverer scope (``mirrors=()``); asserts nothing
+    and is non-fatal. ``args`` are the tokens AFTER the resolved binary; the default is claude's headless
+    trust invocation. Other agents pass their own headless invocation (e.g. ``("-p", "...")``)."""
+
+    label: str = "lifecycle/trust"
+    mirrors: tuple[Callable, ...] = ()
+    args: tuple[str, ...] = ("-p", "List the files in this directory.", "--permission-mode", "bypassPermissions")
+
+    def commands(self, ctx: CanaryContext) -> list[SeedCommand]:
+        return [SeedCommand(argv=(ctx.bin, *self.args), run_in_project=True, non_fatal=True)]
 
 
 @dataclass(frozen=True)

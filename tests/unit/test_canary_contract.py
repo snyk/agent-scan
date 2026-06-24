@@ -2,11 +2,11 @@
 ``FixtureFile``s.
 
 The backoffice executor (agent-scan-backoffice ``canary.run_canary``) is a *generic interpreter* with two
-primitives: it calls ``scope.commands(ctx)`` and runs each :class:`~canary_test_supported_agents.base.SeedCommand` as
+primitives: it calls ``scope.commands(ctx)`` and runs each :class:`~agent_scan.canary.base.SeedCommand` as
 a subprocess (reading ``argv`` / ``run_in_project`` / ``timeout`` / ``non_fatal``), and it calls
-``scope.files()`` and copies each :class:`~canary_test_supported_agents.base.FixtureFile` into the project (reading
+``scope.files()`` and copies each :class:`~agent_scan.canary.base.FixtureFile` into the project (reading
 ``src`` / ``dest``). This test pins that contract from the agent-scan side — every concrete
-:class:`~canary_test_supported_agents.base.Scope` subclass must be exercised by a real canary and must emit commands
+:class:`~agent_scan.canary.base.Scope` subclass must be exercised by a real canary and must emit commands
 the executor can run (non-empty string ``argv``, sane flags, positive ``timeout``) and fixtures the executor
 can copy (non-empty *relative* ``src``/``dest``, no ``..`` escape). A new Scope subclass that returns
 malformed commands/files — or that no canary uses — fails HERE, before the executor ever sees it. Companion
@@ -19,7 +19,8 @@ import os
 from pathlib import Path
 
 import pytest
-from canary_test_supported_agents import CANARIES, CanaryContext, FixtureFile, Scope, SeedCommand
+
+from agent_scan.canary import CANARIES, CanaryContext, FixtureFile, Scope, SeedCommand
 
 # A purely synthetic context: no path is touched and no command is run — commands() is pure.
 CTX = CanaryContext(home=Path("/canary/home"), project=Path("/canary/home/proj"), bin="claude")
@@ -28,7 +29,7 @@ _CANARIES = list(CANARIES.values())
 
 
 def _concrete_scope_subclasses() -> set[type[Scope]]:
-    """Every loaded concrete subclass of ``Scope`` (importing ``canary_test_supported_agents`` registers them all)."""
+    """Every loaded concrete subclass of ``Scope`` (importing ``agent_scan.canary`` registers them all)."""
     seen: set[type[Scope]] = set()
     stack = list(Scope.__subclasses__())
     while stack:

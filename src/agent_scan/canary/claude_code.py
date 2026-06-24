@@ -37,10 +37,9 @@ CLAUDE_PLUGIN_PIN_SHA = "66bca6b6f62e5023673feff699d9d99451ae9919"
 
 # Committed project fixtures, copied into the (registered) dummy project so inspect can detect the
 # project-local skill/server scopes no `claude` CLI writes. The src paths are relative to the
-# `canary_test_supported_agents` package dir on disk; the executor resolves them against that dir (the
-# cloned source tree it puts on PYTHONPATH — these fixtures are test support, not shipped in the wheel)
-# and copies them in.
-_FIXTURE_ROOT = "test_projects/proj"
+# `agent_scan.canary` package dir on disk (the `fixtures/` tree shipped as package data); the executor
+# resolves them against that dir and copies them in.
+_FIXTURE_ROOT = "fixtures/proj"
 
 _D = ClaudeCodeDiscoverer  # the scope methods this canary mirrors, by object reference
 
