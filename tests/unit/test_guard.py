@@ -1499,7 +1499,6 @@ class TestRunInstallCallsEnsureGuardEnabled:
             tenant_id="tid-interactive",
             file=str(config),
             managed=False,
-            test=False,
         )
         _run_install(args)
         mock_fetch.assert_called_once_with("https://api.snyk.io", "tid-interactive", "snyk-from-env")
@@ -1519,7 +1518,6 @@ class TestRunInstallCallsEnsureGuardEnabled:
             tenant_id="",
             file=str(config),
             managed=False,
-            test=False,
         )
         _run_install(args)
         mock_fetch.assert_not_called()
@@ -1538,7 +1536,6 @@ class TestRunInstallCallsEnsureGuardEnabled:
             tenant_id="tid-hl",
             file=str(config),
             managed=False,
-            test=False,
         )
         _run_install(args)
         mock_fetch.assert_not_called()
@@ -1619,7 +1616,7 @@ class TestInstallHooksOrchestration:
             p.stop()
 
     def _call(
-        self, tmp_path, client="claude", hook_client="claude-code", minted=False, config_exists=False, test=False
+        self, tmp_path, client="claude", hook_client="claude-code", minted=False, config_exists=False
     ):
         config = tmp_path / "config.json"
         if config_exists:
@@ -1635,7 +1632,6 @@ class TestInstallHooksOrchestration:
             minted,
             "tid-1",
             "snyk-tok",
-            test=test,
         )
         return config
 
@@ -1721,10 +1717,6 @@ class TestInstallHooksOrchestration:
     def test_test_event_always_sent(self, ctx, tmp_path):
         self._call(tmp_path, config_exists=True, minted=False)
         ctx["test_event"].assert_called_once()
-
-    def test_test_event_skipped_when_test_true(self, ctx, tmp_path):
-        self._call(tmp_path, config_exists=True, minted=False, test=True)
-        ctx["test_event"].assert_not_called()
 
     # ---------------------------------------------------------------
     # Test event: payload carries diff

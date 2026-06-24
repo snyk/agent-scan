@@ -244,7 +244,6 @@ def _run_install(args) -> None:
             minted,
             tenant_id,
             snyk_token,
-            test=getattr(args, "test", False),
         )
     except (SystemExit, KeyboardInterrupt):
         raise
@@ -319,8 +318,6 @@ def _install_hooks(
     minted: bool,
     tenant_id: str,
     snyk_token: str,
-    *,
-    test: bool = False,
 ) -> None:
     """Post-mint install steps.  Extracted so _run_install can revoke on failure."""
     existing_info = _detect_existing_install(client, config_path)
@@ -334,7 +331,7 @@ def _install_hooks(
     first_install = not script_existed
     config_changed = bool(hooks_diff["added"] or hooks_diff["modified"] or hooks_diff["removed"])
 
-    if not test and not _send_test_event(
+    if not _send_test_event(
         push_key,
         url,
         hook_client,
