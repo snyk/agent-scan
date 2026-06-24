@@ -548,7 +548,7 @@ def main():
         "--test",
         action="store_true",
         default=False,
-        help="Send a test event to verify connectivity before installing hooks",
+        help="Deprecated, no-op",
     )
     guard_install_parser.add_argument(
         "--file",
