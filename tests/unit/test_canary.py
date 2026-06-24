@@ -11,9 +11,12 @@ from canary_test_supported_agents.claude_code import ClaudeCodeCanary
 
 CTX = CanaryContext(home=Path("/home"), project=Path("/home/proj"), bin="claude")
 
+# Item order follows scope order: the .mcp.json fixture (mcp/project-file-fixture) is seeded just before
+# the `-s project` CLI write (mcp/project-file) that merges into it, so its item comes first.
 EXPECTED_ITEMS = [
     ExpectedItem("mcp", "canary-global-mcp", "mcp/global"),
     ExpectedItem("mcp", "canary-project-inline-mcp", "mcp/project-inline"),
+    ExpectedItem("mcp", "canary-project-fixture-mcp", "mcp/project-file-fixture"),
     ExpectedItem("mcp", "canary-project-file-mcp", "mcp/project-file"),
     ExpectedItem("mcp", "discord", "mcp/plugin"),
     ExpectedItem("skill", "access", "skill/plugin", ("$HOME/.claude/plugins/", "skills/access")),
@@ -21,7 +24,6 @@ EXPECTED_ITEMS = [
     ExpectedItem(
         "skill", "canary-project-skill", "skill/project", ("$PROJECT/.claude/skills/", "canary-project-skill")
     ),
-    ExpectedItem("mcp", "canary-project-fixture-mcp", "mcp/project-file-fixture"),
 ]
 
 
@@ -34,19 +36,26 @@ def test_expected_items_in_order():
     assert ClaudeCodeCanary().expected() == EXPECTED_ITEMS
 
 
-def test_scope_order_live_then_fixtures_then_gaps():
+def test_scope_order_fixture_before_merging_mcp_scope_then_gaps():
     scopes = ClaudeCodeCanary().scopes
     labels = [s.label for s in scopes]
-    assert labels[:5] == [
+    assert labels == [
         "mcp/global",
         "mcp/project-inline",
+        "mcp/project-file-fixture",
         "mcp/project-file",
         "lifecycle/trust",
         "mcp+skill/plugin",
+        "skill/project",
+        "skill/global",
+        "mcp/managed",
+        "mcp/plugin-manifest",
+        "skill/plugin-manifest",
     ]
-    assert isinstance(scopes[4], PluginScope)  # the live plugin install
-    assert labels[5:7] == ["skill/project", "mcp/project-file-fixture"]
-    assert all(isinstance(s, FixtureScope) for s in scopes[5:7])
+    # The committed .mcp.json fixture must precede the `-s project` McpScope that merges into it, so
+    # `claude mcp add` adds to (rather than gets clobbered by) the fixture — both servers are detected.
+    assert labels.index("mcp/project-file-fixture") < labels.index("mcp/project-file")
+    assert isinstance(scopes[5], PluginScope)  # the live plugin install
     assert all(isinstance(s, Gap) for s in scopes[7:])
 
 

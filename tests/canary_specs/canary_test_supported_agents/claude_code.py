@@ -2,11 +2,11 @@
 
 One :class:`Scope` per scope-producing ``_discover_*`` method (``mirrors`` references the method object
 itself). Three tiers: the scopes a real ``claude`` can write are driven live (the three ``claude mcp add``
-MCP scopes + a pinned marketplace plugin — ``discord`` for MCP/skills); the project-local skill/server
-scopes that no CLI writes are :class:`FixtureScope` s
-(the executor copies a committed fixture into the project, then inspect must detect it); the rest are
-:class:`Gap` s — mirrored for fidelity (so the coverage test sees them covered) but never seeded or
-asserted, because neither a CLI nor a sensible fixture can drive them.
+MCP scopes + a pinned marketplace plugin — ``discord`` for MCP/skills); :class:`FixtureScope` s cover
+on-disk state via a committed fixture the executor copies in — a project skill no CLI authors, and a
+project ``.mcp.json`` seeded just before the ``-s project`` CLI write so the two merge in one file; the
+rest are :class:`Gap` s — mirrored for fidelity (so the coverage test sees them covered) but never seeded
+or asserted, because neither a CLI nor a sensible fixture can drive them.
 """
 
 from __future__ import annotations
@@ -51,8 +51,11 @@ class ClaudeCodeCanary(AgentCanary):
 
     @property
     def scopes(self) -> list[Scope]:
-        # Ordered: the three `claude mcp add` scopes → trust the project → install the pinned plugin
+        # Ordered: the `claude mcp add` scopes → trust the project → install the pinned plugin
         # last (its cache is the final on-disk write before the scan) → the no-live-writer Gaps.
+        # The committed `.mcp.json` fixture is seeded just BEFORE the `-s project` CLI write so the
+        # latter merges into it (the executor materializes fixtures before any seed command — see
+        # FixtureFile), keeping both servers in <project>/.mcp.json.
         return [
             McpScope("mcp/global", (_D._discover_global_mcp_servers,), "canary-global-mcp", "user", ("echo", "global")),
             McpScope(
@@ -62,6 +65,14 @@ class ClaudeCodeCanary(AgentCanary):
                 "local",
                 ("echo", "inline"),
                 run_in_project=True,
+            ),
+            # Committed project `.mcp.json` no `claude` CLI authors on its own — copied in first so the
+            # `mcp/project-file` `claude mcp add -s project` below merges into it (both servers detected).
+            FixtureScope(
+                "mcp/project-file-fixture",
+                (_D._discover_project_mcp_servers,),
+                (FixtureFile(f"{_FIXTURE_ROOT}/.mcp.json", ".mcp.json"),),
+                (ExpectedItem("mcp", "canary-project-fixture-mcp", "mcp/project-file-fixture"),),
             ),
             McpScope(
                 "mcp/project-file",
@@ -85,11 +96,9 @@ class ClaudeCodeCanary(AgentCanary):
                     ExpectedItem("skill", "configure", "skill/plugin", ("$HOME/.claude/plugins/", "skills/configure")),
                 ),
             ),
-            # --- Fixture scopes: project-local skill/server that no `claude` CLI writes. The executor
-            #     copies the committed fixture into the (registered) project, then inspect must detect it.
-            #     A project skill surfaces as a skill-type item. The server fixture shares
-            #     <project>/.mcp.json with the mcp/project-file CLI write — `claude mcp add` merges into the
-            #     pre-written file, so both servers are detected.
+            # --- Fixture scope: a project-local skill that no `claude` CLI writes. The executor copies
+            #     the committed fixture into the (registered) project, then inspect must detect it as a
+            #     skill-type item.
             FixtureScope(
                 "skill/project",
                 (_D._discover_project_skills,),
@@ -106,12 +115,6 @@ class ClaudeCodeCanary(AgentCanary):
                         ("$PROJECT/.claude/skills/", "canary-project-skill"),
                     ),
                 ),
-            ),
-            FixtureScope(
-                "mcp/project-file-fixture",
-                (_D._discover_project_mcp_servers,),
-                (FixtureFile(f"{_FIXTURE_ROOT}/.mcp.json", ".mcp.json"),),
-                (ExpectedItem("mcp", "canary-project-fixture-mcp", "mcp/project-file-fixture"),),
             ),
             # --- Gaps: real discoverer scopes with no live writer (no claude CLI creates them) and no
             #     sensible fixture. Mirrored so the coverage test counts their method as covered; surfaced

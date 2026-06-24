@@ -67,7 +67,13 @@ class FixtureFile:
     landing path under the dummy project. Pure data — the executor resolves ``src`` against that package
     dir on disk and copies it into ``project / dest`` (a directory is copied recursively).
     Unlike a binary-written scope this cannot catch on-disk *format* drift (we author the file); it gives
-    the no-writer scopes end-to-end ``inspect`` coverage instead."""
+    the no-writer scopes end-to-end ``inspect`` coverage instead.
+
+    Executor ordering contract: the executor MUST materialize every ``FixtureFile`` *before* it runs any
+    :class:`SeedCommand`. A committed ``.mcp.json`` fixture and a later ``claude mcp add -s project`` seed
+    both write ``<project>/.mcp.json``; fixtures-first lets the CLI *merge* into the committed file
+    (both servers detected) instead of the copy clobbering the CLI's write. The companion executor guard
+    is agent-scan-backoffice ``tests/unit/test_canary_dispatch.py``."""
 
     src: str
     dest: str

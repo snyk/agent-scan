@@ -7,11 +7,11 @@ runner-agnostic; an external executor (the agent-scan-backoffice canary) imports
 runs the commands against the real binary in an isolated home.
 
 These specs are test support, not part of the shipped ``agent_scan`` package: they live under
-``tests/canary_test_supported_agents`` (not in the wheel). agent-scan's own tests import them via
-``pythonpath = ["tests"]``; the backoffice executor clones this repo and imports them from the source
-tree with ``PYTHONPATH=<clone>/tests``. Because the canary still lives in the same repo as the
-discoverers, it cannot drift from them — ``tests/unit/test_canary_covers_scopes.py`` enforces that
-every scope-producing method has a canary scope.
+``tests/canary_specs/canary_test_supported_agents`` (not in the wheel). agent-scan's own tests import
+them via ``pythonpath = ["tests/canary_specs"]``; the backoffice executor clones this repo and imports
+them from the source tree with ``PYTHONPATH=<clone>/tests/canary_specs``. Because the canary still lives
+in the same repo as the discoverers, it cannot drift from them — ``tests/unit/test_canary_covers_scopes.py``
+enforces that every scope-producing method has a canary scope.
 """
 
 from .base import (
