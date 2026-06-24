@@ -1665,6 +1665,14 @@ class TestInstallHooksOrchestration:
         return [c.args[0] for c in ctx["rich"].print.call_args_list if c.args]
 
     # ---------------------------------------------------------------
+    # _copy_hook_script receives only config_path
+    # ---------------------------------------------------------------
+
+    def test_copy_hook_script_called_with_config_path_only(self, ctx, tmp_path):
+        config = self._call(tmp_path, client="claude", config_exists=True)
+        ctx["copy"].assert_called_once_with(config)
+
+    # ---------------------------------------------------------------
     # Client routing: each client calls its own prepare + write
     # ---------------------------------------------------------------
 
