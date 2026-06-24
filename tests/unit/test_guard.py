@@ -1615,9 +1615,7 @@ class TestInstallHooksOrchestration:
         for p in active.values():
             p.stop()
 
-    def _call(
-        self, tmp_path, client="claude", hook_client="claude-code", minted=False, config_exists=False
-    ):
+    def _call(self, tmp_path, client="claude", hook_client="claude-code", minted=False, config_exists=False):
         config = tmp_path / "config.json"
         if config_exists:
             config.write_text("{}")
