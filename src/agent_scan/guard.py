@@ -325,7 +325,7 @@ def _install_hooks(
     old_push_key = existing_info.get("auth_value", "") if existing_info else ""
     push_key_changed = bool(old_push_key) and old_push_key != push_key
 
-    dest_path, script_existed, script_updated, current_checksum, new_checksum = _copy_hook_script(client, config_path)
+    dest_path, script_existed, script_updated, current_checksum, new_checksum = _copy_hook_script(config_path)
     command = _build_hook_command(push_key, url, dest_path, hook_client, tenant_id=tenant_id)
     prepared_config, prepared_content, hooks_diff, preserved = _prepare_client_config(client, command, config_path)
 
