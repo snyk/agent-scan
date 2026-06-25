@@ -14,10 +14,10 @@ import typing
 import warnings
 
 import pytest
+from canary_test_supported_agents import CANARIES
 
 from agent_scan.agents import DISCOVERERS
 from agent_scan.agents.base import McpConfigsResult, SkillsDirsResult
-from agent_scan.canary import CANARIES
 
 _SCOPE_RETURNS = {McpConfigsResult, SkillsDirsResult}
 _CANARIES = list(CANARIES.values())

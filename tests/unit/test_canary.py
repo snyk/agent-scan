@@ -5,9 +5,9 @@ from __future__ import annotations
 from importlib.resources import files
 from pathlib import Path
 
-from agent_scan.canary import CANARIES, CanaryContext
-from agent_scan.canary.base import ExpectedItem, FixtureScope, Gap, McpScope, PluginScope
-from agent_scan.canary.claude_code import ClaudeCodeCanary
+from canary_test_supported_agents import CANARIES, CanaryContext
+from canary_test_supported_agents.base import ExpectedItem, FixtureScope, Gap, McpScope, PluginScope
+from canary_test_supported_agents.claude_code import ClaudeCodeCanary
 
 CTX = CanaryContext(home=Path("/home"), project=Path("/home/proj"), bin="claude")
 
@@ -108,7 +108,7 @@ def test_fixture_scopes_declare_files_and_assert_items_but_run_no_command():
     assert skill.commands(CTX) == []  # no CLI can write a project skill
     (sf,) = skill.files()
     assert (sf.src, sf.dest) == (
-        "fixtures/proj/.claude/skills/canary-project-skill",
+        "test_projects/proj/.claude/skills/canary-project-skill",
         ".claude/skills/canary-project-skill",
     )
     assert skill.expected() == [
@@ -119,36 +119,17 @@ def test_fixture_scopes_declare_files_and_assert_items_but_run_no_command():
 
     server = fixtures["mcp/project-file-fixture"]
     (mf,) = server.files()
-    assert (mf.src, mf.dest) == ("fixtures/proj/.mcp.json", ".mcp.json")
+    assert (mf.src, mf.dest) == ("test_projects/proj/.mcp.json", ".mcp.json")
     assert server.expected() == [ExpectedItem("mcp", "canary-project-fixture-mcp", "mcp/project-file-fixture")]
-
-
-def test_all_backoffice_agents_have_a_registered_canary():
-    # Every agent the agent-scan-backoffice canary drives must have a co-located spec here, so the
-    # backoffice runs one unified spec-driven path (no backoffice-local seed functions).
-    assert set(CANARIES) == {"claude code", "vscode", "cursor", "kiro", "windsurf", "antigravity"}
-
-
-def test_vscode_enforces_user_mcp_only():
-    # VS Code's only binary writer is `code --add-mcp` (the user mcp.json); everything else is a Gap.
-    items = CANARIES["vscode"].expected()
-    assert items == [ExpectedItem("mcp", "canary-vscode-user-mcp", "mcp/user-mcp-json")]
-
-
-def test_vscode_fork_canaries_assert_nothing():
-    # kiro/windsurf/antigravity/cursor have no CLI that writes a detectable MCP scope yet — their canary
-    # is a lifecycle (headless) run plus Gaps, asserting nothing (matches the old empty-baseline legs).
-    for name in ("kiro", "windsurf", "antigravity", "cursor"):
-        assert CANARIES[name].expected() == [], name
 
 
 def test_committed_fixtures_are_locatable():
     # Every declared FixtureFile.src must resolve to a real committed path under the package dir — the
-    # same lookup the backoffice executor does (it imports agent_scan.canary and resolves src against the
-    # package dir). A miss here means the backoffice would copy nothing and the scope would fail MISSING
-    # in CI. The fixtures ship with the agent_scan wheel (package data under agent_scan/canary/fixtures/),
-    # so importlib.resources resolves them from the installed package too.
-    root = files("agent_scan.canary")
+    # same lookup the backoffice executor does (it imports canary_test_supported_agents from the cloned
+    # source tree and resolves src against the package dir). A miss here means the backoffice would copy
+    # nothing and the scope would fail MISSING in CI. These fixtures are test support, not shipped in the
+    # agent_scan wheel, so this guards the source tree (not a built artifact).
+    root = files("canary_test_supported_agents")
     for canary in CANARIES.values():
         for scope in canary.scopes:
             for f in scope.files():

@@ -63,6 +63,13 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Put ONLY the canary spec root on sys.path so the (unshipped) live-test specs import as a top-level
+# `canary_test_supported_agents` package — the same name the agent-scan-backoffice executor imports them
+# under (it clones this repo and runs with PYTHONPATH=<clone>/tests/canary_specs). A dedicated root that
+# contains just that package keeps the import name identical on both sides WITHOUT leaking the other
+# tests/ subdirs (unit, e2e, skills, mcp_servers, ...) onto sys.path. The specs deliberately live under
+# tests/ and are not part of the shipped agent_scan wheel.
+pythonpath = ["tests/canary_specs"]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
