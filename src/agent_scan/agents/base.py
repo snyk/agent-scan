@@ -401,11 +401,10 @@ class AgentDiscoverer(ABC):
     ) -> SkillsDirsResult:
         """Walk each base dir for ``subdir_name`` directories and inspect each hit.
 
-        Shared by the Claude Code plugin ``skills``/``commands`` walks and the
-        VSCode-family extension ``skills`` walk — all iterate identically:
-        ``_walk_under_depth`` for the named directory under each base (skipping
-        unreadable bases, see its docstring), then run ``inspect_fn``
-        (``inspect_skills_dir`` or ``inspect_commands_dir``) on each match.
+        Shared by the Claude Code plugin ``skills`` walk and the VSCode-family
+        extension ``skills`` walk — both iterate identically: ``_walk_under_depth``
+        for the named directory under each base (skipping unreadable bases, see its
+        docstring), then run ``inspect_fn`` (``inspect_skills_dir``) on each match.
         """
         result: SkillsDirsResult = {}
         for base in bases:
