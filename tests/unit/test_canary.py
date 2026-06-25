@@ -89,7 +89,27 @@ def test_plugin_scope_marketplace_pin_then_installs_narrow_to_broad():
         "claude plugin install discord@claude-plugins-official --scope project",
         "claude plugin install discord@claude-plugins-official --scope user",
     ]
-    assert all(c.non_fatal for c in scope.commands(CTX))
+
+
+def test_plugin_pin_steps_are_fatal_but_add_and_installs_degrade():
+    # The two git PIN steps (fetch + checkout) must be FATAL: if the pin can't be applied, the executor
+    # must fail the leg loudly (SeedError) rather than fall through to `plugin install`, which would
+    # install unpinned LATEST — still satisfying the discord/access/configure assertions and passing
+    # green against the wrong version (the pin exists precisely to give a deterministic baseline).
+    # The marketplace add and the per-scope installs stay non-fatal: a failed install leaves its
+    # enforced items MISSING, which the inspect comparison already catches (safe degrade).
+    scope = _plugin_scope("mcp+skill/plugin")
+    cmds = scope.commands(CTX)
+
+    pin = [c for c in cmds if c.argv[0] == "git"]
+    assert len(pin) == 2  # fetch + checkout
+    assert all(not c.non_fatal for c in pin), "git fetch/checkout pin steps must be fatal"
+
+    add = next(c for c in cmds if c.argv[:4] == ("claude", "plugin", "marketplace", "add"))
+    assert add.non_fatal  # may be idempotent/transient; its failure cascades into the fatal fetch anyway
+
+    installs = [c for c in cmds if c.argv[:2] == ("claude", "plugin") and "install" in c.argv]
+    assert installs and all(c.non_fatal for c in installs)  # failed install → MISSING → caught by inspect
 
 
 def test_gaps_are_inert():

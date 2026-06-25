@@ -127,8 +127,11 @@ class McpScope(Scope):
 class PluginScope(Scope):
     """One pinned marketplace-plugin install (marketplace add → pin clone → install at each scope) that
     yields multiple expected items (the bundled mcp server + skills). Narrow→broad scope order avoids a
-    later scope deduping an earlier one's enablement write. All steps non-fatal (enforced items surface
-    as MISSING if the install fails)."""
+    later scope deduping an earlier one's enablement write. The two git PIN steps (fetch + checkout) are
+    FATAL — a failed pin fails the leg, because installing unpinned LATEST would still satisfy the
+    expected items and pass green against the wrong version. The marketplace add and the per-scope
+    installs stay non-fatal: a failed install leaves its enforced items MISSING, which the inspect
+    comparison catches."""
 
     label: str
     mirrors: tuple[Callable, ...]
@@ -142,10 +145,14 @@ class PluginScope(Scope):
     def commands(self, ctx: CanaryContext) -> list[SeedCommand]:
         clone = ctx.home / ".claude" / "plugins" / "marketplaces" / self.marketplace
         spec = f"{self.plugin}@{self.marketplace}"
+        # The two git PIN steps are FATAL (non_fatal=False): a failed fetch/checkout must fail the leg, not
+        # fall through to `plugin install` against unpinned LATEST (which still satisfies the expected items
+        # and passes green against the wrong version). marketplace add stays non-fatal — it may be idempotent
+        # or transiently fail, and if the clone is absent the fatal fetch below fails the leg loudly anyway.
         cmds = [
             SeedCommand((ctx.bin, "plugin", "marketplace", "add", self.marketplace_repo), non_fatal=True),
-            SeedCommand(("git", "-C", str(clone), "fetch", "--depth", "1", "origin", self.pin_sha), non_fatal=True),
-            SeedCommand(("git", "-C", str(clone), "checkout", "--detach", self.pin_sha), non_fatal=True),
+            SeedCommand(("git", "-C", str(clone), "fetch", "--depth", "1", "origin", self.pin_sha), non_fatal=False),
+            SeedCommand(("git", "-C", str(clone), "checkout", "--detach", self.pin_sha), non_fatal=False),
         ]
         cmds += [
             SeedCommand((ctx.bin, "plugin", "install", spec, "--scope", s), run_in_project=True, non_fatal=True)
