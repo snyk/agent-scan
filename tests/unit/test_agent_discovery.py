@@ -7808,3 +7808,177 @@ def test_find_discoverers_returns_opencode_when_installed(tmp_path):
     found = find_discoverers(tmp_path)
 
     assert any(isinstance(d, OpenCodeDiscoverer) for d in found)
+
+
+# --- OpenCodeDiscoverer: singular subdir variant (backwards-compat) ---
+
+
+def test_opencode_discoverer_scans_singular_skill_global_dir(tmp_path):
+    """``~/.config/opencode/skill/`` (singular) is loaded alongside ``skills/``
+    per https://opencode.ai/docs/config: "Singular names (e.g., ``agent/``) are
+    also supported for backwards compatibility"."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    install = _opencode_install(tmp_path)
+    sing = install / "skill" / "legacy-skill"
+    sing.mkdir(parents=True)
+    (sing / "SKILL.md").write_text("---\nname: legacy-skill\ndescription: y\n---\nBody\n")
+
+    skills_dirs = OpenCodeDiscoverer(tmp_path).discover_skills()
+
+    matching = [k for k in skills_dirs if k.endswith("/.config/opencode/skill")]
+    assert len(matching) == 1
+    skills = skills_dirs[matching[0]]
+    assert isinstance(skills, list)
+    assert skills[0][0] == "legacy-skill"
+
+
+def test_opencode_discoverer_scans_singular_skill_project_dir(tmp_path):
+    """``.opencode/skill/`` (singular) is loaded alongside ``.opencode/skills/``."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    project = tmp_path / "repo"
+    skills_dir = project / ".opencode" / "skill" / "legacy-proj"
+    skills_dir.mkdir(parents=True)
+    (skills_dir / "SKILL.md").write_text("---\nname: legacy-proj\ndescription: x\n---\nBody\n")
+    db_path = tmp_path / ".local" / "share" / "opencode" / "opencode.db"
+    _seed_opencode_db(db_path, [project.as_posix()])
+
+    skills_dirs = OpenCodeDiscoverer(tmp_path).discover_skills()
+
+    matching = [k for k in skills_dirs if k.endswith("/repo/.opencode/skill")]
+    assert len(matching) == 1
+
+
+# --- OpenCodeDiscoverer: Claude Code compatibility skill paths ---
+
+
+def test_opencode_discoverer_scans_global_claude_compat_skills(tmp_path):
+    """opencode loads ``~/.claude/skills/<name>/SKILL.md`` even when Claude Code
+    itself is not installed (https://opencode.ai/docs/skills lists it under
+    "Global Claude-compatible"). Our discoverer must surface it so a scan of an
+    opencode-only user finds it."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    # No ``~/.claude`` install dir on purpose — only the skills tree below.
+    claude_skill = tmp_path / ".claude" / "skills" / "compat-skill"
+    claude_skill.mkdir(parents=True)
+    (claude_skill / "SKILL.md").write_text("---\nname: compat-skill\ndescription: z\n---\nBody\n")
+
+    skills_dirs = OpenCodeDiscoverer(tmp_path).discover_skills()
+
+    matching = [k for k in skills_dirs if k.endswith("/.claude/skills")]
+    assert len(matching) == 1
+    skills = skills_dirs[matching[0]]
+    assert isinstance(skills, list)
+    assert skills[0][0] == "compat-skill"
+
+
+def test_opencode_discoverer_scans_global_agents_compat_skills(tmp_path):
+    """``~/.agents/skills`` cross-agent compat path is scanned."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    agents_skill = tmp_path / ".agents" / "skills" / "shared-skill"
+    agents_skill.mkdir(parents=True)
+    (agents_skill / "SKILL.md").write_text("---\nname: shared-skill\ndescription: q\n---\nBody\n")
+
+    skills_dirs = OpenCodeDiscoverer(tmp_path).discover_skills()
+
+    matching = [k for k in skills_dirs if k.endswith("/.agents/skills")]
+    assert len(matching) == 1
+
+
+def test_opencode_discoverer_scans_project_claude_and_agents_compat_skills(tmp_path):
+    """``<project>/.claude/skills`` and ``<project>/.agents/skills`` are scanned per project."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    project = tmp_path / "repo"
+    for rel, name in ((".claude/skills/cc-proj", "cc-proj"), (".agents/skills/ag-proj", "ag-proj")):
+        sd = project / rel
+        sd.mkdir(parents=True)
+        (sd / "SKILL.md").write_text(f"---\nname: {name}\ndescription: q\n---\nBody\n")
+    db_path = tmp_path / ".local" / "share" / "opencode" / "opencode.db"
+    _seed_opencode_db(db_path, [project.as_posix()])
+
+    skills_dirs = OpenCodeDiscoverer(tmp_path).discover_skills()
+
+    assert any(k.endswith("/repo/.claude/skills") for k in skills_dirs)
+    assert any(k.endswith("/repo/.agents/skills") for k in skills_dirs)
+
+
+# --- OpenCodeDiscoverer: $OPENCODE_CONFIG_DIR env override (additive) ---
+
+
+def test_opencode_discoverer_scans_opencode_config_dir_in_addition_to_default(tmp_path, monkeypatch):
+    """``$OPENCODE_CONFIG_DIR`` is scanned in addition to ``~/.config/opencode``
+    (additive on the scanner side regardless of opencode's own treatment)."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    install = _opencode_install(tmp_path)
+    # Default-dir entry
+    (install / "opencode.json").write_text(
+        '{"mcp": {"def-srv": {"type": "local", "command": ["echo"]}}}'
+    )
+    # Override-dir entry
+    override_dir = tmp_path / "alt-opencode"
+    override_dir.mkdir()
+    (override_dir / "opencode.json").write_text(
+        '{"mcp": {"alt-srv": {"type": "local", "command": ["echo"]}}}'
+    )
+
+    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(override_dir))
+    monkeypatch.setattr("agent_scan.agents.opencode.Path.home", staticmethod(lambda: tmp_path))
+
+    mcp_configs = OpenCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    seen = {next(iter(entry))[0] for entry in mcp_configs.values() if isinstance(entry, list)}
+    assert "def-srv" in seen
+    assert "alt-srv" in seen
+
+
+def test_opencode_discoverer_scans_opencode_config_dir_skills(tmp_path, monkeypatch):
+    """``$OPENCODE_CONFIG_DIR/skills`` is scanned for skills too."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    override_dir = tmp_path / "alt-opencode"
+    sk = override_dir / "skills" / "alt-skill"
+    sk.mkdir(parents=True)
+    (sk / "SKILL.md").write_text("---\nname: alt-skill\ndescription: a\n---\nBody\n")
+
+    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(override_dir))
+    monkeypatch.setattr("agent_scan.agents.opencode.Path.home", staticmethod(lambda: tmp_path))
+
+    skills_dirs = OpenCodeDiscoverer(tmp_path).discover_skills()
+
+    matching = [k for k in skills_dirs if k.endswith("/alt-opencode/skills")]
+    assert len(matching) == 1
+    skills = skills_dirs[matching[0]]
+    assert isinstance(skills, list)
+    assert skills[0][0] == "alt-skill"
+
+
+def test_opencode_discoverer_ignores_opencode_config_dir_when_not_own_home(tmp_path, monkeypatch):
+    """Env var honored only on own-home scans (matches ``$OPENCODE_CONFIG`` policy)."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    override_dir = tmp_path / "alt-opencode"
+    override_dir.mkdir()
+    (override_dir / "opencode.json").write_text(
+        '{"mcp": {"alt-srv": {"type": "local", "command": ["echo"]}}}'
+    )
+
+    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(override_dir))
+    other_home = tmp_path / "other-home"
+    other_home.mkdir()
+    monkeypatch.setattr("agent_scan.agents.opencode.Path.home", staticmethod(lambda: other_home))
+
+    mcp_configs = OpenCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    matching = [k for k in mcp_configs if "alt-opencode" in k]
+    assert matching == []
