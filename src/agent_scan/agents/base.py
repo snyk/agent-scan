@@ -414,6 +414,34 @@ class AgentDiscoverer(ABC):
                     result[found.as_posix()] = inspect_fn(str(found))
         return result
 
+    def _discover_plugin_mcp_files(
+        self,
+        bases: list[Path],
+        filenames: tuple[str, ...],
+        parse_fn: Callable[[Path], McpScanResult],
+    ) -> McpConfigsResult:
+        """Walk each base dir for plugin MCP files named in ``filenames``, parse
+        each hit via ``parse_fn``, keyed by absolute path.
+
+        The MCP counterpart of :meth:`_discover_skill_and_command_dirs`, shared by
+        the Claude Code, Codex, and Cursor plugin walks. Each agent supplies its own
+        ``filenames`` and ``parse_fn`` (format union / snake-case / ``skip_unrecognized``
+        policy), so per-agent parsing stays in the subclass while the walk is shared.
+        A falsy result (``None`` or empty list) is skipped; a truthy
+        ``CouldNotParseMCPConfig`` is recorded.
+        """
+        result: McpConfigsResult = {}
+        for base in bases:
+            for name in filenames:
+                for mcp_file in _walk_under_depth(base, name, _MAX_PLUGIN_RGLOB_DEPTH, want_file=True):
+                    if not mcp_file.is_file():
+                        continue
+                    parsed = parse_fn(mcp_file)
+                    if not parsed:
+                        continue
+                    result[mcp_file.as_posix()] = parsed
+        return result
+
     # --- shared project-folder enumeration (used by both Claude Code and the VSCode family) ---
 
     def _discover_project_folders(self) -> list[Path]:

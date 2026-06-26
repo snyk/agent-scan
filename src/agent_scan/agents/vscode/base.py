@@ -827,12 +827,12 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
 
     def _discover_extension_mcp_servers(self) -> McpConfigsResult:
         """Scan ``mcp.json`` under each *installed* extension (no leading dot — the
-        VSCode-family file-name convention). Mirrors
-        :meth:`ClaudeCodeDiscoverer._discover_plugin_mcp_servers` but uses
-        :attr:`_VSCODE_FAMILY_FORMATS` so wrapped, VSCode-flat ``servers``, and
-        fully flat shapes all parse. Roots are install-manifest gated (see
-        :meth:`_extension_scan_roots`) so uninstalled extensions left on disk are
-        not scanned.
+        VSCode-family file-name convention) via the shared
+        :meth:`_discover_plugin_mcp_files`, the same opportunistic walk the Claude
+        Code / Codex / Cursor plugin trees use. Roots are install-manifest gated
+        (see :meth:`_extension_scan_roots`) so uninstalled extensions left on disk
+        are not scanned. Uses :attr:`_VSCODE_FAMILY_FORMATS` so wrapped, VSCode-flat
+        ``servers``, and fully flat shapes all parse.
 
         ``skip_unrecognized=True``: this walk matches every file merely *named*
         ``mcp.json``, and extensions ship unrelated files under that name (JSON
@@ -840,16 +840,11 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         ``CouldNotParseMCPConfig`` false positives; a file with a real MCP shape
         that fails to validate is still reported as malformed.
         """
-        result: McpConfigsResult = {}
-        for root in self._extension_scan_roots():
-            for mcp_file in _walk_under_depth(root, "mcp.json", _MAX_PLUGIN_RGLOB_DEPTH, want_file=True):
-                if not mcp_file.is_file():
-                    continue
-                parsed = self._parse_mcp_file(mcp_file, formats=_VSCODE_FAMILY_FORMATS, skip_unrecognized=True)
-                if parsed is None:
-                    continue
-                result[mcp_file.as_posix()] = parsed
-        return result
+        return self._discover_plugin_mcp_files(
+            self._extension_scan_roots(),
+            ("mcp.json",),
+            lambda f: self._parse_mcp_file(f, formats=_VSCODE_FAMILY_FORMATS, skip_unrecognized=True),
+        )
 
     def _discover_extension_skills(self) -> SkillsDirsResult:
         """Scan ``skills/`` subdirs under each *installed* extension (roots are

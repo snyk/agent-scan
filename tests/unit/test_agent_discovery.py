@@ -3382,6 +3382,92 @@ def test_cursor_extension_skills_discovers_skills_dir(tmp_path):
     assert len(matching) == 1
 
 
+def test_cursor_plugin_mcp_discovers_mcp_json_flat(tmp_path):
+    """Installed Cursor plugins under ``~/.cursor/plugins/cache`` are scanned for a
+    flat ``{name: serverConfig}`` ``mcp.json`` (the Linear-plugin shape)."""
+    from agent_scan.agents import CursorDiscoverer
+
+    plugin_dir = tmp_path / ".cursor" / "plugins" / "cache" / "cursor-public" / "linear" / "abc123"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "mcp.json").write_text('{"linear": {"command": "linear-mcp"}}')
+
+    mcp_configs = CursorDiscoverer(tmp_path).discover_mcp_servers()
+
+    matching = [k for k in mcp_configs if k.endswith("/cursor-public/linear/abc123/mcp.json")]
+    assert len(matching) == 1
+    entries = mcp_configs[matching[0]]
+    assert isinstance(entries, list)
+    name, _ = entries[0]
+    assert name == "linear"
+
+
+def test_cursor_plugin_mcp_discovers_dot_mcp_json_wrapped(tmp_path):
+    """Installed Cursor plugins are scanned for a wrapped ``{"mcpServers": ...}``
+    ``.mcp.json`` carrying a remote server (the Atlassian-plugin shape)."""
+    from agent_scan.agents import CursorDiscoverer
+
+    plugin_dir = tmp_path / ".cursor" / "plugins" / "cache" / "cursor-public" / "atlassian" / "def456"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / ".mcp.json").write_text(
+        '{"mcpServers": {"atlassian": {"type": "http", "url": "https://mcp.atlassian.com/v1/mcp"}}}'
+    )
+
+    mcp_configs = CursorDiscoverer(tmp_path).discover_mcp_servers()
+
+    matching = [k for k in mcp_configs if k.endswith("/atlassian/def456/.mcp.json")]
+    assert len(matching) == 1
+    entries = mcp_configs[matching[0]]
+    assert isinstance(entries, list)
+    name, _ = entries[0]
+    assert name == "atlassian"
+
+
+def test_cursor_plugin_skills_discovers_skills_dir(tmp_path):
+    """Installed Cursor plugins can ship a ``skills/`` directory."""
+    from agent_scan.agents import CursorDiscoverer
+
+    skill_dir = (
+        tmp_path / ".cursor" / "plugins" / "cache" / "cursor-public" / "datadog" / "fed789" / "skills" / "ddsetup"
+    )
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("---\nname: ddsetup\ndescription: d\n---\n\nbody.\n")
+
+    skills_dirs = CursorDiscoverer(tmp_path).discover_skills()
+
+    matching = [k for k in skills_dirs if k.endswith("/datadog/fed789/skills")]
+    assert len(matching) == 1
+
+
+def test_cursor_plugin_local_dir_scanned(tmp_path):
+    """Locally-installed Cursor plugins under ``~/.cursor/plugins/local`` are scanned too."""
+    from agent_scan.agents import CursorDiscoverer
+
+    plugin_dir = tmp_path / ".cursor" / "plugins" / "local" / "my-plugin"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / "mcp.json").write_text('{"mcpServers": {"local-srv": {"command": "l"}}}')
+
+    mcp_configs = CursorDiscoverer(tmp_path).discover_mcp_servers()
+
+    matching = [k for k in mcp_configs if k.endswith("/plugins/local/my-plugin/mcp.json")]
+    assert len(matching) == 1
+    name, _ = mcp_configs[matching[0]][0]
+    assert name == "local-srv"
+
+
+def test_cursor_plugins_marketplaces_not_scanned(tmp_path):
+    """Only *installed* plugins (``cache``/``local``) are scanned; a marketplace
+    catalog clone under ``~/.cursor/plugins/marketplaces`` is NOT walked."""
+    from agent_scan.agents import CursorDiscoverer
+
+    catalog_dir = tmp_path / ".cursor" / "plugins" / "marketplaces" / "cursor-public" / "uninstalled" / "xyz"
+    catalog_dir.mkdir(parents=True)
+    (catalog_dir / "mcp.json").write_text('{"mcpServers": {"uninstalled-srv": {"command": "u"}}}')
+
+    mcp_configs = CursorDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert not any("/marketplaces/" in k for k in mcp_configs)
+
+
 def test_windsurf_extension_mcp_discovers_mcp_json(tmp_path):
     """Windsurf is a VSCode fork. Its Codeium *engine* state lives under
     ``~/.codeium/windsurf`` (the MCP/skill paths), but its VSCode-fork *user data*
@@ -3405,6 +3491,37 @@ def test_windsurf_extension_mcp_discovers_mcp_json(tmp_path):
     assert name == "ws-ext-srv"
 
 
+def test_vscode_extension_empty_mcpservers_map_skipped(tmp_path, monkeypatch):
+    """An installed extension's ``mcp.json`` with an empty ``mcpServers`` map yields
+    no servers and is omitted rather than recorded as an empty entry, while a
+    populated sibling under the same manifest IS recorded — so the absence is the
+    empty-config drop (the shared ``if not parsed`` skip), not the extension going
+    unscanned. Cf. ``test_claude_mcp_formats_empty_mcpservers_map_skipped``."""
+    from agent_scan.agents import VSCodeDiscoverer
+
+    monkeypatch.setattr(VSCodeDiscoverer, "_builtin_extension_dirs", lambda self: [])
+    exts = tmp_path / ".vscode" / "extensions"
+    empty = exts / "pub.empty-1.0.0"
+    populated = exts / "pub.populated-1.0.0"
+    empty.mkdir(parents=True)
+    populated.mkdir(parents=True)
+    (empty / "mcp.json").write_text('{"mcpServers": {}}')
+    (populated / "mcp.json").write_text('{"mcpServers": {"real-srv": {"command": "r"}}}')
+    (exts / "extensions.json").write_text(
+        '[{"relativeLocation": "pub.empty-1.0.0"}, {"relativeLocation": "pub.populated-1.0.0"}]'
+    )
+
+    mcp_configs = VSCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    # Positive control: the populated sibling IS scanned and recorded...
+    populated_keys = [k for k in mcp_configs if k.endswith("/pub.populated-1.0.0/mcp.json")]
+    assert len(populated_keys) == 1
+    name, _ = mcp_configs[populated_keys[0]][0]
+    assert name == "real-srv"
+    # ...so the empty config's absence is the drop, not an unscanned dir.
+    assert [k for k in mcp_configs if k.endswith("/pub.empty-1.0.0/mcp.json")] == []
+
+
 def test_vscode_extension_walk_respects_max_depth_cap(tmp_path, monkeypatch):
     """An extension nested deeper than the depth cap is not scanned.
 
@@ -3412,11 +3529,12 @@ def test_vscode_extension_walk_respects_max_depth_cap(tmp_path, monkeypatch):
     pathologically deep trees blowing up the walk.
     """
     from agent_scan.agents import VSCodeDiscoverer
-    from agent_scan.agents.vscode import base as vscode_base
+    from agent_scan.agents import base as agent_base
 
-    # The extension walk reads ``_MAX_PLUGIN_RGLOB_DEPTH`` from its own module
-    # (agents.vscode.base), so patch the cap there.
-    monkeypatch.setattr(vscode_base, "_MAX_PLUGIN_RGLOB_DEPTH", 3)
+    # The extension MCP walk delegates to ``AgentDiscoverer._discover_plugin_mcp_files``
+    # (agents.base), which reads ``_MAX_PLUGIN_RGLOB_DEPTH`` from that module, so patch
+    # the cap there.
+    monkeypatch.setattr(agent_base, "_MAX_PLUGIN_RGLOB_DEPTH", 3)
 
     # Scan the tree as a built-in (manifest-less) root so it is walked wholesale
     # and depth *pruning* — not manifest gating — is what's under test; depth is
