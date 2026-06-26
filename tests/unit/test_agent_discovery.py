@@ -7982,3 +7982,187 @@ def test_opencode_discoverer_ignores_opencode_config_dir_when_not_own_home(tmp_p
 
     matching = [k for k in mcp_configs if "alt-opencode" in k]
     assert matching == []
+
+
+# --- OpenCodeDiscoverer: ~/.opencode second global config dir ---
+
+
+def test_opencode_discoverer_scans_dot_opencode_home_dir_skills(tmp_path):
+    """``~/.opencode`` is a second global config dir per opencode's
+    ConfigPaths.directories (packages/opencode/src/config/paths.ts:34-38)."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    alt = tmp_path / ".opencode"
+    sk = alt / "skills" / "home-skill"
+    sk.mkdir(parents=True)
+    (sk / "SKILL.md").write_text("---\nname: home-skill\ndescription: x\n---\nBody\n")
+
+    skills_dirs = OpenCodeDiscoverer(tmp_path).discover_skills()
+
+    matching = [k for k in skills_dirs if k.endswith("/.opencode/skills") and ".config" not in k]
+    assert len(matching) == 1
+    skills = skills_dirs[matching[0]]
+    assert isinstance(skills, list)
+    assert skills[0][0] == "home-skill"
+
+
+def test_opencode_discoverer_scans_dot_opencode_home_dir_mcp(tmp_path):
+    """``~/.opencode/opencode.json`` is a second global MCP config source."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    alt = tmp_path / ".opencode"
+    alt.mkdir()
+    (alt / "opencode.json").write_text(
+        '{"mcp": {"home-srv": {"type": "local", "command": ["echo"]}}}'
+    )
+
+    mcp_configs = OpenCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    matching = [k for k in mcp_configs if k.endswith("/.opencode/opencode.json") and ".config" not in k]
+    assert len(matching) == 1
+    entries = mcp_configs[matching[0]]
+    assert isinstance(entries, list)
+    assert entries[0][0] == "home-srv"
+
+
+# --- OpenCodeDiscoverer: cfg.skills.paths user-declared skill folders ---
+
+
+def test_opencode_discoverer_scans_skills_paths_with_tilde_expansion(tmp_path):
+    """``skills.paths: ["~/team-skills"]`` resolves ``~`` to home_directory."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    install = _opencode_install(tmp_path)
+    team_skills = tmp_path / "team-skills" / "team-skill"
+    team_skills.mkdir(parents=True)
+    (team_skills / "SKILL.md").write_text("---\nname: team-skill\ndescription: y\n---\nBody\n")
+    (install / "opencode.json").write_text(
+        '{"skills": {"paths": ["~/team-skills"]}}'
+    )
+
+    skills_dirs = OpenCodeDiscoverer(tmp_path).discover_skills()
+
+    matching = [k for k in skills_dirs if k.endswith("/team-skills")]
+    assert len(matching) == 1
+    skills = skills_dirs[matching[0]]
+    assert isinstance(skills, list)
+    assert skills[0][0] == "team-skill"
+
+
+def test_opencode_discoverer_scans_skills_paths_with_absolute_path(tmp_path):
+    """Absolute ``skills.paths`` entries are taken as-is."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    install = _opencode_install(tmp_path)
+    abs_root = tmp_path / "abs-skill-root"
+    skill = abs_root / "abs-skill"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: abs-skill\ndescription: a\n---\nBody\n")
+    (install / "opencode.json").write_text(
+        '{"skills": {"paths": ["' + abs_root.as_posix() + '"]}}'
+    )
+
+    skills_dirs = OpenCodeDiscoverer(tmp_path).discover_skills()
+
+    matching = [k for k in skills_dirs if k.endswith("/abs-skill-root")]
+    assert len(matching) == 1
+
+
+def test_opencode_discoverer_scans_skills_paths_relative_to_config_dir(tmp_path):
+    """Relative ``skills.paths`` resolve against the containing config file's directory,
+    matching opencode's loader."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    project = tmp_path / "repo"
+    project.mkdir()
+    rel_skill = project / "vendor-skills" / "vendor-skill"
+    rel_skill.mkdir(parents=True)
+    (rel_skill / "SKILL.md").write_text("---\nname: vendor-skill\ndescription: v\n---\nBody\n")
+    (project / "opencode.json").write_text('{"skills": {"paths": ["./vendor-skills"]}}')
+    db_path = tmp_path / ".local" / "share" / "opencode" / "opencode.db"
+    _seed_opencode_db(db_path, [project.as_posix()])
+
+    skills_dirs = OpenCodeDiscoverer(tmp_path).discover_skills()
+
+    matching = [k for k in skills_dirs if k.endswith("/repo/vendor-skills")]
+    assert len(matching) == 1
+
+
+def test_opencode_discoverer_skips_non_string_skills_paths(tmp_path):
+    """Malformed entries are skipped silently (don't blow up the discoverer)."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    install = _opencode_install(tmp_path)
+    (install / "opencode.json").write_text(
+        '{"skills": {"paths": [123, null, "", true]}}'
+    )
+
+    skills_dirs = OpenCodeDiscoverer(tmp_path).discover_skills()
+
+    assert skills_dirs == {}
+
+
+def test_opencode_discoverer_skips_skills_paths_when_field_missing(tmp_path):
+    """No ``skills`` block in opencode.json -> no error, no entries."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    install = _opencode_install(tmp_path)
+    (install / "opencode.json").write_text('{"mcp": {}}')
+
+    skills_dirs = OpenCodeDiscoverer(tmp_path).discover_skills()
+
+    assert skills_dirs == {}
+
+
+# --- OpenCodeDiscoverer: URL-pulled skill cache (~/.cache/opencode/skills/) ---
+
+
+def test_opencode_discoverer_scans_cached_url_skills(tmp_path):
+    """``~/.cache/opencode/skills/<hash>/<skill>/SKILL.md`` (skills downloaded
+    via ``cfg.skills.urls``) is scanned per hash dir."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    hash_dir = tmp_path / ".cache" / "opencode" / "skills" / "abcd1234"
+    sk = hash_dir / "remote-skill"
+    sk.mkdir(parents=True)
+    (sk / "SKILL.md").write_text("---\nname: remote-skill\ndescription: r\n---\nBody\n")
+
+    skills_dirs = OpenCodeDiscoverer(tmp_path).discover_skills()
+
+    matching = [k for k in skills_dirs if k.endswith("/.cache/opencode/skills/abcd1234")]
+    assert len(matching) == 1
+    skills = skills_dirs[matching[0]]
+    assert isinstance(skills, list)
+    assert skills[0][0] == "remote-skill"
+
+
+def test_opencode_discoverer_scans_cached_url_skills_returns_empty_when_dir_absent(tmp_path):
+    """No ``~/.cache/opencode/skills/`` -> no extra entries (graceful)."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    # No cache dir on disk
+
+    skills_dirs = OpenCodeDiscoverer(tmp_path).discover_skills()
+
+    assert all("/.cache/opencode/skills" not in k for k in skills_dirs)
+
+
+def test_opencode_discoverer_scans_multiple_cached_hash_dirs(tmp_path):
+    """Multiple hash dirs each become their own skill scope."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    for h in ("hash-a", "hash-b"):
+        sk = tmp_path / ".cache" / "opencode" / "skills" / h / f"{h}-skill"
+        sk.mkdir(parents=True)
+        (sk / "SKILL.md").write_text(f"---\nname: {h}-skill\ndescription: q\n---\nBody\n")
+
+    skills_dirs = OpenCodeDiscoverer(tmp_path).discover_skills()
+
+    matching = [k for k in skills_dirs if "/.cache/opencode/skills/" in k]
+    assert len(matching) == 2

@@ -68,6 +68,24 @@ class OpenCodeDiscoverer(AgentDiscoverer):
       Cross-discoverer overlap when Claude Code *is* also installed is harmless:
       the pipeline keys results by absolute path and dedupes.
 
+    * Second global dir — opencode's own ``ConfigPaths.directories`` also walks
+      ``~/.opencode`` (``packages/opencode/src/config/paths.ts``), so that
+      location is treated as a second global config root.
+
+    * User-declared skill folders — opencode's config schema
+      (``packages/core/src/v1/config/skills.ts``) exposes
+      ``skills.paths: string[]`` for "additional paths to skill folders". Every
+      ``opencode.json`` we already parse is rechecked for this array, and each
+      entry is expanded the way opencode does: ``~/...`` against
+      ``home_directory``, relative against the *containing config file's
+      directory*.
+
+    * URL-pulled skill cache — opencode's config also exposes
+      ``skills.urls: string[]``; the runtime puller writes downloaded skills
+      under ``~/.cache/opencode/skills/<Bun.hash(base-url)>/<skill-name>/SKILL.md``
+      (``packages/core/src/skill/discovery.ts``). Each hash dir is scanned as a
+      skills-dir root.
+
     Project enumeration is unusual: opencode persists the absolute paths of
     opened projects in a SQLite database at
     ``~/.local/share/opencode/opencode.db`` (Drizzle ``project`` table,
@@ -79,7 +97,18 @@ class OpenCodeDiscoverer(AgentDiscoverer):
     name = "opencode"
 
     _install_path = "~/.config/opencode"
+    # opencode's own ``ConfigPaths.directories`` walks ``Global.Path.home`` for
+    # a ``.opencode`` dir (packages/opencode/src/config/paths.ts:34-38), so
+    # ``~/.opencode`` is a real second global config location alongside
+    # ``~/.config/opencode``. Scanned for both ``opencode.{json,jsonc}`` and
+    # ``{skills,skill}`` subdirs.
+    _install_path_alt = "~/.opencode"
     _data_path = "~/.local/share/opencode"
+    # opencode caches URL-pulled skills here. Per
+    # packages/core/src/skill/discovery.ts:107 the layout is
+    # ``<cache>/skills/<bun-hash-of-base-url>/<skill-name>/SKILL.md``. We walk
+    # the ``<hash>`` level so each hash dir is treated like a skills dir root.
+    _cache_path = "~/.cache/opencode"
     _db_filename = "opencode.db"
     # Both spellings are documented; ``skills/`` is canonical, ``skill/`` is the
     # backwards-compat alias. We scan both so a user who created either gets
@@ -129,6 +158,8 @@ class OpenCodeDiscoverer(AgentDiscoverer):
         result.update(self._discover_global_skills())
         result.update(self._discover_project_skills())
         result.update(self._discover_managed_skills())
+        result.update(self._discover_config_skills_paths())
+        result.update(self._discover_cached_url_skills())
         return result
 
     # --- folder resolution ---
@@ -149,12 +180,19 @@ class OpenCodeDiscoverer(AgentDiscoverer):
     def _global_config_dirs(self) -> list[Path]:
         """Every global config dir to sweep for MCP/skills.
 
-        Always includes the XDG default (``~/.config/opencode``). When
-        ``$OPENCODE_CONFIG_DIR`` is set on an own-home scan, prepend it — kept
-        additive (not a replacement) so the scanner never misses configs
-        regardless of whether opencode treats the env var as relocation or as
-        an additional search root. Results are downstream-keyed by absolute
-        path, so a single dir that appears both ways collapses to one entry.
+        Includes (in priority order):
+
+        - ``$OPENCODE_CONFIG_DIR`` when set on an own-home scan — kept additive
+          (not a replacement) so the scanner never misses configs regardless of
+          whether opencode treats the env var as relocation or as an additional
+          search root.
+        - ``~/.config/opencode`` — the XDG default.
+        - ``~/.opencode`` — opencode's ``ConfigPaths.directories`` also walks
+          ``Global.Path.home`` for ``.opencode``, so a user with skills or an
+          ``opencode.json`` directly under their home dir gets discovered too.
+
+        Results are downstream-keyed by absolute path, so a single dir that
+        appears multiple ways collapses to one entry.
         """
         dirs: list[Path] = []
         if self._scans_own_home():
@@ -162,10 +200,14 @@ class OpenCodeDiscoverer(AgentDiscoverer):
             if override:
                 dirs.append(Path(override))
         dirs.append(self._default_global_config_dir())
+        dirs.append(expand_path(Path(self._install_path_alt), self.home_directory))
         return dirs
 
     def _data_dir(self) -> Path:
         return expand_path(Path(self._data_path), self.home_directory)
+
+    def _cache_dir(self) -> Path:
+        return expand_path(Path(self._cache_path), self.home_directory)
 
     def _managed_config_dir(self) -> Path | None:
         """System-wide opencode config directory, or ``None`` on unsupported OSes.
@@ -312,4 +354,107 @@ class OpenCodeDiscoverer(AgentDiscoverer):
         result: SkillsDirsResult = {}
         for sub in self._skills_subdirs:
             self._record_skills_at(result, managed_dir / sub)
+        return result
+
+    # --- skills.paths from user opencode.json (Gap B) ---
+
+    def _iter_candidate_config_files(self) -> list[Path]:
+        """Every opencode config file we'd consider for ``skills.paths`` extraction.
+
+        Covers the same scopes as MCP discovery (global, project, managed,
+        ``$OPENCODE_CONFIG`` env file) so a ``skills.paths`` declared anywhere
+        opencode honors it is picked up. The file may or may not exist;
+        ``_load_json_file`` handles missing/unreadable files quietly.
+        """
+        candidates: list[Path] = []
+        for base in self._global_config_dirs():
+            for filename in _CONFIG_FILENAMES:
+                candidates.append(base / filename)
+        for project in self._project_paths_with_ancestors():
+            for filename in _CONFIG_FILENAMES:
+                candidates.append(project / filename)
+        managed = self._managed_config_dir()
+        if managed is not None:
+            for filename in _CONFIG_FILENAMES:
+                candidates.append(managed / filename)
+        env_path = self._opencode_config_env_path()
+        if env_path is not None:
+            candidates.append(env_path)
+        return candidates
+
+    def _discover_config_skills_paths(self) -> SkillsDirsResult:
+        """Scan every ``skills.paths`` entry referenced from any opencode.json.
+
+        Per ``packages/core/src/v1/config/skills.ts``:
+
+            paths: Schema.optional(Schema.Array(Schema.String))
+                .annotate({ description: "Additional paths to skill folders" })
+
+        The opencode loader (``packages/opencode/src/skill/index.ts:211-220``)
+        expands each entry — ``~/...`` against the user's home, relative paths
+        against the *containing config file's directory* — then globs
+        ``**/SKILL.md`` recursively. We mirror the expansion rules; the
+        recursive ``**/SKILL.md`` is handled by ``_scan_skills_dir`` only at
+        the top level for now (nested skills are a separate follow-up, since
+        ``inspect_skills_dir`` is shared infrastructure).
+
+        Malformed config files (already reported by MCP discovery) are skipped
+        here — we only consume the ``skills.paths`` array on success.
+        """
+        result: SkillsDirsResult = {}
+        for config_path in self._iter_candidate_config_files():
+            data = self._load_json_file(config_path)
+            if not isinstance(data, dict):
+                continue
+            skills = data.get("skills")
+            if not isinstance(skills, dict):
+                continue
+            paths = skills.get("paths")
+            if not isinstance(paths, list):
+                continue
+            for entry in paths:
+                if not isinstance(entry, str) or not entry:
+                    continue
+                resolved = self._resolve_skills_path_entry(entry, config_path)
+                self._record_skills_at(result, resolved)
+        return result
+
+    def _resolve_skills_path_entry(self, entry: str, config_path: Path) -> Path:
+        """Expand a single ``skills.paths`` entry the way opencode does.
+
+        - ``~/...`` -> joined to ``self.home_directory``.
+        - Absolute -> as-is.
+        - Relative -> joined to the *containing config file's directory*.
+        """
+        if entry.startswith("~/") or entry == "~":
+            return expand_path(Path(entry), self.home_directory)
+        candidate = Path(entry)
+        if candidate.is_absolute():
+            return candidate
+        return config_path.parent / candidate
+
+    # --- URL-pulled skills cache (Gap C) ---
+
+    def _discover_cached_url_skills(self) -> SkillsDirsResult:
+        """Scan ``~/.cache/opencode/skills/<hash>/`` for skills pulled from
+        ``cfg.skills.urls`` URLs.
+
+        Per ``packages/core/src/skill/discovery.ts:107`` the layout is
+        ``<cache>/skills/<Bun.hash(base-url)>/<skill-name>/SKILL.md``. Each
+        ``<hash>`` directory is structurally identical to a normal skills dir
+        root, so we list one level beneath ``skills/`` and feed each match
+        through ``_scan_skills_dir``.
+        """
+        cache_skills = self._cache_dir() / "skills"
+        result: SkillsDirsResult = {}
+        try:
+            if not cache_skills.is_dir():
+                return result
+            hash_dirs = sorted(cache_skills.iterdir())
+        except (PermissionError, OSError):
+            return result
+        for hash_dir in hash_dirs:
+            if not hash_dir.is_dir():
+                continue
+            self._record_skills_at(result, hash_dir)
         return result
