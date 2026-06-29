@@ -142,15 +142,26 @@ class OpenCodeDiscoverer(AgentDiscoverer):
     # --- public (override AgentDiscoverer abstracts) ---
 
     def client_exists(self) -> str | None:
-        """Detect an opencode install at any of the known global config dirs.
+        """Detect an opencode install at any known global config dir or the
+        ``$OPENCODE_CONFIG`` file.
 
         Walks every candidate in :meth:`_global_config_dirs` (XDG override,
         ``$OPENCODE_CONFIG_DIR``, ``~/.config/opencode``, ``~/.opencode``) and
         returns the first one that exists. A user with ``$XDG_CONFIG_HOME``
         relocating their config out of ``~/.config`` would otherwise read as
         "not installed" and skip the whole discoverer.
+
+        The ``$OPENCODE_CONFIG`` file (own-home scans only, via
+        :meth:`_opencode_config_env_path`) is checked last: a user who relocates
+        their entire config to a file outside any standard dir would otherwise
+        read as "not installed", so ``discover`` would bail before
+        :meth:`_discover_env_override_mcp_servers` could surface it.
         """
-        for path in self._global_config_dirs():
+        candidates = list(self._global_config_dirs())
+        env_config = self._opencode_config_env_path()
+        if env_config is not None:
+            candidates.append(env_config)
+        for path in candidates:
             try:
                 if path.exists():
                     return path.as_posix()

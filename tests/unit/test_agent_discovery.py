@@ -7659,6 +7659,60 @@ def test_opencode_discoverer_ignores_env_var_when_not_own_home(tmp_path, monkeyp
     assert str(override_path) not in mcp_configs
 
 
+def test_opencode_discoverer_detects_install_via_opencode_config_env(tmp_path, monkeypatch):
+    """An env-only install — ``$OPENCODE_CONFIG`` pointing at a config file with
+    NO standard global dir present — must register as installed. Otherwise
+    ``client_exists`` returns ``None``, ``discover`` bails, and the env-override
+    MCP servers ``_discover_env_override_mcp_servers`` exists to surface are
+    never scanned."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    # No ``~/.config/opencode`` or ``~/.opencode`` on disk — only the env file.
+    override_path = tmp_path / "custom.json"
+    override_path.write_text('{"mcp": {"env-srv": {"type": "local", "command": ["echo"]}}}')
+
+    monkeypatch.setenv("OPENCODE_CONFIG", str(override_path))
+    _force_home(monkeypatch, tmp_path)
+
+    result = OpenCodeDiscoverer(tmp_path).client_exists()
+
+    assert result == override_path.as_posix()
+
+
+def test_opencode_discoverer_discover_surfaces_env_only_install(tmp_path, monkeypatch):
+    """The full ``discover()`` path on an env-only install (no standard dir) yields
+    the env-override MCP servers rather than ``None``."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    override_path = tmp_path / "custom.json"
+    override_path.write_text('{"mcp": {"env-srv": {"type": "local", "command": ["echo"]}}}')
+
+    monkeypatch.setenv("OPENCODE_CONFIG", str(override_path))
+    _force_home(monkeypatch, tmp_path)
+
+    cti = OpenCodeDiscoverer(tmp_path).discover()
+
+    assert cti is not None
+    assert str(override_path) in cti.mcp_configs
+
+
+def test_opencode_discoverer_ignores_opencode_config_env_for_client_exists_when_not_own_home(tmp_path, monkeypatch):
+    """The ``$OPENCODE_CONFIG`` install signal is honored only on own-home scans,
+    matching the env-override MCP policy — under ``--scan-all-users`` it reflects
+    the scanning process's env, not the scanned user's."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    override_path = tmp_path / "custom.json"
+    override_path.write_text('{"mcp": {"env-srv": {"type": "local", "command": ["echo"]}}}')
+
+    monkeypatch.setenv("OPENCODE_CONFIG", str(override_path))
+    other_home = tmp_path / "other-home"
+    other_home.mkdir()
+    _force_home(monkeypatch, other_home)
+
+    assert OpenCodeDiscoverer(tmp_path).client_exists() is None
+
+
 # --- OpenCodeDiscoverer: discover_skills ---
 
 
