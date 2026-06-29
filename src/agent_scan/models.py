@@ -323,8 +323,8 @@ class OpenCodeConfigFile(MCPConfig):
         if not isinstance(data, dict):
             raise ValueError("opencode config must be a JSON object")
         mcp = data.get("mcp")
-        if not isinstance(mcp, dict) or not mcp:
-            raise ValueError("opencode config has no non-empty 'mcp' block")
+        if not isinstance(mcp, dict):
+            raise ValueError("opencode config has no 'mcp' block")
         servers: dict[str, dict[str, Any]] = {}
         for name, entry in mcp.items():
             if not isinstance(entry, dict):

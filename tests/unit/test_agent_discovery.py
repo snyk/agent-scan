@@ -7522,6 +7522,19 @@ def test_opencode_discoverer_skips_config_without_mcp_block(tmp_path):
     assert mcp_configs == {}
 
 
+def test_opencode_discoverer_skips_config_with_empty_mcp_block(tmp_path):
+    """``{"mcp": {}}`` is a valid opencode config (zero servers configured) —
+    must skip silently rather than report ``CouldNotParseMCPConfig``."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    install = _opencode_install(tmp_path)
+    (install / "opencode.json").write_text('{"mcp": {}}')
+
+    mcp_configs = OpenCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert mcp_configs == {}
+
+
 def test_opencode_discoverer_records_could_not_parse_on_invalid_json(tmp_path):
     from agent_scan.agents import OpenCodeDiscoverer
 
@@ -7730,7 +7743,7 @@ def test_opencode_discoverer_discovers_project_skills_dir(tmp_path):
 
 def test_opencode_discoverer_discovers_managed_mcp_servers(tmp_path, monkeypatch):
     """Managed dir per OS yields its ``opencode.json`` mcp entries."""
-    from agent_scan.agents import OpenCodeDiscoverer, opencode as opencode_module
+    from agent_scan.agents import OpenCodeDiscoverer
 
     _opencode_install(tmp_path)
     managed = tmp_path / "managed-opencode"
@@ -7747,7 +7760,6 @@ def test_opencode_discoverer_discovers_managed_mcp_servers(tmp_path, monkeypatch
     entries = mcp_configs[matching[0]]
     assert isinstance(entries, list)
     assert entries[0][0] == "mgr-srv"
-    assert opencode_module  # silence unused-import lint when running this test alone
 
 
 def test_opencode_discoverer_managed_config_dir_per_os(monkeypatch):
