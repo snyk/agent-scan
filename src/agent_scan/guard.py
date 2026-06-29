@@ -133,10 +133,7 @@ def _get_machine_description(client: str) -> str:
     from agent_scan.upload import get_hostname
 
     hostname = get_hostname()
-    if client == "all":
-        label = ", ".join(_client_label(c) for c in ALL_CLIENTS)
-    else:
-        label = _client_label(client)
+    label = ", ".join(_client_label(c) for c in ALL_CLIENTS) if client == "all" else _client_label(client)
     return f"agent-guard ({hostname}) {label}"
 
 
