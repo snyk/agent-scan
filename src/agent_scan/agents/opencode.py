@@ -181,15 +181,6 @@ class OpenCodeDiscoverer(AgentDiscoverer):
         """The XDG-style default global config dir, ignoring ``OPENCODE_CONFIG_DIR``."""
         return expand_path(Path(self._install_path), self.home_directory)
 
-    def _global_config_dir(self) -> Path:
-        """The single global config dir reported as the install path.
-
-        Kept as the canonical install path for ``client_exists``; the discovery
-        sweeps consult :meth:`_global_config_dirs` instead so they cover the
-        ``OPENCODE_CONFIG_DIR`` override too.
-        """
-        return self._default_global_config_dir()
-
     def _xdg_env_dir(self, env_var: str) -> Path | None:
         """Return ``<env>/opencode`` if ``env_var`` is set on an own-home scan.
 
@@ -532,6 +523,10 @@ class OpenCodeDiscoverer(AgentDiscoverer):
             try:
                 if not cache_skills.is_dir():
                     continue
+                # Sort for deterministic ordering in tests/output; opencode's
+                # runtime doesn't impose any order on the bun-hash directories
+                # (each maps to a distinct base URL via Bun.hash, so iteration
+                # order is FS-dependent).
                 hash_dirs = sorted(cache_skills.iterdir())
             except (PermissionError, OSError):
                 continue
