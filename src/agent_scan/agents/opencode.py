@@ -68,8 +68,14 @@ class OpenCodeDiscoverer(AgentDiscoverer):
       These are scanned even when Claude Code itself is not installed (an
       opencode-only user may still have authored skills under one of these
       directories — opencode will load them, so the scanner must see them).
-      Cross-discoverer overlap when Claude Code *is* also installed is harmless:
-      the pipeline keys results by absolute path and dedupes.
+      Cross-discoverer overlap when Claude Code *is* also installed is expected,
+      not deduped away. The pipeline dedupes only *within* one agent: it keys
+      ``ClientToInspect`` by ``(name, username)`` and unions each one's
+      path-keyed ``skills_dirs`` (see ``pipelines.discover_clients_to_inspect``).
+      ``opencode`` and ``claude code`` are distinct names, so each reports
+      ``~/.claude/skills`` under its own name and it is inspected/attributed
+      twice. That is correct rather than redundant — both agents really do load
+      those skills, so each should be labeled with them.
 
     * Second global dir — opencode's own ``ConfigPaths.directories`` also walks
       ``~/.opencode`` (``packages/opencode/src/config/paths.ts``), so that
