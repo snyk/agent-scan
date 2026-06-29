@@ -7549,6 +7549,57 @@ def test_opencode_discoverer_records_could_not_parse_on_invalid_json(tmp_path):
     assert entry.is_failure is True
 
 
+def test_opencode_discoverer_unknown_type_skips_entry_not_whole_file(tmp_path, caplog):
+    """An unknown ``type`` (e.g. a transport added in a future opencode release)
+    drops only that one entry; parseable siblings in the same file still surface.
+    Without this tolerance, a single forward-looking ``type: "sse"`` entry would
+    sink every other MCP server in the user's opencode.json."""
+    import logging
+
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    install = _opencode_install(tmp_path)
+    (install / "opencode.json").write_text(
+        '{"mcp": {'
+        '"playwright": {"type": "local", "command": ["echo", "hi"]}, '
+        '"future-srv": {"type": "sse", "url": "https://example.com/sse"}'
+        "}}"
+    )
+
+    with caplog.at_level(logging.WARNING):
+        mcp_configs = OpenCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert len(mcp_configs) == 1
+    entry = next(iter(mcp_configs.values()))
+    assert isinstance(entry, list)
+    names = {n for n, _ in entry}
+    assert names == {"playwright"}
+    assert any(
+        "future-srv" in record.message and "sse" in record.message
+        for record in caplog.records
+    ), "expected a warning naming the skipped entry and its unrecognized type"
+
+
+def test_opencode_discoverer_malformed_known_type_still_raises(tmp_path):
+    """Tolerance applies ONLY to unknown ``type``. A known type with a missing
+    or malformed required field (e.g. ``local`` with no ``command``) must still
+    fail loudly — that's a real config bug worth surfacing, not a
+    forward-compat case."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    install = _opencode_install(tmp_path)
+    (install / "opencode.json").write_text(
+        '{"mcp": {"broken": {"type": "local", "command": []}}}'
+    )
+
+    mcp_configs = OpenCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert len(mcp_configs) == 1
+    entry = next(iter(mcp_configs.values()))
+    assert isinstance(entry, CouldNotParseMCPConfig)
+    assert entry.is_failure is True
+
+
 def test_opencode_discoverer_returns_empty_when_global_config_missing(tmp_path):
     from agent_scan.agents import OpenCodeDiscoverer
 

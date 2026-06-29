@@ -352,7 +352,21 @@ class OpenCodeConfigFile(MCPConfig):
                     "headers": entry.get("headers") or {},
                 }
             else:
-                raise ValueError(f"opencode mcp entry {name!r} has unknown type {entry_type!r}")
+                # Unknown ``type`` (e.g. a transport added in a future opencode
+                # release). Skip the single entry rather than sinking the whole
+                # file: dropping parseable siblings on the floor would silently
+                # hide every other MCP server in the same config. The warning
+                # is the audit trail — operators who see it can file a ticket to
+                # add the new transport. Malformed *known* entries (e.g.
+                # ``local`` with no ``command``) still raise above; the
+                # tolerance applies only to entirely unrecognized types.
+                logger.warning(
+                    "opencode mcp entry %r has unrecognized type %r; skipping entry "
+                    "(file an issue if opencode added a new transport)",
+                    name,
+                    entry_type,
+                )
+                continue
         return {"servers": servers}
 
     def get_servers(self) -> dict[str, StdioServer | RemoteServer]:

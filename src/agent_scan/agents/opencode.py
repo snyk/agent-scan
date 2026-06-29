@@ -312,14 +312,26 @@ class OpenCodeDiscoverer(AgentDiscoverer):
                     continue
             except (PermissionError, OSError):
                 continue
-            # ``immutable=1`` tells SQLite the file will not change, so no
-            # WAL/SHM is consulted and no lock is taken — safe co-existence
-            # with a live opencode. ``as_uri()`` produces the canonical
-            # ``file:///`` form on every OS (Windows needs the third slash so
-            # ``C:`` isn't parsed as URI authority) and percent-encodes any
-            # ``?``/``#``/whitespace in the path so they don't corrupt the
-            # query string. ``.absolute()`` guards a relative ``$XDG_DATA_HOME``
-            # — ``as_uri`` raises ValueError on relative paths.
+            # ``immutable=1`` tells SQLite to bypass the WAL/SHM machinery
+            # entirely (no lock taken, no ``-shm`` file consulted). This is
+            # the right trade-off here for two reasons:
+            #   1. Under ``--scan-all-users`` the scanner reads other users'
+            #      dbs and may not have permission to create or read the
+            #      ``-shm`` file a normal WAL reader needs — without
+            #      ``immutable=1`` those scans would fail outright and
+            #      silently drop every project for that user.
+            #   2. The cost is tolerated torn reads if opencode happens to
+            #      be writing the ``project`` table mid-scan: a corrupt
+            #      worktree string just yields a ``Path`` that probes
+            #      nothing downstream. The ``project`` table only grows
+            #      when a user opens a new project, so the window is small
+            #      in practice.
+            # ``as_uri()`` produces the canonical ``file:///`` form on every
+            # OS (Windows needs the third slash so ``C:`` isn't parsed as URI
+            # authority) and percent-encodes any ``?``/``#``/whitespace in
+            # the path so they don't corrupt the query string. ``.absolute()``
+            # guards a relative ``$XDG_DATA_HOME`` — ``as_uri`` raises
+            # ValueError on relative paths.
             uri = f"{db_path.absolute().as_uri()}?mode=ro&immutable=1"
             try:
                 con = sqlite3.connect(uri, uri=True)
