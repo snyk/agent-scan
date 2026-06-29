@@ -8518,3 +8518,37 @@ def test_opencode_discoverer_relative_opencode_config_file_yields_absolute_key(t
     env_keys = [k for k in mcp_configs if k.endswith("/rel-custom.json")]
     assert len(env_keys) == 1
     assert Path(env_keys[0]).is_absolute()
+
+
+# --- OpenCodeDiscoverer: client_exists tolerates non-EACCES OSError per candidate ---
+
+
+def test_opencode_discoverer_client_exists_tolerates_oserror_on_candidate(tmp_path, monkeypatch):
+    """A non-EACCES ``OSError`` (e.g. ESTALE on a stale NFS mount, EIO) from a
+    candidate's ``.exists()`` probe must not abort ``client_exists`` — it should
+    fall through to the next candidate. ``Path.exists()`` re-raises such errors
+    (only ENOENT/ENOTDIR/EBADF/ELOOP are swallowed), and ``find_discoverers``
+    would otherwise treat opencode as "not installed" for the whole scan.
+    Matches the ``(PermissionError, OSError)`` tolerance the SQLite db probe has.
+    """
+    import errno
+    from pathlib import Path
+
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    # ``~/.opencode`` exists; the default ``~/.config/opencode`` candidate raises.
+    (tmp_path / ".opencode").mkdir()
+
+    real_exists = Path.exists
+
+    def flaky_exists(self, *args, **kwargs):
+        if self.as_posix().endswith("/.config/opencode"):
+            raise OSError(errno.ESTALE, "Stale file handle")
+        return real_exists(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "exists", flaky_exists)
+
+    result = OpenCodeDiscoverer(tmp_path).client_exists()
+
+    assert result is not None
+    assert result.endswith("/.opencode")

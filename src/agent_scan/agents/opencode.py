@@ -163,8 +163,13 @@ class OpenCodeDiscoverer(AgentDiscoverer):
             try:
                 if path.exists():
                     return path.as_posix()
-            except PermissionError:
-                logger.warning("Permission error for path %s", path.as_posix())
+            except (PermissionError, OSError) as e:
+                # ``Path.exists()`` re-raises OSErrors other than
+                # ENOENT/ENOTDIR/EBADF/ELOOP (e.g. ESTALE on a stale NFS mount,
+                # EIO). Tolerate per candidate and keep probing the rest rather
+                # than letting one bad path drop the whole discoverer. Matches
+                # the ``(PermissionError, OSError)`` guard on the db probe below.
+                logger.warning("Error checking opencode candidate path %s: %s", path.as_posix(), e)
         return None
 
     def discover_mcp_servers(self) -> McpConfigsResult:
