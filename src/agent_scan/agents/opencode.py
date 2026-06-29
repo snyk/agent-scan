@@ -42,9 +42,7 @@ class OpenCodeDiscoverer(AgentDiscoverer):
       ``<root>/.opencode/{skills,skill}``.
     * Managed — per-OS system-wide ``opencode.{json,jsonc}`` (and skill dirs)
       under ``/Library/Application Support/opencode`` (macOS), ``/etc/opencode``
-      (Linux), or ``%ProgramData%\\opencode`` (Windows). See follow-up note in
-      :meth:`_managed_config_dir` for the macOS MDM plist scope, which is
-      intentionally NOT scanned here.
+      (Linux), or ``%ProgramData%\\opencode`` (Windows).
     * Env overrides — all are honored only on an own-home scan (the env vars
       reflect the *scanning process's* environment, so they must not be applied
       to other users under ``--scan-all-users``). All are applied *additively*
@@ -268,12 +266,8 @@ class OpenCodeDiscoverer(AgentDiscoverer):
     def _managed_config_dir(self) -> Path | None:
         """System-wide opencode config directory, or ``None`` on unsupported OSes.
 
-        macOS MDM scope NOT scanned here: opencode also exposes managed
-        preferences as a plist at ``/Library/Managed Preferences/<user>/
-        ai.opencode.managed.plist`` (bundle id ``ai.opencode.managed``). That
-        path uses Apple's binary-or-XML plist format, not JSON, and its mcp
-        schema is not yet documented end-to-end. Adding plist parsing for a
-        speculative schema would be premature; documented in TODO(ADS-MDM).
+        ``/Library/Application Support/opencode`` (macOS), ``/etc/opencode``
+        (Linux), or ``%ProgramData%\\opencode`` (Windows).
         """
         if sys.platform == "darwin":
             return Path("/Library/Application Support/opencode")
@@ -478,11 +472,8 @@ class OpenCodeDiscoverer(AgentDiscoverer):
 
         The opencode loader (``packages/opencode/src/skill/index.ts:211-220``)
         expands each entry — ``~/...`` against the user's home, relative paths
-        against the *containing config file's directory* — then globs
-        ``**/SKILL.md`` recursively. We mirror the expansion rules; the
-        recursive ``**/SKILL.md`` is handled by ``_scan_skills_dir`` only at
-        the top level for now (nested skills are a separate follow-up, since
-        ``inspect_skills_dir`` is shared infrastructure).
+        against the *containing config file's directory*. We mirror those
+        expansion rules and scan each resolved directory via ``_scan_skills_dir``.
 
         Malformed config files (already reported by MCP discovery) are skipped
         here — we only consume the ``skills.paths`` array on success.
