@@ -7848,6 +7848,37 @@ def test_opencode_discoverer_project_folders_skips_fifo_db_without_hanging(tmp_p
     assert result[0] == []
 
 
+def test_opencode_discoverer_enumerates_uncheckpointed_wal_projects(tmp_path):
+    """opencode keeps a long-lived WAL connection and checkpoints lazily, so the
+    newest ``project`` rows live only in ``opencode.db-wal``. The discoverer must
+    read them (a ``mode=ro`` open is WAL-aware) rather than an ``immutable=1``
+    snapshot of just the main db file, which ignores the ``-wal`` and would drop
+    the most-recently-opened projects."""
+    import sqlite3
+
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    db_path = tmp_path / ".local" / "share" / "opencode" / "opencode.db"
+    db_path.parent.mkdir(parents=True)
+
+    writer = sqlite3.connect(str(db_path))
+    try:
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("CREATE TABLE project (worktree TEXT)")
+        writer.execute("INSERT INTO project VALUES ('/repo/checkpointed')")
+        writer.commit()
+        writer.execute("PRAGMA wal_checkpoint(FULL)")  # flush that row into the main .db
+        writer.execute("INSERT INTO project VALUES ('/repo/newest-in-wal')")
+        writer.commit()  # committed, but only in -wal; writer stays open so no checkpoint
+
+        folders = OpenCodeDiscoverer(tmp_path)._discover_project_folders()
+    finally:
+        writer.close()
+
+    assert {f.as_posix() for f in folders} == {"/repo/checkpointed", "/repo/newest-in-wal"}
+
+
 def test_opencode_discoverer_discovers_project_opencode_json(tmp_path):
     """A project-root ``opencode.json`` is picked up when listed in the SQLite db."""
     from agent_scan.agents import OpenCodeDiscoverer

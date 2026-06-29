@@ -306,11 +306,11 @@ class OpenCodeDiscoverer(AgentDiscoverer):
         """Project paths from opencode's SQLite db (``project.worktree`` column).
 
         Reads ``opencode.db`` from every data dir in :meth:`_data_dirs` (XDG +
-        default), deduplicating worktree paths. Opened with
-        ``mode=ro&immutable=1`` so a concurrently-running opencode cannot block
-        us on the WAL/SHM lock; per-db sqlite errors (missing file, schema
-        drift, permission denied) are tolerated rather than aborting the whole
-        discoverer.
+        default), deduplicating worktree paths. :meth:`_read_worktrees` opens
+        each db read-only (preferring a WAL-aware ``mode=ro`` read, falling back
+        to an ``immutable=1`` snapshot when that open is denied); per-db sqlite
+        errors (missing file, schema drift, permission denied) are tolerated
+        rather than aborting the whole discoverer.
         """
         seen: set[str] = set()
         result: list[Path] = []
@@ -331,39 +331,8 @@ class OpenCodeDiscoverer(AgentDiscoverer):
                     continue
             except (PermissionError, OSError):
                 continue
-            # ``immutable=1`` tells SQLite to bypass the WAL/SHM machinery
-            # entirely (no lock taken, no ``-shm`` file consulted). This is
-            # the right trade-off here for two reasons:
-            #   1. Under ``--scan-all-users`` the scanner reads other users'
-            #      dbs and may not have permission to create or read the
-            #      ``-shm`` file a normal WAL reader needs — without
-            #      ``immutable=1`` those scans would fail outright and
-            #      silently drop every project for that user.
-            #   2. The cost is tolerated torn reads if opencode happens to
-            #      be writing the ``project`` table mid-scan: a corrupt
-            #      worktree string yields a ``Path`` whose ancestor walk
-            #      makes a bounded handful of stat calls (one
-            #      ``opencode.json`` / ``.opencode/skills`` probe per
-            #      ancestor up to the filesystem root), all of which miss
-            #      on a non-existent path. The ``project`` table only grows
-            #      when a user opens a new project, so the window is small
-            #      in practice.
-            # ``as_uri()`` produces the canonical ``file:///`` form on every
-            # OS (Windows needs the third slash so ``C:`` isn't parsed as URI
-            # authority) and percent-encodes any ``?``/``#``/whitespace in
-            # the path so they don't corrupt the query string. ``.absolute()``
-            # guards a relative ``$XDG_DATA_HOME`` — ``as_uri`` raises
-            # ValueError on relative paths.
-            uri = f"{db_path.absolute().as_uri()}?mode=ro&immutable=1"
-            try:
-                con = sqlite3.connect(uri, uri=True)
-                try:
-                    cur = con.execute("SELECT worktree FROM project WHERE worktree IS NOT NULL")
-                    rows = cur.fetchall()
-                finally:
-                    con.close()
-            except sqlite3.Error as e:
-                logger.warning("Could not read opencode project table from %s: %s", db_path.as_posix(), e)
+            rows = self._read_worktrees(db_path)
+            if rows is None:
                 continue
             for row in rows:
                 if not isinstance(row[0], str) or not row[0] or row[0] in seen:
@@ -371,6 +340,52 @@ class OpenCodeDiscoverer(AgentDiscoverer):
                 seen.add(row[0])
                 result.append(Path(row[0]))
         return result
+
+    def _read_worktrees(self, db_path: Path) -> list[tuple[object, ...]] | None:
+        """Read the ``project.worktree`` column read-only, preferring a live
+        (WAL-aware) read and falling back to an immutable snapshot. ``None`` on
+        any sqlite failure (missing table, corruption, denied open).
+
+        ``mode=ro`` reads the latest *committed* state, including rows still in
+        the ``-wal`` that opencode hasn't checkpointed into the main db yet —
+        where its most-recently-opened projects live, since it keeps a
+        long-lived WAL connection and checkpoints lazily. But a plain read-only
+        open of a WAL db must read/build the ``-shm`` wal-index, which an
+        unprivileged scanner reading *another* user's home under
+        ``--scan-all-users`` may lack permission to write; that open fails
+        outright. So we fall back to ``immutable=1``, which tells SQLite the
+        file never changes and to read the main db file directly with no
+        ``-wal``/``-shm`` consulted and no lock taken: the open always succeeds,
+        at the cost of missing un-checkpointed rows (and tolerating a torn read
+        of an in-flight write — a bogus worktree string just yields a Path whose
+        ancestor walk misses on a handful of stats). Best case (own-home / root
+        scan) we get freshness; worst case we still get every checkpointed
+        project instead of dropping the user entirely.
+
+        ``no such table`` (schema drift) also raises ``OperationalError``, so a
+        drifted db is probed in both modes before the warning — rare and cheap
+        (no rows, fast fail), and preferable to matching on error-message text.
+
+        ``as_uri()`` produces the canonical ``file:///`` form on every OS
+        (Windows needs the third slash so ``C:`` isn't parsed as URI authority)
+        and percent-encodes any ``?``/``#``/whitespace in the path so they don't
+        corrupt the query string. ``.absolute()`` guards a relative
+        ``$XDG_DATA_HOME`` — ``as_uri`` raises ValueError on relative paths.
+        """
+        base = db_path.absolute().as_uri()
+        last_error: sqlite3.Error | None = None
+        for suffix in ("?mode=ro", "?mode=ro&immutable=1"):
+            try:
+                con = sqlite3.connect(f"{base}{suffix}", uri=True)
+                try:
+                    return con.execute("SELECT worktree FROM project WHERE worktree IS NOT NULL").fetchall()
+                finally:
+                    con.close()
+            except sqlite3.Error as e:
+                last_error = e
+                continue
+        logger.warning("Could not read opencode project table from %s: %s", db_path.as_posix(), last_error)
+        return None
 
     # --- MCP discovery ---
 
