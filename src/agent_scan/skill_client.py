@@ -165,6 +165,11 @@ def traverse_skill_tree(skill_path: str, relative_path: str | None) -> tuple[lis
     for file in os.listdir(os.path.expanduser(path)):
         full_path = os.path.join(path, file)
         relative_full_path = os.path.join(relative_path, file) if relative_path else file
+        # The skill-relative path (with forward slashes) is the canonical entity
+        # name: it preserves the directory (so subdir files don't collide on
+        # basename) and matches the path the backend emits as the
+        # ``=== FILE: ... ===`` header that line-location references resolve against.
+        entity_name = relative_full_path.replace(os.path.sep, "/")
         if os.path.isdir(os.path.expanduser(full_path)):
             prompts_sub, resources_sub, tools_sub = traverse_skill_tree(skill_path, relative_full_path)
             prompts.extend(prompts_sub)
@@ -179,7 +184,7 @@ def traverse_skill_tree(skill_path: str, relative_path: str | None) -> tuple[lis
                 content = f.read()
                 prompts.append(
                     Prompt(
-                        name=os.path.join(relative_path or "", file),
+                        name=entity_name,
                         description=content,
                     )
                 )
@@ -187,10 +192,13 @@ def traverse_skill_tree(skill_path: str, relative_path: str | None) -> tuple[lis
         elif file.split(".")[-1] in ["py", "js", "ts", "sh"]:
             with open(os.path.expanduser(full_path), encoding="utf-8") as f:
                 code = f.read()
+            # The raw code is the description so its line numbers map 1:1 to the
+            # file once serialized. The filename is already carried by the entity
+            # name and the serialized ``=== FILE: ... ===`` header.
             tools.append(
                 Tool(
-                    name=file,
-                    description=f"Script: {file}. Code:\n{code or 'No code available'}",
+                    name=entity_name,
+                    description=code or "No code available",
                     inputSchema={},
                     outputSchema=None,
                     annotations=None,
@@ -202,14 +210,15 @@ def traverse_skill_tree(skill_path: str, relative_path: str | None) -> tuple[lis
                 with open(os.path.expanduser(full_path), encoding="utf-8") as f:
                     content = f.read()
             except UnicodeDecodeError:
-                logger.exception(f"Error reading file: {file}. The file is not a bianry")
+                # Expected for binary files: fall back to a hash-only description.
+                logger.debug("File %s is not valid UTF-8; treating as binary", file)
                 with open(os.path.expanduser(full_path), "rb") as f:
                     content_hash = hashlib.sha256(f.read()).hexdigest()
                 content = f"{BINARY_FILE_DESCRIPTION_PREFIX}{content_hash}"
             resources.append(
                 Resource(
-                    name=file,
-                    uri=f"skill://{relative_full_path.replace(os.path.sep, '/')}",
+                    name=entity_name,
+                    uri=f"skill://{entity_name}",
                     description=content,
                 )
             )
