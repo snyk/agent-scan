@@ -27,7 +27,8 @@ from agent_scan.agents.base import (
 class PartialDiscoverer(AgentDiscoverer, abstract=True):
     """Base for agents whose layout is fully described by three path lists.
 
-    Subclasses set ``name`` and any of the path tuples below; ``~`` is expanded
+    Subclasses set ``name`` and any of the path tuples below — plus the inherited
+    ``AgentDiscoverer._skills_dir_paths`` for skills directories; ``~`` is expanded
     against the discoverer's bound home (so it resolves correctly per-home under
     ``--scan-all-users``), while non-``~`` paths (e.g. ``.amp/skills``) are
     cwd-relative and pass through unchanged.
@@ -39,8 +40,6 @@ class PartialDiscoverer(AgentDiscoverer, abstract=True):
     # but parsed leniently (``mcp.servers``/``servers`` wrappers and flat server
     # maps are also accepted -- legacy ``well_known_clients`` scan parity).
     _mcp_config_paths: tuple[str, ...] = ()
-    # Skills directories (``<dir>/<skill>/SKILL.md``).
-    _skills_dir_paths: tuple[str, ...] = ()
 
     def client_exists(self) -> str | None:
         return self._first_existing_path([self._expand_path(Path(raw)) for raw in self._client_exists_paths])
@@ -55,13 +54,7 @@ class PartialDiscoverer(AgentDiscoverer, abstract=True):
         return result
 
     def discover_skills(self) -> SkillsDirsResult:
-        result: SkillsDirsResult = {}
-        for raw in self._skills_dir_paths:
-            path = self._expand_path(Path(raw))
-            scanned = self._scan_skills_dir(path)
-            if scanned is not None:
-                result[path.as_posix()] = scanned
-        return result
+        return self._discover_home_skills_dirs()
 
     def static_mcp_config_paths(self) -> list[str]:
         return [self._expand_path(Path(raw)).as_posix() for raw in self._mcp_config_paths]

@@ -158,6 +158,13 @@ class AgentDiscoverer(ABC):
 
     name: str = ""
 
+    # Skill-directory templates (``<dir>/<skill>/SKILL.md``): ``~``-prefixed entries
+    # expand against the bound home; non-``~`` entries (e.g. ``.amp/skills``) are
+    # cwd-relative and pass through unchanged. Consumed by
+    # :meth:`_discover_home_skills_dirs`; empty for agents that discover skills some
+    # other way (or not at all).
+    _skills_dir_paths: tuple[str, ...] = ()
+
     def __init__(self, home_directory: Path | None) -> None:
         # ``None`` is the own-home sentinel; normalize to ``Path.home()`` so the
         # stored home is always concrete. ``expand_path`` treats ``None`` as
@@ -466,6 +473,16 @@ class AgentDiscoverer(ABC):
         except PermissionError:
             return None
         return inspect_skills_dir(str(path))
+
+    def _discover_home_skills_dirs(self) -> SkillsDirsResult:
+        """Scan the home-relative skill directories declared in ``_skills_dir_paths``."""
+        result: SkillsDirsResult = {}
+        for raw in self._skills_dir_paths:
+            path = self._expand_path(Path(raw))
+            entries = self._scan_skills_dir(path)
+            if entries is not None:
+                result[path.as_posix()] = entries
+        return result
 
     def _first_existing_path(self, paths: list[Path]) -> str | None:
         """Return ``as_posix()`` of the first path in ``paths`` that exists, else ``None``.

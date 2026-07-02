@@ -245,7 +245,6 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
     _user_settings_file: str = ""  # e.g. "User/settings.json"
     _workspace_mcp_relative: tuple[str, ...] = ()
     _workspace_skills_relative: tuple[str, ...] = ()
-    _skills_dir_paths: tuple[str, ...] = ()
     _extension_paths: tuple[str, ...] = ()
     # Directories holding custom-agent / subagent definitions, one file per
     # agent (e.g. Kiro's ``~/.kiro/agents/<agent>.json``). The CLI agent format
@@ -322,16 +321,6 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         # earlier in ``DISCOVERERS`` -- listing them here would steal that attribution
         # on the first-registered-wins realpath collision.
         return [path.as_posix() for path in (*self._user_mcp_candidate_files(), *self._user_settings_candidate_files())]
-
-    def _discover_home_skills_dirs(self) -> SkillsDirsResult:
-        """Scan the home-relative skill directories declared in ``_skills_dir_paths``."""
-        result: SkillsDirsResult = {}
-        for raw in self._skills_dir_paths:
-            path = self._expand_path(Path(raw))
-            entries = self._scan_skills_dir(path)
-            if entries is not None:
-                result[path.as_posix()] = entries
-        return result
 
     def _discover_system_skills_dirs(self) -> SkillsDirsResult:
         """Scan the machine-wide system skill directories from
