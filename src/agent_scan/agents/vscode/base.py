@@ -313,17 +313,15 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
     def static_mcp_config_paths(self) -> list[str]:
         # Every fixed-location MCP file this agent owns: the home-relative standalone
         # configs plus each userdata-dir standalone ``User/mcp.json`` and ``User/settings.json``,
-        # so ``--paths`` attribution stays complete. ``_user_data_dirs`` yields every
-        # documented userdata location for the current OS (both the native and the WSL
-        # ``~/.config`` convention on win32). Profile/workspace/extension MCP paths stay
-        # omitted (truly per-project/dynamic, never classifiable by a fixed path).
-        paths = [self._expand_path(Path(raw)).as_posix() for raw in self._user_mcp_file_paths]
-        for userdata in self._user_data_dirs():
-            if self._userdata_user_mcp_file:
-                paths.append((userdata / self._userdata_user_mcp_file).as_posix())
-            if self._user_settings_file:
-                paths.append((userdata / self._user_settings_file).as_posix())
-        return paths
+        # so ``--paths`` attribution stays complete -- sourced from the same candidate
+        # enumerators discovery uses, so the two cannot drift. Profile/workspace/extension
+        # MCP paths stay omitted (truly per-project/dynamic, never classifiable by a fixed
+        # path). ``_gated_home_settings_files`` is also deliberately omitted: those are
+        # *shared* files whose primary owner is another agent (Antigravity's
+        # ``~/.gemini/settings.json`` belongs to gemini cli), and this family registers
+        # earlier in ``DISCOVERERS`` -- listing them here would steal that attribution
+        # on the first-registered-wins realpath collision.
+        return [path.as_posix() for path in (*self._user_mcp_candidate_files(), *self._user_settings_candidate_files())]
 
     def _discover_home_skills_dirs(self) -> SkillsDirsResult:
         """Scan the home-relative skill directories declared in ``_skills_dir_paths``."""
@@ -434,14 +432,33 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
 
     # --- private: MCP discovery ---
 
+    def _user_mcp_candidate_files(self) -> list[Path]:
+        """Candidate standalone MCP config files: ``_user_mcp_file_paths`` expanded,
+        plus ``<userdata>/<_userdata_user_mcp_file>`` for every candidate userdata dir.
+
+        The single source of user-level MCP file locations, consumed by both
+        ``_discover_user_mcp_files`` (discovery) and ``static_mcp_config_paths``
+        (``--paths`` attribution) so the two cannot drift.
+        """
+        paths = [self._expand_path(Path(raw)) for raw in self._user_mcp_file_paths]
+        if self._userdata_user_mcp_file:
+            paths.extend(userdata / self._userdata_user_mcp_file for userdata in self._user_data_dirs())
+        return paths
+
+    def _user_settings_candidate_files(self) -> list[Path]:
+        """Candidate ``<userdata>/<_user_settings_file>`` settings files (empty when
+        the fork declares none). The single source of user-settings locations,
+        consumed by both ``_discover_user_settings_mcp`` (discovery) and
+        ``static_mcp_config_paths`` (``--paths`` attribution) so the two cannot drift.
+        """
+        if not self._user_settings_file:
+            return []
+        return [userdata / self._user_settings_file for userdata in self._user_data_dirs()]
+
     def _discover_user_mcp_files(self) -> McpConfigsResult:
         """Parse every file in ``_user_mcp_file_paths`` plus the userdata standalone ``mcp.json``."""
         result: McpConfigsResult = {}
-        paths: list[Path] = [self._expand_path(Path(raw)) for raw in self._user_mcp_file_paths]
-        if self._userdata_user_mcp_file:
-            paths.extend(userdata / self._userdata_user_mcp_file for userdata in self._user_data_dirs())
-
-        for path in paths:
+        for path in self._user_mcp_candidate_files():
             parsed = self._parse_mcp_file(path, formats=_VSCODE_FAMILY_FORMATS)
             if parsed is None:
                 continue
@@ -552,11 +569,8 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         from every candidate userdata folder, gated via
         :meth:`_parse_settings_mcp_gated`.
         """
-        if not self._user_settings_file:
-            return {}
         result: McpConfigsResult = {}
-        for userdata in self._user_data_dirs():
-            path = userdata / self._user_settings_file
+        for path in self._user_settings_candidate_files():
             entry = self._parse_settings_mcp_gated(path)
             if entry is not None:
                 result[path.as_posix()] = entry
