@@ -755,3 +755,88 @@ async def test_skip_ssl_verify_defaults_false_when_unset(monkeypatch):
         )
 
     assert captured_kwargs.get("skip_ssl_verify") is False
+
+
+# --- skip_servers trust gating -------------------------------------------------
+# skip_servers reduces scan coverage, so it is only honored from a verified-TLS
+# Snyk endpoint. These cover the host allowlist and the sanitizer that strips it.
+
+
+@pytest.mark.parametrize(
+    "url,expected",
+    [
+        ("https://api.snyk.io/mcp-scan/client-bootstrap", True),
+        ("https://api.eu.snyk.io/mcp-scan/client-bootstrap", True),
+        ("https://snyk.io/mcp-scan/client-bootstrap", True),
+        ("https://api.snykgov.io/mcp-scan/client-bootstrap", True),
+        # Non-Snyk host, plain HTTP, and look-alike hosts must all be rejected.
+        ("http://api.snyk.io/mcp-scan/client-bootstrap", False),  # not https
+        ("https://evil.example.com/mcp-scan/client-bootstrap", False),
+        ("https://api.snyk.io.evil.com/mcp-scan/client-bootstrap", False),
+        ("https://evilsnyk.io/mcp-scan/client-bootstrap", False),
+        ("https://snyk.io.attacker.net/mcp-scan/client-bootstrap", False),
+    ],
+)
+def test_is_trusted_skip_host(url, expected):
+    assert bootstrap_module._is_trusted_skip_host(url) is expected
+
+
+def test_sanitize_keeps_skip_servers_for_trusted_https_snyk_host():
+    cfg = {"skip_servers": ["entra-mcp-proxy"], "feature_x": True}
+    out = bootstrap_module._sanitize_runtime_config(
+        cfg, "https://api.snyk.io/mcp-scan/client-bootstrap", skip_ssl_verify=False
+    )
+    assert out == cfg
+
+
+def test_sanitize_strips_skip_servers_when_ssl_verify_disabled(caplog):
+    cfg = {"skip_servers": ["entra-mcp-proxy"], "feature_x": True}
+    with caplog.at_level(logging.WARNING, logger="agent_scan.bootstrap"):
+        out = bootstrap_module._sanitize_runtime_config(
+            cfg, "https://api.snyk.io/mcp-scan/client-bootstrap", skip_ssl_verify=True
+        )
+    assert out == {"feature_x": True}
+    assert "skip_servers" in caplog.text
+    # Non-coverage-reducing keys are preserved; only skip_servers is dropped.
+    assert cfg == {"skip_servers": ["entra-mcp-proxy"], "feature_x": True}  # input untouched
+
+
+def test_sanitize_strips_skip_servers_for_untrusted_host(caplog):
+    cfg = {"skip_servers": ["entra-mcp-proxy"]}
+    with caplog.at_level(logging.WARNING, logger="agent_scan.bootstrap"):
+        out = bootstrap_module._sanitize_runtime_config(
+            cfg, "https://evil.example.com/mcp-scan/client-bootstrap", skip_ssl_verify=False
+        )
+    assert out == {}
+    assert "skip_servers" in caplog.text
+
+
+def test_sanitize_noop_without_skip_servers():
+    cfg = {"feature_x": True}
+    out = bootstrap_module._sanitize_runtime_config(
+        cfg, "http://localhost/mcp-scan/client-bootstrap", skip_ssl_verify=True
+    )
+    assert out is cfg  # untouched, returned as-is
+
+
+@pytest.mark.asyncio
+async def test_skip_servers_stripped_from_untrusted_control_server():
+    """End to end: a skip_servers value from an untrusted (local http) control
+    server is stripped before it reaches the runtime config singleton, while
+    other keys survive."""
+    bootstrap_event_id = uuid4()
+    server_config = {"skip_servers": ["anything"], "feature_x": True}
+    async with _BootstrapServer(
+        [(200, {"bootstrap_event_id": str(bootstrap_event_id), "runtime_config": server_config}, 0)]
+    ) as server:
+        result = await bootstrap_first_control_server(
+            [_control_server(server.url)],
+            command="scan",
+            subcommand=None,
+            control_identifier="machine-1",
+            argv=[],
+            no_bootstrap=False,
+        )
+
+    assert result.config == {"feature_x": True}
+    assert "skip_servers" not in result.config

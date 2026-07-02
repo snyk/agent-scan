@@ -599,7 +599,7 @@ async def test_inspect_pipeline_discovery_mode_without_all_users_falls_back_to_c
 
 
 @pytest.mark.asyncio
-async def test_inspect_client_skips_server_per_runtime_config_without_starting_subprocess():
+async def test_inspect_client_skips_server_per_runtime_config_without_starting_subprocess(capsys):
     """When runtime_config.skip_servers matches, inspect_extension must not run.
 
     This is the load-bearing guarantee: the *whole point* of skipping is to
@@ -679,6 +679,12 @@ async def test_inspect_client_skips_server_per_runtime_config_without_starting_s
     # Sanity: the non-skipped server did go through inspect_extension exactly once.
     call_names = [call.args[0] for call in mock_inspect_extension.call_args_list]
     assert call_names == ["other"]
+
+    # A skipped server means it was NOT scanned; that must be visible on stderr
+    # even without --verbose (default logging is suppressed).
+    stderr = capsys.readouterr().err
+    assert "entra-mcp-proxy" in stderr
+    assert "Not scanning" in stderr
 
 
 @pytest.mark.asyncio
