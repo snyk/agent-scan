@@ -723,9 +723,6 @@ class CandidateClient(BaseModel):
     client_exists_paths: list[str]
     mcp_config_paths: list[str]
     skills_dir_paths: list[str]
-    mcp_config_globs: list[str] = Field(default_factory=list)
-    skills_dir_globs: list[str] = Field(default_factory=list)
-    max_glob_depth: int = Field(default=6)
 
 
 class ClientToInspect(BaseModel):
