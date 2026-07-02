@@ -81,13 +81,18 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         return self._first_existing_path([self._claude_base_dir()])
 
     def static_mcp_config_paths(self) -> list[str]:
-        # Every fixed-location MCP file claude code owns: the user-global config plus each
-        # installed-plugin ``.mcp.json``. Both come from the same helpers the
-        # ``_discover_*_mcp_servers`` methods use -- ``_config_json_path`` for the global config
-        # and ``_plugin_mcp_files`` for plugins -- so ``--paths`` attribution stays in lockstep
-        # with discovery (honoring the same ``CLAUDE_CONFIG_DIR`` / plugin-root env-var
-        # relocations). Per-project ``.mcp.json`` paths stay omitted: arbitrary cwd locations.
+        # Every fixed-location MCP file claude code owns: the user-global config, the
+        # enterprise ``managed-mcp.json``, plus each installed-plugin ``.mcp.json``. All
+        # come from the same helpers the ``_discover_*_mcp_servers`` methods use --
+        # ``_config_json_path`` for the global config, ``_managed_mcp_path`` for the
+        # managed file, and ``_plugin_mcp_files`` for plugins -- so ``--paths``
+        # attribution stays in lockstep with discovery (honoring the same
+        # ``CLAUDE_CONFIG_DIR`` / plugin-root env-var relocations). Per-project
+        # ``.mcp.json`` paths stay omitted: arbitrary cwd locations.
         paths = [self._config_json_path().as_posix()]
+        managed = self._managed_mcp_path()
+        if managed is not None:
+            paths.append(managed.as_posix())
         paths.extend(mcp_file.as_posix() for mcp_file in self._plugin_mcp_files())
         return paths
 

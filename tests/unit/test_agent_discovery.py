@@ -4648,6 +4648,20 @@ def test_managed_mcp_path_falls_back_to_default_program_files_on_windows(tmp_pat
     assert "Program Files" in path.as_posix()
 
 
+def test_static_mcp_config_paths_includes_managed_mcp(tmp_path, monkeypatch):
+    """The enterprise managed-mcp.json is a fixed-location file discovery scans
+    (``_discover_managed_mcp_servers``), so ``--paths`` attribution must know it
+    too -- the hook's contract is every fixed-location file the agent owns."""
+    import agent_scan.agents.claude_code as discovery_module
+    from agent_scan.agents.claude_code import ClaudeCodeDiscoverer
+
+    monkeypatch.setattr(discovery_module.sys, "platform", "linux")
+
+    paths = ClaudeCodeDiscoverer(tmp_path).static_mcp_config_paths()
+
+    assert "/etc/claude-code/managed-mcp.json" in paths
+
+
 def test_claude_code_discovers_global_command_files(tmp_path):
     """``~/.claude/commands/*.md`` are surfaced as skill entries."""
     from agent_scan.agents import ClaudeCodeDiscoverer
@@ -7530,6 +7544,17 @@ def test_get_client_from_path_classifies_relocated_claude_json_under_config_dir(
     from agent_scan.agents import get_client_from_path
 
     assert get_client_from_path(str(cfg / ".claude.json")) == "claude code"
+
+
+def test_get_client_from_path_classifies_managed_mcp_config(monkeypatch):
+    """--paths scans of the enterprise managed-mcp.json label as claude code, not
+    the raw path (the owner map is built at call time, after the platform pin)."""
+    import agent_scan.agents.claude_code as discovery_module
+    from agent_scan.agents import get_client_from_path
+
+    monkeypatch.setattr(discovery_module.sys, "platform", "linux")
+
+    assert get_client_from_path("/etc/claude-code/managed-mcp.json") == "claude code"
 
 
 def test_build_static_path_owner_map_round_trips_known_paths():
