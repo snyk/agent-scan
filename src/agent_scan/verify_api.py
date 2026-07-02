@@ -142,6 +142,8 @@ async def analyze_machine(
     raise_on_error: bool = False,
     scan_context: dict | None = None,
     scanned_usernames: list[str] | None = None,
+    *,
+    owner_map: dict[str, str] | None = None,
 ) -> list[ScanPathResult]:
     """
     Analyze the scan paths with the analysis server.
@@ -171,7 +173,10 @@ async def analyze_machine(
     # Use relative paths in the analysis payload to strip the username from absolute paths,
     # anonymizing the user. Clone to preserve the absolute paths for the control backend call.
     analysis_path_results = []
-    owner_map = build_static_path_owner_map()
+    if owner_map is None:
+        # Enumerating all discoverers walks the filesystem; the pipeline builds the
+        # map once per scan run and passes it in -- this fallback keeps direct calls working.
+        owner_map = build_static_path_owner_map()
     for result in scan_paths:
         result.client = get_client_from_path(result.path, owner_map) or result.client or result.path
         analysis_path_copy = result.clone()

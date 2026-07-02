@@ -24,6 +24,8 @@ async def upload(
     skip_ssl_verify: bool = False,
     scan_context: dict | None = None,
     scanned_usernames: list[str] | None = None,
+    *,
+    owner_map: dict[str, str] | None = None,
 ) -> None:
     """
     Upload the scan results to the control server with retry logic.
@@ -50,7 +52,10 @@ async def upload(
     )
 
     results_with_servers = []
-    owner_map = build_static_path_owner_map()
+    if owner_map is None:
+        # Enumerating all discoverers walks the filesystem; the pipeline builds the
+        # map once per scan run and passes it in -- this fallback keeps direct calls working.
+        owner_map = build_static_path_owner_map()
     for result in results:
         # If there are no servers but there is a path-level error, still include the result
         if not result.servers and result.error is None:

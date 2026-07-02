@@ -5,7 +5,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from agent_scan.agents import find_discoverers
+from agent_scan.agents import build_static_path_owner_map, find_discoverers
 from agent_scan.direct_scanner import direct_scan_to_server_config, is_direct_scan
 from agent_scan.inspect import (
     get_mcp_config_per_client,
@@ -178,6 +178,9 @@ async def inspect_analyze_push_pipeline(
     redacted_scan_path_results = [redact_scan_result(rv) for rv in scan_path_results]
 
     scan_context = {"cli_version": push_args.version}
+    # Build the --paths owner map once: analyze and every control-server upload label
+    # results against it, and each build re-enumerates all discoverers (a filesystem walk).
+    owner_map = build_static_path_owner_map()
     # analyze
     verified_scan_path_results = await analyze_machine(
         redacted_scan_path_results,
@@ -191,6 +194,7 @@ async def inspect_analyze_push_pipeline(
         skip_ssl_verify=analyze_args.skip_ssl_verify,
         scan_context=scan_context,
         scanned_usernames=scanned_usernames,
+        owner_map=owner_map,
     )
     # push
     for control_server in push_args.control_servers:
@@ -203,6 +207,7 @@ async def inspect_analyze_push_pipeline(
             skip_ssl_verify=push_args.skip_ssl_verify,
             scan_context=scan_context,
             scanned_usernames=scanned_usernames,
+            owner_map=owner_map,
         )
 
     return verified_scan_path_results
