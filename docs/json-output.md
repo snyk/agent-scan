@@ -1,83 +1,204 @@
-# JSON Output Reference for `mcp-scan`
+# JSON output reference for `snyk-agent-scan`
 
-The `mcp-scan` CLI provides a structured JSON output that allows for programmatic verification of skill scans. This is particularly useful for CI/CD pipelines or automated auditing tools.
+The `snyk-agent-scan` CLI can emit structured JSON for programmatic consumption — useful in CI/CD pipelines, catalog validation, and custom auditing tools.
 
-To generate this output, run the scan with the `--json` flag:
+Enable JSON mode with `--json`:
 
 ```bash
-uvx mcp-scan --skills <path-to-skill-directory> --json
+uvx snyk-agent-scan@latest --json
+uvx snyk-agent-scan@latest --json ~/.claude/skills
+uvx snyk-agent-scan@latest inspect --json ~/.vscode/mcp.json
 ```
 
-## JSON Structure Overview
+**Output behavior**
 
-The output is a dictionary where keys are file paths and values are `ScanPathResult` objects.
+- With `--json`, stdout contains **only** the JSON document (the version banner and rich-text report are suppressed).
+- Debug logging still goes to stderr when `--verbose` is set.
+- Skills are included by default; pass `--no-skills` for MCP-only scans.
+- For native pass/fail exit codes in CI, prefer [`--ci`](cli-reference.md#ci-mode) over custom `jq` parsing.
+
+> **Experimental output.** Field names, issue codes, and schema details may change between releases. See the [project README](../README.md) stability notice.
+
+---
+
+## JSON structure overview
+
+The root object is a map from **scan path** (absolute path string) to a `ScanPathResult`:
 
 ```json
 {
-  "/absolute/path/to/skill": {
-    "path": "/absolute/path/to/skill",
+  "/Users/me/.claude/skills/my-skill": {
+    "client": "claude-code",
+    "path": "/Users/me/.claude/skills/my-skill",
     "error": null,
     "servers": [
       {
-        "name": "skill-name",
-        "type": "skill",
-        "error": null,
-        "signature": { ... }
+        "name": "my-skill",
+        "config_path": "/Users/me/.claude/skills",
+        "server": {
+          "path": "/Users/me/.claude/skills/my-skill/SKILL.md",
+          "type": "skill"
+        },
+        "signature": {
+          "metadata": { "...": "..." },
+          "tools": [],
+          "prompts": [],
+          "resources": [],
+          "resource_templates": []
+        },
+        "error": null
       }
     ],
     "issues": [
       {
-        "code": "E001",
-        "message": "Description of the error",
-        "reference": [0, 1]
+        "code": "E004",
+        "message": "Description of the finding",
+        "reference": [0, null],
+        "extra_data": null
       }
-    ]
+    ],
+    "labels": []
   }
 }
 ```
 
-## 1. Checking for Execution Failures
+### Top-level fields (`ScanPathResult`)
 
-Before looking for policy violations, ensure the scanner successfully ran on the target.
+| Field | Type | Description |
+| --- | --- | --- |
+| `client` | string \| null | Agent client that owns this path (e.g. `cursor`, `claude-code`). |
+| `path` | string | Absolute path for this scan result (config file, skill directory, etc.). |
+| `error` | object \| null | Path-level error when discovery/parsing failed for this path. See [Execution failures](#1-checking-for-execution-failures). |
+| `servers` | array \| null | Inspected MCP servers and skills. `null` when the config could not be read at all. |
+| `issues` | array | Security findings from analysis (`E*`, `W*`). Empty in `inspect` mode. |
+| `labels` | array | Per-tool risk label scores from analysis (MCP scans). Often empty for skills-only paths. |
 
-### Path-level Failure
-Check the top-level `error` field in the result object.
-*   **If `error` is not `null`**: The scan failed completely (e.g., file not found, permission denied).
-*   **Action**: Read `error.message` for details.
+### Server entries (`ServerScanResult`)
 
-### Server-level Failure
-A skill directory might contain multiple "servers" (or parts). Check the `servers` array.
-*   Iterate through each item in `servers`.
-*   **If `servers[i].error` is not `null`**: That specific part of the skill failed to start or run.
-*   **Action**: Read `servers[i].error.message`.
+| Field | Type | Description |
+| --- | --- | --- |
+| `name` | string \| null | Server or skill name from the config. |
+| `config_path` | string \| null | Absolute path of the config file this entry came from. |
+| `server` | object | Underlying config: stdio MCP (`command`, `args`, `type: "stdio"`), remote MCP (`url`, `type: "sse"` \| `"http"`), or skill (`path`, `type: "skill"`). |
+| `signature` | object \| null | Live tool/prompt/resource catalog when inspection succeeded. |
+| `error` | object \| null | Server-level error when startup or inspection failed. |
 
-## 2. Checking for Policy Violations
+### Issue entries (`Issue`)
 
-If the scan executed successfully, look at the `issues` array to find policy violations.
+| Field | Type | Description |
+| --- | --- | --- |
+| `code` | string | Finding code (e.g. `E001`, `W015`). See [Issue codes](issue-codes.md). |
+| `message` | string | Human-readable description. |
+| `reference` | array \| null | `(server_index, entity_index)` into `servers` / entity lists, or `[server_index, null]` for server-scoped issues. |
+| `extra_data` | object \| null | Optional structured context from analysis. |
 
-| Code Prefix | Meaning | Severity | Example |
-| :--- | :--- | :--- | :--- |
-| **`E`** | **Error** | **High** | `E001`: Critical security flaw |
-| **`W`** | **Warning** | **Medium** | `W001`: Best practice violation |
-| **`X`** | **Analysis Error** | **Variable** | `X001`: API analysis failed |
-| **`X002`** | **Whitelisted** | **Safe** | Explicitly allowed by user |
+### Error objects (`ScanError`)
 
-### Internal Warnings
-The JSON output is verbose and may include internal warnings (codes `W003`, `W004`, `W005`, `W006`) that are typically hidden in the text output. These usually relate to internal scanner states or non-critical hints and can often be ignored for compliance checks.
+| Field | Type | Description |
+| --- | --- | --- |
+| `message` | string \| null | Short error description. |
+| `exception` | string \| null | Serialized exception message. |
+| `traceback` | string \| null | Stack trace when captured. |
+| `is_failure` | boolean | Whether this error should count as a runtime failure (see CI below). |
+| `category` | string \| null | Structured category (e.g. `server_startup`, `file_not_found`). |
+| `server_output` | string \| null | Captured MCP traffic / stderr for startup failures. |
 
-## Practical Example: Filtering with `jq`
+---
 
-You can use `jq` to parse the output and determine if a skill passes or fails your criteria.
+## 1. Checking for execution failures
 
-### Basic Check: Any Errors?
-To check if there are any critical errors (`E` codes) or execution failures:
+Check failures **before** policy violations.
+
+### Path-level errors
+
+Inspect `error` on each `ScanPathResult`.
+
+- **`error` is not `null`:** Discovery or parsing failed for that path.
+- Read `error.message` (and `error.category`) for details.
+- **`error.is_failure`:** When `false`, the path was skipped benignly (e.g. `file_not_found`, `unknown_config`). When `true`, treat as a hard failure (e.g. `parse_error`).
+
+### Server-level errors
+
+Iterate `servers[]`:
+
+- **`servers[i].error` is not `null`:** That MCP server or skill failed to inspect (startup error, HTTP error, skill scan error, user declined consent, etc.).
+- Check `servers[i].error.is_failure` the same way as path-level errors.
+- A server with `signature: null` and `error: null` was **configured but not live-inspected** (common for stdio MCP on unattended push-key scans without `--dangerously-run-mcp-servers`).
+
+### Runtime failure codes (`X*`)
+
+Operational failures map to `X*` codes (via `error.category`, or occasionally in `issues`):
+
+| Code | Category | Typical `is_failure` |
+| --- | --- | --- |
+| `X001` | `server_startup` | true |
+| `X002` | `skill_scan_error` | true |
+| `X003` | `file_not_found` | false |
+| `X004` | `unknown_config` | false |
+| `X005` | `parse_error` | true |
+| `X006` | `server_http_error` | true |
+| `X007` | `analysis_error` | true |
+| `X008` | (uncategorized) | true |
+| `X009` | `user_declined` | true |
+| `X010` | `skipped_by_runtime_config` | true |
+
+---
+
+## 2. Checking for policy violations
+
+When inspection and analysis succeeded, read the `issues` array.
+
+| Prefix | Meaning | Example |
+| --- | --- | --- |
+| **`E`** | Error — high-severity security finding | `E001` prompt injection in MCP tool |
+| **`W`** | Warning — lower-severity or informational finding | `W001` suspicious words in tool description |
+
+Full reference: [Issue codes](issue-codes.md).
+
+### Internal warnings (`W003`–`W006`)
+
+The human-readable CLI hides `W003`, `W004`, `W005`, and `W006` unless `--verbose` is set. **JSON output includes all issues unchanged.**
+
+These codes are legacy internal hints. If you want JSON parsing to mirror the default text report, filter them out in post-processing (examples below).
+
+---
+
+## CI/CD integration
+
+### Built-in exit codes (recommended)
+
+Use `--ci` for a native non-zero exit when findings or runtime failures remain:
 
 ```bash
-uvx mcp-scan --skills ./my-skill --json | jq '
+uvx snyk-agent-scan@latest \
+  --ci \
+  --dangerously-run-mcp-servers \
+  --json \
+  ~/.claude/skills
+```
+
+| Exit code | Meaning |
+| --- | --- |
+| `0` | Clean (no remaining issues or failures) |
+| `1` | Issues or unignored runtime failures present |
+| `2` | Invalid flags (e.g. `--ci` without `--dangerously-run-mcp-servers`) |
+
+Ignore specific codes in CI with `--ignore-issues-codes W001,W015` (requires `--ci`). Ignored codes are removed from the JSON payload before the exit check.
+
+See [CLI reference — CI mode](cli-reference.md#ci-mode).
+
+---
+
+## Practical examples with `jq`
+
+### Any critical findings or failures?
+
+```bash
+uvx snyk-agent-scan@latest --json ./my-skill | jq '
   [ .[] ] | map(
     select(
-      .error != null or
-      (.servers[]? | .error != null) or
+      (.error != null and .error.is_failure) or
+      (.servers[]? | .error != null and .error.is_failure) or
       (
         (.issues // []) | map(select(.code | startswith("E"))) | length > 0
       )
@@ -85,35 +206,35 @@ uvx mcp-scan --skills ./my-skill --json | jq '
   ) | length > 0
 '
 ```
-*   Returns `true` if there are failures or critical errors.
-*   Returns `false` if the scan is clean of errors.
 
-### Advanced Check: Filter Internal Warnings
-To get a list of "real" issues (ignoring internal warnings `W003`-`W006` and whitelisted items `X002`):
+Returns `true` when hard failures or `E*` findings exist.
+
+### Filter internal warnings
+
+Match the default text output by excluding `W003`–`W006`:
 
 ```bash
-uvx mcp-scan --skills ./my-skill --json | jq '
+uvx snyk-agent-scan@latest --json ./my-skill | jq '
   .[] | (.issues // [])[] |
   select(
-    .code as $c | ["W003", "W004", "W005", "W006", "X002"] | index($c) | not
+    .code as $c | ["W003", "W004", "W005", "W006"] | index($c) | not
   )
 '
 ```
 
-### Complete Compliance Check
-A strict check that fails if there are **any** errors or warnings (excluding internal ones), or if the scan itself failed:
+### Strict compliance check
+
+Fail on any remaining issue (excluding internal warnings) or any `is_failure` error:
 
 ```bash
-uvx mcp-scan --skills ./my-skill --json | jq '
+uvx snyk-agent-scan@latest --json ./my-skill | jq '
   [ .[] ] | map(
     select(
-      # Check for execution errors (path or server level)
-      (.error != null) or (.servers[]? | .error != null) or
-
-      # Check for policy issues, excluding internal warnings and whitelisted items
+      (.error != null and .error.is_failure) or
+      (.servers[]? | .error != null and .error.is_failure) or
       (
         (.issues // []) | map(select(
-          .code as $c | ["W003", "W004", "W005", "W006", "X002"] | index($c) | not
+          .code as $c | ["W003", "W004", "W005", "W006"] | index($c) | not
         )) | length > 0
       )
     )
@@ -121,68 +242,76 @@ uvx mcp-scan --skills ./my-skill --json | jq '
 '
 ```
 
-If the output is `true`, the skill **failed** the check.
+If the result is `true`, the target **failed** the check.
 
-## One-Liner for CI/CD
+### One-liner exit code via `jq`
 
-If you need a concise command for scripts or CI/CD pipelines that simply passes (exit 0) or fails (exit 1) based on policy violations:
+When you cannot use `--ci`, derive an exit code from issue codes:
 
 ```bash
-uvx mcp-scan --skills . --json | jq -e '[.[].issues[].code] - ["W003","W004","W005","W006","X002"] == []' > /dev/null
+uvx snyk-agent-scan@latest --json . | jq -e '
+  [
+    .[] | (.issues // [])[].code
+  ] | map(select(. as $c | ["W003","W004","W005","W006"] | index($c) | not)) | length == 0
+' > /dev/null
 ```
 
-### Why this works:
-1. `[.[].issues[].code]` collects all found issue codes into a single array.
-2. `- ["W003", ...]` removes the internal/whitelisted codes from that array.
-3. `== []` checks if any "real" issues remain.
-4. `jq -e` sets the shell exit code based on the truthiness of the result (`true` -> 0, `false` -> 1).
-5. `> /dev/null` suppresses the output so you only get the exit code.
+- `jq -e` maps `true` → exit `0`, `false` → exit `1`.
+- This checks **issues only**; combine with failure checks above for full coverage.
 
-## Node.js Integration
+---
 
-If you are integrating `mcp-scan` into a Node.js tool, you can use the following pattern to detect failures and policy violations programmatically.
+## Node.js integration
 
 ```javascript
-const { execSync } = require('child_process');
+const { execSync } = require("child_process");
 
-function checkSkillSecurity(targetPath) {
-  try {
-    const scanOutput = execSync(`uvx mcp-scan@latest --skills ${targetPath} --json`).toString();
-    const scanResult = JSON.parse(scanOutput);
+const IGNORE_CODES = new Set(["W003", "W004", "W005", "W006"]);
 
-    // Internal codes to ignore
-    const IGNORE_CODES = ["W003", "W004", "W005", "W006", "X002"];
+function checkAgentScan(targetPath) {
+  const scanOutput = execSync(
+    `uvx snyk-agent-scan@latest --json ${JSON.stringify(targetPath)}`,
+    { encoding: "utf8" }
+  );
+  const scanResult = JSON.parse(scanOutput);
 
-    // 1. Check for top-level execution failures
-    for (const [path, result] of Object.entries(scanResult)) {
-      if (result.error) {
-        throw new Error(`Scan failed for ${path}: ${result.error.message}`);
-      }
+  for (const [path, result] of Object.entries(scanResult)) {
+    if (result.error?.is_failure) {
+      throw new Error(`Scan failed for ${path}: ${result.error.message}`);
+    }
 
-      // 2. Check for server-level startup failures
-      const startupError = result.servers?.find(s => s.error)?.error;
-      if (startupError) {
-        throw new Error(`Server failed to start: ${startupError.message}`);
-      }
-
-      // 3. Filter for real policy violations (Errors or Warnings)
-      const violations = result.issues.filter(issue => !IGNORE_CODES.includes(issue.code));
-
-      if (violations.length > 0) {
-        const messages = violations.map(v => `[${v.code}] ${v.message}`).join(', ');
-        throw new Error(`Security policy violations found: ${messages}`);
+    for (const server of result.servers ?? []) {
+      if (server.error?.is_failure) {
+        throw new Error(
+          `Inspection failed for ${server.name ?? path}: ${server.error.message}`
+        );
       }
     }
 
-    return true; // Scan passed and is clean
-  } catch (error) {
-    // Handle or rethrow for your UI/Spinner
-    throw error;
+    const violations = (result.issues ?? []).filter(
+      (issue) => !IGNORE_CODES.has(issue.code)
+    );
+
+    if (violations.length > 0) {
+      const messages = violations.map((v) => `[${v.code}] ${v.message}`).join(", ");
+      throw new Error(`Security findings: ${messages}`);
+    }
   }
+
+  return true;
 }
 ```
 
-### Key Integration Points:
-*   **Object.entries**: Remember that the root of the JSON is an object keyed by file paths.
-*   **Issue Filtering**: Always filter out `W003`-`W006` and `X002` if you want to match the standard "clean" output of the CLI.
-*   **Server Errors**: Don't forget to check `result.servers[].error`. A skill might be "invalid" because it failed to execute, even if it has no security `issues` reported yet.
+**Integration notes**
+
+- The root JSON object is keyed by absolute paths — iterate with `Object.entries`.
+- Check `error.is_failure` and `servers[].error.is_failure`, not just presence of `error`.
+- Filter `W003`–`W006` when mirroring the default text report.
+- For CI pipelines, prefer `--ci --dangerously-run-mcp-servers --json` over reimplementing exit logic.
+
+---
+
+## Related documentation
+
+- [CLI reference](cli-reference.md) — all flags, including `--json`, `--ci`, and `--ignore-issues-codes`
+- [Issue codes](issue-codes.md) — security finding reference

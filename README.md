@@ -368,6 +368,7 @@ If you want to include Agent Scan results in your own project or registry, pleas
 
 - [CLI reference](docs/cli-reference.md) — All commands, flags, options, and environment variables.
 - [Scanning](docs/scanning.md) — How scanning works and usage examples.
+- [JSON output](docs/json-output.md) — JSON schema and programmatic parsing.
 - [Issue Codes](docs/issue-codes.md) — Reference for all security issues detected by Agent Scan.
 
 ## Further Reading

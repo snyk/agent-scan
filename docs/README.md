@@ -6,4 +6,5 @@ This is the documentation for [Agent Scan](https://github.com/snyk/agent-scan). 
 
 - **[CLI reference](cli-reference.md)** — All commands, flags, options, environment variables, and exit codes.
 - **[Scanning](scanning.md)** — How scanning works and usage examples.
+- **[JSON output](json-output.md)** — JSON schema, CI integration, and programmatic parsing.
 - **[Issue Codes](issue-codes.md)** — Reference for all security issues, warnings, toxic flows, and system codes detected by Agent Scan.
