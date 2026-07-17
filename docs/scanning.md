@@ -41,71 +41,20 @@ Agent Scan does not store or log any usage data, i.e. the contents and results o
 
 ## CLI Parameters
 
-```
-snyk-agent-scan - Security scanner for agents, MCP servers, and skills
-```
+For the complete, up-to-date list of commands, flags, options, environment variables, and exit codes, see **[CLI reference](cli-reference.md)**.
 
-### Common Options
+Quick summary:
 
-These options are available for all commands:
-
-```
---storage-file FILE    Path to store scan results and scanner state (default: ~/.mcp-scan)
---base-url URL         Base URL for the verification server
---verbose              Enable detailed logging output
---print-errors         Show error details and tracebacks
---full-toxic-flows     Show all tools that could take part in toxic flow. By default only the top 3 are shown.
---json                 Output results in JSON format instead of rich text
-```
-
-### Commands
-
-#### scan (default)
-
-Scan MCP configurations for security vulnerabilities in tools, prompts, and resources.
-
-```
-snyk-agent-scan scan [CONFIG_FILE...]
-```
-
-Options:
-
-```
---checks-per-server NUM           Number of checks to perform on each server (default: 1)
---server-timeout SECONDS          Seconds to wait before timing out server connections (default: 10)
---suppress-mcpserver-io BOOL      Suppress stdout/stderr from MCP servers (default: True)
---skills                          Autodetects and analyzes skills
---skills PATH_TO_SKILL_MD_FILE    Analyzes the specific skill
---skills PATHS_TO_DIRECTORY       Recursively detects and analyzes all skills in the directory
-```
-
-#### inspect
-
-Print descriptions of tools, prompts, and resources without verification.
-
-```
-snyk-agent-scan inspect [CONFIG_FILE...]
-```
-
-Options:
-
-```
---server-timeout SECONDS      Seconds to wait before timing out server connections (default: 10)
---suppress-mcpserver-io BOOL  Suppress stdout/stderr from MCP servers (default: True)
-```
-
-#### help
-
-Display detailed help information and examples.
-
-```bash
-snyk-agent-scan help
-```
+- **Default command:** `scan` (omit the subcommand to scan well-known agent configs)
+- **`inspect`:** discovery and MCP handshake only — no security analysis
+- **`--skills` / `--no-skills`:** skills are scanned by default; use `--no-skills` for MCP-only
+- **`--ci`:** non-zero exit on findings (requires `--dangerously-run-mcp-servers` in CI)
+- **`--json`:** machine-readable output — see [JSON output](json-output.md)
 
 ### Examples
 
 ```bash
-# Scan all known MCP configs
+# Scan all known MCP configs and agent skills
 snyk-agent-scan
 
 # Scan a specific config file
@@ -113,4 +62,7 @@ snyk-agent-scan ~/custom/config.json
 
 # Just inspect tools without verification
 snyk-agent-scan inspect
+
+# CI mode
+snyk-agent-scan --ci --dangerously-run-mcp-servers
 ```
