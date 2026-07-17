@@ -250,7 +250,9 @@ snyk-agent-scan guard uninstall {claude,cursor,codex,all} [OPTIONS]
 
 ## Snyk CLI extension flags
 
-The Snyk CLI command `snyk agent-scan` is implemented by **cli-extension-agent-scan**. It requires `--experimental` and delegates to the embedded Agent Scan binary.
+The Snyk CLI command `snyk agent-scan` is implemented by [**cli-extension-agent-scan**](https://github.com/snyk/cli-extension-agent-scan). It requires `--experimental` and delegates to the embedded Agent Scan binary.
+
+**Authentication:** Run `snyk auth` before using the extension. Analysis always goes through the Snyk API via a local credential proxy, so a valid Snyk CLI session is required in every mode — including `--no-upload`.
 
 ```bash
 snyk agent-scan --experimental [EXTENSION_FLAGS] [AGENT_SCAN_ARGS...]
@@ -263,7 +265,7 @@ snyk agent-scan --experimental [EXTENSION_FLAGS] [AGENT_SCAN_ARGS...]
 | `--experimental` | boolean | `false` | **Required.** Enables the agent-scan workflow. |
 | `--tenant-id UUID` | string | — | Snyk tenant ID. Required when using `--json` without a client ID; otherwise resolved interactively or from `SNYK_TENANT_ID`. Must be a valid UUID. |
 | `--client-id UUID` | string | — | Push-key client ID passed as `x-client-id` to the control server. If omitted (and not using `--no-upload`), the extension mints one via the authenticated Snyk CLI session. Must be a valid UUID when provided. |
-| `--no-upload` | boolean | `false` | Scan and analyze locally without uploading to Evo. Requires Snyk CLI authentication (`snyk auth`). |
+| `--no-upload` | boolean | `false` | Skip uploading results to Evo (analysis still runs). When omitted on a default scan invocation, the extension uploads by configuring `--control-server` automatically. |
 | `--json` | boolean | `false` | Forwarded to the Agent Scan binary. |
 | `--skills [PATH]` | string / boolean | — | Forwarded to the binary. `--skills` alone enables skills; `--skills /path` enables skills and passes `/path` as a scan target. |
 
@@ -276,17 +278,19 @@ snyk agent-scan --experimental [EXTENSION_FLAGS] [AGENT_SCAN_ARGS...]
 
 ### What the extension adds automatically
 
-When uploading (default, without `--no-upload`):
+**Default scan invocation** (`snyk agent-scan --experimental` with no explicit subcommand such as `inspect` or `help`, and without `--no-upload`):
 
-- Prepends `scan` if no subcommand or config path is given
-- Sets `--analysis-url` from `SNYK_API` / configured API URL
-- Appends `--control-server`, `--control-server-H "x-client-id: …"`, and `--control-identifier <hostname>`
+- Prepends `scan` if no config path is given
+- Sets `--analysis-url` from the configured Snyk API URL
+- Mints or reuses a push key and appends `--control-server`, `--control-server-H "x-client-id: …"`, and `--control-identifier <hostname>` so results upload to Evo (unless `--client-id` was supplied)
 - Starts a local MITM proxy for Snyk CLI credential injection
 
-When `--no-upload` is set:
+**With `--no-upload`:**
 
-- Requires `snyk auth`; no control-server arguments are added
+- Does not mint a client ID or add control-server arguments
 - Analysis still runs through the authenticated proxy
+
+**Explicit subcommands** (`inspect`, `help`, `guard`, etc.): no upload is configured, regardless of `--no-upload` (the flag is effectively irrelevant for those commands).
 
 ### Deprecated alias
 
