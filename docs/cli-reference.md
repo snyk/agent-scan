@@ -56,8 +56,11 @@ These flags are shared by `scan`, `inspect`, and `evo`.
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| `--skills` / `--no-skills` | boolean | `--skills` (enabled) | Include agent skills in the scan. Use `--no-skills` to scan MCP servers only. |
+| `--no-skills` | boolean | off | Scan MCP servers only — skip agent skill discovery and analysis. Skills are **included by default** on every scan/inspect/evo invocation; you normally do not need to pass anything to enable them. |
+| `--skills` | boolean | on (implicit) | **Deprecated / no-op.** Accepted for backward compatibility (`BooleanOptionalAction`) but redundant because skills are already enabled by default. Prefer omitting it; use `--no-skills` to opt out. |
 | `--scan-all-users` | boolean | `false` | Scan all readable user home directories on the machine (and WSL profiles on Windows), not just the current user. Also expands the control-server bootstrap payload to list those homes. |
+
+**Behavior:** `scan_skills` flows from the CLI into discovery and inspection — with `--no-skills`, explicit skill paths, skill directories, and auto-discovered agent skills are all skipped (see `client_to_inspect_from_path` and `inspect_client` in the codebase). E2E tests assert that `--no-skills` produces no skill servers even when a skill path is passed as a positional argument.
 
 ### Analysis and upload
 
@@ -267,7 +270,7 @@ snyk agent-scan --experimental [EXTENSION_FLAGS] [AGENT_SCAN_ARGS...]
 | `--client-id UUID` | string | — | Push-key client ID passed as `x-client-id` to the control server. If omitted (and not using `--no-upload`), the extension mints one via the authenticated Snyk CLI session. Must be a valid UUID when provided. |
 | `--no-upload` | boolean | `false` | Skip uploading results to Evo (analysis still runs). When omitted on a default scan invocation, the extension uploads by configuring `--control-server` automatically. |
 | `--json` | boolean | `false` | Forwarded to the Agent Scan binary. |
-| `--skills [PATH]` | string / boolean | — | Forwarded to the binary. `--skills` alone enables skills; `--skills /path` enables skills and passes `/path` as a scan target. |
+| `--skills [PATH]` | string / boolean | skills on | **Deprecated** when used alone (`--skills` without a path) — skills are already enabled by default in the embedded binary. Still supported by the extension: `--skills /path/to/skills` forwards `/path/to/skills` as a scan target (equivalent to passing the path as a positional argument). |
 
 ### Snyk CLI flags consumed by the extension
 
@@ -316,8 +319,11 @@ uvx snyk-agent-scan@latest ~/.claude/skills
 # Inspect without analysis
 uvx snyk-agent-scan@latest inspect
 
-# JSON for CI parsing
-uvx snyk-agent-scan@latest --json --no-skills ./my-skill
+# JSON for CI parsing (skill path — skills included by default)
+uvx snyk-agent-scan@latest --json ./my-skill
+
+# JSON for MCP-only scan
+uvx snyk-agent-scan@latest --json --no-skills ~/.cursor/mcp.json
 
 # CI pipeline (non-interactive)
 uvx snyk-agent-scan@latest --ci --dangerously-run-mcp-servers --json
@@ -355,8 +361,8 @@ snyk agent-scan --experimental --no-upload
 # JSON output
 snyk agent-scan --experimental --json --tenant-id "<tenant-uuid>"
 
-# Scan a specific path
-snyk agent-scan --experimental --skills ~/.claude/skills
+# Scan a specific path (skills included by default)
+snyk agent-scan --experimental ~/.claude/skills
 ```
 
 ### Agent Guard

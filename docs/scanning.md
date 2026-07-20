@@ -10,10 +10,10 @@ Agent Scan operates in two main modes which can be used jointly or separately:
 
 ## Quick Start
 
-To run a full scan of your machine (auto-discovers agents, MCP servers, skills), run:
+To run a full scan of your machine (auto-discovers agents, MCP servers, and skills), run:
 
 ```bash
-uvx snyk-agent-scan@latest --skills
+uvx snyk-agent-scan@latest
 ```
 
 This will scan for security vulnerabilities in servers, skills, tools, prompts, and resources. It will automatically discover a variety of agent configurations, including Claude Code/Desktop, Cursor, Gemini CLI, and Windsurf.
@@ -21,19 +21,21 @@ This will scan for security vulnerabilities in servers, skills, tools, prompts, 
 You can also scan particular configuration files or skills:
 
 ```bash
-# scan mcp configurations
+# scan an MCP configuration
 uvx snyk-agent-scan@latest ~/.vscode/mcp.json
 # scan a single agent skill
-uvx snyk-agent-scan@latest  --skills ~/path/to/my/SKILL.md
+uvx snyk-agent-scan@latest ~/path/to/my/SKILL.md
 # scan all claude skills
-uvx snyk-agent-scan@latest  --skills ~/.claude/skills
+uvx snyk-agent-scan@latest ~/.claude/skills
+# MCP only (skip skills)
+uvx snyk-agent-scan@latest --no-skills
 ```
 
 ## How It Works
 
 ![Scanning overview](assets/scan.svg)
 
-Agent Scan searches through your local agent's configuration files to find agents, skills, and MCP servers. For MCP, it connects to servers and retrieves tool descriptions. Omit `--skills` to skip skill analysis.
+Agent Scan searches through your local agent's configuration files to find agents, skills, and MCP servers. For MCP, it connects to servers and retrieves tool descriptions. Skills are scanned by default; use `--no-skills` to skip skill analysis.
 
 It then validates the components, both with local checks and by invoking the Agent Scan API. For this, skills, agent applications, tool names, and descriptions are shared with Snyk. By using Agent Scan, you agree to the Snyk [terms of use for Agent Scan](../TERMS.md).
 
@@ -47,7 +49,7 @@ Quick summary:
 
 - **Default command:** `scan` (omit the subcommand to scan well-known agent configs)
 - **`inspect`:** discovery and MCP handshake only — no security analysis
-- **`--skills` / `--no-skills`:** skills are scanned by default; use `--no-skills` for MCP-only
+- **Skills:** included by default; use `--no-skills` for MCP-only (`--skills` is deprecated — see [CLI reference](cli-reference.md))
 - **`--ci`:** non-zero exit on findings (requires `--dangerously-run-mcp-servers` in CI)
 - **`--json`:** machine-readable output — see [JSON output](json-output.md)
 
@@ -59,6 +61,9 @@ snyk-agent-scan
 
 # Scan a specific config file
 snyk-agent-scan ~/custom/config.json
+
+# MCP only
+snyk-agent-scan --no-skills
 
 # Just inspect tools without verification
 snyk-agent-scan inspect
