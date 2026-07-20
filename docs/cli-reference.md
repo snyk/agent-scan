@@ -72,9 +72,9 @@ These flags are shared by `scan`, `inspect`, and `evo`.
 | `--skip-ssl-verify` | boolean | `false` | Disable TLS certificate verification for analysis and upload HTTP calls. |
 | `--mcp-oauth-tokens-path PATH` | string | — | JSON file containing MCP OAuth tokens (`TokenAndClientInfoList` schema) used when connecting to OAuth-protected remote MCP servers. |
 
-### Control server (enterprise upload)
+### Control server (enterprise upload, **on deprecation path**)
 
-Upload analyzed results to one or more control servers (typically Snyk Evo).
+Upload analyzed results to one or more control servers (typically Snyk Evo). Will be replaced soon.
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
