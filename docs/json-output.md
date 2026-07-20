@@ -71,7 +71,7 @@ The root object is a map from **scan path** (absolute path string) to a `ScanPat
 | `error` | object \| null | Path-level error when discovery/parsing failed for this path. See [Execution failures](#1-checking-for-execution-failures). |
 | `servers` | array \| null | Inspected MCP servers and skills. `null` when the config could not be read at all. |
 | `issues` | array | Security findings from analysis (`E*`, `W*`). Empty in `inspect` mode. |
-| `labels` | array | Per-tool risk label scores from analysis (MCP scans). Often empty for skills-only paths. |
+| `labels` | array | **Deprecated — do not rely on this field.** Kept for schema compatibility. After analysis it is usually a nested array of all-zero risk scores (`is_public_sink`, `destructive`, `untrusted_content`, `private_data` = 0) aligned to each entity; before analysis or in `inspect` mode it is often `[]`. Real findings live in `issues`. |
 
 ### Server entries (`ServerScanResult`)
 
@@ -89,7 +89,7 @@ The root object is a map from **scan path** (absolute path string) to a `ScanPat
 | --- | --- | --- |
 | `code` | string | Finding code (e.g. `E001`, `W015`). See [Issue codes](issue-codes.md). |
 | `message` | string | Human-readable description. |
-| `reference` | array \| null | `(server_index, entity_index)` into `servers` / entity lists, or `[server_index, null]` for server-scoped issues. |
+| `reference` | array \| null | Index pair into the result: `[server_index, entity_index]`. **`server_index`** selects an entry in `servers[]` (an MCP server *or* a skill). **`entity_index`** selects an item within that entry's catalog — an MCP **tool** (or prompt/resource) for servers, or a **file** within a skill bundle; `null` as the second element means the issue applies to the whole server/skill, not one entity. |
 | `extra_data` | object \| null | Optional structured context from analysis. |
 
 ### Error objects (`ScanError`)
