@@ -80,7 +80,7 @@ uvx snyk-agent-scan@latest ~/path/to/my/SKILL.md
 uvx snyk-agent-scan@latest ~/.claude/skills
 ```
 
-### Download a standalone binary
+### Run with a standalone binary
 
 Download the binary for your operating system and architecture from the [latest GitHub Release](https://github.com/snyk/agent-scan/releases/latest). The release page also provides an SBOM (`sbom-<version>.json`), checksum files, and GitHub-generated source code archives. See [Verifying Standalone Binaries](#verifying-standalone-binaries) to verify your download.
 
