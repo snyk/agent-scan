@@ -123,7 +123,7 @@ Bootstrap behavior is described in the [README — Control Server Bootstrap](../
 | --- | --- |
 | `0` | Success; no remaining issues or failures (after ignores) |
 | `1` | `--ci`: findings or unignored runtime failures present |
-| `2` | Invalid flag combination (e.g. `--ignore-issues-codes` without `--ci`, or `--ci` without `--dangerously-run-mcp-servers`) |
+| `2` | Invalid flag combination |
 
 ---
 
