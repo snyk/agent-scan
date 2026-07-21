@@ -84,7 +84,7 @@ uvx snyk-agent-scan@latest ~/.claude/skills
 
 Download the binary for your operating system and architecture from the [latest GitHub Release](https://github.com/snyk/agent-scan/releases/latest). The release page also provides an SBOM (`sbom-<version>.json`), checksum files, and GitHub-generated source code archives. See [Verifying Standalone Binaries](#verifying-standalone-binaries) to verify your download.
 
-#### Example Run
+### Example Run
 
 [![Agent Scan security vulnerabilities demo](demo.svg)](https://asciinema.org/a/716858)
 
