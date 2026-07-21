@@ -71,7 +71,7 @@ The root object is a map from **scan path** (absolute path string) to a `ScanPat
 | `error` | object \| null | Path-level error when discovery/parsing failed for this path. See [Execution failures](#1-checking-for-execution-failures). |
 | `servers` | array \| null | Inspected MCP servers and skills. `null` when the config could not be read at all. |
 | `issues` | array | Security findings from analysis (`E*`, `W*`). Empty in `inspect` mode. |
-| `labels` | array | **Deprecated — do not rely on this field.** Kept for schema compatibility. After analysis it is usually a nested array of all-zero risk scores (`is_public_sink`, `destructive`, `untrusted_content`, `private_data` = 0) aligned to each entity; before analysis or in `inspect` mode it is often `[]`. Real findings live in `issues`. |
+| `labels` | array | **Deprecated — do not rely on this field.** Kept for schema compatibility. Real findings live in `issues`. |
 
 ### Server entries (`ServerScanResult`)
 
@@ -140,7 +140,8 @@ Operational failures map to `X*` codes (via `error.category`, or occasionally in
 | `X007` | `analysis_error` | true |
 | `X008` | (uncategorized) | true |
 | `X009` | `user_declined` | true |
-| `X010` | `skipped_by_runtime_config` | true |
+
+These nine codes match `FAILURE_CATEGORY_TO_CODE` in the CLI source; there is no `X010`.
 
 ---
 
