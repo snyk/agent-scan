@@ -20,7 +20,6 @@ from agent_scan.models import (
     ClaudeCodeConfigFile,
     ClaudeConfigFile,
     ConfigWithoutMCP,
-    FileTokenStorage,
     MCPConfig,
     OpenCodeConfigFile,
     PluginMCPConfigFile,
@@ -32,11 +31,59 @@ from agent_scan.models import (
     VSCodeConfigFile,
     VSCodeMCPConfig,
 )
+from agent_scan.oauth_store import (
+    OAuthTokenStore,
+    PersistentTokenStorage,
+    StoredServerAuth,
+    ensure_fresh_token,
+)
 from agent_scan.traffic_capture import PipeStderrCapture, TrafficCapture, capturing_client
 from agent_scan.utils import resolve_command_and_args
 
 # Set up logger for this module
 logger = logging.getLogger(__name__)
+
+
+async def _handle_redirect_unsupported(auth_url: str) -> None:
+    raise NotImplementedError(f"Interactive OAuth is not supported on the scan path: {auth_url}")
+
+
+async def _handle_callback_unsupported(auth_code: str, state: str | None) -> tuple[str, str | None]:
+    raise NotImplementedError("Interactive OAuth callback is not supported on the scan path")
+
+
+async def _resolve_scan_oauth_provider(
+    url: str, token: TokenAndClientInfo | None
+) -> OAuthClientProvider | None:
+    """Build a store-backed, non-interactive OAuth provider for the scan path.
+
+    Looks up (or seeds) the persistent store by normalized URL, proactively
+    refreshes an expired token, and returns a provider whose interactive
+    handlers deliberately raise — so a server that would still need browser auth
+    fails cleanly to ``auth_failed`` rather than blocking the unattended scan.
+    Returns ``None`` when there is no credential for this server (unauthenticated
+    connect, exactly as before). Used by both the HTTP and SSE transports.
+    """
+    store = OAuthTokenStore()
+    entry = store.get(url)
+    if entry is None and token is not None:
+        entry = StoredServerAuth.from_token_and_client_info(token)
+        store.put(url, entry)
+    if entry is None:
+        return None
+    await ensure_fresh_token(store, url)
+    return OAuthClientProvider(
+        server_url=url,
+        client_metadata=OAuthClientMetadata(
+            client_name="mcp-scan",
+            grant_types=["authorization_code", "refresh_token"],
+            response_types=["code"],
+            redirect_uris=["http://127.0.0.1:33418/callback"],
+        ),
+        storage=PersistentTokenStorage(store, url),
+        redirect_handler=_handle_redirect_unsupported,
+        callback_handler=_handle_callback_unsupported,
+    )
 
 
 @asynccontextmanager
@@ -46,27 +93,7 @@ async def streamablehttp_client_without_session(
     timeout: int,
     token: TokenAndClientInfo | None = None,
 ):
-    async def handle_redirect(auth_url: str) -> None:
-        raise NotImplementedError(f"handle_redirect is not implemented {auth_url}")
-
-    async def handle_callback(auth_code: str, state: str | None) -> tuple[str, str | None]:
-        raise NotImplementedError(f"handle_callback is not implemented {auth_code} {state}")
-
-    if token:
-        oauth_client_provider = OAuthClientProvider(
-            server_url=token.mcp_server_url,
-            client_metadata=OAuthClientMetadata(
-                client_name="mcp-scan",
-                grant_types=["authorization_code", "refresh_token"],
-                response_types=["code"],
-                redirect_uris=["http://localhost:3030/callback"],
-            ),
-            storage=FileTokenStorage(data=token),
-            redirect_handler=handle_redirect,
-            callback_handler=handle_callback,
-        )
-    else:
-        oauth_client_provider = None
+    oauth_client_provider = await _resolve_scan_oauth_provider(url, token)
     async with httpx.AsyncClient(
         auth=oauth_client_provider, follow_redirects=True, headers=headers, timeout=timeout
     ) as custom_client:
@@ -96,11 +123,15 @@ async def get_client(
     """
     if isinstance(server_config, RemoteServer) and server_config.type == "sse":
         logger.debug("Creating SSE client with URL: %s", server_config.url)
+        # Attach the same store-backed OAuth provider the HTTP path uses, so an
+        # authenticated SSE server (e.g. Atlassian) presents its stored token.
+        sse_oauth_provider = await _resolve_scan_oauth_provider(server_config.url, token)
         client_cm = sse_client(
             url=server_config.url,
             headers=server_config.headers,
             # env=server_config.env, #Not supported by MCP yet, but present in vscode
             timeout=timeout,
+            auth=sse_oauth_provider,
         )
     elif isinstance(server_config, RemoteServer) and server_config.type == "http":
         logger.debug(

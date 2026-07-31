@@ -906,6 +906,17 @@ def main():
     # use the same parser as scan
     setup_scan_parser(evo_parser, add_ci_ignore_options=False, add_show_full_discovery_option=False)
 
+    # MCP-AUTH command: interactively authenticate an OAuth-protected remote server
+    mcp_auth_parser = subparsers.add_parser(
+        "mcp-auth", help="Authenticate an OAuth-protected remote MCP server so scans can use it"
+    )
+    setup_scan_parser(mcp_auth_parser, add_files=False)
+    mcp_auth_parser.add_argument("server", nargs="?", help="Name of the MCP server (as configured) to authenticate")
+    mcp_auth_parser.add_argument("--url", help="Authenticate a remote MCP server by URL directly")
+    mcp_auth_parser.add_argument(
+        "--all-unauthenticated", action="store_true", help="Authenticate every discovered remote MCP server"
+    )
+
     # GUARD command
     guard_parser = subparsers.add_parser(
         "guard",
@@ -1069,6 +1080,9 @@ def main():
     elif args.command == "evo":
         asyncio.run(evo(args))
         sys.exit(0)
+    elif args.command == "mcp-auth":
+        asyncio.run(mcp_auth(args))
+        sys.exit(0)
     elif args.command == "guard":
         from agent_scan.guard import run_guard
 
@@ -1143,6 +1157,73 @@ def _should_show_analysis_results(args) -> bool:
         or getattr(args, "ci", False)
         or getattr(args, "show_analysis_results", False)
     )
+
+
+async def mcp_auth(args):
+    """Interactively authenticate an OAuth-protected remote MCP server.
+
+    Runs the browser OAuth flow and persists the token to the local store, so
+    subsequent (unattended) scans use and refresh it. This is the only command
+    that performs an interactive authorization; the scan path never does.
+    """
+    from urllib.parse import urlparse
+
+    from agent_scan.models import RemoteServer
+    from agent_scan.oauth_flow import authenticate_server
+    from agent_scan.oauth_store import OAuthTokenStore
+
+    store = OAuthTokenStore()
+    url_arg = getattr(args, "url", None)
+    server_arg = getattr(args, "server", None)
+    all_unauth = getattr(args, "all_unauthenticated", False)
+
+    targets: list[tuple[str, str]] = []
+    if url_arg:
+        name = server_arg or urlparse(url_arg).hostname or url_arg
+        targets = [(name, url_arg)]
+    else:
+        # Discover remote MCP servers from this machine's agent configs.
+        inspect_args = InspectArgs(
+            timeout=getattr(args, "server_timeout", 10),
+            tokens=[],
+            paths=[],
+            all_users=getattr(args, "scan_all_users", False),
+            scan_skills=False,
+        )
+        clients_to_inspect, _, _ = await discover_clients_to_inspect(inspect_args)
+        remote: dict[str, str] = {}
+        for client in clients_to_inspect:
+            for _config_path, entries in client.mcp_configs.items():
+                if isinstance(entries, list):
+                    for name, server in entries:
+                        if isinstance(server, RemoteServer):
+                            remote.setdefault(name, server.url)
+        if all_unauth:
+            targets = list(remote.items())
+        elif server_arg:
+            if server_arg not in remote:
+                rich.print(f"[bold red]No remote MCP server named '{server_arg}' found.[/bold red]")
+                if remote:
+                    rich.print(f"Discovered remote servers: {', '.join(sorted(remote))}")
+                else:
+                    rich.print("No remote MCP servers were discovered on this machine.")
+                return
+            targets = [(server_arg, remote[server_arg])]
+        else:
+            rich.print("[bold red]Specify a server name, --url <url>, or --all-unauthenticated.[/bold red]")
+            return
+
+    if not targets:
+        rich.print("No remote MCP servers to authenticate.")
+        return
+
+    for name, url in targets:
+        rich.print(f"\n[bold]Authenticating '{name}'[/bold] ({url}) ...")
+        result = await authenticate_server(url, name, store)
+        if result.ok:
+            rich.print(f"[bold green]{name}: authenticated[/bold green]")
+        else:
+            rich.print(f"[bold red]{name}: authentication failed[/bold red] — {result.message}")
 
 
 async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> ScanResponse | list[InspectedPath]:
