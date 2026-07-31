@@ -130,6 +130,22 @@ def _redaction_marker(plugin_name: str) -> str:
     return f"**REDACTED_SECRET_{plugin_name.upper()}**"
 
 
+_BEARER_TOKEN_RE = re.compile(r"[Bb]earer\s+[\w.\-~+/]+=*")
+
+
+def redact_bearer_tokens(text: str | None) -> str | None:
+    """Replace ``Bearer <token>`` values with the redaction marker.
+
+    OAuth access tokens are applied at the HTTP transport layer and do not reach
+    the captured MCP protocol messages, so this is defense-in-depth for the
+    ``server_output`` (and traceback) uploaded on errors — a 401 dump is the one
+    place a bearer token could plausibly surface.
+    """
+    if not text:
+        return text
+    return _BEARER_TOKEN_RE.sub(f"Bearer {REDACTED}", text)
+
+
 def redact_absolute_paths(text: str | None) -> str | None:
     """
     Redact all absolute file paths in a string.
@@ -690,11 +706,15 @@ def redact_server(server_scan_result: ServerScanResult) -> ServerScanResult:
 
     # Redact traceback in server error
     if server_scan_result.error and server_scan_result.error.traceback:
-        server_scan_result.error.traceback = redact_absolute_paths(server_scan_result.error.traceback)
+        server_scan_result.error.traceback = redact_bearer_tokens(
+            redact_absolute_paths(server_scan_result.error.traceback)
+        )
 
-    # Redact all absolute paths in server output (stderr, protocol messages)
+    # Redact absolute paths and any bearer tokens in server output (stderr, protocol messages)
     if server_scan_result.error and server_scan_result.error.server_output:
-        server_scan_result.error.server_output = redact_absolute_paths(server_scan_result.error.server_output)
+        server_scan_result.error.server_output = redact_bearer_tokens(
+            redact_absolute_paths(server_scan_result.error.server_output)
+        )
 
     return server_scan_result
 
