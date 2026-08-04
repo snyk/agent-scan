@@ -13,6 +13,7 @@ from agent_scan.agents.base import (
     SkillsDirsResult,
     _walk_under_depth,
 )
+from agent_scan.client_paths import resolve_user_client_dir, user_client_dir_override
 from agent_scan.models import (
     ClaudeConfigFile,
     CouldNotParseMCPConfig,
@@ -121,11 +122,11 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         the scanner can't know each *other* target user's env, so the per-home
         default is used instead.
         """
-        if self._scans_own_home():
-            config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
-            if config_dir:
-                return Path(config_dir)
-        return expand_path(Path(self._install_path), self.home_directory)
+        return resolve_user_client_dir(
+            "claude",
+            home_directory=self.home_directory,
+            honor_environment=self._scans_own_home(),
+        )
 
     def _config_json_path(self) -> Path:
         """Path to the global ``.claude.json``.
@@ -134,7 +135,7 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         ``<base>/.claude.json``; falls back to the legacy ``~/.claude.json`` when
         that relocated file does not exist.
         """
-        if self._scans_own_home() and os.environ.get("CLAUDE_CONFIG_DIR"):
+        if self._scans_own_home() and user_client_dir_override("claude") is not None:
             relocated = self._claude_base_dir() / ".claude.json"
             if relocated.exists():
                 return relocated

@@ -20,12 +20,9 @@ from agent_scan.guard import (
     ALL_CLIENTS,
     CLAUDE_HOOK_EVENTS,
     CLAUDE_MANAGED_SETTINGS_PATH,
-    CLAUDE_SETTINGS_PATH,
     CODEX_HOOK_EVENTS,
-    CODEX_HOOKS_PATH,
     CODEX_MANAGED_HOOKS_PATH,
     CURSOR_HOOK_EVENTS,
-    CURSOR_HOOKS_PATH,
     CURSOR_MANAGED_HOOKS_PATH,
     _build_hook_command,
     _build_hook_command_powershell,
@@ -52,6 +49,7 @@ from agent_scan.guard import (
     _prepare_cursor_config,
     _print_client_status,
     _run_install,
+    _run_status,
     _run_uninstall,
     _send_test_event,
     _shell_quote,
@@ -695,31 +693,160 @@ class TestFilterCursorHooks:
 
 
 class TestConfigPath:
-    def test_claude_user_default(self):
-        assert _config_path("claude") == CLAUDE_SETTINGS_PATH
+    def test_claude_user_default(self, monkeypatch):
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+        assert _config_path("claude") == Path.home() / ".claude" / "settings.json"
 
     def test_cursor_user_default(self):
-        assert _config_path("cursor") == CURSOR_HOOKS_PATH
+        assert _config_path("cursor") == Path.home() / ".cursor" / "hooks.json"
 
-    def test_codex_user_default(self):
-        assert _config_path("codex") == CODEX_HOOKS_PATH
+    def test_codex_user_default(self, monkeypatch):
+        monkeypatch.delenv("CODEX_HOME", raising=False)
+        assert _config_path("codex") == Path.home() / ".codex" / "hooks.json"
 
-    def test_claude_managed(self):
+    @pytest.mark.parametrize(
+        ("client", "env_var", "filename"),
+        [("claude", "CLAUDE_CONFIG_DIR", "settings.json"), ("codex", "CODEX_HOME", "hooks.json")],
+    )
+    def test_honors_client_environment_directory(self, client, env_var, filename, tmp_path, monkeypatch):
+        configured = tmp_path / f"custom-{client}"
+        monkeypatch.setenv(env_var, str(configured))
+        assert _config_path(client) == configured / filename
+
+    @pytest.mark.parametrize(
+        ("client", "env_var", "default_dir", "filename"),
+        [
+            ("claude", "CLAUDE_CONFIG_DIR", ".claude", "settings.json"),
+            ("codex", "CODEX_HOME", ".codex", "hooks.json"),
+        ],
+    )
+    def test_empty_environment_directory_uses_default(self, client, env_var, default_dir, filename, monkeypatch):
+        monkeypatch.setenv(env_var, "")
+        assert _config_path(client) == Path.home() / default_dir / filename
+
+    @pytest.mark.parametrize(
+        ("client", "env_var", "filename"),
+        [("claude", "CLAUDE_CONFIG_DIR", "settings.json"), ("codex", "CODEX_HOME", "hooks.json")],
+    )
+    def test_environment_directory_expands_tilde(self, client, env_var, filename, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv(env_var, f"~/custom-{client}")
+        assert _config_path(client) == tmp_path / f"custom-{client}" / filename
+
+    def test_environment_changes_after_import_are_honored(self, tmp_path, monkeypatch):
+        first = tmp_path / "first"
+        second = tmp_path / "second"
+        monkeypatch.setenv("CODEX_HOME", str(first))
+        assert _config_path("codex") == first / "hooks.json"
+        monkeypatch.setenv("CODEX_HOME", str(second))
+        assert _config_path("codex") == second / "hooks.json"
+
+    def test_claude_managed(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "ignored"))
         assert _config_path("claude", managed=True) == CLAUDE_MANAGED_SETTINGS_PATH
 
     def test_cursor_managed(self):
         assert _config_path("cursor", managed=True) == CURSOR_MANAGED_HOOKS_PATH
 
-    def test_codex_managed(self):
+    def test_codex_managed(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "ignored"))
         assert _config_path("codex", managed=True) == CODEX_MANAGED_HOOKS_PATH
 
-    def test_file_override_takes_precedence_over_managed(self):
+    def test_file_override_takes_precedence_over_managed(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "ignored"))
         override = "/custom/path/settings.json"
         assert _config_path("claude", override=override, managed=True) == Path(override)
 
     def test_file_override_takes_precedence_over_user(self):
         override = "/custom/path/settings.json"
         assert _config_path("claude", override=override) == Path(override)
+
+
+class TestResolvedUserPaths:
+    def test_install_uses_resolved_config_and_hook_directory(self, tmp_path, monkeypatch):
+        codex_home = tmp_path / "custom-codex"
+        codex_home.mkdir()
+        config_path = codex_home / "hooks.json"
+        _write(
+            config_path,
+            {
+                "unrelated": {"preserved": True},
+                "hooks": {"CustomEvent": [_claude_group(OTHER_CMD)]},
+            },
+        )
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        monkeypatch.setenv("PUSH_KEY", "headless-pk")
+        monkeypatch.delenv("TENANT_ID", raising=False)
+
+        with patch("agent_scan.guard._send_test_event", return_value=True):
+            _run_install(
+                SimpleNamespace(
+                    client="codex",
+                    url="https://api.snyk.io",
+                    tenant_id="",
+                    file=None,
+                    managed=False,
+                )
+            )
+
+        script_name = "snyk-agent-guard.ps1" if sys.platform == "win32" else "snyk-agent-guard.sh"
+        script_path = codex_home / "hooks" / script_name
+        assert script_path.is_file()
+        data = json.loads(config_path.read_text())
+        assert data["unrelated"] == {"preserved": True}
+        assert data["hooks"]["CustomEvent"] == [_claude_group(OTHER_CMD)]
+        command = data["hooks"]["PreToolUse"][-1]["hooks"][0]["command"]
+        assert str(script_path) in command
+
+    def test_uninstall_uses_resolved_config_and_preserves_unrelated_data(self, tmp_path, monkeypatch):
+        claude_home = tmp_path / "custom-claude"
+        config_path = claude_home / "settings.json"
+        _write(config_path, {"unrelated": {"preserved": True}})
+        _setup_claude_hooks(AGENT_SCAN_CMD, config_path)
+        script_name = "snyk-agent-guard.ps1" if sys.platform == "win32" else "snyk-agent-guard.sh"
+        script_path = claude_home / "hooks" / script_name
+        script_path.parent.mkdir()
+        script_path.write_text("hook")
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
+        monkeypatch.delenv("SNYK_TOKEN", raising=False)
+
+        _run_uninstall(SimpleNamespace(client="claude", file=None, managed=False))
+
+        data = json.loads(config_path.read_text())
+        assert data == {"unrelated": {"preserved": True}}
+        assert not script_path.exists()
+
+    def test_default_detector_uses_runtime_resolved_path(self, tmp_path, monkeypatch):
+        codex_home = tmp_path / "custom-codex"
+        config_path = codex_home / "hooks.json"
+        _setup_codex_hooks(CODEX_AGENT_SCAN_CMD, config_path)
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+        info = _detect_codex_install()
+
+        assert info is not None
+        assert info["auth_value"] == "pk-codex"
+
+    def test_status_reports_and_inspects_resolved_paths(self, tmp_path, monkeypatch, capsys):
+        import agent_scan.guard as guard_module
+
+        claude_home = tmp_path / "custom-claude"
+        codex_home = tmp_path / "custom-codex"
+        _setup_claude_hooks(AGENT_SCAN_CMD, claude_home / "settings.json")
+        _setup_codex_hooks(CODEX_AGENT_SCAN_CMD, codex_home / "hooks.json")
+        monkeypatch.setenv("HOME", str(tmp_path / "default-home"))
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
+        monkeypatch.setenv("CODEX_HOME", str(codex_home))
+        monkeypatch.setattr(guard_module, "CLAUDE_MANAGED_SETTINGS_PATH", tmp_path / "managed-claude.json")
+        monkeypatch.setattr(guard_module, "CURSOR_MANAGED_HOOKS_PATH", tmp_path / "managed-cursor.json")
+        monkeypatch.setattr(guard_module, "CODEX_MANAGED_HOOKS_PATH", tmp_path / "managed-codex.toml")
+
+        _run_status()
+
+        output = capsys.readouterr().out.replace("\n", "")
+        assert str(claude_home / "settings.json") in output
+        assert str(codex_home / "hooks.json") in output
+        assert output.count("INSTALLED") >= 2
 
 
 class TestManagedPathConstants:
@@ -1508,6 +1635,33 @@ class TestRunInstallCallsEnsureGuardEnabled:
         mock_fetch.assert_called_once_with("https://api.snyk.io", "tid-interactive", "snyk-from-env")
         mock_mint.assert_called_once()
         mock_install.assert_called_once()
+
+    @patch("agent_scan.guard._preflight_writable")
+    @patch("agent_scan.guard._install_hooks")
+    @patch("agent_scan.guard.mint_push_key", return_value="minted-pk")
+    @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
+    def test_preflight_and_install_receive_resolved_config_path(
+        self, mock_fetch, mock_mint, mock_install, mock_preflight, tmp_path, monkeypatch
+    ):
+        claude_home = tmp_path / "custom-claude"
+        claude_home.mkdir()
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
+        monkeypatch.delenv("PUSH_KEY", raising=False)
+        monkeypatch.setenv("SNYK_TOKEN", "snyk-from-env")
+
+        _run_install(
+            SimpleNamespace(
+                client="claude",
+                url="https://api.snyk.io",
+                tenant_id="tid-interactive",
+                file=None,
+                managed=False,
+            )
+        )
+
+        expected = claude_home / "settings.json"
+        mock_preflight.assert_called_once_with(expected)
+        assert mock_install.call_args.args[4] == expected
 
     @patch("agent_scan.guard._install_hooks")
     @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
@@ -2529,7 +2683,7 @@ class TestRunInstallAll:
             d = tmp_path / f".{client}"
             d.mkdir()
             fake_paths[client] = d
-        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", fake_paths):
+        with patch("agent_scan.guard.resolve_user_client_dir", side_effect=fake_paths.__getitem__):
             yield
 
     @patch("agent_scan.guard._install_hooks")
@@ -2686,18 +2840,26 @@ class TestRunUninstallAll:
 
 class TestIsClientInstalled:
     def test_installed_when_config_dir_exists(self, tmp_path):
-        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", {"claude": tmp_path / ".claude"}):
-            (tmp_path / ".claude").mkdir()
+        path = tmp_path / ".claude"
+        path.mkdir()
+        with patch("agent_scan.guard.resolve_user_client_dir", return_value=path):
             assert _is_client_installed("claude") is True
 
     def test_not_installed_when_config_dir_missing(self, tmp_path):
-        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", {"claude": tmp_path / ".claude"}):
+        with patch("agent_scan.guard.resolve_user_client_dir", return_value=tmp_path / ".claude"):
             assert _is_client_installed("claude") is False
 
     def test_not_installed_when_path_is_file_not_dir(self, tmp_path):
-        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", {"claude": tmp_path / ".claude"}):
-            (tmp_path / ".claude").write_text("")
+        path = tmp_path / ".claude"
+        path.write_text("")
+        with patch("agent_scan.guard.resolve_user_client_dir", return_value=path):
             assert _is_client_installed("claude") is False
+
+    def test_uses_resolved_environment_directory(self, tmp_path, monkeypatch):
+        configured = tmp_path / "custom-codex"
+        configured.mkdir()
+        monkeypatch.setenv("CODEX_HOME", str(configured))
+        assert _is_client_installed("codex") is True
 
     def test_unknown_client_returns_true(self):
         assert _is_client_installed("unknown-client") is True
@@ -2705,7 +2867,7 @@ class TestIsClientInstalled:
     def test_permission_error_returns_false(self, tmp_path):
         path = MagicMock()
         path.is_dir.side_effect = PermissionError("denied")
-        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", {"claude": path}):
+        with patch("agent_scan.guard.resolve_user_client_dir", return_value=path):
             assert _is_client_installed("claude") is False
 
 
@@ -2719,7 +2881,7 @@ class TestRunInstallSkipsUninstalledClients:
 
     @staticmethod
     def _fake_paths(tmp_path, installed_clients):
-        """Build a _CLIENT_INSTALL_PATHS dict where only *installed_clients* have real dirs."""
+        """Build resolved directories where only *installed_clients* exist."""
         paths = {}
         for client in ALL_CLIENTS:
             d = tmp_path / f".{client}"
@@ -2736,7 +2898,8 @@ class TestRunInstallSkipsUninstalledClients:
     ):
         monkeypatch.delenv("PUSH_KEY", raising=False)
         monkeypatch.setenv("SNYK_TOKEN", "tok")
-        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, [])):
+        paths = self._fake_paths(tmp_path, [])
+        with patch("agent_scan.guard.resolve_user_client_dir", side_effect=paths.__getitem__):
             _run_install(
                 SimpleNamespace(
                     client="claude",
@@ -2759,7 +2922,8 @@ class TestRunInstallSkipsUninstalledClients:
     ):
         monkeypatch.delenv("PUSH_KEY", raising=False)
         monkeypatch.setenv("SNYK_TOKEN", "tok")
-        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, [])):
+        paths = self._fake_paths(tmp_path, [])
+        with patch("agent_scan.guard.resolve_user_client_dir", side_effect=paths.__getitem__):
             _run_install(
                 SimpleNamespace(
                     client="all",
@@ -2782,7 +2946,8 @@ class TestRunInstallSkipsUninstalledClients:
     ):
         monkeypatch.delenv("PUSH_KEY", raising=False)
         monkeypatch.setenv("SNYK_TOKEN", "tok")
-        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, ["claude"])):
+        paths = self._fake_paths(tmp_path, ["claude"])
+        with patch("agent_scan.guard.resolve_user_client_dir", side_effect=paths.__getitem__):
             _run_install(
                 SimpleNamespace(
                     client="all",
@@ -2803,7 +2968,8 @@ class TestRunInstallSkipsUninstalledClients:
     def test_headless_skips_uninstalled_client(self, mock_install, tmp_path, monkeypatch, capsys):
         monkeypatch.setenv("PUSH_KEY", "headless-pk")
         monkeypatch.setenv("TENANT_ID", "tid-hl")
-        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, [])):
+        paths = self._fake_paths(tmp_path, [])
+        with patch("agent_scan.guard.resolve_user_client_dir", side_effect=paths.__getitem__):
             _run_install(
                 SimpleNamespace(
                     client="cursor",
@@ -2823,7 +2989,8 @@ class TestRunInstallSkipsUninstalledClients:
     def test_all_clients_all_installed_installs_all(self, mock_fetch, mock_mint, mock_install, tmp_path, monkeypatch):
         monkeypatch.delenv("PUSH_KEY", raising=False)
         monkeypatch.setenv("SNYK_TOKEN", "tok")
-        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, ALL_CLIENTS)):
+        paths = self._fake_paths(tmp_path, ALL_CLIENTS)
+        with patch("agent_scan.guard.resolve_user_client_dir", side_effect=paths.__getitem__):
             _run_install(
                 SimpleNamespace(
                     client="all",

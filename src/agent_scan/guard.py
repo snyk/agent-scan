@@ -17,6 +17,7 @@ from urllib.parse import urlparse
 
 import rich
 
+from agent_scan.client_paths import resolve_user_client_dir
 from agent_scan.pushkeys import (
     GuardEnabledAccessDeniedError,
     _is_localhost,
@@ -40,9 +41,11 @@ _DETECTION_RE = re.compile(
 )
 _PERMISSION_DENIED = "__permission_denied__"
 
-CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
-CURSOR_HOOKS_PATH = Path.home() / ".cursor" / "hooks.json"
-CODEX_HOOKS_PATH = Path.home() / ".codex" / "hooks.json"
+_CLIENT_CONFIG_FILENAMES = {
+    "claude": "settings.json",
+    "cursor": "hooks.json",
+    "codex": "hooks.json",
+}
 
 # Managed (MDM / admin-deployed) config paths — OS-specific
 # Codex managed hooks use a requirements.toml file at a system location
@@ -792,11 +795,14 @@ def _uninstall_cursor(path: Path) -> None:
 
 def _run_status() -> None:
     rich.print("[bold]User-level hooks:[/bold]")
-    _print_client_status("Claude Code", CLAUDE_SETTINGS_PATH, _detect_claude_install())
+    claude_path = _config_path("claude")
+    _print_client_status("Claude Code", claude_path, _detect_claude_install(claude_path))
     rich.print()
-    _print_client_status("Cursor", CURSOR_HOOKS_PATH, _detect_cursor_install())
+    cursor_path = _config_path("cursor")
+    _print_client_status("Cursor", cursor_path, _detect_cursor_install(cursor_path))
     rich.print()
-    _print_client_status("Codex", CODEX_HOOKS_PATH, _detect_codex_install())
+    codex_path = _config_path("codex")
+    _print_client_status("Codex", codex_path, _detect_codex_install(codex_path))
     rich.print()
 
     rich.print("[bold]Managed hooks:[/bold]")
@@ -855,7 +861,9 @@ def _print_client_status(label: str, path: Path, info: dict | str | None) -> Non
     )
 
 
-def _detect_claude_install(path: Path = CLAUDE_SETTINGS_PATH) -> dict | None:
+def _detect_claude_install(path: Path | None = None) -> dict | None:
+    if path is None:
+        path = _config_path("claude")
     if not path.exists():
         return None
     settings = _read_json_or_empty(path)
@@ -880,7 +888,9 @@ def _detect_claude_install(path: Path = CLAUDE_SETTINGS_PATH) -> dict | None:
     return _parse_command_info(found_cmd, events)
 
 
-def _detect_codex_install(path: Path = CODEX_HOOKS_PATH) -> dict | None:
+def _detect_codex_install(path: Path | None = None) -> dict | None:
+    if path is None:
+        path = _config_path("codex")
     if not path.exists():
         return None
     if _is_codex_requirements_toml(path):
@@ -907,7 +917,9 @@ def _detect_codex_install(path: Path = CODEX_HOOKS_PATH) -> dict | None:
     return _parse_command_info(found_cmd, events)
 
 
-def _detect_cursor_install(path: Path = CURSOR_HOOKS_PATH) -> dict | None:
+def _detect_cursor_install(path: Path | None = None) -> dict | None:
+    if path is None:
+        path = _config_path("cursor")
     if not path.exists():
         return None
     data = _read_json_or_empty(path)
@@ -1160,18 +1172,11 @@ _CLIENT_LABELS = {"claude": "Claude Code", "cursor": "Cursor", "codex": "Codex"}
 _HOOK_CLIENT_NAMES = {"claude": "claude-code", "cursor": "cursor", "codex": "codex"}
 
 
-_CLIENT_INSTALL_PATHS = {
-    "claude": Path.home() / ".claude",
-    "cursor": Path.home() / ".cursor",
-    "codex": Path.home() / ".codex",
-}
-
-
 def _is_client_installed(client: str) -> bool:
     """Check whether the agent is installed on this machine by looking for its config directory."""
-    path = _CLIENT_INSTALL_PATHS.get(client)
-    if path is None:
+    if client not in _CLIENT_CONFIG_FILENAMES:
         return True
+    path = resolve_user_client_dir(client)
     try:
         return path.is_dir()
     except PermissionError:
@@ -1197,11 +1202,7 @@ def _config_path(client: str, override: str | None = None, managed: bool = False
         if client == "cursor":
             return CURSOR_MANAGED_HOOKS_PATH
         return CODEX_MANAGED_HOOKS_PATH
-    if client == "claude":
-        return CLAUDE_SETTINGS_PATH
-    if client == "cursor":
-        return CURSOR_HOOKS_PATH
-    return CODEX_HOOKS_PATH
+    return resolve_user_client_dir(client) / _CLIENT_CONFIG_FILENAMES[client]
 
 
 def _preflight_writable(config_path: Path) -> None:
