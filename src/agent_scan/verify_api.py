@@ -1,5 +1,6 @@
 import asyncio
 import getpass
+import gzip
 import logging
 import os
 import ssl
@@ -24,6 +25,71 @@ logger = logging.getLogger(__name__)
 
 class SnykTokenError(Exception):
     """Raised when SNYK_TOKEN is required but not set. Handled at top level to exit without traceback."""
+
+
+# Sync push-key endpoint suffix and its async counterpart.
+_SYNC_ANALYSIS_PATH = "/hidden/mcp-scan/analysis-machine"
+_ASYNC_ANALYSIS_PATH = "/hidden/agent-scan/async/analysis"
+
+
+def _async_analysis_enabled() -> bool:
+    """Whether the CLI should *attempt* the async (fire-and-forget) analysis path.
+
+    Only meaningful on the push-key (MDM) path, where nobody waits for results.
+    Opt-out via ``AGENT_SCAN_ASYNC=false``; forced off in CI (interactive callers
+    want results synchronously). The server still gates async per-tenant and the
+    CLI falls back to sync if it declines, so defaulting on is safe.
+    """
+    return True
+
+
+async def _submit_async_analysis(
+    async_url: str,
+    payload: "ScanPathResultsCreate",
+    base_headers: dict[str, str],
+    identifier: str | None,
+    trace_configs: list | None,
+    skip_ssl_verify: bool,
+) -> bool:
+    """Stream the (gzipped) payload to the async accept endpoint.
+
+    Returns True if the server accepted the scan (202) for background analysis.
+    Returns False if async is unavailable/declined (e.g. 404 on an old backend,
+    503 when the tenant isn't ramped or the backlog is full, or a network error)
+    so the caller can fall back to the synchronous endpoint. MDM does not read
+    analysis results, so there is nothing to merge back on success.
+    """
+    body = gzip.compress(payload.model_dump_json().encode("utf-8"))
+    headers = {
+        **base_headers,
+        "Content-Type": "application/json",
+        "Content-Encoding": "gzip",
+    }
+    if identifier:
+        headers["X-Scan-User-Id"] = identifier
+    try:
+        async with aiohttp.ClientSession(
+            trace_configs=trace_configs,
+            connector=setup_tcp_connector(skip_ssl_verify=skip_ssl_verify),
+            trust_env=True,
+        ) as session:
+            async with session.post(
+                async_url,
+                data=body,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=75),
+            ) as response:
+                print("Response: ", response)
+                if response.status == 202:
+                    return True
+                print(
+                    "Async analysis not accepted (status %s); falling back to sync.",
+                    response.status,
+                )
+                return False
+    except (TimeoutError, aiohttp.ClientError) as e:
+        print("Async analysis request failed (%s); falling back to sync.", e)
+        return False
 
 
 def get_hostname() -> str:
@@ -235,6 +301,20 @@ async def analyze_machine(
         # Enterprise MDM mode with push key
         # The analysis_url in this case has authentication through push_key (not on api-gateway)
         headers["X-Push-Key"] = push_key
+        print("Inside async flow")
+        # Prefer the async (fire-and-forget) path for unattended MDM scans: stream
+        # the gzipped payload straight to the backend's object store and get a fast
+        # 202. The server decides per-tenant; if it declines we fall back to sync.
+        if _async_analysis_enabled():
+            async_url = analysis_url.replace(_SYNC_ANALYSIS_PATH, _ASYNC_ANALYSIS_PATH)
+            print("Async URL: ", async_url)
+            accepted = await _submit_async_analysis(
+                async_url, payload, headers, identifier, trace_configs, skip_ssl_verify
+            )
+            if accepted:
+                print("Scan accepted for asynchronous analysis.")
+                return scan_paths
+            print("Falling back to synchronous analysis for this push-key scan.")
     elif snyk_token:
         # CLI mode with SNYK_TOKEN environment variable for authentication
         analysis_url = analysis_url.replace(
