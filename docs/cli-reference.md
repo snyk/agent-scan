@@ -62,6 +62,50 @@ These flags are shared by `scan`, `inspect`, and `evo`.
 
 **Behavior:** `scan_skills` flows from the CLI into discovery and inspection — with `--no-skills`, explicit skill paths, skill directories, and auto-discovered agent skills are all skipped (see `client_to_inspect_from_path` and `inspect_client` in the codebase). E2E tests assert that `--no-skills` produces no skill servers even when a skill path is passed as a positional argument.
 
+### Targeting a single MCP server (`scan`, `inspect`)
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--server NAME` | string | none | Scan only the configured MCP server with this exact name. Discovery still runs, then every other server is dropped. |
+| `--url URL` | string | none | Scan a remote MCP server at this URL directly, without reading any config file. Spelled the same as `mcp-auth --url`. |
+| `--server-type {http,sse}` | choice | none | Pin the transport of the targeted server. **Disables transport probing** — exactly the given URL and transport are contacted, once. |
+
+```bash
+# one configured server, by name
+snyk-agent-scan scan --server MY_SERVER
+
+# an ad-hoc URL, no config entry needed, no probing
+snyk-agent-scan scan --url https://api.snyk.io/mcp-server/mcp --server-type http
+
+# override a wrong transport recorded in a config file
+snyk-agent-scan scan --server MY_SERVER --server-type sse
+```
+
+**Behavior:**
+
+- Either flag **skips skills entirely**, the same as passing `--no-skills`.
+- `--url` and `--server` combine: `--url` is the target, `--server` is only the display name. This mirrors `mcp-auth`.
+- Without `--server-type`, a remote server is probed across six transport/URL combinations (`http` and `sse` × the base URL, `/mcp`, and `/sse`). With it, the URL is used verbatim — no `/mcp` or `/sse` suffix is appended or stripped — and a failure raises the underlying error instead of an `ExceptionGroup`.
+- `--server-type` requires `--server` or `--url` (exit code 2), and cannot be applied to a stdio server (exit code 2).
+- A `--server NAME` that matches nothing lists the discovered server names and exits 1.
+- Credentials are unaffected: stored OAuth tokens are looked up by normalized server URL, so a token obtained via `mcp-auth` resolves regardless of which form you use.
+
+### Scanning a server by package or URL without a config
+
+`scan`, `inspect`, and `evo` also accept a **prefixed positional** that describes a server directly, bypassing config discovery:
+
+| Prefix | Example | Resolves to |
+| --- | --- | --- |
+| `streamable-https:` | `streamable-https:api.snyk.io/mcp-server/mcp` | remote server at `https://…` |
+| `streamable-http:` | `streamable-http:localhost:3000/mcp` | remote server at `http://…` |
+| `sse:` | `sse:https://example.com/sse` | remote server, SSE transport |
+| `npm:` | `npm:some-mcp-server@1.2.3` | `npx -y some-mcp-server@1.2.3` |
+| `pypi:` | `pypi:some-mcp-server@1.2.3` | `uvx some-mcp-server@1.2.3` |
+| `oci:` | `oci:ghcr.io/org/image:tag` | `docker run -i --rm …` |
+| `nuget:`, `mcpb:` | — | reserved |
+
+Omit the scheme for `streamable-https:` / `streamable-http:` — the prefix supplies it. These forms leave the transport unset, so probing still applies; use `--url` with `--server-type` when you want a single, exact attempt.
+
 ### Analysis and upload
 
 | Flag | Type | Default | Description |

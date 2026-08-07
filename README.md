@@ -80,6 +80,17 @@ uvx snyk-agent-scan@latest ~/path/to/my/SKILL.md
 uvx snyk-agent-scan@latest ~/.claude/skills
 ```
 
+Or scan exactly one MCP server, skipping every other server and all skills:
+
+```bash
+# one configured server, by name
+uvx snyk-agent-scan@latest scan --server MY_SERVER
+# a remote server by URL, with the transport pinned so nothing is probed
+uvx snyk-agent-scan@latest scan --url https://example.com/mcp --server-type http
+```
+
+See the [CLI reference](docs/cli-reference.md#targeting-a-single-mcp-server-scan-inspect) for the full set of targeting options, including the `npm:` / `pypi:` / `oci:` prefixes for scanning a server straight from a package.
+
 ### Run with a standalone binary
 
 Download the binary for your operating system and architecture from the [latest GitHub Release](https://github.com/snyk/agent-scan/releases/latest). The release page also provides an SBOM (`sbom-<version>.json`), checksum files, and GitHub-generated source code archives. See [Verifying Standalone Binaries](#verifying-standalone-binaries) to verify your download.

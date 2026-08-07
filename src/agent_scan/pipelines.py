@@ -2,6 +2,8 @@ import getpass
 import logging
 import os
 from pathlib import Path
+from typing import Literal
+from urllib.parse import urlparse
 
 from pydantic import BaseModel
 
@@ -16,9 +18,11 @@ from agent_scan.models import (
     CandidateClient,
     ClientToInspect,
     ControlServer,
+    RemoteServer,
     ScanError,
     ScanPathResult,
     SkillServer,
+    StdioServer,
     TokenAndClientInfo,
 )
 from agent_scan.redact import redact_scan_result
@@ -35,6 +39,7 @@ class InspectArgs(BaseModel):
     paths: list[str]
     all_users: bool = False
     scan_skills: bool = False
+    probe_transports: bool = True
 
 
 class AnalyzeArgs(BaseModel):
@@ -161,6 +166,7 @@ async def inspect_pipeline(
             stream_stderr=stream_stderr,
             declined_servers=declined_servers,
             do_stdio_handshake=do_stdio_handshake,
+            probe_transports=inspect_args.probe_transports,
         )
         scan_path_results.append(inspected_client_to_scan_path_result(inspected_client))
     return scan_path_results, scanned_usernames or []
@@ -213,6 +219,92 @@ async def inspect_analyze_push_pipeline(
     )
 
     return verified_scan_path_results
+
+
+def single_remote_client_to_inspect(
+    name: str | None,
+    url: str,
+    server_type: Literal["sse", "http"] | None = None,
+) -> ClientToInspect:
+    """Build a one-server plan for ``--url``, bypassing discovery entirely.
+
+    Mirrors the direct-scan branch of ``client_to_inspect_from_path`` so the
+    rest of the pipeline sees exactly the shape it always sees. The fallback
+    chain for the display name matches ``mcp_auth``: explicit name, else the
+    URL's hostname, else the raw URL.
+    """
+    server_name = name or urlparse(url).hostname or url
+    return ClientToInspect(
+        name="not-available",
+        client_path=url,
+        mcp_configs={url: [(server_name, RemoteServer(url=url, type=server_type))]},
+        skills_dirs={},
+    )
+
+
+def filter_clients_to_server(
+    clients: list[ClientToInspect],
+    server_name: str,
+    server_type: Literal["sse", "http"] | None = None,
+) -> list[ClientToInspect]:
+    """Narrow a discovered plan down to entries named exactly ``server_name``.
+
+    Clients left holding nothing are dropped. ``skills_dirs`` is emptied
+    because a single-server scan never wants skills. When ``server_type`` is
+    given it overrides the configured transport on matched remote servers,
+    which is what lets ``--server-type`` correct a wrong type in a config.
+    """
+    filtered: list[ClientToInspect] = []
+    for client in clients:
+        kept: dict[str, list[tuple[str, StdioServer | RemoteServer]]] = {}
+        for config_path, entries in client.mcp_configs.items():
+            # Values may be error sentinels rather than lists; skip those.
+            if not isinstance(entries, list):
+                continue
+            matches = [(entry_name, cfg) for entry_name, cfg in entries if entry_name == server_name]
+            if not matches:
+                continue
+            if server_type is not None:
+                for _entry_name, cfg in matches:
+                    if isinstance(cfg, RemoteServer):
+                        cfg.type = server_type
+            kept[config_path] = matches
+        if kept:
+            filtered.append(
+                ClientToInspect(
+                    name=client.name,
+                    client_path=client.client_path,
+                    username=client.username,
+                    mcp_configs=kept,
+                    skills_dirs={},
+                )
+            )
+    return filtered
+
+
+async def discover_servers_by_name(
+    inspect_args: InspectArgs,
+    *,
+    remote_only: bool = False,
+) -> dict[str, StdioServer | RemoteServer]:
+    """Map discovered server name -> config, first occurrence winning.
+
+    Extracted from ``mcp_auth`` so that ``scan --server`` and ``mcp-auth``
+    agree on what "the server named X" means. ``remote_only`` reproduces
+    ``mcp_auth``'s behavior of ignoring stdio servers, which it cannot
+    authenticate; ``scan`` passes False because it can target either.
+    """
+    clients_to_inspect, _, _ = await discover_clients_to_inspect(inspect_args)
+    servers: dict[str, StdioServer | RemoteServer] = {}
+    for client in clients_to_inspect:
+        for _config_path, entries in client.mcp_configs.items():
+            if not isinstance(entries, list):
+                continue
+            for entry_name, server in entries:
+                if remote_only and not isinstance(server, RemoteServer):
+                    continue
+                servers.setdefault(entry_name, server)
+    return servers
 
 
 async def client_to_inspect_from_path(

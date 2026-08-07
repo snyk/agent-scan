@@ -195,6 +195,7 @@ async def inspect_extension(
     *,
     config_path: str | None = None,
     stream_stderr: bool = False,
+    probe_transports: bool = True
 ) -> InspectedExtensions:
     """
     Scan an extension (MCP server or skill) and return a InspectedExtensions object.
@@ -239,6 +240,7 @@ async def inspect_extension(
                 server_name=name,
                 config_path=config_path,
                 stream_stderr=False,  # no-op for remote; flag is stdio-only
+                probe_transports=probe_transports
             )
             assert isinstance(fixed_config, RemoteServer), f"Fixed config is not a RemoteServer: {fixed_config}"
             return InspectedExtensions(name=name, config=fixed_config, signature_or_error=signature)
@@ -297,6 +299,7 @@ async def inspect_client(
     stream_stderr: bool = False,
     declined_servers: set[tuple[str, str]] | None = None,
     do_stdio_handshake: bool = False,
+    probe_transports: bool = True,
 ) -> InspectedClient:
     """
     Scan a client (Cursor, VSCode, etc.) and return a InspectedClient object.
@@ -346,6 +349,7 @@ async def inspect_client(
                 find_relevant_token(tokens, name),
                 config_path=mcp_config_path,
                 stream_stderr=stream_stderr,
+                probe_transports=probe_transports,
             )
             extensions_for_mcp_config.append(extension)
         extensions[mcp_config_path] = extensions_for_mcp_config
