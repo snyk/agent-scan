@@ -301,6 +301,8 @@ async def _inspect_remote_server(
     config_path: str,
     timeout: int,
     tokens: list[TokenAndClientInfo],
+    *,
+    probe_transports: bool = True,
 ) -> InspectedServer:
     traffic_capture = TrafficCapture()
     try:
@@ -312,6 +314,7 @@ async def _inspect_remote_server(
             server_name=name,
             config_path=config_path,
             stream_stderr=False,
+            probe_transports=probe_transports,
         )
         assert isinstance(fixed_config, RemoteServer), f"Fixed config is not a RemoteServer: {fixed_config}"
         return InspectedServer(
@@ -357,6 +360,7 @@ async def _inspect_server(
     stream_stderr: bool,
     declined: bool,
     do_stdio_handshake: bool,
+    probe_transports: bool = True,
 ) -> InspectedServer:
     if declined:
         error = UserDeclinedError(
@@ -380,7 +384,7 @@ async def _inspect_server(
             tokens,
             stream_stderr=stream_stderr,
         )
-    return await _inspect_remote_server(name, config, config_path, timeout, tokens)
+    return await _inspect_remote_server(name, config, config_path, timeout, tokens, probe_transports=probe_transports)
 
 
 async def _inspect_server_configs(
@@ -391,6 +395,7 @@ async def _inspect_server_configs(
     stream_stderr: bool,
     declined_servers: set[tuple[str, str]],
     do_stdio_handshake: bool,
+    probe_transports: bool = True,
 ) -> tuple[list[InspectedServer], list[ScanError]]:
     servers: list[InspectedServer] = []
     candidate_errors: list[ScanError] = []
@@ -408,6 +413,7 @@ async def _inspect_server_configs(
                 stream_stderr=stream_stderr,
                 declined=(config_path, name) in declined_servers,
                 do_stdio_handshake=do_stdio_handshake,
+                probe_transports=probe_transports,
             )
             inspected_server.name = _inspection_component_name(name, "server", config_path)
             servers.append(inspected_server)
@@ -434,6 +440,7 @@ async def inspect_client(
     stream_stderr: bool = False,
     declined_servers: set[tuple[str, str]] | None = None,
     do_stdio_handshake: bool = False,
+    probe_transports: bool = True,
 ) -> InspectedPath:
     """Inspect one client and return its normalized inspection result."""
     servers, candidate_errors = await _inspect_server_configs(
@@ -443,6 +450,7 @@ async def inspect_client(
         stream_stderr=stream_stderr,
         declined_servers=declined_servers or set(),
         do_stdio_handshake=do_stdio_handshake,
+        probe_transports=probe_transports,
     )
 
     if scan_skills:

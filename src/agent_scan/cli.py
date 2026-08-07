@@ -37,11 +37,21 @@ from agent_scan.pipelines import (
     InspectArgs,
     PushArgs,
     discover_clients_to_inspect,
+    discover_servers_by_name,
+    filter_clients_to_server,
     inspect_analyze_push_pipeline,
     inspect_pipeline,
+    single_remote_client_to_inspect,
 )
 from agent_scan.printer import print_inspected_machine, print_scan_response
-from agent_scan.utils import ensure_unicode_console, get_hostname, get_push_key, parse_headers, suppress_stdout
+from agent_scan.utils import (
+    ensure_unicode_console,
+    get_hostname,
+    get_push_key,
+    get_username,
+    parse_headers,
+    suppress_stdout,
+)
 from agent_scan.version import version_info
 
 # Configure logging to suppress all output by default
@@ -662,6 +672,66 @@ def add_ignore_failure_codes_argument(parser) -> None:
     )
 
 
+def add_target_arguments(parser, *, positional: bool, include_type: bool):
+    """Add the "which server" arguments shared by scan/inspect and mcp-auth.
+
+    ``mcp-auth`` takes the server name as a positional (its historical CLI);
+    ``scan``/``inspect`` must use a flag because they already own a greedy
+    ``files`` positional. ``--url`` is spelled identically everywhere so the
+    two commands share one vocabulary.
+    """
+    if positional:
+        parser.add_argument("server", nargs="?", help="Name of the MCP server (as configured) to authenticate")
+    else:
+        parser.add_argument(
+            "--server",
+            help="Scan only the MCP server with this name, as configured (skips every other server and all skills)",
+            metavar="NAME",
+        )
+    parser.add_argument(
+        "--url",
+        help=(
+            "Target a remote MCP server by URL directly, without reading any config file"
+            if not positional
+            else "Authenticate a remote MCP server by URL directly"
+        ),
+    )
+    if include_type:
+        parser.add_argument(
+            "--server-type",
+            choices=["http", "sse"],
+            default=None,
+            help=(
+                "Pin the transport of the targeted server. Disables transport probing, "
+                "so exactly the given URL and transport are contacted, once."
+            ),
+        )
+
+
+def print_server_not_found(server_name: str, discovered: dict, *, remote_only: bool = False) -> None:
+    """Report a --server / mcp-auth name that matched nothing, listing what exists."""
+    kind = "remote MCP server" if remote_only else "MCP server"
+    rich.print(f"[bold red]No {kind} named '{server_name}' found.[/bold red]")
+    if discovered:
+        rich.print(f"Discovered {'remote ' if remote_only else ''}servers: {', '.join(sorted(discovered))}")
+    else:
+        rich.print(f"No {kind}s were discovered on this machine.")
+
+
+def _target_is_remote(clients_to_inspect: list) -> bool:
+    """True when every matched entry in the narrowed plan is a remote server."""
+    from agent_scan.models import RemoteServer
+
+    for client in clients_to_inspect:
+        for entries in client.mcp_configs.values():
+            if not isinstance(entries, list):
+                continue
+            for _name, config in entries:
+                if not isinstance(config, RemoteServer):
+                    return False
+    return True
+
+
 def setup_scan_parser(scan_parser, add_files=True, add_ci_ignore_options=True, add_show_full_discovery_option=True):
     if add_files:
         scan_parser.add_argument(
@@ -871,6 +941,7 @@ def main():
         ),
     )
     setup_scan_parser(scan_parser)
+    add_target_arguments(scan_parser, positional=False, include_type=True)
 
     # INSPECT command
     inspect_parser = subparsers.add_parser(
@@ -891,6 +962,7 @@ def main():
         help="Configuration files to inspect (default: known MCP config locations)",
         metavar="CONFIG_FILE",
     )
+    add_target_arguments(inspect_parser, positional=False, include_type=True)
 
     # HELP command
     help_parser = subparsers.add_parser(  # noqa: F841
@@ -910,8 +982,7 @@ def main():
         "mcp-auth", help="Authenticate an OAuth-protected remote MCP server so scans can use it"
     )
     setup_scan_parser(mcp_auth_parser, add_files=False)
-    mcp_auth_parser.add_argument("server", nargs="?", help="Name of the MCP server (as configured) to authenticate")
-    mcp_auth_parser.add_argument("--url", help="Authenticate a remote MCP server by URL directly")
+    add_target_arguments(mcp_auth_parser, positional=True, include_type=False)
     mcp_auth_parser.add_argument(
         "--all-unauthenticated", action="store_true", help="Authenticate every discovered remote MCP server"
     )
@@ -1131,7 +1202,6 @@ async def mcp_auth(args):
     """
     from urllib.parse import urlparse
 
-    from agent_scan.models import RemoteServer
     from agent_scan.oauth_flow import authenticate_server
     from agent_scan.oauth_store import OAuthTokenStore
 
@@ -1153,23 +1223,13 @@ async def mcp_auth(args):
             all_users=getattr(args, "scan_all_users", False),
             scan_skills=False,
         )
-        clients_to_inspect, _, _ = await discover_clients_to_inspect(inspect_args)
-        remote: dict[str, str] = {}
-        for client in clients_to_inspect:
-            for _config_path, entries in client.mcp_configs.items():
-                if isinstance(entries, list):
-                    for name, server in entries:
-                        if isinstance(server, RemoteServer):
-                            remote.setdefault(name, server.url)
+        discovered = await discover_servers_by_name(inspect_args, remote_only=True)
+        remote: dict[str, str] = {name: server.url for name, server in discovered.items()}
         if all_unauth:
             targets = list(remote.items())
         elif server_arg:
             if server_arg not in remote:
-                rich.print(f"[bold red]No remote MCP server named '{server_arg}' found.[/bold red]")
-                if remote:
-                    rich.print(f"Discovered remote servers: {', '.join(sorted(remote))}")
-                else:
-                    rich.print("No remote MCP servers were discovered on this machine.")
+                print_server_not_found(server_arg, remote, remote_only=True)
                 return
             targets = [(server_arg, remote[server_arg])]
         else:
@@ -1212,10 +1272,23 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> ScanRespo
     server_timeout: int = args.server_timeout if hasattr(args, "server_timeout") else 10
     files: list[str] | None = args.files if hasattr(args, "files") else None
     scan_skills: bool = hasattr(args, "skills") and args.skills
+
     tokens: list[TokenAndClientInfo] = []
     if hasattr(args, "mcp_oauth_tokens_path") and args.mcp_oauth_tokens_path:
         with open(args.mcp_oauth_tokens_path) as f:
             tokens = TokenAndClientInfoList.model_validate_json(f.read()).root
+
+    # Single-server targeting. --url addresses a server directly (no discovery);
+    # --server narrows discovery to one configured entry. Either way skills are
+    # irrelevant, and --server-type pins the transport so nothing is probed.
+    target_name: str | None = getattr(args, "server", None)
+    target_url: str | None = getattr(args, "url", None)
+    target_type: str | None = getattr(args, "server_type", None)
+    if target_type and not (target_name or target_url):
+        rich.print("[bold red]--server-type requires --server <name> or --url <url>.[/bold red]")
+        sys.exit(2)
+    if target_name or target_url:
+        scan_skills = False
 
     inspect_args = InspectArgs(
         timeout=server_timeout,
@@ -1223,6 +1296,7 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> ScanRespo
         paths=files,
         all_users=scan_all_users,
         scan_skills=scan_skills,
+        probe_transports=not bool(target_type),
     )
 
     # Resolve the MCP server IO flag and the consent flag.
@@ -1235,7 +1309,27 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> ScanRespo
     dangerously_run_mcp_servers: bool = bool(getattr(args, "dangerously_run_mcp_servers", False))
 
     # Step 1: Discover everything we would inspect without starting any server.
-    clients_to_inspect, unresolved_paths, scanned_usernames = await discover_clients_to_inspect(inspect_args)
+    if target_url:
+        # Addressed directly: skip discovery entirely.
+        clients_to_inspect = [single_remote_client_to_inspect(target_name, target_url, target_type)]
+        unresolved_paths = []
+        scanned_usernames = [get_username()]
+    else:
+        clients_to_inspect, unresolved_paths, scanned_usernames = await discover_clients_to_inspect(inspect_args)
+        if target_name:
+            clients_to_inspect = filter_clients_to_server(clients_to_inspect, target_name, target_type)
+            if not clients_to_inspect:
+                discovered = await discover_servers_by_name(inspect_args)
+                print_server_not_found(target_name, discovered)
+                sys.exit(1)
+            if target_type and not _target_is_remote(clients_to_inspect):
+                rich.print(
+                    f"[bold red]'{target_name}' is a stdio server; --server-type only applies to remote servers."
+                    "[/bold red]"
+                )
+                sys.exit(2)
+            # A named target is one server: nothing else should be reported.
+            unresolved_paths = []
 
     # Collect consent when applicable; otherwise show the
     # dangerous-flag banner to users at the terminal. Silent
