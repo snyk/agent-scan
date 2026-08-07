@@ -10,8 +10,8 @@ from httpx import HTTPStatusError, Request, Response
 from agent_scan.inspect import (
     get_mcp_config_per_client,
     inspect_client,
+    inspect_client_inventory,
     inspect_extension,
-    inspected_client_to_inspected_path,
     inspected_client_to_scan_path_result,
 )
 from agent_scan.mcp_client import scan_mcp_config_file
@@ -19,17 +19,15 @@ from agent_scan.models import (
     CandidateClient,
     ClientToInspect,
     CouldNotParseMCPConfig,
-    InspectedClient,
-    InspectedExtensions,
-    InspectedServer,
     InspectedSkill,
     RemoteServer,
-    ServerSignature,
+    ServerHTTPError,
     ServerStartupError,
     SkillServer,
     StdioServer,
 )
 from agent_scan.pipelines import InspectArgs, inspect_legacy_pipeline
+from tests.unit._secret_fixtures import synthetic_secret
 
 TEST_CANDIDATE_CLIENT = CandidateClient(
     name="test-client",
@@ -37,6 +35,56 @@ TEST_CANDIDATE_CLIENT = CandidateClient(
     mcp_config_paths=["tests/mcp_servers/.test-client/mcp.json"],
     skills_dir_paths=["tests/mcp_servers/.test-client/skills"],
 )
+
+
+@pytest.mark.asyncio
+async def test_inspect_client_inventory_rejects_symlink_before_reading_skill(tmp_path):
+    """A symlinked skill file must be rejected by collection, not opened by the
+    legacy signature reader first."""
+    skill_dir = tmp_path / "skill"
+    skill_dir.mkdir()
+    outside_file = tmp_path / "outside.md"
+    outside_file.write_bytes(b"\xff\xfe")
+    (skill_dir / "SKILL.md").symlink_to(outside_file)
+    client = ClientToInspect(
+        name="cursor",
+        client_path="/proj",
+        mcp_configs={},
+        skills_dirs={str(skill_dir.parent): [("skill", SkillServer(path=str(skill_dir)))]},
+    )
+
+    result = await inspect_client_inventory(client, timeout=1, tokens=[], scan_skills=True)
+
+    assert len(result.skills) == 1
+    assert result.skills[0].files == []
+    assert result.skills[0].error is not None
+    assert result.skills[0].error.exception == "Skill directory must not contain symbolic links"
+
+
+@pytest.mark.asyncio
+async def test_inspect_client_inventory_records_stdio_server_without_handshake():
+    client = ClientToInspect(
+        name="cursor",
+        client_path="/proj",
+        mcp_configs={
+            "/proj/.mcp.json": [("sqlite", StdioServer(command="sqlite-mcp"))],
+        },
+        skills_dirs={},
+    )
+
+    result = await inspect_client_inventory(
+        client,
+        timeout=1,
+        tokens=[],
+        scan_skills=False,
+        do_stdio_handshake=False,
+    )
+
+    assert len(result.servers) == 1
+    assert result.servers[0].name == "sqlite"
+    assert result.servers[0].config_path == "/proj/.mcp.json"
+    assert result.servers[0].signature is None
+    assert result.servers[0].error is None
 
 
 @pytest.mark.asyncio
@@ -55,8 +103,66 @@ async def test_inspect_extension_preserves_direct_http_status_error_category():
             timeout=1,
         )
 
-    assert result.signature_or_error is not None
+    assert isinstance(result.signature_or_error, ServerHTTPError)
     assert result.signature_or_error.category == "server_http_error"
+
+
+@pytest.mark.asyncio
+async def test_inspect_client_inventory_inspects_server_without_legacy_extension():
+    from mcp.types import Implementation, InitializeResult
+
+    from agent_scan.models import ServerSignature
+
+    remote = RemoteServer(url="https://example.test/mcp", type="http")
+    signature = ServerSignature(
+        metadata=InitializeResult(
+            protocolVersion="2024-11-05",
+            capabilities={},
+            serverInfo=Implementation(name="server", version="1"),
+        )
+    )
+    client = ClientToInspect(
+        name="cursor",
+        client_path="/proj",
+        mcp_configs={"/proj/.mcp.json": [("remote", remote)]},
+        skills_dirs={},
+    )
+
+    with (
+        patch("agent_scan.inspect.inspect_extension", side_effect=AssertionError("legacy path used")),
+        patch("agent_scan.inspect.check_server", new_callable=AsyncMock, return_value=(signature, remote)),
+    ):
+        result = await inspect_client_inventory(client, timeout=1, tokens=[], scan_skills=False)
+
+    assert len(result.servers) == 1
+    assert result.servers[0].signature == signature
+    assert result.servers[0].error is None
+
+
+@pytest.mark.asyncio
+async def test_inspect_client_inventory_converts_server_error_without_legacy_union():
+    request = Request("POST", "https://example.test/mcp")
+    status_error = HTTPStatusError(
+        "server error",
+        request=request,
+        response=Response(500, request=request),
+    )
+    client = ClientToInspect(
+        name="cursor",
+        client_path="/proj",
+        mcp_configs={
+            "/proj/.mcp.json": [("remote", RemoteServer(url="https://example.test/mcp", type="http"))]
+        },
+        skills_dirs={},
+    )
+
+    with patch("agent_scan.inspect.check_server", new_callable=AsyncMock, side_effect=status_error):
+        result = await inspect_client_inventory(client, timeout=1, tokens=[], scan_skills=False)
+
+    assert len(result.servers) == 1
+    assert result.servers[0].signature is None
+    assert result.servers[0].error is not None
+    assert result.servers[0].error.category == "server_http_error"
 
 
 @pytest.fixture
@@ -640,7 +746,7 @@ async def test_inspect_client_default_does_not_handshake_stdio_servers():
 
     A caller that forgets to forward ``do_stdio_handshake=True`` falls
     through to this safe path: every stdio server is recorded on the
-    InspectedExtensions list with ``signature_or_error=None``, and
+    InspectedExtension list with no signature and no error, and
     ``inspect_extension`` is only invoked for remote MCP servers (skills
     do not flow through this code path). The test installs a side_effect
     that raises if ``inspect_extension`` is ever called for a stdio
@@ -674,13 +780,13 @@ async def test_inspect_client_default_does_not_handshake_stdio_servers():
         async def fake_inspect(name, server, *args, **kwargs):
             from mcp.types import Implementation, InitializeResult
 
-            from agent_scan.models import InspectedExtensions, ServerSignature
+            from agent_scan.models import InspectedExtension, ServerSignature
 
             if isinstance(server, StdioServer):
                 raise AssertionError(
                     f"inspect_extension must not be called for stdio server {name!r} on the default path"
                 )
-            return InspectedExtensions(
+            return InspectedExtension(
                 name=name,
                 config=server,
                 signature_or_error=ServerSignature(
@@ -741,9 +847,9 @@ async def test_inspect_client_explicit_do_stdio_handshake_runs_stdio_servers():
     with patch("agent_scan.inspect.inspect_extension", new_callable=AsyncMock) as mock_inspect_extension:
         from mcp.types import Implementation, InitializeResult
 
-        from agent_scan.models import InspectedExtensions, ServerSignature
+        from agent_scan.models import InspectedExtension, ServerSignature
 
-        mock_inspect_extension.return_value = InspectedExtensions(
+        mock_inspect_extension.return_value = InspectedExtension(
             name="stdio",
             config=stdio,
             signature_or_error=ServerSignature(
@@ -782,15 +888,15 @@ def test_inspected_client_to_scan_path_result_sets_config_path_per_server():
     discovered in. The config path is the key of ``InspectedClient.extensions``;
     the converter must propagate it onto each server across all three branches
     (inspected signature, recorded-but-not-inspected ``None``, and error)."""
-    from agent_scan.models import InspectedClient, InspectedExtensions, ServerStartupError
+    from agent_scan.models import InspectedClient, InspectedExtension
 
     cfg_path = "/home/u/.config/agent/.mcp.json"
-    ok = InspectedExtensions(name="ok", config=StdioServer(command="echo"), signature_or_error=_signature())
-    not_inspected = InspectedExtensions(name="skip", config=StdioServer(command="echo"), signature_or_error=None)
-    errored = InspectedExtensions(
+    ok = InspectedExtension(name="ok", config=StdioServer(command="echo"), signature_or_error=_signature())
+    not_inspected = InspectedExtension(name="skip", config=StdioServer(command="echo"))
+    errored = InspectedExtension(
         name="boom",
         config=RemoteServer(url="https://example.com/mcp", type="http"),
-        signature_or_error=ServerStartupError(message="boom"),
+        signature_or_error=ServerStartupError(message="boom", sub_exception_message="details"),
     )
 
     client = InspectedClient(
@@ -805,6 +911,8 @@ def test_inspected_client_to_scan_path_result_sets_config_path_per_server():
     assert by_name["ok"].config_path == cfg_path
     assert by_name["skip"].config_path == cfg_path
     assert by_name["boom"].config_path == cfg_path
+    assert by_name["boom"].error is not None
+    assert by_name["boom"].error.category == "server_startup"
     # The top-level ScanPathResult.path stays the client install path, not the config file.
     assert result.path == "/install/path"
 
@@ -812,12 +920,12 @@ def test_inspected_client_to_scan_path_result_sets_config_path_per_server():
 def test_inspected_client_to_scan_path_result_config_path_multiple_files():
     """A single client flattens multiple config files into one ScanPathResult;
     each server must retain the config path of the file it came from."""
-    from agent_scan.models import InspectedClient, InspectedExtensions
+    from agent_scan.models import InspectedClient, InspectedExtension
 
     cfg_a = "/home/u/.cursor/mcp.json"
     cfg_b = "/home/u/project/.mcp.json"
-    ext_a = InspectedExtensions(name="srv-a", config=StdioServer(command="a"), signature_or_error=_signature())
-    ext_b = InspectedExtensions(name="srv-b", config=StdioServer(command="b"), signature_or_error=_signature())
+    ext_a = InspectedExtension(name="srv-a", config=StdioServer(command="a"), signature_or_error=_signature())
+    ext_b = InspectedExtension(name="srv-b", config=StdioServer(command="b"), signature_or_error=_signature())
 
     client = InspectedClient(
         name="test",
@@ -876,65 +984,25 @@ def test_config_path_survives_serialization_round_trip():
     assert restored.scan_path_results[0].servers[0].config_path == "/home/u/.mcp.json"
 
 
-# ---------------------------------------------------------------------------
-# inspected_client_to_inspected_path: the v2026-07-10 InspectedPath converter
-# used by the `inspect` command (scan keeps inspected_client_to_scan_path_result).
-# ---------------------------------------------------------------------------
-
-
-def test_inspected_client_to_inspected_path(tmp_path):
-    """Splits an InspectedClient into servers (carrying the signature) and
-    skills (carrying collected files), and joins
-    config-level parse errors onto the path."""
-    from mcp.types import Implementation, InitializeResult
-
+@pytest.mark.asyncio
+async def test_inspect_client_inventory_collects_skills_and_joins_config_errors(tmp_path):
     skill_dir = tmp_path / "my-skill"
     skill_dir.mkdir()
-    (skill_dir / "SKILL.md").write_text("---\nname: my-skill\n---\ndo things")
+    (skill_dir / "SKILL.md").write_text("---\nname: my-skill\ndescription: test\n---\ndo things")
     (skill_dir / "run.py").write_text("print('hi')")
-
-    signature = ServerSignature(
-        metadata=InitializeResult(
-            protocolVersion="2024-11-05",
-            capabilities={},
-            serverInfo=Implementation(name="sqlite", version="1"),
-        ),
-    )
-    client = InspectedClient(
+    client = ClientToInspect(
         name="cursor",
         client_path="/proj",
-        extensions={
-            "/proj/.mcp.json": [
-                InspectedExtensions(
-                    name="sqlite",
-                    config=StdioServer(command="uvx", args=["sqlite-mcp"], type="stdio"),
-                    signature_or_error=signature,
-                ),
-            ],
-            "/proj/skills": [
-                InspectedExtensions(
-                    name="my-skill",
-                    config=SkillServer(path=str(skill_dir)),
-                    signature_or_error=None,
-                ),
-            ],
+        mcp_configs={
             "/proj/bad.json": CouldNotParseMCPConfig(message="bad config", traceback="tb"),
         },
+        skills_dirs={"/proj/skills": [("my-skill", SkillServer(path=str(skill_dir)))]},
     )
 
-    result = inspected_client_to_inspected_path(client)
+    result = await inspect_client_inventory(client, timeout=1, tokens=[], scan_skills=True)
 
     assert result.client == "cursor"
     assert result.path == "/proj"
-
-    assert [s.name for s in result.servers] == ["sqlite"]
-    mcp = result.servers[0]
-    assert isinstance(mcp, InspectedServer)
-    assert mcp.config_path == "/proj/.mcp.json"
-    assert isinstance(mcp.server, StdioServer)
-    assert mcp.signature is signature
-    assert mcp.error is None
-
     assert [s.name for s in result.skills] == ["my-skill"]
     skill = result.skills[0]
     assert isinstance(skill, InspectedSkill)
@@ -942,53 +1010,20 @@ def test_inspected_client_to_inspected_path(tmp_path):
     assert {f.path for f in skill.files} == {"SKILL.md", "run.py"}
     assert skill.error is None
 
-    # config-level parse error is joined onto the path
     assert result.error is not None and "bad config" in (result.error.message or "")
 
 
-def test_inspected_client_to_inspected_path_carries_server_error():
-    """A failed MCP handshake becomes the InspectedServer.error (no signature)."""
-    client = InspectedClient(
-        name="cursor",
-        client_path="/proj",
-        extensions={
-            "/proj/.mcp.json": [
-                InspectedExtensions(
-                    name="broken",
-                    config=StdioServer(command="nope", type="stdio"),
-                    signature_or_error=ServerStartupError(message="boom", traceback="tb"),
-                ),
-            ],
-        },
-    )
-
-    result = inspected_client_to_inspected_path(client)
-
-    assert len(result.servers) == 1
-    server = result.servers[0]
-    assert server.signature is None
-    assert server.error is not None
-    assert server.error.message == "boom"
-    assert server.error.category == "server_startup"
-
-
-def test_inspected_client_to_inspected_path_carries_skill_file_collection_error(tmp_path):
+@pytest.mark.asyncio
+async def test_inspect_client_inventory_carries_skill_file_collection_error(tmp_path):
     skill_path = tmp_path / "missing-skill"
-    client = InspectedClient(
+    client = ClientToInspect(
         name="cursor",
         client_path="/proj",
-        extensions={
-            "/proj/skills": [
-                InspectedExtensions(
-                    name="missing-skill",
-                    config=SkillServer(path=str(skill_path)),
-                    signature_or_error=None,
-                ),
-            ],
-        },
+        mcp_configs={},
+        skills_dirs={"/proj/skills": [("missing-skill", SkillServer(path=str(skill_path)))]},
     )
 
-    result = inspected_client_to_inspected_path(client)
+    result = await inspect_client_inventory(client, timeout=1, tokens=[], scan_skills=True)
 
     assert len(result.skills) == 1
     skill = result.skills[0]
@@ -999,25 +1034,78 @@ def test_inspected_client_to_inspected_path_carries_skill_file_collection_error(
     assert str(skill_path) not in (skill.error.message or "")
 
 
-def test_inspected_client_to_inspected_path_recovers_from_unexpected_collection_error(tmp_path):
-    skill_path = tmp_path / "skill"
+@pytest.mark.asyncio
+async def test_inspect_client_inventory_reports_manifest_validation_as_inspection_error(tmp_path):
+    skill_path = tmp_path / "malformed-skill"
     skill_path.mkdir()
-    client = InspectedClient(
+    (skill_path / "SKILL.md").write_text("---\nname: malformed\n---\nmissing description")
+    client = ClientToInspect(
         name="cursor",
         client_path="/proj",
-        extensions={
-            "/proj/skills": [
-                InspectedExtensions(
-                    name="skill",
-                    config=SkillServer(path=str(skill_path)),
-                    signature_or_error=None,
-                ),
-            ],
-        },
+        mcp_configs={},
+        skills_dirs={"/proj/skills": [("malformed", SkillServer(path=str(skill_path)))]},
+    )
+
+    result = await inspect_client_inventory(client, timeout=1, tokens=[], scan_skills=True)
+
+    assert result.skills[0].error is not None
+    assert result.skills[0].error.message == "could not inspect skill"
+    assert "Missing description" in (result.skills[0].error.exception or "")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("frontmatter", ["", "a scalar", "- a list item"])
+async def test_inspect_client_inventory_rejects_non_mapping_manifest_frontmatter(tmp_path, frontmatter):
+    skill_path = tmp_path / "malformed-skill"
+    skill_path.mkdir()
+    (skill_path / "SKILL.md").write_text(f"---\n{frontmatter}\n---\nbody")
+    client = ClientToInspect(
+        name="cursor",
+        client_path="/proj",
+        mcp_configs={},
+        skills_dirs={"/proj/skills": [("malformed", SkillServer(path=str(skill_path)))]},
+    )
+
+    result = await inspect_client_inventory(client, timeout=1, tokens=[], scan_skills=True)
+
+    assert result.skills[0].error is not None
+    assert result.skills[0].error.message == "could not inspect skill"
+    assert "YAML frontmatter must be a mapping" in (result.skills[0].error.exception or "")
+
+
+@pytest.mark.asyncio
+async def test_inspect_client_inventory_validates_manifest_before_redaction(tmp_path):
+    secret = synthetic_secret()
+    skill_path = tmp_path / "secret-skill"
+    skill_path.mkdir()
+    (skill_path / "SKILL.md").write_text(f"---\nname: secret-skill\ndescription: {secret}\n---\ndo things")
+    client = ClientToInspect(
+        name="cursor",
+        client_path="/proj",
+        mcp_configs={},
+        skills_dirs={"/proj/skills": [("secret-skill", SkillServer(path=str(skill_path)))]},
+    )
+
+    result = await inspect_client_inventory(client, timeout=1, tokens=[], scan_skills=True)
+
+    assert result.skills[0].error is None
+    assert secret not in result.skills[0].files[0].content
+    assert "**REDACTED_SECRET_" in result.skills[0].files[0].content
+
+
+@pytest.mark.asyncio
+async def test_inspect_client_inventory_recovers_from_unexpected_collection_error(tmp_path):
+    skill_path = tmp_path / "skill"
+    skill_path.mkdir()
+    client = ClientToInspect(
+        name="cursor",
+        client_path="/proj",
+        mcp_configs={},
+        skills_dirs={"/proj/skills": [("skill", SkillServer(path=str(skill_path)))]},
     )
 
     with patch("agent_scan.inspect.collect_skill_files", side_effect=RuntimeError("unexpected")):
-        result = inspected_client_to_inspected_path(client)
+        result = await inspect_client_inventory(client, timeout=1, tokens=[], scan_skills=True)
 
     assert result.skills[0].files == []
     assert result.skills[0].error is not None

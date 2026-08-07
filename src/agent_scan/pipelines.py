@@ -10,7 +10,7 @@ from agent_scan.direct_scanner import direct_scan_to_server_config, is_direct_sc
 from agent_scan.inspect import (
     get_mcp_config_per_client,
     inspect_client,
-    inspected_client_to_inspected_path,
+    inspect_client_inventory,
     inspected_client_to_scan_path_result,
 )
 from agent_scan.models import (
@@ -193,16 +193,17 @@ async def inspect_pipeline(
         InspectedPath(client=r.client, path=r.path, error=r.error) for r in (precomputed_scan_path_results or [])
     ]
     for client_to_inspect in clients_to_inspect:
-        inspected_client = await inspect_client(
-            client_to_inspect,
-            inspect_args.timeout,
-            inspect_args.tokens,
-            inspect_args.scan_skills,
-            stream_stderr=stream_stderr,
-            declined_servers=declined_servers,
-            do_stdio_handshake=do_stdio_handshake,
+        inspected_paths.append(
+            await inspect_client_inventory(
+                client_to_inspect,
+                inspect_args.timeout,
+                inspect_args.tokens,
+                inspect_args.scan_skills,
+                stream_stderr=stream_stderr,
+                declined_servers=declined_servers,
+                do_stdio_handshake=do_stdio_handshake,
+            )
         )
-        inspected_paths.append(inspected_client_to_inspected_path(inspected_client))
     return inspected_paths, scanned_usernames or []
 
 
