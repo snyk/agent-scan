@@ -13,6 +13,9 @@ from agent_scan.models import (
     FileNotFoundConfig,
     InspectedClient,
     InspectedExtensions,
+    InspectedPath,
+    InspectedServer,
+    InspectedSkill,
     RemoteServer,
     ScanError,
     ScanPathResult,
@@ -29,7 +32,7 @@ from agent_scan.models import (
     UserDeclinedError,
 )
 from agent_scan.signed_binary import check_server_signature
-from agent_scan.skill_client import inspect_skill, inspect_skills_dir
+from agent_scan.skill_client import collect_skill_files, inspect_skill, inspect_skills_dir
 from agent_scan.traffic_capture import TrafficCapture
 from agent_scan.well_known_clients import expand_path
 
@@ -363,6 +366,33 @@ async def inspect_client(
     return InspectedClient(name=client.name, client_path=client.client_path, extensions=extensions)
 
 
+def _config_error_to_scan_error(
+    error: FileNotFoundConfig | UnknownConfigFormat | CouldNotParseMCPConfig | SkillScannError,
+) -> ScanError:
+    """Normalize a config-level inspection error for either result model."""
+    return ScanError(
+        message=error.message,
+        exception=error.sub_exception_message,
+        traceback=error.traceback,
+        is_failure=error.is_failure,
+        category=error.category,
+    )
+
+
+def _join_scan_errors(errors: list[ScanError]) -> ScanError | None:
+    """Combine config-level errors into the single error carried by a path."""
+    if not errors:
+        return None
+    error_category = next((error.category for error in errors if error.category is not None), None)
+    return ScanError(
+        message="\n".join(error.message or "" for error in errors),
+        exception="\n".join(str(error.exception) for error in errors),
+        traceback="\n".join(error.traceback or "missing traceback" for error in errors),
+        is_failure=any(error.is_failure for error in errors),
+        category=error_category,
+    )
+
+
 def inspected_client_to_scan_path_result(inspected_client: InspectedClient) -> ScanPathResult:
     """
     Convert a InspectedClient object to a ScanPathResult object.
@@ -373,15 +403,7 @@ def inspected_client_to_scan_path_result(inspected_client: InspectedClient) -> S
         if isinstance(
             extensions_or_error, FileNotFoundConfig | UnknownConfigFormat | CouldNotParseMCPConfig | SkillScannError
         ):
-            candidate_errors.append(
-                ScanError(
-                    message=extensions_or_error.message,
-                    exception=extensions_or_error.sub_exception_message,
-                    traceback=extensions_or_error.traceback,
-                    is_failure=extensions_or_error.is_failure,
-                    category=extensions_or_error.category,
-                )
-            )
+            candidate_errors.append(_config_error_to_scan_error(extensions_or_error))
             continue
         for extension in extensions_or_error:
             if isinstance(extension.signature_or_error, ServerSignature):
@@ -425,21 +447,95 @@ def inspected_client_to_scan_path_result(inspected_client: InspectedClient) -> S
                         ),
                     )
                 )
-    joined_error: None | ScanError = None
-    if len(candidate_errors) > 0:
-        error_category = next((error.category for error in candidate_errors if error.category is not None), None)
-        joined_error = ScanError(
-            message="\n".join([error.message or "" for error in candidate_errors]),
-            exception="\n".join([str(error.exception) for error in candidate_errors]),
-            traceback="\n".join([error.traceback or "missing traceback" for error in candidate_errors]),
-            is_failure=any(error.is_failure for error in candidate_errors),
-            category=error_category,
-        )
     return ScanPathResult(
         client=inspected_client.name,
         path=inspected_client.client_path,
         servers=servers,
         issues=[],
         labels=[],
-        error=joined_error,
+        error=_join_scan_errors(candidate_errors),
+    )
+
+
+def _signature_or_error_to_scan_error(
+    signature_or_error: ServerSignature
+    | ServerStartupError
+    | ServerHTTPError
+    | SkillScannError
+    | UserDeclinedError
+    | None,
+) -> ScanError | None:
+    """Turn an inspected extension's ``signature_or_error`` into a ``ScanError`` if it
+    is an error (``None`` when it is a signature or a not-inspected placeholder)."""
+    if isinstance(signature_or_error, ServerSignature) or signature_or_error is None:
+        return None
+    return ScanError(
+        message=signature_or_error.message,
+        exception=signature_or_error.sub_exception_message,
+        traceback=signature_or_error.traceback,
+        is_failure=signature_or_error.is_failure,
+        category=signature_or_error.category,
+        server_output=signature_or_error.server_output
+        if isinstance(signature_or_error, ServerStartupError | ServerHTTPError)
+        else None,
+    )
+
+
+def inspected_client_to_inspected_path(inspected_client: InspectedClient) -> InspectedPath:
+    """Convert an ``InspectedClient`` into an ``InspectedPath`` (the v2026-07-10 inventory).
+
+    Sibling to :func:`inspected_client_to_scan_path_result` (which stays for the ``scan``
+    path). MCP servers and skills remain inspection-domain models; conversion to
+    versioned API request models happens later at the API boundary.
+    """
+    servers: list[InspectedServer] = []
+    skills: list[InspectedSkill] = []
+    candidate_errors: list[ScanError] = []
+    for config_path, extensions_or_error in inspected_client.extensions.items():
+        if isinstance(
+            extensions_or_error, FileNotFoundConfig | UnknownConfigFormat | CouldNotParseMCPConfig | SkillScannError
+        ):
+            candidate_errors.append(_config_error_to_scan_error(extensions_or_error))
+            continue
+        for extension in extensions_or_error:
+            error = _signature_or_error_to_scan_error(extension.signature_or_error)
+            if isinstance(extension.config, SkillServer):
+                files = []
+                if error is None:
+                    try:
+                        files = collect_skill_files(extension.config.path)
+                    except Exception as collection_error:
+                        error = ScanError(
+                            message="could not collect skill files",
+                            exception=str(collection_error),
+                            traceback=traceback.format_exc(),
+                            is_failure=True,
+                            category="skill_scan_error",
+                        )
+                skills.append(
+                    InspectedSkill(
+                        name=extension.name,
+                        installation_path=extension.config.path,
+                        files=files,
+                        error=error,
+                    )
+                )
+            else:
+                servers.append(
+                    InspectedServer(
+                        name=extension.name,
+                        config_path=config_path,
+                        server=extension.config,
+                        signature=extension.signature_or_error
+                        if isinstance(extension.signature_or_error, ServerSignature)
+                        else None,
+                        error=error,
+                    )
+                )
+    return InspectedPath(
+        client=inspected_client.name,
+        path=inspected_client.client_path,
+        servers=servers,
+        skills=skills,
+        error=_join_scan_errors(candidate_errors),
     )

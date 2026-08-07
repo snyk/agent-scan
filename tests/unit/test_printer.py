@@ -1,6 +1,9 @@
-from mcp.types import Prompt, Tool
+import types
 
-from agent_scan.printer import format_entity_line, format_servers_line
+from mcp.types import Implementation, InitializeResult, Prompt, Tool
+
+from agent_scan.models import InspectedPath, InspectedServer, InspectedSkill, ServerSignature, SkillFile, StdioServer
+from agent_scan.printer import format_entity_line, format_servers_line, format_skill_file_line, print_inspected_machine
 
 
 class TestFormatServersLine:
@@ -79,3 +82,53 @@ class TestFormatEntityLine:
         result = format_entity_line(entity, issues=[], is_skill=True, full_description=True).plain
         assert "instruction SKILL.md" in result
         assert "instructionSKILL.md" not in result
+
+
+class TestPrintInspectedMachine:
+    """The `inspect` command's InspectedPath renderer: MCP servers with their
+    entities, and skills with their files."""
+
+    def test_renders_servers_and_skills(self, capsys):
+        signature = ServerSignature(
+            metadata=InitializeResult(
+                protocolVersion="2024-11-05",
+                capabilities={},
+                serverInfo=Implementation(name="github", version="1"),
+            ),
+            tools=[Tool(name="create_pull_request", description="d", inputSchema={})],
+        )
+        path = InspectedPath(
+            client="cursor",
+            path="/proj",
+            servers=[
+                InspectedServer(
+                    name="github",
+                    server=StdioServer(command="uvx", args=["gh"], type="stdio"),
+                    signature=signature,
+                )
+            ],
+            skills=[
+                InspectedSkill(
+                    name="my-skill",
+                    installation_path="/proj/.skills/my-skill",
+                    files=[SkillFile(path="SKILL.md", content="x"), SkillFile(path="run.py", content="y")],
+                )
+            ],
+        )
+
+        print_inspected_machine([path], args=types.SimpleNamespace(skills=True))
+        out = capsys.readouterr().out
+
+        assert "found 1 mcp server and 1 skill" in out
+        assert "github" in out
+        assert "create_pull_request" in out  # server entity from the signature
+        assert "my-skill" in out
+        assert "SKILL.md" in out and "run.py" in out  # skill files
+
+    def test_skill_file_name_is_rendered_as_plain_text(self):
+        line = format_skill_file_line(SkillFile(path="[bold]not-markup[/bold].md", content="x"))
+        assert "[bold]not-markup[/bold].md" in line.plain
+
+    def test_empty_machine(self, capsys):
+        print_inspected_machine([], args=types.SimpleNamespace(skills=True))
+        assert "No MCP client configurations found" in capsys.readouterr().out

@@ -935,7 +935,7 @@ class TestRunScanConsentAndStreamStderrWiring:
             ),
             patch("agent_scan.cli.collect_consent", return_value=declined),
             patch(
-                "agent_scan.cli.inspect_pipeline",
+                "agent_scan.cli.inspect_pipeline_inspected",
                 new_callable=AsyncMock,
                 return_value=([], []),
             ) as mock_inspect_pipeline,
@@ -1040,7 +1040,7 @@ class TestStdioHandshakeInvariants:
             ),
             patch("agent_scan.cli.collect_consent", return_value=declined) as mock_consent,
             patch(
-                "agent_scan.cli.inspect_pipeline",
+                "agent_scan.cli.inspect_pipeline_inspected",
                 new_callable=AsyncMock,
                 return_value=([], []),
             ) as mock_pipeline,

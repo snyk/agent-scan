@@ -365,3 +365,25 @@ def test_collect_skill_files_rejects_path_that_is_not_file_or_directory(tmp_path
 
     with pytest.raises(ValueError, match="not a file or directory"):
         collect_skill_files(str(special_path))
+
+
+def test_collect_skill_files_rejects_symlinked_skill_path(tmp_path):
+    target = tmp_path / "target.md"
+    target.write_text("secret")
+    link = tmp_path / "skill.md"
+    link.symlink_to(target)
+
+    with pytest.raises(ValueError, match="symbolic link"):
+        collect_skill_files(str(link))
+
+
+def test_collect_skill_files_rejects_symlinked_file_inside_skill(tmp_path):
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret")
+    skill = tmp_path / "skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("instructions")
+    (skill / "outside.txt").symlink_to(outside)
+
+    with pytest.raises(ValueError, match="symbolic link"):
+        collect_skill_files(str(skill))

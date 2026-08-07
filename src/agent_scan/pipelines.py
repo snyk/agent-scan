@@ -10,12 +10,14 @@ from agent_scan.direct_scanner import direct_scan_to_server_config, is_direct_sc
 from agent_scan.inspect import (
     get_mcp_config_per_client,
     inspect_client,
+    inspected_client_to_inspected_path,
     inspected_client_to_scan_path_result,
 )
 from agent_scan.models import (
     CandidateClient,
     ClientToInspect,
     ControlServer,
+    InspectedPath,
     ScanError,
     ScanPathResult,
     SkillServer,
@@ -164,6 +166,44 @@ async def inspect_pipeline(
         )
         scan_path_results.append(inspected_client_to_scan_path_result(inspected_client))
     return scan_path_results, scanned_usernames or []
+
+
+async def inspect_pipeline_inspected(
+    inspect_args: InspectArgs,
+    *,
+    clients_to_inspect: list[ClientToInspect] | None = None,
+    precomputed_scan_path_results: list[ScanPathResult] | None = None,
+    scanned_usernames: list[str] | None = None,
+    stream_stderr: bool = False,
+    declined_servers: set[tuple[str, str]] | None = None,
+    do_stdio_handshake: bool = False,
+) -> tuple[list[InspectedPath], list[str]]:
+    """Inspect each discovered client and return the v2026-07-10 ``InspectedPath`` inventory.
+
+    The ``InspectedPath`` sibling of :func:`inspect_pipeline`, used by the ``inspect``
+    command. ``scan`` still uses :func:`inspect_pipeline` (``ScanPathResult``). The
+    precomputed results are error-only paths (e.g. file-not-found), so their error is
+    carried straight onto an otherwise-empty ``InspectedPath``.
+    """
+    if clients_to_inspect is None:
+        clients_to_inspect, precomputed_scan_path_results, scanned_usernames = await discover_clients_to_inspect(
+            inspect_args
+        )
+    inspected_paths: list[InspectedPath] = [
+        InspectedPath(client=r.client, path=r.path, error=r.error) for r in (precomputed_scan_path_results or [])
+    ]
+    for client_to_inspect in clients_to_inspect:
+        inspected_client = await inspect_client(
+            client_to_inspect,
+            inspect_args.timeout,
+            inspect_args.tokens,
+            inspect_args.scan_skills,
+            stream_stderr=stream_stderr,
+            declined_servers=declined_servers,
+            do_stdio_handshake=do_stdio_handshake,
+        )
+        inspected_paths.append(inspected_client_to_inspected_path(inspected_client))
+    return inspected_paths, scanned_usernames or []
 
 
 async def inspect_analyze_push_pipeline(
