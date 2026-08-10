@@ -1,6 +1,6 @@
 # Scanning with `snyk-agent-scan`
 
-Scan your machine for agents, MCP servers, and skills, and detect security vulnerabilities like prompt injections, tool poisoning, toxic flows, or malware payloads. See the [Issue Code Reference](issue-codes.md) for a full list of detected issues.
+Scan your machine for agents, MCP servers, and skills, and detect security risks such as prompt injection, exposure to untrusted or private content, destructive capabilities, insecure credential handling, and malicious skill code. See the [risk reference](risks.md) for every risk indicator and the separate [failure code reference](failure-codes.md) for operational errors.
 
 Agent Scan operates in two main modes which can be used jointly or separately:
 
@@ -37,7 +37,7 @@ uvx snyk-agent-scan@latest --no-skills
 
 Agent Scan searches through your local agent's configuration files to find agents, skills, and MCP servers. For MCP, it connects to servers and retrieves tool descriptions. Skills are scanned by default; use `--no-skills` to skip skill analysis.
 
-It then validates the components, both with local checks and by invoking the Agent Scan API. For this, skills, agent applications, tool names, and descriptions are shared with Snyk. By using Agent Scan, you agree to the Snyk [terms of use for Agent Scan](../TERMS.md).
+It then validates components with local checks and by invoking the Agent Scan API. For analysis, it sends discovered client information, MCP server configurations and signatures, and skill files to Snyk. Secrets in configuration values and text are redacted before transmission. By using Agent Scan, you agree to the Snyk [terms of use for Agent Scan](../TERMS.md).
 
 Agent Scan does not store or log any usage data, i.e. the contents and results of your MCP tool calls.
 
@@ -50,7 +50,7 @@ Quick summary:
 - **Default command:** `scan` (omit the subcommand to scan well-known agent configs)
 - **`inspect`:** discovery and MCP handshake only — no security analysis
 - **Skills:** included by default; use `--no-skills` for MCP-only (`--skills` is deprecated — see [CLI reference](cli-reference.md))
-- **`--ci`:** non-zero exit on findings (requires `--dangerously-run-mcp-servers` in CI)
+- **`--ci`:** non-zero exit on risks or operational failures (requires `--dangerously-run-mcp-servers`)
 - **`--json`:** machine-readable output — see [JSON output](json-output.md)
 
 ### Examples

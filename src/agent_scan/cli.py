@@ -310,7 +310,7 @@ def add_scan_arguments(scan_parser):
         "--checks-per-server",
         type=int,
         default=1,
-        help="Number of times to check each server (default: 1)",
+        help="Deprecated no-op retained for backward compatibility",
         metavar="NUM",
     )
     add_control_server_arguments(scan_parser)

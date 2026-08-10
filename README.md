@@ -11,7 +11,7 @@
 
 > **Note: CLI output is experimental and subject to change**
 >
-> The raw output of this CLI — including issue codes, field names, severity labels, and response structure — is experimental and may change without notice between releases. We do not recommend building production workflows that depend on specific CLI output fields or issue codes.
+> The raw output of this CLI — including risk indicator names, scores, field names, and response structure — is experimental and may change without notice between releases. We do not recommend building production workflows that depend on specific CLI output fields or risk names.
 >
 > If you are an enterprise customer using Snyk to manage agent security risk at scale, the CLI output may not reflect what is sent to and shown in the Evo platform. The underlying integration, discovery, and risk assessment that powers enterprise deployments is stable and supported — any changes will be communicated in line with standard Snyk product practices. Contact your account team for deployment guidance.
 
@@ -24,7 +24,7 @@
 </p>
 
 <div align="center">
-  <img width="1304" height="976" alt="agent-scan-pretty" src="https://github.com/user-attachments/assets/49c32115-703c-465f-bb09-1b6bae852253" />
+  <img width="1000" alt="Agent Scan report showing scored MCP server and skill risks" src="demo.svg" />
 </div>
 
 <br>
@@ -84,17 +84,13 @@ uvx snyk-agent-scan@latest ~/.claude/skills
 
 Download the binary for your operating system and architecture from the [latest GitHub Release](https://github.com/snyk/agent-scan/releases/latest). The release page also provides an SBOM (`sbom-<version>.json`), checksum files, and GitHub-generated source code archives. See [Verifying Standalone Binaries](#verifying-standalone-binaries) to verify your download.
 
-### Example Run
-
-[![Agent Scan security vulnerabilities demo](demo.svg)](https://asciinema.org/a/716858)
-
 ## Highlights
 
 - Auto-discover MCP configurations, agent tools, skills
 - Scanning of Claude, Cursor, Windsurf, Gemini CLI, Amp, Amazon Q, and other agents.
-- Detects [15+ distinct security risks](docs/issue-codes.md) across MCP servers and agent skills:
-  - MCP: [Prompt Injection](docs/issue-codes.md#E001), [Tool Poisoning](docs/issue-codes.md#E001), [Tool Shadowing](docs/issue-codes.md#E002), [Toxic Flows](docs/issue-codes.md#ToxicFlows)
-  - Skills: [Prompt Injection](docs/issue-codes.md#E004), [Malware Payloads](docs/issue-codes.md#E006), [Untrusted Content](docs/issue-codes.md#W011), [Credential Handling](docs/issue-codes.md#W007), [Hardcoded Secrets](docs/issue-codes.md#W008)
+- Detects [15 distinct security risks](docs/risks.md) across MCP servers and agent skills:
+  - MCP: [Prompt injection](docs/risks.md#prompt_injection_tool_desc), [dangerous words](docs/risks.md#dangerous_words), [untrusted content](docs/risks.md#untrusted_content), [private data](docs/risks.md#private_data), and [destructive capabilities](docs/risks.md#destructive_capabilities)
+  - Skills: [prompt injection](docs/risks.md#prompt_injection_skill_instructions), [suspicious downloads](docs/risks.md#suspicious_download_url), [malicious code](docs/risks.md#malicious_code), [credential handling](docs/risks.md#insecure_credential_handling), [secret detection](docs/risks.md#secret_detection), and more
 
 ## Supported agents and capabilities
 
@@ -185,7 +181,7 @@ We use GPG signing on the release checksums file to ensure distribution integrit
 
 ## Scanner Capabilities
 
-Agent Scan is a security scanning tool to both scan and inspect the supply chain of agent components on your machine. It scans for common security vulnerabilities like prompt injections, tool poisoning, toxic flows, or vulnerabilities in agent skills.
+Agent Scan is a security scanning tool to both scan and inspect the supply chain of agent components on your machine. It reports scored risk indicators for threats such as prompt injection, exposure to untrusted or private data, destructive capabilities, and malicious agent skills.
 
 Agent Scan operates in two main modes which can be used jointly or separately:
 
@@ -219,7 +215,7 @@ For non-interactive environments (e.g., CI/CD pipelines), you must use the `--da
 
 #### Analysis and Validation
 
-Agent Scan validates the components, both with local checks and by invoking the Agent Scan API. For this, skills, agent applications, tool names, and descriptions are shared with Snyk. By using Agent Scan, you agree to the Snyk [terms of use for Agent Scan](./TERMS.md).
+Agent Scan validates components with local checks and by invoking the Agent Scan API. For analysis, it sends discovered client information, MCP server configurations and signatures, and skill files to Snyk. Secrets in configuration values and text are redacted before transmission. By using Agent Scan, you agree to the Snyk [terms of use for Agent Scan](./TERMS.md).
 
 Agent Scan does not store or log any usage data, i.e. the contents and results of your MCP tool calls.
 
@@ -237,9 +233,11 @@ These options are available for all commands:
 
 ```
 --storage-file FILE    Path to store scan results and scanner state (default: ~/.mcp-scan)
---base-url URL         Base URL for the verification server
+--analysis-url URL     URL endpoint for the analysis server
 --verbose              Enable detailed logging output
 --print-errors         Show error details and tracebacks
+--print-full-descriptions
+                       Show full entity descriptions without truncation
 --json                 Output results in JSON format instead of rich text
 ```
 
@@ -256,7 +254,6 @@ snyk-agent-scan scan [CONFIG_FILE...]
 Options:
 
 ```
---checks-per-server NUM           Number of checks to perform on each server (default: 1)
 --server-timeout SECONDS          Seconds to wait before timing out server connections (default: 10)
 --suppress-mcpserver-io BOOL      Suppress stderr from stdio MCP servers (stdout carries the JSON-RPC protocol
                                   and is never shown). Default: False for interactive runs (stderr is streamed
@@ -265,6 +262,9 @@ Options:
                                   stdio MCP server listed in the scanned configs. Only use in trusted
                                   environments where you've verified all MCP server commands.
 --no-skills                       Skip analysis on skills.
+--ci                              Exit with code 1 when risks or operational failures remain.
+--ignore-risks NAMES              Comma-separated risk names to omit from CI output and evaluation.
+--ignore-failure-codes CODES      Comma-separated X-codes to omit from CI evaluation.
 ```
 
 #### inspect
@@ -325,9 +325,9 @@ snyk-agent-scan --ci --dangerously-run-mcp-servers
 
 ## Demo
 
-This repository includes a vulnerable MCP server that can demonstrate Model Context Protocol security issues that Agent Scan finds.
+This repository includes a vulnerable MCP server that demonstrates Model Context Protocol security risks that Agent Scan finds.
 
-How to demo MCP security issues?
+How to demo MCP security risks?
 
 1. Clone this repository
 2. Create an `mcp.json` config file in the cloned git repository root directory with the following contents:
@@ -344,7 +344,7 @@ How to demo MCP security issues?
 }
 ```
 
-3. Run Agent Scan: `uvx --python 3.13 snyk-agent-scan@latest scan --full-toxic-flows mcp.json`
+3. Run Agent Scan: `uvx --python 3.13 snyk-agent-scan@latest scan mcp.json`
 
 Note: if you place the `mcp.json` configuration filepath elsewhere then adjust the `args` path inside the MCP server configuration to reflect the path to the MCP Server (`demoserver/server.py`) as well as the `uvx` command that runs Agent Scan with the correct filepath to `mcp.json`.
 
@@ -372,7 +372,8 @@ If you want to include Agent Scan results in your own project or registry, pleas
 - [CLI reference](docs/cli-reference.md) — All commands, flags, options, and environment variables.
 - [Scanning](docs/scanning.md) — How scanning works and usage examples.
 - [JSON output](docs/json-output.md) — JSON schema and programmatic parsing.
-- [Issue Codes](docs/issue-codes.md) — Reference for all security issues detected by Agent Scan.
+- [Risk reference](docs/risks.md) — Security risk indicators, scores, and evidence fields.
+- [Failure codes](docs/failure-codes.md) — Operational discovery, inspection, and analysis failures.
 
 ## Further Reading
 

@@ -9,7 +9,7 @@ Complete reference for **Agent Scan** command-line flags and options. Agent Scan
 
 Unless noted, flags apply to the standalone CLI. When no subcommand is given, **`scan` is assumed**.
 
-> **Experimental output.** Issue codes, JSON field names, and human-readable output may change between releases. See the [project README](../README.md) for the stability notice.
+> **Experimental output.** Risk names, JSON field names, and human-readable output may change between releases. See the [project README](../README.md) for the stability notice.
 
 ---
 
@@ -17,7 +17,7 @@ Unless noted, flags apply to the standalone CLI. When no subcommand is given, **
 
 | Command | Description |
 | --- | --- |
-| `scan` | Scan MCP configs, agents, and skills for security issues (default) |
+| `scan` | Scan MCP configs, agents, and skills for security risks (default) |
 | `inspect` | List tools, prompts, and resources without running security analysis |
 | `help` | Print top-level help |
 | `evo` | Interactive flow: mint a push key, scan, upload to Snyk Evo, revoke the key |
@@ -67,7 +67,7 @@ These flags are shared by `scan`, `inspect`, and `evo`.
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
 | `--storage-file FILE` | string | `~/.mcp-scan` | Path for local scan state and cached results. |
-| `--analysis-url URL` | string | `https://api.snyk.io/hidden/mcp-scan/analysis-machine?version=2025-09-02` | Analysis API endpoint. With `SNYK_TOKEN`, the CLI rewrites this to the `/cli/analysis-machine` variant automatically. |
+| `--analysis-url URL` | string | `https://api.snyk.io/hidden/mcp-scan/analysis-machine?version=2026-07-10` | Analysis API endpoint. With `SNYK_TOKEN`, the CLI rewrites this to the `/cli/analysis-machine` variant automatically. The URL version must match the Agent Scan binary's request and response models. |
 | `--verification-H HEADER` | repeatable | — | Extra HTTP header for the analysis request. Format: `Name: value` (repeat for multiple headers). |
 | `--skip-ssl-verify` | boolean | `false` | Disable TLS certificate verification for analysis and upload HTTP calls. |
 | `--mcp-oauth-tokens-path PATH` | string | — | JSON file containing MCP OAuth tokens (`TokenAndClientInfoList` schema) used when connecting to OAuth-protected remote MCP servers. |
@@ -108,22 +108,23 @@ Add `--dangerously-run-mcp-servers` when a fleet or CI job must actually execute
 
 `inspect` is unaffected: it always runs interactively (consent prompts when applicable), even if a push key is configured. See [MCP server options](#mcp-server-options) for the full handshake matrix.
 
-Bootstrap behavior is described in the [README — Control Server Bootstrap](../README.md#control-server-bootstrap).
-
 ### CI mode
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| `--ci` | boolean | `false` | Exit with code **1** if any analysis issues or runtime failure codes remain after the scan. Requires `--dangerously-run-mcp-servers` in non-interactive environments. |
-| `--ignore-issues-codes CODES` | string | — | Comma-separated issue/failure codes to ignore for `--ci` exit status (e.g. `W001,W015,X001`). **Only valid with `--ci`.** Ignored codes are also removed from JSON output in CI mode. |
+| `--ci` | boolean | `false` | Exit with code **1** if any security risks or operational failures remain. Requires `--dangerously-run-mcp-servers`. |
+| `--ignore-risks NAMES` | string | — | Comma-separated [risk indicator names](risks.md) to omit from output and CI evaluation (for example, `dangerous_words,suspicious_download_url`). **Only valid with `--ci`.** |
+| `--ignore-failure-codes CODES` | string | — | Comma-separated operational [failure codes](failure-codes.md) to omit from CI evaluation (for example, `X001,X007`). Errors remain visible in human-readable and JSON output. **Only valid with `--ci`.** |
+
+Risk names and failure codes are case-sensitive. Unknown values produce a warning and are not applied. The ignore flags are available on `scan`; `inspect` supports `--ignore-failure-codes` because it can encounter operational failures but has no risks to ignore. The `evo` command supports neither ignore flag.
 
 **Exit codes (scan / inspect with `--ci`):**
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Success; no remaining issues or failures (after ignores) |
-| `1` | `--ci`: findings or unignored runtime failures present |
-| `2` | Invalid flag combination |
+| `0` | Success; no remaining risks or operational failures after ignores. |
+| `1` | `--ci`: risks or unignored operational failures are present. |
+| `2` | Invalid command-line usage or flag combination. |
 
 ---
 
@@ -164,7 +165,7 @@ Applies to: `scan`, `inspect`, `evo`.
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| `--checks-per-server NUM` | integer | `1` | Number of analysis passes per MCP server. |
+| `--checks-per-server NUM` | integer | `1` | **Deprecated / no-op.** Accepted for backward compatibility but does not change analysis behavior. |
 
 `scan` runs the full pipeline: discover → inspect → redact → analyze → (optional) upload.
 
@@ -180,14 +181,16 @@ When `--control-server` is set, `inspect` still sends the startup bootstrap requ
 
 ## `evo`
 
-Uses the same flags as `scan`. Additionally:
+Uses the scan discovery, inspection, analysis, and upload flow. It accepts the scan flags except `--ignore-risks` and `--ignore-failure-codes`; its result is uploaded rather than rendered or evaluated for a CI exit.
+
+The command:
 
 1. Prompts interactively for **tenant ID** (from the Snyk app URL) and **API token** (from https://app.snyk.io/account).
 2. Mints a short-lived push key (`x-client-id` header).
 3. Runs `scan` with the Snyk push endpoint configured automatically.
 4. Revokes the push key when finished.
 
-No extra flags beyond the shared scan options.
+`--ci` is accepted for backward compatibility but does not change `evo` output or its exit status. Because argument validation is shared, it must still be paired with `--dangerously-run-mcp-servers`. Use the regular `scan` command when CI risk or failure evaluation is required.
 
 ---
 
@@ -328,9 +331,10 @@ uvx snyk-agent-scan@latest --json --no-skills ~/.cursor/mcp.json
 # CI pipeline (non-interactive)
 uvx snyk-agent-scan@latest --ci --dangerously-run-mcp-servers --json
 
-# CI with ignored warnings
+# CI with selected risks and operational failures ignored
 uvx snyk-agent-scan@latest --ci --dangerously-run-mcp-servers \
-  --ignore-issues-codes W001,W015
+  --ignore-risks dangerous_words,suspicious_download_url \
+  --ignore-failure-codes X001
 
 # All users on a shared machine
 uvx snyk-agent-scan@latest --scan-all-users
@@ -386,6 +390,7 @@ snyk-agent-scan guard uninstall all
 ## Related documentation
 
 - [Scanning overview](scanning.md) — how discovery and analysis work
-- [Issue codes](issue-codes.md) — security finding reference
+- [Risk reference](risks.md) — security risk indicators and scores
+- [Failure codes](failure-codes.md) — operational discovery, inspection, and analysis failures
 - [JSON output](json-output.md) — programmatic output schema
 - [Developer guide — entrypoints](https://github.com/snyk/agent-scan-dev-guide/blob/main/agent-scan-entrypoints-and-release.md) — standalone vs Snyk CLI vs MDM paths
