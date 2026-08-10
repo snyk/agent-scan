@@ -122,9 +122,15 @@ class ScanRequest(BaseModel):
         )
 
 
+# Shared risk constants
+RISK_SCORE_MAX = 1000
+
+
 # MCP risk models
+
+
 class RiskScore(BaseModel):
-    score: int = Field(ge=0, le=1000)
+    score: int = Field(ge=0, le=RISK_SCORE_MAX)
     evidence: str
     affected_tools: list[int] | None = None
 
@@ -171,7 +177,7 @@ class Region(BaseModel):
 
 
 class SkillRiskScore(BaseModel):
-    score: int = Field(ge=0, le=1000)
+    score: int = Field(ge=0, le=RISK_SCORE_MAX)
     evidence: str
     locations: list[Region] | None = None
 
