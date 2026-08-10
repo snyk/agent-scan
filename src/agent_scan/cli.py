@@ -23,7 +23,9 @@ from agent_scan.models import (
     FAILURE_CATEGORY_TO_CODE,
     ControlServer,
     InspectedPath,
+    McpServerRiskIndexes,
     ScanResponse,
+    SkillRiskIndexes,
     TokenAndClientInfo,
     TokenAndClientInfoList,
 )
@@ -43,6 +45,8 @@ from agent_scan.version import version_info
 logging.getLogger().setLevel(logging.CRITICAL + 1)  # Higher than any standard level
 # Add null handler to prevent "No handler found" warnings
 logging.getLogger().addHandler(logging.NullHandler())
+
+CLI_USAGE_ERROR_EXIT_CODE = 2
 
 
 class MissingIdentifierError(Exception):
@@ -312,7 +316,16 @@ def add_scan_arguments(scan_parser):
     add_control_server_arguments(scan_parser)
 
 
-def setup_scan_parser(scan_parser, add_files=True):
+def add_ignore_failure_codes_argument(parser) -> None:
+    parser.add_argument(
+        "--ignore-failure-codes",
+        type=str,
+        default=None,
+        help="Comma-separated X-codes to omit from --ci exit evaluation",
+    )
+
+
+def setup_scan_parser(scan_parser, add_files=True, add_ci_ignore_options=True):
     if add_files:
         scan_parser.add_argument(
             "files",
@@ -322,6 +335,14 @@ def setup_scan_parser(scan_parser, add_files=True):
             metavar="CONFIG_FILE",
         )
     add_common_arguments(scan_parser)
+    if add_ci_ignore_options:
+        scan_parser.add_argument(
+            "--ignore-risks",
+            type=str,
+            default=None,
+            help="Comma-separated risk names to omit from --ci output and exit evaluation",
+        )
+        add_ignore_failure_codes_argument(scan_parser)
     add_server_arguments(scan_parser)
     add_scan_arguments(scan_parser)
 
@@ -424,7 +445,7 @@ def enforce_consent_requirements(args) -> None:
             "scans, so CI runs must confirm trust explicitly.",
             file=sys.stderr,
         )
-        sys.exit(2)
+        sys.exit(CLI_USAGE_ERROR_EXIT_CODE)
 
 
 def main():
@@ -478,6 +499,7 @@ def main():
         description="Inspect and display MCP tools, prompts, and resources without security verification.",
     )
     add_common_arguments(inspect_parser)
+    add_ignore_failure_codes_argument(inspect_parser)
     add_server_arguments(inspect_parser)
     add_control_server_arguments(inspect_parser)
     inspect_parser.add_argument(
@@ -500,7 +522,7 @@ def main():
     evo_parser = subparsers.add_parser("evo", help="Push scan results to Snyk Evo")
 
     # use the same parser as scan
-    setup_scan_parser(evo_parser)
+    setup_scan_parser(evo_parser, add_ci_ignore_options=False)
 
     # GUARD command
     guard_parser = subparsers.add_parser(
@@ -795,6 +817,57 @@ def _collect_failure_codes(result: list[InspectedPath]) -> set[str]:
     return codes
 
 
+_VALID_RISK_NAMES = frozenset(McpServerRiskIndexes.model_fields) | frozenset(SkillRiskIndexes.model_fields)
+_VALID_FAILURE_CODES = frozenset(FAILURE_CATEGORY_TO_CODE.values())
+
+
+def _parse_comma_separated(raw_value: str | None) -> set[str]:
+    """Parse a comma-separated CLI option into non-empty, stripped values."""
+    return {value.strip() for value in raw_value.split(",") if value.strip()} if raw_value else set()
+
+
+def _parse_ignore_risks(args, ci_mode: bool) -> set[str]:
+    """Parse --ignore-risks, which is valid only for CI scans."""
+    requested = _parse_comma_separated(getattr(args, "ignore_risks", None))
+    if requested and not ci_mode:
+        rich.print(
+            "[bold red]Error: --ignore-risks can only be used with --ci.[/bold red]",
+            file=sys.stderr,
+        )
+        sys.exit(CLI_USAGE_ERROR_EXIT_CODE)
+
+    unknown = requested - _VALID_RISK_NAMES
+    for name in sorted(unknown):
+        rich.print(f"[yellow]Warning: unknown risk name: {name}[/yellow]", file=sys.stderr)
+    return requested - unknown
+
+
+def _parse_ignore_failure_codes(args, ci_mode: bool) -> set[str]:
+    """Parse --ignore-failure-codes, which is valid only for CI scans."""
+    requested = _parse_comma_separated(getattr(args, "ignore_failure_codes", None))
+    if requested and not ci_mode:
+        rich.print(
+            "[bold red]Error: --ignore-failure-codes can only be used with --ci.[/bold red]",
+            file=sys.stderr,
+        )
+        sys.exit(CLI_USAGE_ERROR_EXIT_CODE)
+
+    unknown = requested - _VALID_FAILURE_CODES
+    for code in sorted(unknown):
+        rich.print(f"[yellow]Warning: unknown failure code: {code}[/yellow]", file=sys.stderr)
+    return requested - unknown
+
+
+def _apply_ignore_risks(response: ScanResponse, ignored_risks: set[str]) -> None:
+    """Remove ignored risks before rendering and CI exit evaluation."""
+    for path in response.scan_path_responses:
+        risk_indexes = [server.risk_indexes for server in path.server_risks]
+        risk_indexes.extend(skill.risk_indexes for skill in path.skill_risks)
+        for indexes in risk_indexes:
+            for name in ignored_risks & indexes.__class__.model_fields.keys():
+                setattr(indexes, name, None)
+
+
 def _has_risks(response: ScanResponse) -> bool:
     for path in response.scan_path_responses:
         for server in path.server_risks:
@@ -818,7 +891,11 @@ def _collect_response_failure_codes(response: ScanResponse) -> set[str]:
     return codes
 
 
-def _handle_ci_exit(result: list[InspectedPath] | ScanResponse, json_output: bool) -> None:
+def _handle_ci_exit(
+    result: list[InspectedPath] | ScanResponse,
+    json_output: bool,
+    ignored_failure_codes: set[str] | None = None,
+) -> None:
     """In CI mode, exit with code 1 if any risk or runtime failure remains."""
     if isinstance(result, ScanResponse):
         failure_codes = _collect_response_failure_codes(result)
@@ -826,6 +903,7 @@ def _handle_ci_exit(result: list[InspectedPath] | ScanResponse, json_output: boo
     else:
         failure_codes = _collect_failure_codes(result)
         has_risks = False
+    failure_codes -= ignored_failure_codes or set()
     if not has_risks and not failure_codes:
         return
 
@@ -847,6 +925,8 @@ async def print_scan_inspect(mode="scan", args=None):
     print_errors: bool = hasattr(args, "print_errors") and args.print_errors
     full_description: bool = hasattr(args, "print_full_descriptions") and args.print_full_descriptions
     ci_mode: bool = hasattr(args, "ci") and args.ci
+    ignored_risks = _parse_ignore_risks(args, ci_mode)
+    ignored_failure_codes = _parse_ignore_failure_codes(args, ci_mode)
 
     if json_output:
         with suppress_stdout():
@@ -861,10 +941,12 @@ async def print_scan_inspect(mode="scan", args=None):
         else:
             print_inspected_machine(inspected_paths, print_errors, full_description, args)
         if ci_mode:
-            _handle_ci_exit(inspected_paths, json_output)
+            _handle_ci_exit(inspected_paths, json_output, ignored_failure_codes)
         return
 
     response = cast("ScanResponse", result)
+    if ignored_risks:
+        _apply_ignore_risks(response, ignored_risks)
 
     if json_output:
         print(json.dumps(response.model_dump(mode="json", exclude_none=True), indent=2))
@@ -872,7 +954,7 @@ async def print_scan_inspect(mode="scan", args=None):
         print_scan_response(response, print_errors, args)
 
     if ci_mode:
-        _handle_ci_exit(response, json_output)
+        _handle_ci_exit(response, json_output, ignored_failure_codes)
 
 
 if __name__ == "__main__":

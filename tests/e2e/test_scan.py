@@ -12,6 +12,7 @@ from pytest_lazy_fixtures import lf
 
 class _V20260710AnalysisHandler(BaseHTTPRequestHandler):
     requests: ClassVar[list[dict]] = []
+    server_error: ClassVar[dict | None] = None
 
     def do_POST(self):
         body = self.rfile.read(int(self.headers["Content-Length"]))
@@ -30,6 +31,7 @@ class _V20260710AnalysisHandler(BaseHTTPRequestHandler):
                             "affected_tools": [0],
                         }
                     },
+                    **({"error": type(self).server_error} if type(self).server_error else {}),
                 }
                 for server in path["servers"]
             ]
@@ -70,6 +72,7 @@ class _V20260710AnalysisHandler(BaseHTTPRequestHandler):
 @pytest.fixture
 def v20260710_analysis_server():
     _V20260710AnalysisHandler.requests = []
+    _V20260710AnalysisHandler.server_error = None
     server = HTTPServer(("127.0.0.1", 0), _V20260710AnalysisHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -112,6 +115,80 @@ class TestFullScanFlow:
         assert [server["name"] for server in path_request["servers"]] == ["Math"]
         assert path_request["skills"] == []
         assert "server" in path_request["servers"][0]
+
+    @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
+    @pytest.mark.parametrize(
+        ("ignored_risk", "expected_exit"),
+        [("private_data", 0), ("dangerous_words", 1)],
+    )
+    def test_ignore_risks_filters_output_and_ci_exit(
+        self,
+        agent_scan_cmd,
+        v20260710_analysis_server,
+        ignored_risk,
+        expected_exit,
+    ):
+        result = subprocess.run(
+            [
+                *agent_scan_cmd,
+                "scan",
+                "--json",
+                "--ci",
+                "--ignore-risks",
+                ignored_risk,
+                "--dangerously-run-mcp-servers",
+                "tests/mcp_servers/configs_files/math_config.json",
+                "--analysis-url",
+                v20260710_analysis_server,
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == expected_exit, result.stderr
+        output = json.loads(result.stdout)
+        risk_indexes = output["scan_path_responses"][0]["server_risks"][0]["risk_indexes"]
+        if ignored_risk == "private_data":
+            assert "private_data" not in risk_indexes
+        else:
+            assert risk_indexes["private_data"]["score"] == 750
+
+    @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
+    def test_ignore_failure_codes_suppresses_ci_exit_but_preserves_error(
+        self,
+        agent_scan_cmd,
+        v20260710_analysis_server,
+    ):
+        _V20260710AnalysisHandler.server_error = {
+            "message": "could not start server",
+            "category": "server_startup",
+            "is_failure": True,
+        }
+        result = subprocess.run(
+            [
+                *agent_scan_cmd,
+                "scan",
+                "--json",
+                "--ci",
+                "--ignore-risks",
+                "private_data",
+                "--ignore-failure-codes",
+                "X001",
+                "--dangerously-run-mcp-servers",
+                "tests/mcp_servers/configs_files/math_config.json",
+                "--analysis-url",
+                v20260710_analysis_server,
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0, result.stderr
+        output = json.loads(result.stdout)
+        server = output["scan_path_responses"][0]["server_risks"][0]
+        assert "private_data" not in server["risk_indexes"]
+        assert server["error"]["category"] == "server_startup"
+        assert server["error"]["message"] == "could not start server"
 
     @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
     def test_v20260710_skill_scan_sends_files_and_prints_plain_risk(self, agent_scan_cmd, v20260710_analysis_server):
