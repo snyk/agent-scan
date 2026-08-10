@@ -1,6 +1,6 @@
 import builtins
 import os
-from typing import Literal, cast
+from typing import Literal, cast, overload
 
 import rich
 from mcp.types import Prompt, Resource, ResourceTemplate, Tool
@@ -21,19 +21,31 @@ from agent_scan.models import (
 )
 from agent_scan.models.api.v20260710 import (
     RISK_DISPLAY_NAMES,
+    RISK_SCORE_MAX,
     MaliciousURLSkillRiskScore,
     McpEntitySummary,
+    McpServerRiskIndexes,
     McpServerRiskResponse,
     Region,
+    RiskScore,
     ScanPathResponse,
     SkillFileSummary,
+    SkillRiskIndexes,
     SkillRiskResponse,
+    SkillRiskScore,
     UnverifiableURLSkillRiskScore,
 )
 
 MAX_ENTITY_NAME_LENGTH = 25
 MAX_ENTITY_NAME_LENGTH_SKILL = 35
 MAX_ENTITY_NAME_TOXIC_FLOW_LENGTH = 30
+
+RISK_SCORE_BANDS = (
+    (299, "#e2d2f4"),
+    (599, "#cbabee"),
+    (999, "#9456d2"),
+    (RISK_SCORE_MAX, "#8446c4"),
+)
 
 
 SEVERITY_COLOR_MAP = {
@@ -560,10 +572,41 @@ def _format_response_skill_file_line(skill_file: SkillFileSummary) -> Text:
     return result
 
 
-def _format_component_line(name: str, risk_count: int) -> Text:
+def _risk_score_color(score: int) -> str:
+    """Map an Agent Scan score to the same risk bands used by Maverick."""
+    for upper_bound, color in RISK_SCORE_BANDS:
+        if score <= upper_bound:
+            return color
+    return RISK_SCORE_BANDS[-1][1]
+
+
+@overload
+def _sorted_risks(risk_indexes: McpServerRiskIndexes) -> list[tuple[str, RiskScore]]: ...
+
+
+@overload
+def _sorted_risks(risk_indexes: SkillRiskIndexes) -> list[tuple[str, SkillRiskScore]]: ...
+
+
+def _sorted_risks(
+    risk_indexes: McpServerRiskIndexes | SkillRiskIndexes,
+) -> list[tuple[str, RiskScore | SkillRiskScore]]:
+    """Return detected risks highest-first, preserving model order for ties."""
+    risks = [(name, risk) for name, risk in risk_indexes if risk is not None]
+    return sorted(risks, key=lambda item: item[1].score, reverse=True)
+
+
+def _format_component_line(name: str, risk_scores: list[int], *, has_error: bool = False) -> Text:
     result = Text()
-    result.append(name, style="bold green")
-    if risk_count:
+    if risk_scores:
+        color = _risk_score_color(max(risk_scores))
+    elif has_error:
+        color = "blue"
+    else:
+        color = "green"
+    result.append(name, style=f"bold {color}")
+    if risk_scores:
+        risk_count = len(risk_scores)
         result.append(f" {risk_count} risk{'' if risk_count == 1 else 's'}")
     return result
 
@@ -587,28 +630,30 @@ def _format_scan_path_line(path: str, message: str, error: ScanError | None) -> 
 
 def _format_risk(
     name: str,
-    risk,
+    risk: RiskScore | SkillRiskScore,
     *,
     affected_tools: list[str] | None = None,
 ) -> Text:
-    line = Text("● ", style="yellow")
-    line.append(f"{RISK_DISPLAY_NAMES[name]} (score: {risk.score})", style="bold")
+    color = _risk_score_color(risk.score)
+    line = Text()
+    line.append("● ", style=color)
+    line.append(RISK_DISPLAY_NAMES[name], style=f"bold {color}")
+    line.append(f" ({risk.score}/{RISK_SCORE_MAX})", style=f"bold {color}")
     line.append(f": {risk.evidence}")
     if affected_tools:
-        line.append("\n  Affected tools: ")
+        line.append("\n  Affected tools: ", style="bold gray62")
         line.append(", ".join(affected_tools))
     locations = getattr(risk, "locations", None)
     if locations:
-        line.append("\n  Locations: ")
+        line.append("\n  Locations: ", style="bold gray62")
         line.append(", ".join(_format_region(region) for region in locations))
-    urls: list[str] = []
     if isinstance(risk, MaliciousURLSkillRiskScore):
-        urls = risk.malicious_urls
-    elif isinstance(risk, UnverifiableURLSkillRiskScore):
-        urls = risk.unverifiable_urls
-    for url in urls:
-        line.append("\n  ")
-        line.append(url)
+        if risk.malicious_urls:
+            line.append("\n  Malicious URLs: ", style="bold gray62")
+            line.append(", ".join(risk.malicious_urls))
+    elif isinstance(risk, UnverifiableURLSkillRiskScore) and risk.unverifiable_urls:
+        line.append("\n  Unverifiable URLs: ", style="bold gray62")
+        line.append(", ".join(risk.unverifiable_urls))
     return line
 
 
@@ -618,8 +663,12 @@ def _append_component_detail(component: Text, detail: Text) -> None:
 
 
 def _add_server(parent: Tree, server: McpServerRiskResponse) -> None:
-    risks = [(name, risk) for name, risk in server.risk_indexes if risk is not None]
-    component = _format_component_line(server.name, len(risks))
+    risks = _sorted_risks(server.risk_indexes)
+    component = _format_component_line(
+        server.name,
+        [risk.score for _, risk in risks],
+        has_error=server.error is not None,
+    )
     for name, risk in risks:
         tools = []
         for index in risk.affected_tools or []:
@@ -636,8 +685,12 @@ def _add_server(parent: Tree, server: McpServerRiskResponse) -> None:
 
 
 def _add_skill(parent: Tree, skill: SkillRiskResponse) -> None:
-    risks = [(name, risk) for name, risk in skill.risk_indexes if risk is not None]
-    component = _format_component_line(skill.name, len(risks))
+    risks = _sorted_risks(skill.risk_indexes)
+    component = _format_component_line(
+        skill.name,
+        [risk.score for _, risk in risks],
+        has_error=skill.error is not None,
+    )
     for name, risk in risks:
         _append_component_detail(component, _format_risk(name, risk))
     if skill.error is not None:

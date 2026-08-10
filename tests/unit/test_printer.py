@@ -1,5 +1,6 @@
 import types
 
+import pytest
 from mcp.types import Implementation, InitializeResult, Prompt, Tool
 
 from agent_scan.models import (
@@ -25,9 +26,12 @@ from agent_scan.models.api.v20260710 import (
     SkillRiskIndexes,
     SkillRiskResponse,
     SkillRiskScore,
+    UnverifiableURLSkillRiskScore,
 )
 from agent_scan.printer import (
     _format_component_line,
+    _format_risk,
+    _risk_score_color,
     format_entity_line,
     format_servers_line,
     format_skill_file_line,
@@ -78,11 +82,73 @@ class TestFormatServersLine:
         assert "my-server" in result
 
 
-def test_scan_component_line_preserves_legacy_green_style():
-    result = _format_component_line("my-server", risk_count=1)
+@pytest.mark.parametrize(
+    ("score", "color"),
+    [
+        (100, "#e2d2f4"),
+        (299, "#e2d2f4"),
+        (300, "#cbabee"),
+        (599, "#cbabee"),
+        (600, "#9456d2"),
+        (999, "#9456d2"),
+        (1000, "#8446c4"),
+    ],
+)
+def test_risk_score_color_matches_maverick_bands(score, color):
+    assert _risk_score_color(score) == color
 
-    assert result.plain == "my-server 1 risk"
-    assert any("green" in str(span.style) for span in result.spans)
+
+def test_scan_component_line_uses_highest_risk_score_color():
+    result = _format_component_line("my-server", [300, 600, 100])
+
+    assert result.plain == "my-server 3 risks"
+    assert any("#9456d2" in str(span.style) for span in result.spans)
+    assert not any("green" in str(span.style) for span in result.spans)
+
+
+def test_scan_component_line_preserves_legacy_clean_and_error_colors():
+    clean = _format_component_line("clean-server", [])
+    failed = _format_component_line("failed-server", [], has_error=True)
+
+    assert any("green" in str(span.style) for span in clean.spans)
+    assert any("blue" in str(span.style) for span in failed.spans)
+
+
+def test_format_risk_uses_score_color_and_explicit_metadata_labels():
+    malicious = _format_risk(
+        "suspicious_download_url",
+        MaliciousURLSkillRiskScore(
+            score=600,
+            evidence="Downloads executable content",
+            malicious_urls=["https://malicious.example/payload"],
+        ),
+        affected_tools=["download", "execute"],
+    )
+    unverifiable = _format_risk(
+        "unverifiable_dependencies",
+        UnverifiableURLSkillRiskScore(
+            score=300,
+            evidence="Uses an unverified dependency",
+            unverifiable_urls=["https://unknown.example/package"],
+        ),
+    )
+
+    assert "Suspicious download URL (600/1000)" in malicious.plain
+    assert "Affected tools: download, execute" in malicious.plain
+    assert "Malicious URLs: https://malicious.example/payload" in malicious.plain
+    assert "Unverifiable URLs: https://unknown.example/package" in unverifiable.plain
+    assert any("#9456d2" in str(span.style) for span in malicious.spans)
+    assert not malicious.style
+    for unstyled_text in (
+        "Downloads executable content",
+        "download, execute",
+        "https://malicious.example/payload",
+    ):
+        offset = malicious.plain.index(unstyled_text)
+        assert not any(span.start <= offset < span.end for span in malicious.spans)
+    for metadata_label in ("Affected tools:", "Malicious URLs:"):
+        offset = malicious.plain.index(metadata_label)
+        assert any(span.start <= offset < span.end and "gray62" in str(span.style) for span in malicious.spans)
 
 
 class TestFormatEntityLine:
@@ -211,11 +277,12 @@ def test_plain_scan_output_includes_complete_server_and_skill_risk_details(capsy
     print_scan_response(response)
 
     output = capsys.readouterr().out
-    assert "Private data (score: 750)" in output
+    assert "Private data (750/1000)" in output
     assert "Reads private records" in output
     assert "Affected tools: catalog_tool" in output
-    assert "Suspicious download URL (score: 900)" in output
+    assert "Suspicious download URL (900/1000)" in output
     assert "SKILL.md:12:3" in output
+    assert "Malicious URLs:" in output
     assert "https://malware.example/payload" in output
 
 
@@ -326,10 +393,10 @@ def test_plain_scan_output_preserves_components_and_nests_risks(capsys):
     assert "SKILL.md" in output
     assert "risky-server" in output
     assert "risky_tool" in output
-    assert "Private data (score: 300)" in output
+    assert "Private data (300/1000)" in output
     assert "risky-skill" in output
     assert "scripts/run.py" in output
-    assert "Malicious code (score: 600)" in output
+    assert "Malicious code (600/1000)" in output
 
     # Preserve the old hierarchy: each risk appears after its owner and before
     # the next sibling component, rather than in a separate flat risk report.
@@ -342,6 +409,50 @@ def test_plain_scan_output_preserves_components_and_nests_risks(capsys):
     malicious_code_line = next(line for line in output.splitlines() if "Malicious code" in line)
     assert "├── ●" not in private_data_line and "└── ●" not in private_data_line
     assert "├── ●" not in malicious_code_line and "└── ●" not in malicious_code_line
+
+
+def test_plain_scan_output_sorts_only_risks_by_descending_score(capsys):
+    response = ScanResponse(
+        scan_path_responses=[
+            ScanPathResponse(
+                path="/config",
+                server_risks=[
+                    McpServerRiskResponse(
+                        name="server",
+                        entities=[
+                            McpEntitySummary(name="first-tool", type="tool"),
+                            McpEntitySummary(name="second-tool", type="tool"),
+                        ],
+                        risk_indexes=McpServerRiskIndexes(
+                            dangerous_words=RiskScore(score=100, evidence="low risk"),
+                            private_data=RiskScore(score=600, evidence="high risk"),
+                        ),
+                    )
+                ],
+                skill_risks=[
+                    SkillRiskResponse(
+                        name="skill",
+                        files=[
+                            SkillFileSummary(name="first-file.md", type="instruction"),
+                            SkillFileSummary(name="second-file.py", type="script"),
+                        ],
+                        risk_indexes=SkillRiskIndexes(
+                            malicious_code=SkillRiskScore(score=100, evidence="low skill risk"),
+                            secret_detection=SkillRiskScore(score=600, evidence="high skill risk"),
+                        ),
+                    )
+                ],
+            )
+        ]
+    )
+
+    print_scan_response(response)
+
+    output = capsys.readouterr().out
+    assert output.index("Private data") < output.index("Dangerous words")
+    assert output.index("Secret detection") < output.index("Malicious code")
+    assert output.index("first-tool") < output.index("second-tool")
+    assert output.index("first-file.md") < output.index("second-file.py")
 
 
 def test_plain_scan_output_prints_every_component_and_analysis_error(capsys):
