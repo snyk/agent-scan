@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ipaddress
 import json
 import logging
 import os
@@ -53,6 +54,35 @@ _EXPIRY_SKEW_SECONDS = 60
 # path; the scan never performs an interactive authorization, so nothing binds
 # to it. The interactive command (M2) supplies a real ``127.0.0.1`` callback.
 _PLACEHOLDER_REDIRECT_URI = "http://127.0.0.1:33418/callback"
+
+
+def _is_loopback_host(host: str) -> bool:
+    """True for ``localhost`` and any address in 127.0.0.0/8 or ::1."""
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def is_secure_token_url(url: str) -> bool:
+    """True if a refresh token and client secret may be sent to ``url``.
+
+    RFC 6749 s3.2 requires TLS on the token endpoint. The endpoint we persist is
+    taken from server-controlled OAuth discovery metadata, so it is validated
+    before use rather than trusted. Plain ``http`` is accepted only for loopback
+    hosts: local MCP servers legitimately use it, and the credential never
+    reaches a network. An empty or unparseable URL is rejected, which is also
+    what makes an entry whose endpoint was never finalized fail closed.
+    """
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    if parsed.scheme == "https":
+        return True
+    return parsed.scheme == "http" and _is_loopback_host((parsed.hostname or "").lower())
 
 
 def normalize_server_url(url: str) -> str:
@@ -123,13 +153,34 @@ class StoredServerAuth(BaseModel):
         """True if the access token is at/near expiry (with a safety skew).
 
         Unknown expiry (``expires_at is None``) is treated as *not* expired: we
-        cannot prove it is stale, so we let the connection try it and fall back
-        to the ``auth_failed`` path if the server rejects it.
+        cannot prove it is stale, so we let the connection try it; if the server
+        rejects it, the connection attempt fails and the scan reports a
+        connection error for that server.
         """
         if self.expires_at is None:
             return False
         current = time.time() if now is None else now
         return current >= (self.expires_at - _EXPIRY_SKEW_SECONDS)
+
+    def safe_summary(self) -> dict[str, object]:
+        """Non-secret description of this entry, for diagnostics and logs.
+
+        Deliberately omits ``access_token``, ``refresh_token`` and
+        ``client_secret``. Anything that prints or logs an entry must go through
+        here — ``model_dump()`` returns the live credentials verbatim.
+        """
+        return {
+            "server_name": self.server_name,
+            "mcp_server_url": self.mcp_server_url,
+            "client_id": self.client_id,
+            "token_url": self.token_url,
+            "redirect_uris": self.redirect_uris,
+            "updated_at": self.updated_at,
+            "expires_at": self.expires_at,
+            "has_client_secret": self.client_secret is not None,
+            "has_refresh_token": self.token.refresh_token is not None,
+            "access_token_expired": self.is_access_token_expired(),
+        }
 
 
 class OAuthTokenStore:
@@ -158,13 +209,33 @@ class OAuthTokenStore:
         return data if isinstance(data, dict) else {}
 
     def _write_raw(self, data: dict[str, dict]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        # Create the directory owner-only from the start; the chmod covers the
+        # case where it already existed with looser permissions.
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         with contextlib.suppress(OSError):
             os.chmod(self.path.parent, 0o700)
         tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
+        # Open at 0o600 *before* any token bytes are written. Builtin open()
+        # would create the file at 0o666 & ~umask (0o644 under the usual
+        # umask 022) and only tighten it afterwards, leaving a fully-written
+        # credential file readable by every local user for the length of the
+        # write.
+        # O_NOFOLLOW (POSIX-only, absent on Windows) refuses to open the path if
+        # it is a symlink, so a symlink planted at the ``.tmp`` path beforehand
+        # cannot redirect the write to an arbitrary target. getattr(...) makes
+        # this a no-op flag bit on platforms without it.
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            # os.open's mode argument is masked by umask; fchmod is not, so this
+            # pins 0o600 regardless of the umask the caller runs with. Guarded
+            # because os.fchmod is POSIX-only and absent on Windows before
+            # Python 3.13 (this repo's floor is 3.10 and CI includes
+            # windows-latest); POSIX file modes are meaningless there anyway.
+            if hasattr(os, "fchmod"):
+                os.fchmod(f.fileno(), 0o600)
             json.dump(data, f, indent=2, default=str)
-        os.chmod(tmp, 0o600)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, self.path)
 
     def _locked(self):
@@ -215,25 +286,38 @@ class OAuthTokenStore:
             data[key] = json.loads(entry.model_dump_json())
             self._write_raw(data)
 
-    def set_token_url(self, server_url: str, token_url: str) -> None:
+    def set_token_url(self, server_url: str, token_url: str) -> bool:
         """Record the discovered token endpoint for an entry.
 
         The interactive auth command captures the token endpoint from OAuth
         discovery and stores it here so ``ensure_fresh_token`` refreshes against
         the correct URL — important for servers (e.g. Atlassian) whose token
         endpoint is on a different host than ``<base>/token``.
+
+        Declines to store an endpoint that is neither HTTPS nor loopback, so a
+        discovery document cannot arrange for the refresh token to be sent in
+        cleartext later. The entry keeps whatever endpoint it already had.
+
+        Returns ``True`` if the endpoint was stored, ``False`` if it was refused
+        (non-HTTPS/non-loopback) or there was no existing entry to update. Never
+        raises; callers that need the user to know about a refusal must check
+        the return value themselves.
         """
+        if not is_secure_token_url(token_url):
+            logger.warning("Refusing to store a non-HTTPS token endpoint for %s: %r", server_url, token_url)
+            return False
         key = normalize_server_url(server_url)
         with self._locked():
             data = self._read_raw()
             raw = data.get(key)
             if raw is None:
-                return
+                return False
             entry = StoredServerAuth.model_validate(raw)
             entry.token_url = token_url
             entry.updated_at = time.time()
             data[key] = json.loads(entry.model_dump_json())
             self._write_raw(data)
+            return True
 
 
 class _FileLock:
@@ -335,8 +419,19 @@ async def ensure_fresh_token(store: OAuthTokenStore, server_url: str, *, timeout
 
     Best-effort and non-fatal: any failure (network, dead refresh token,
     non-rotating server) is logged and swallowed. The scan then attempts the
-    stale token; if the server rejects it, the existing ``auth_failed`` path
-    records that, and the user re-authenticates. Never raises.
+    stale token; if the server rejects it, the connection attempt fails and the
+    scan reports a connection error for that server, and the user
+    re-authenticates. Never raises.
+
+    This function guards only its own proactive refresh: ``follow_redirects``
+    and ``is_secure_token_url`` below cover this module's HTTP POST to the
+    stored token endpoint, not the MCP SDK's own refresh. When that guard
+    declines, the stale token is instead handed to the SDK's
+    ``OAuthClientProvider``, which performs its own refresh
+    (``mcp/client/auth/oauth2.py``) against a ``token_endpoint`` taken from
+    discovery with no scheme check, through an ``httpx`` client built with
+    ``follow_redirects=True`` (see ``mcp_client.py`` and ``oauth_flow.py``).
+    That path is not covered here and is tracked as a follow-up.
     """
     entry = store.get(server_url)
     if entry is None or not entry.is_access_token_expired():
@@ -350,8 +445,23 @@ async def ensure_fresh_token(store: OAuthTokenStore, server_url: str, *, timeout
         if entry is None or not entry.is_access_token_expired():
             return
         if entry.token.refresh_token is None:
-            # Nothing to refresh with; let the connection fail to auth_failed.
+            # Nothing to refresh with; let the connection attempt fail on its own,
+            # which the scan reports as a connection error for this server.
             logger.debug("Stored token for %s expired and has no refresh token", server_url)
+            return
+
+        if not is_secure_token_url(entry.token_url):
+            # Fail closed rather than send the credential in cleartext through
+            # this module's own refresh POST below. This does not stop the MCP
+            # SDK's own refresh (see the docstring above) — only this proactive
+            # path. The scan then tries the stale token; if the server rejects
+            # it, the connection attempt fails and the scan reports a connection
+            # error, prompting the user to re-run mcp-auth.
+            logger.warning(
+                "Refusing to refresh %s: stored token endpoint %r is neither HTTPS nor loopback",
+                server_url,
+                entry.token_url,
+            )
             return
 
         data = {
@@ -363,8 +473,24 @@ async def ensure_fresh_token(store: OAuthTokenStore, server_url: str, *, timeout
             data["client_secret"] = entry.client_secret
         headers = {"Content-Type": "application/x-www-form-urlencoded"}
         try:
-            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            # follow_redirects=False is deliberate and security-relevant for this
+            # module's own refresh POST: httpx preserves the method and re-sends
+            # the body on 307/308, and entry.token_url comes from
+            # server-controlled discovery metadata. Following a redirect would
+            # deliver the refresh token and client secret to a host the remote
+            # server picked. This protects only this proactive-refresh path, not
+            # the MCP SDK's own refresh (see the docstring above); that path is
+            # not covered here and is tracked as a follow-up.
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
                 resp = await client.post(entry.token_url, data=data, headers=headers)
+            if resp.status_code in (301, 302, 303, 307, 308):
+                logger.warning(
+                    "Token endpoint for %s returned a %s redirect to %s; not resending the refresh token",
+                    server_url,
+                    resp.status_code,
+                    resp.headers.get("location", "<no location header>"),
+                )
+                return
             if resp.status_code != 200:
                 logger.info("Refresh for %s failed with status %s; leaving stored token", server_url, resp.status_code)
                 return
