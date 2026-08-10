@@ -3,12 +3,11 @@ from __future__ import annotations
 import json
 import logging
 import sys
-from typing import Any
 
 import rich
 
 from agent_scan.oauth_flow import AuthResult, authenticate_server
-from agent_scan.oauth_store import OAuthTokenStore, StoredServerAuth, normalize_server_url
+from agent_scan.oauth_store import OAuthTokenStore, normalize_server_url
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +36,9 @@ async def run_debug_auth(
 
     if entry is not None:
         if print_details:
-            rich.print(json.dumps(entry.model_dump(mode="json"), indent=2))
+            # safe_summary(), never model_dump(): the latter includes the access
+            # token, refresh token and client secret, which must not reach stdout.
+            rich.print(json.dumps(entry.safe_summary(), indent=2))
         if verbose:
             rich.print("[green]Found existing stored auth entry[/green]")
     else:
