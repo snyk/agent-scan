@@ -282,7 +282,12 @@ async def authenticate_server(
             metadata = getattr(provider.context, "oauth_metadata", None)
             token_endpoint = getattr(metadata, "token_endpoint", None) if metadata else None
             if token_endpoint:
-                store.set_token_url(url, str(token_endpoint))
+                if not store.set_token_url(url, str(token_endpoint)):
+                    rich.print(
+                        "[yellow]Warning:[/yellow] the server advertised a non-HTTPS token endpoint "
+                        f"({token_endpoint!r}); automatic refresh is disabled for this server and you "
+                        "will need to run mcp-auth again once the token expires."
+                    )
             else:
                 logger.warning("Authenticated %s but no token endpoint was discovered", url)
             return AuthResult(ok=True, server_url=normalize_server_url(url))
