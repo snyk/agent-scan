@@ -336,6 +336,13 @@ def test_plain_scan_output_preserves_components_and_nests_risks(capsys):
     assert output.index("risky-server") < output.index("Private data") < output.index("clean-skill")
     assert output.index("risky-skill") < output.index("Malicious code") < output.index("scripts/run.py")
 
+    # Match the legacy issue layout: findings are continuation lines in the
+    # component label, not child nodes with their own tree connectors.
+    private_data_line = next(line for line in output.splitlines() if "Private data" in line)
+    malicious_code_line = next(line for line in output.splitlines() if "Malicious code" in line)
+    assert "├── ●" not in private_data_line and "└── ●" not in private_data_line
+    assert "├── ●" not in malicious_code_line and "└── ●" not in malicious_code_line
+
 
 def test_plain_scan_output_prints_every_component_and_analysis_error(capsys):
     response = ScanResponse(

@@ -585,40 +585,41 @@ def _format_scan_path_line(path: str, message: str, error: ScanError | None) -> 
     return result
 
 
-def _add_risk(
-    parent: Tree,
+def _format_risk(
     name: str,
     risk,
     *,
     affected_tools: list[str] | None = None,
-) -> None:
+) -> Text:
     line = Text("● ", style="yellow")
     line.append(f"{RISK_DISPLAY_NAMES[name]} (score: {risk.score})", style="bold")
     line.append(f": {risk.evidence}")
-    risk_tree = parent.add(line)
     if affected_tools:
-        affected_tools_line = Text("Affected tools: ")
-        affected_tools_line.append(", ".join(affected_tools))
-        risk_tree.add(affected_tools_line)
+        line.append("\n  Affected tools: ")
+        line.append(", ".join(affected_tools))
     locations = getattr(risk, "locations", None)
     if locations:
-        locations_line = Text("Locations: ")
-        locations_line.append(", ".join(_format_region(region) for region in locations))
-        risk_tree.add(locations_line)
+        line.append("\n  Locations: ")
+        line.append(", ".join(_format_region(region) for region in locations))
     urls: list[str] = []
     if isinstance(risk, MaliciousURLSkillRiskScore):
         urls = risk.malicious_urls
     elif isinstance(risk, UnverifiableURLSkillRiskScore):
         urls = risk.unverifiable_urls
     for url in urls:
-        risk_tree.add(Text(url))
+        line.append("\n  ")
+        line.append(url)
+    return line
+
+
+def _append_component_detail(component: Text, detail: Text) -> None:
+    component.append("\n")
+    component.append(detail)
 
 
 def _add_server(parent: Tree, server: McpServerRiskResponse) -> None:
     risks = [(name, risk) for name, risk in server.risk_indexes if risk is not None]
-    server_tree = parent.add(_format_component_line(server.name, len(risks)))
-    if server.error is not None:
-        server_tree.add(_format_response_error(server.error))
+    component = _format_component_line(server.name, len(risks))
     for name, risk in risks:
         tools = []
         for index in risk.affected_tools or []:
@@ -626,18 +627,22 @@ def _add_server(parent: Tree, server: McpServerRiskResponse) -> None:
                 tools.append(server.entities[index].name)
             else:
                 tools.append(str(index))
-        _add_risk(server_tree, name, risk, affected_tools=tools)
+        _append_component_detail(component, _format_risk(name, risk, affected_tools=tools))
+    if server.error is not None:
+        _append_component_detail(component, _format_response_error(server.error))
+    server_tree = parent.add(component)
     for entity in server.entities:
         server_tree.add(_format_response_entity_line(entity))
 
 
 def _add_skill(parent: Tree, skill: SkillRiskResponse) -> None:
     risks = [(name, risk) for name, risk in skill.risk_indexes if risk is not None]
-    skill_tree = parent.add(_format_component_line(skill.name, len(risks)))
-    if skill.error is not None:
-        skill_tree.add(_format_response_error(skill.error))
+    component = _format_component_line(skill.name, len(risks))
     for name, risk in risks:
-        _add_risk(skill_tree, name, risk)
+        _append_component_detail(component, _format_risk(name, risk))
+    if skill.error is not None:
+        _append_component_detail(component, _format_response_error(skill.error))
+    skill_tree = parent.add(component)
     for skill_file in skill.files:
         skill_tree.add(_format_response_skill_file_line(skill_file))
 
