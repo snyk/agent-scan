@@ -1,7 +1,9 @@
 """Unit tests for the persistent OAuth token store (M1)."""
 
 import json
+import os
 import stat
+import sys
 import time
 
 import pytest
@@ -14,6 +16,7 @@ from agent_scan.oauth_store import (
     PersistentTokenStorage,
     StoredServerAuth,
     ensure_fresh_token,
+    is_secure_token_url,
     normalize_server_url,
 )
 
@@ -34,6 +37,21 @@ def _entry(url="https://mcp.linear.app", token=None, expires_at=None):
         expires_at=expires_at,
         token=token or _token(),
     )
+
+
+@pytest.fixture
+def permissive_umask():
+    """Pin a permissive umask for the duration of a test.
+
+    Without this, a developer running with ``umask 077`` would see the
+    permission tests pass even against the unfixed code, because the ambient
+    umask — not the code — would be what tightened the file.
+    """
+    previous = os.umask(0o022)
+    try:
+        yield
+    finally:
+        os.umask(previous)
 
 
 @pytest.mark.parametrize(
@@ -123,18 +141,21 @@ async def test_persistent_storage_roundtrip(tmp_path):
 
 
 class _FakeResponse:
-    def __init__(self, status_code, content):
+    def __init__(self, status_code, content, headers=None):
         self.status_code = status_code
         self.content = content
+        self.headers = headers or {}
 
 
 class _FakeAsyncClient:
     """Minimal stand-in for httpx.AsyncClient capturing the refresh POST."""
 
     last_post = None
+    last_init_kwargs: dict | None = None
 
     def __init__(self, *args, **kwargs):
-        pass
+        # Recorded on the base class so subclass instances report here too.
+        _FakeAsyncClient.last_init_kwargs = kwargs
 
     async def __aenter__(self):
         return self
@@ -218,3 +239,187 @@ async def test_ensure_fresh_token_swallows_failure(tmp_path, monkeypatch):
     # Must not raise; the stale token is left in place for the connection to try.
     await ensure_fresh_token(store, "https://mcp.linear.app/mcp")
     assert store.get("https://mcp.linear.app/mcp").token.access_token == "stale"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes are not meaningful on Windows")
+def test_temp_file_is_owner_only_while_being_written(tmp_path, monkeypatch, permissive_umask):
+    """The temp file must be 0600 before any token bytes reach it.
+
+    Regression test: creating it with builtin ``open()`` yields ``0o666 & ~umask``
+    (0o644 here) and only tightens it after the write, so the fully-written
+    credential file is world-readable for the length of the write.
+    """
+    path = tmp_path / "store.json"
+    tmp_file = tmp_path / "store.json.tmp"
+    observed: dict[str, int] = {}
+
+    real_dump = oauth_store.json.dump
+
+    def spy_dump(obj, fp, **kwargs):
+        # Sampled at the moment the credentials are being serialized — the exact
+        # window the unfixed code leaves open.
+        observed["mode"] = stat.S_IMODE(tmp_file.stat().st_mode)
+        return real_dump(obj, fp, **kwargs)
+
+    monkeypatch.setattr(oauth_store.json, "dump", spy_dump)
+    OAuthTokenStore(path=path).put("https://mcp.linear.app/mcp", _entry())
+
+    assert observed["mode"] == 0o600
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes are not meaningful on Windows")
+def test_store_directory_is_owner_only(tmp_path, permissive_umask):
+    """Characterization test: the store directory is 0700, including when created.
+
+    Passes before and after the temp-file fix. It exists so that the directory
+    tightening cannot be removed without a test failing.
+    """
+    store_dir = tmp_path / "nested" / ".mcp-scan"
+    OAuthTokenStore(path=store_dir / "store.json").put("https://mcp.linear.app/mcp", _entry())
+
+    assert stat.S_IMODE(store_dir.stat().st_mode) == 0o700
+
+
+def test_safe_summary_omits_secrets():
+    entry = _entry(token=_token(access="SECRETACCESS", refresh="SECRETREFRESH"))
+    entry.client_secret = "SECRETCLIENT"
+
+    summary = entry.safe_summary()
+    rendered = json.dumps(summary)
+
+    assert "SECRETACCESS" not in rendered
+    assert "SECRETREFRESH" not in rendered
+    assert "SECRETCLIENT" not in rendered
+    # Presence is still reportable without disclosing the values.
+    assert summary["has_refresh_token"] is True
+    assert summary["has_client_secret"] is True
+    # Non-secret identifiers stay useful for diagnostics.
+    assert summary["client_id"] == "client-123"
+    assert summary["token_url"] == "https://mcp.linear.app/token"
+
+
+@pytest.mark.asyncio
+async def test_refresh_disables_redirect_following(tmp_path, monkeypatch):
+    """The token exchange must not follow redirects.
+
+    token_url comes from server-controlled discovery metadata, and httpx
+    re-sends the body on 307/308 — so following a redirect would hand the
+    refresh token and client secret to a host the server chose.
+    """
+    monkeypatch.setattr(oauth_store.httpx, "AsyncClient", _FakeAsyncClient)
+    store = OAuthTokenStore(path=tmp_path / "store.json")
+    store.put("https://mcp.linear.app/mcp", _entry(expires_at=time.time() - 10))
+
+    await ensure_fresh_token(store, "https://mcp.linear.app/mcp")
+
+    assert _FakeAsyncClient.last_init_kwargs["follow_redirects"] is False
+
+
+@pytest.mark.asyncio
+async def test_refresh_ignores_a_redirect_response(tmp_path, monkeypatch, caplog):
+    class _Redirecting(_FakeAsyncClient):
+        async def post(self, url, data=None, headers=None):
+            _FakeAsyncClient.last_post = {"url": url, "data": data}
+            return _FakeResponse(307, b"", {"location": "https://attacker.example/token"})
+
+    monkeypatch.setattr(oauth_store.httpx, "AsyncClient", _Redirecting)
+    store = OAuthTokenStore(path=tmp_path / "store.json")
+    store.put("https://mcp.linear.app/mcp", _entry(token=_token(access="stale"), expires_at=time.time() - 10))
+
+    with caplog.at_level("WARNING", logger="agent_scan.oauth_store"):
+        await ensure_fresh_token(store, "https://mcp.linear.app/mcp")
+
+    # The stale token is left for the connection to try, and the only request
+    # made went to the configured endpoint.
+    assert store.get("https://mcp.linear.app/mcp").token.access_token == "stale"
+    assert _FakeAsyncClient.last_post["url"] == "https://mcp.linear.app/token"
+    # This branch's only observable behaviour distinct from a plain non-200 is
+    # its warning log — assert it fires and names the redirect target, so
+    # deleting the 3xx branch (which would fall through to the generic
+    # status_code != 200 return, producing identical stored-token state) fails
+    # this test.
+    redirect_warnings = [r for r in caplog.records if "redirect" in r.getMessage()]
+    assert len(redirect_warnings) == 1
+    assert "307" in redirect_warnings[0].getMessage()
+    assert "https://attacker.example/token" in redirect_warnings[0].getMessage()
+
+
+@pytest.mark.parametrize(
+    "url,expected",
+    [
+        ("https://mcp.linear.app/token", True),
+        ("https://auth.atlassian.com/oauth/token", True),
+        # Loopback http never leaves the host, and local servers use it.
+        ("http://127.0.0.1:8080/token", True),
+        ("http://localhost:8080/token", True),
+        ("http://[::1]:8080/token", True),
+        # Anything else must be TLS (RFC 6749 s3.2).
+        ("http://mcp.linear.app/token", False),
+        ("http://attacker.example/token", False),
+        # Empty (an entry whose endpoint was never finalized) and malformed.
+        ("", False),
+        ("not a url", False),
+    ],
+)
+def test_is_secure_token_url(url, expected):
+    assert is_secure_token_url(url) is expected
+
+
+@pytest.mark.asyncio
+async def test_refresh_refuses_a_plaintext_token_endpoint(tmp_path, monkeypatch):
+    called = {"post": False}
+
+    class _NoPost(_FakeAsyncClient):
+        async def post(self, *a, **k):
+            called["post"] = True
+            return _FakeResponse(200, b"{}")
+
+    monkeypatch.setattr(oauth_store.httpx, "AsyncClient", _NoPost)
+    store = OAuthTokenStore(path=tmp_path / "store.json")
+    entry = _entry(expires_at=time.time() - 10)
+    entry.token_url = "http://mcp.linear.app/token"
+    store.put("https://mcp.linear.app/mcp", entry)
+
+    await ensure_fresh_token(store, "https://mcp.linear.app/mcp")
+
+    assert called["post"] is False  # the refresh token was never sent in cleartext
+
+
+def test_set_token_url_rejects_plaintext(tmp_path):
+    store = OAuthTokenStore(path=tmp_path / "store.json")
+    store.put("https://mcp.linear.app/mcp", _entry())
+
+    result = store.set_token_url("https://mcp.linear.app/mcp", "http://attacker.example/token")
+
+    # The original endpoint is retained; the insecure one is never persisted.
+    assert store.get("https://mcp.linear.app/mcp").token_url == "https://mcp.linear.app/token"
+    # Callers (e.g. authenticate_server) need to know the endpoint was refused
+    # so they can warn the user that automatic refresh is disabled.
+    assert result is False
+
+
+def test_set_token_url_accepts_https(tmp_path):
+    store = OAuthTokenStore(path=tmp_path / "store.json")
+    store.put("https://mcp.linear.app/mcp", _entry())
+
+    result = store.set_token_url("https://mcp.linear.app/mcp", "https://auth.atlassian.com/oauth/token")
+
+    assert store.get("https://mcp.linear.app/mcp").token_url == "https://auth.atlassian.com/oauth/token"
+    assert result is True
+
+
+def test_set_token_url_return_value_distinguishes_accepted_from_refused(tmp_path):
+    """set_token_url's bool return is what lets a caller warn the user.
+
+    Without it, authenticate_server cannot tell a stored endpoint from a
+    silently-refused one, so mcp-auth would print "authenticated" even though
+    the entry's token_url stayed unset and can never be refreshed.
+    """
+    store = OAuthTokenStore(path=tmp_path / "store.json")
+    store.put("https://mcp.linear.app/mcp", _entry())
+
+    accepted = store.set_token_url("https://mcp.linear.app/mcp", "https://mcp.linear.app/oauth/token")
+    refused = store.set_token_url("https://mcp.linear.app/mcp", "http://attacker.example/token")
+
+    assert accepted is True
+    assert refused is False
