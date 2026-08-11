@@ -4,22 +4,50 @@ import logging
 import os
 import ssl
 import traceback
+from typing import Any
 
 import aiohttp
 import certifi
 import rich
 
-from agent_scan.models import (
+from agent_scan.models.api.common import ScanUserInfo
+from agent_scan.models.api.v20250902 import (
     ScalarToolLabels,
-    ScanError,
     ScanPathResult,
     ScanPathResultsCreate,
-    ScanUserInfo,
 )
+from agent_scan.models.api.v20260710 import ScanRequest
+from agent_scan.models.errors import ScanError
+from agent_scan.models.inspect import InspectedPath
 from agent_scan.utils import get_environment, get_relative_path
 from agent_scan.well_known_clients import get_client_from_path
 
 logger = logging.getLogger(__name__)
+
+
+def build_scan_request(
+    inspected_paths: list[InspectedPath],
+    scan_user_info: ScanUserInfo | None = None,
+    scan_metadata: dict[str, Any] | None = None,
+) -> ScanRequest:
+    """Convert inspection inventory into a v2026-07-10 scan request.
+
+    The versioned API models own the structural conversion from inspection-domain
+    models to wire models. This transport boundary additionally makes each top-level
+    path home-relative. Per-component ``config_path`` and ``installation_path``
+    remain absolute because the backend forwards them to Maverick as the asset
+    location.
+
+    This remains additive: ``analyze_machine`` still sends the legacy payload.
+    """
+    request = ScanRequest.from_inspected_paths(
+        inspected_paths,
+        scan_user_info=scan_user_info,
+        scan_metadata=scan_metadata,
+    )
+    for path_request in request.scan_path_requests:
+        path_request.path = get_relative_path(path_request.path)
+    return request
 
 
 class SnykTokenError(Exception):

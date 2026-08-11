@@ -8,8 +8,16 @@ Code command files are flat ``*.md`` files, so they need their own scanner
 
 from pathlib import Path
 
-from agent_scan.models import SkillServer
-from agent_scan.skill_client import inspect_commands_dir, inspect_skill
+import pytest
+
+from agent_scan.models.skill import SkillServer
+from agent_scan.redact import redact_text
+from agent_scan.skill_client import (
+    BINARY_FILE_DESCRIPTION_PREFIX,
+    collect_skill_files,
+    inspect_commands_dir,
+    inspect_skill,
+)
 from tests.unit._secret_fixtures import synthetic_secret
 
 
@@ -276,3 +284,84 @@ def test_redact_and_skill_client_import_without_cycle():
             text=True,
         )
         assert result.returncode == 0, f"importing {module} first failed:\n{result.stderr}"
+
+
+# ---------------------------------------------------------------------------
+# collect_skill_files: raw file collection for the v2026-07-10 request payload
+# (unlike inspect_skill, which classifies files into a signature's entities).
+# ---------------------------------------------------------------------------
+
+
+def test_collect_skill_files_single_file_command(tmp_path):
+    cmd = tmp_path / "deploy.md"
+    cmd.write_text("# Deploy\nrun the deploy")
+
+    files = collect_skill_files(str(cmd))
+
+    assert len(files) == 1
+    assert files[0].path == "deploy.md"
+    assert files[0].content == "# Deploy\nrun the deploy"
+
+
+def test_collect_skill_files_directory_relative_paths(tmp_path):
+    skill = tmp_path / "my-skill"
+    (skill / "scripts").mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: my-skill\n---\ndo things")
+    (skill / "scripts" / "run.py").write_text("print('hi')")
+    (skill / "reference.md").write_text("# Reference")
+
+    by_path = {f.path: f.content for f in collect_skill_files(str(skill))}
+
+    assert set(by_path) == {"SKILL.md", "reference.md", "scripts/run.py"}
+    # nested files keep a forward-slash, skill-relative path
+    assert by_path["scripts/run.py"] == "print('hi')"
+
+
+def test_collect_skill_files_deterministic_order(tmp_path):
+    skill = tmp_path / "skill"
+    (skill / "a").mkdir(parents=True)
+    (skill / "b").mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: s\n---\nx")
+    (skill / "a" / "one.md").write_text("1")
+    (skill / "b" / "two.md").write_text("2")
+
+    assert [f.path for f in collect_skill_files(str(skill))] == ["SKILL.md", "a/one.md", "b/two.md"]
+
+
+def test_collect_skill_files_redacts_secrets(tmp_path):
+    raw = f"api_key = {_FAKE_SKILL_SECRET}\n"
+    cmd = tmp_path / "cmd.md"
+    cmd.write_text(raw)
+
+    files = collect_skill_files(str(cmd))
+
+    assert _FAKE_SKILL_SECRET not in files[0].content
+    # redaction is exactly the shared redact_text applied to the raw content
+    assert files[0].content == redact_text(raw)
+
+
+def test_collect_skill_files_binary_hash_marker(tmp_path):
+    skill = tmp_path / "skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("---\nname: s\n---\nx")
+    (skill / "logo.png").write_bytes(b"\xff\xd8\xff\xe0\x00binary\x00data")
+
+    by_path = {f.path: f.content for f in collect_skill_files(str(skill))}
+
+    assert by_path["logo.png"].startswith(BINARY_FILE_DESCRIPTION_PREFIX)
+
+
+def test_collect_skill_files_non_existent_path_raises(tmp_path):
+    missing = tmp_path / "does-not-exist"
+    with pytest.raises(FileNotFoundError):
+        collect_skill_files(str(missing))
+
+
+def test_collect_skill_files_rejects_path_that_is_not_file_or_directory(tmp_path, monkeypatch):
+    special_path = tmp_path / "special"
+    special_path.touch()
+    monkeypatch.setattr("agent_scan.skill_client.os.path.isfile", lambda _path: False)
+    monkeypatch.setattr("agent_scan.skill_client.os.path.isdir", lambda _path: False)
+
+    with pytest.raises(ValueError, match="not a file or directory"):
+        collect_skill_files(str(special_path))

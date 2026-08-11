@@ -9,15 +9,18 @@ import aiohttp
 import pytest
 from mcp.types import Implementation, InitializeResult, ServerCapabilities, Tool
 
-from agent_scan.models import (
-    RemoteServer,
-    ScanError,
-    ScanPathResult,
-    ServerScanResult,
-    ServerSignature,
-    StdioServer,
+from agent_scan.models.api.common import ScanUserInfo
+from agent_scan.models.api.v20250902 import ScanPathResult, ServerScanResult
+from agent_scan.models.api.v20260710 import (
+    McpServerRequest,
+    ScanPathRequest,
+    SkillRequest,
 )
-from agent_scan.verify_api import analyze_machine, load_extra_ca_certs, setup_tcp_connector
+from agent_scan.models.errors import ErrorCategory, ScanError
+from agent_scan.models.inspect import InspectedPath, InspectedServer, InspectedSkill
+from agent_scan.models.mcp import RemoteServer, ServerSignature, StdioServer
+from agent_scan.models.skill import SkillFile
+from agent_scan.verify_api import analyze_machine, build_scan_request, load_extra_ca_certs, setup_tcp_connector
 
 
 class TestProxySupport:
@@ -837,3 +840,234 @@ class TestAnalyzeMachineHttpErrors:
         figma, playwright = claude.servers
         assert figma.error is not None and figma.error.category == "server_startup"
         assert playwright.error is not None and playwright.error.category == "analysis_error"
+
+
+class TestBuildScanRequest:
+    """The API boundary turns inspection-domain inventory into v2026-07-10 wire models."""
+
+    def test_maps_mcp_servers_and_skills(self):
+        inspected = InspectedPath(
+            client="cursor",
+            path="/tmp/project",
+            servers=[
+                InspectedServer(
+                    name="sqlite",
+                    config_path="/tmp/project/.mcp.json",
+                    server=StdioServer(command="uvx", args=["sqlite-mcp"], type="stdio"),
+                ),
+                InspectedServer(
+                    name="remote",
+                    config_path="/tmp/project/.mcp.json",
+                    server=RemoteServer(url="https://example.com/mcp", type="http"),
+                ),
+            ],
+            skills=[
+                InspectedSkill(
+                    name="my-skill",
+                    installation_path="/tmp/project/.skills/my-skill",
+                    files=[SkillFile(path="SKILL.md", content="---\nname: my-skill\n---\ndo things")],
+                ),
+            ],
+        )
+
+        req = build_scan_request([inspected])
+
+        assert len(req.scan_path_requests) == 1
+        spr = req.scan_path_requests[0]
+        assert type(spr) is ScanPathRequest
+        assert type(spr.servers[0]) is McpServerRequest
+        assert type(spr.skills[0]) is SkillRequest
+        assert spr.client == "cursor"
+        assert [s.name for s in spr.servers] == ["sqlite", "remote"]
+        assert [s.name for s in spr.skills] == ["my-skill"]
+        # mcp fields carried across
+        assert spr.servers[0].config_path == "/tmp/project/.mcp.json"
+        assert isinstance(spr.servers[0].server, StdioServer)
+        assert isinstance(spr.servers[1].server, RemoteServer)
+        # skill request carries installation_path + files verbatim
+        assert spr.skills[0].installation_path == "/tmp/project/.skills/my-skill"
+        assert [f.path for f in spr.skills[0].files] == ["SKILL.md"]
+
+    def test_top_level_path_is_home_relativized(self):
+        absolute_path = os.path.expanduser("~/project/.mcp.json")
+        inspected = InspectedPath(client=None, path=absolute_path)
+        req = build_scan_request([inspected])
+
+        assert req.scan_path_requests[0].path == "~/project/.mcp.json"
+        assert inspected.path == absolute_path
+
+    def test_passes_through_error_and_empty_name(self):
+        server_error = ScanError(message="boom", category="server_startup")
+        inspected = InspectedPath(
+            client=None,
+            path="/tmp/p",
+            error=ScanError(message="path error", category="parse_error"),
+            servers=[
+                InspectedServer(name="", server=StdioServer(command="x", type="stdio"), error=server_error),
+            ],
+        )
+
+        spr = build_scan_request([inspected]).scan_path_requests[0]
+
+        assert spr.error is not None and spr.error.message == "path error"
+        assert spr.servers[0].name == ""
+        assert spr.servers[0].error == server_error
+        assert spr.servers[0].error is not server_error
+
+    def test_sanitizes_error_diagnostics_without_mutating_local_errors(self):
+        private_path = "/Users/alice/private/diagnostics/error.log"
+        secret = "ghp_abcdefghijklmnopqrstuvwxyz1234567890"
+
+        def local_error(message: str, category: ErrorCategory) -> ScanError:
+            return ScanError(
+                message=f"{message}: {private_path}",
+                exception=f"permission denied for {private_path}; token={secret}",
+                traceback=f'File "{private_path}", line 7, in inspect\nValueError: token={secret}',
+                server_output=f"failed to open {private_path}; token={secret}",
+                category=category,
+            )
+
+        path_error = local_error("path failed", "parse_error")
+        server_error = local_error("server failed", "server_startup")
+        skill_error = local_error("skill failed", "skill_scan_error")
+        inspected = InspectedPath(
+            client="cursor",
+            path="/tmp/project",
+            error=path_error,
+            servers=[
+                InspectedServer(
+                    name="server",
+                    server=StdioServer(command="server", type="stdio"),
+                    error=server_error,
+                )
+            ],
+            skills=[InspectedSkill(name="skill", installation_path="/tmp/project/skill", error=skill_error)],
+        )
+
+        request = build_scan_request([inspected])
+
+        request_json = request.model_dump_json()
+        assert private_path not in request_json
+        assert secret not in request_json
+        wire_errors = [
+            request.scan_path_requests[0].error,
+            request.scan_path_requests[0].servers[0].error,
+            request.scan_path_requests[0].skills[0].error,
+        ]
+        assert all(error is not None and error.traceback is None for error in wire_errors)
+        assert wire_errors[0] is not None and wire_errors[0].message.startswith("path failed:")
+        assert wire_errors[1] is not None and wire_errors[1].category == "server_startup"
+        assert wire_errors[2] is not None and wire_errors[2].category == "skill_scan_error"
+
+        # Local inspect output retains full diagnostics for --print-errors.
+        assert path_error.traceback is not None and private_path in path_error.traceback
+        assert server_error.exception is not None and secret in str(server_error.exception)
+        assert skill_error.server_output is not None and secret in skill_error.server_output
+
+    def test_redacts_stdio_server_config_without_mutating_local_inventory(self):
+        secret = "ghp_abcdefghijklmnopqrstuvwxyz1234567890"
+        local_server = StdioServer(
+            command="server",
+            args=["--token", secret, "--mode", "safe"],
+            env={"API_TOKEN": secret, "MODE": "development"},
+            type="stdio",
+        )
+        inspected = InspectedPath(
+            path="/tmp/project",
+            servers=[InspectedServer(name="server", server=local_server)],
+        )
+
+        request_server = build_scan_request([inspected]).scan_path_requests[0].servers[0].server
+
+        assert isinstance(request_server, StdioServer)
+        assert request_server.command == "server"
+        assert request_server.args is not None
+        assert secret not in request_server.args
+        assert request_server.args[-2:] == ["--mode", "safe"]
+        assert request_server.env == {"API_TOKEN": "**REDACTED**", "MODE": "**REDACTED**"}
+        assert local_server.args == ["--token", secret, "--mode", "safe"]
+        assert local_server.env == {"API_TOKEN": secret, "MODE": "development"}
+
+    def test_redacts_remote_server_config_without_mutating_local_inventory(self):
+        local_server = RemoteServer(
+            url="https://example.com/mcp?token=private-token&mode=development",
+            headers={"Authorization": "Bearer private-token", "X-Mode": "development"},
+            type="http",
+        )
+        inspected = InspectedPath(
+            path="/tmp/project",
+            servers=[InspectedServer(name="server", server=local_server)],
+        )
+
+        request_server = build_scan_request([inspected]).scan_path_requests[0].servers[0].server
+
+        assert isinstance(request_server, RemoteServer)
+        assert request_server.url == ("https://example.com/mcp?token=%2A%2AREDACTED%2A%2A&mode=%2A%2AREDACTED%2A%2A")
+        assert request_server.headers == {"Authorization": "**REDACTED**", "X-Mode": "**REDACTED**"}
+        assert local_server.url == "https://example.com/mcp?token=private-token&mode=development"
+        assert local_server.headers == {"Authorization": "Bearer private-token", "X-Mode": "development"}
+
+    def test_signature_passed_through_for_mcp_server(self):
+        signature = ServerSignature(
+            metadata=InitializeResult(
+                protocolVersion="2024-11-05",
+                capabilities=ServerCapabilities(),
+                serverInfo=Implementation(name="server", version="1"),
+            )
+        )
+        server = InspectedServer(
+            name="s",
+            server=StdioServer(command="x", type="stdio"),
+            signature=signature,
+        )
+
+        req = build_scan_request([InspectedPath(client=None, path="/tmp/p", servers=[server])])
+
+        converted_signature = req.scan_path_requests[0].servers[0].signature
+        assert converted_signature == signature
+        assert converted_signature is not signature
+
+    def test_serializes_server_key_not_component(self):
+        inspected = InspectedPath(
+            client=None,
+            path="/tmp/p",
+            servers=[InspectedServer(name="s", server=StdioServer(command="x", type="stdio"))],
+        )
+
+        req = build_scan_request(
+            [inspected], scan_user_info=ScanUserInfo(identifier="u"), scan_metadata={"cli_version": "0.6.0"}
+        )
+        server_dump = req.model_dump()["scan_path_requests"][0]["servers"][0]
+
+        assert "server" in server_dump
+        assert "component" not in server_dump
+        assert '"server"' in req.model_dump_json()
+        assert req.scan_metadata == {"cli_version": "0.6.0"}
+
+    def test_maps_each_path_independently_preserving_order(self):
+        inspected = [
+            InspectedPath(
+                client="cursor",
+                path="/tmp/a",
+                servers=[InspectedServer(name="a-srv", server=StdioServer(command="a", type="stdio"))],
+            ),
+            InspectedPath(
+                client="vscode",
+                path="/tmp/b",
+                skills=[InspectedSkill(name="b-skill", installation_path="/tmp/b/skill")],
+            ),
+        ]
+
+        req = build_scan_request(inspected)
+
+        # order preserved, and each path's servers/skills stay independent
+        assert [p.path for p in req.scan_path_requests] == ["/tmp/a", "/tmp/b"]
+        assert [p.client for p in req.scan_path_requests] == ["cursor", "vscode"]
+        assert [s.name for s in req.scan_path_requests[0].servers] == ["a-srv"]
+        assert req.scan_path_requests[0].skills == []
+        assert req.scan_path_requests[1].servers == []
+        assert [s.name for s in req.scan_path_requests[1].skills] == ["b-skill"]
+
+    def test_empty_inspected_paths(self):
+        req = build_scan_request([])
+        assert req.scan_path_requests == []

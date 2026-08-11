@@ -16,8 +16,10 @@ from mcp.types import (
 )
 from yaml.error import YAMLError
 
-from agent_scan.models import ServerSignature, SkillServer
-from agent_scan.redact import redact_signature
+from agent_scan.models.mcp import ServerSignature
+from agent_scan.models.skill import SkillFile, SkillServer
+from agent_scan.redact import redact_signature, redact_text
+from agent_scan.utils import get_relative_path
 
 logger = logging.getLogger(__name__)
 
@@ -224,6 +226,71 @@ def traverse_skill_tree(skill_path: str, relative_path: str | None) -> tuple[lis
             )
 
     return prompts, resources, tools
+
+
+def _read_skill_file_content(full_path: str) -> str:
+    """Read one skill file's content for the v2026-07-10 request payload.
+
+    Secrets are redacted in place (this is the single point where the raw files
+    are read for the request). Binary files collapse to the same synthetic hash
+    marker ``traverse_skill_tree`` uses; that marker is self-generated and holds
+    no user content, so it is not run through redaction.
+    """
+    expanded = os.path.expanduser(full_path)
+    try:
+        with open(expanded, encoding="utf-8") as f:
+            return redact_text(f.read()) or ""
+    except UnicodeDecodeError:
+        logger.debug("File %s is not valid UTF-8; treating as binary", get_relative_path(full_path))
+        hasher = hashlib.sha256()
+        with open(expanded, "rb") as f:
+            while chunk := f.read(65536):
+                hasher.update(chunk)
+        return f"{BINARY_FILE_DESCRIPTION_PREFIX}{hasher.hexdigest()}"
+
+
+def collect_skill_files(skill_path: str) -> list[SkillFile]:
+    """Collect all skill files as raw ``SkillFile`` records for the v2026-07-10 API payload.
+
+    Traverses and reads every file within a skill target without requiring legacy wrapper objects:
+    - **Single-file command skills** (a flat ``*.md``): returns a single ``SkillFile``
+      keyed by the file's basename (e.g., ``"deploy.md"``).
+    - **Directory skills** (``<name>/SKILL.md`` + subdirectories and sibling files):
+      walks all files in the directory and returns ``SkillFile`` records keyed by their
+      path relative to the skill root with forward slashes (e.g., ``"SKILL.md"``, ``"scripts/run.py"``).
+      Files are sorted deterministically across platforms.
+
+    **File Content Handling:**
+    - **Text files** (instruction markdown, scripts, configs, assets): UTF-8 text is read
+      and run through secret redaction before being sent to the backend.
+    - **Binary files** (images, archives, compiled binaries): non-UTF-8 binary content is
+      caught gracefully and represented as a synthetic hash marker
+      (``"Binary file. Hash: <sha256_hex_digest>"``), preserving asset tracking without
+      transmitting raw binary payloads.
+    """
+    expanded_path = os.path.expanduser(skill_path)
+    if not os.path.exists(expanded_path):
+        raise FileNotFoundError(f"Skill path does not exist: {skill_path}")
+
+    if os.path.isfile(expanded_path):
+        return [
+            SkillFile(
+                path=os.path.basename(expanded_path),
+                content=_read_skill_file_content(expanded_path),
+            )
+        ]
+
+    if not os.path.isdir(expanded_path):
+        raise ValueError(f"Skill path is not a file or directory: {skill_path}")
+
+    files: list[SkillFile] = []
+    for root, dirs, filenames in os.walk(expanded_path):
+        dirs.sort()  # deterministic traversal order across platforms
+        for filename in sorted(filenames):
+            full_path = os.path.join(root, filename)
+            relative_path = os.path.relpath(full_path, expanded_path).replace(os.path.sep, "/")
+            files.append(SkillFile(path=relative_path, content=_read_skill_file_content(full_path)))
+    return files
 
 
 def inspect_skills_dir(path: str) -> list[tuple[str, SkillServer]]:

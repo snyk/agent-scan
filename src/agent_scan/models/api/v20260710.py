@@ -16,6 +16,36 @@ from agent_scan.models.mcp import RemoteServer, ServerSignature, StdioServer
 from agent_scan.models.skill import SkillFile
 
 
+def _error_for_request(error: ScanError | None) -> ScanError | None:
+    """Copy an error while keeping machine-local diagnostics off the wire."""
+    if error is None:
+        return None
+
+    # Imported lazily because ``redact`` depends on the public model facade,
+    # which imports this version module while that facade is initialized.
+    from agent_scan.redact import redact_absolute_paths, redact_text
+
+    def sanitize(value: Exception | str | None) -> str | None:
+        if value is None:
+            return None
+        return redact_absolute_paths(redact_text(str(value)))
+
+    sanitized = error.clone()
+    sanitized.message = sanitize(sanitized.message)
+    sanitized.exception = sanitize(sanitized.exception)
+    sanitized.traceback = None
+    sanitized.server_output = sanitize(sanitized.server_output)
+    return sanitized
+
+
+def _server_for_request(server: StdioServer | RemoteServer) -> StdioServer | RemoteServer:
+    """Copy and sanitize a server config without changing local inspect output."""
+    # See the lazy-import note in ``_error_for_request`` above.
+    from agent_scan.redact import redact_server_config
+
+    return redact_server_config(server.model_copy(deep=True))
+
+
 # Request inventory and envelope
 # ------------------------------
 # These are deliberately distinct from the local inspection models. Conversion
@@ -32,9 +62,9 @@ class McpServerRequest(BaseModel):
         return cls(
             name=inspected.name,
             config_path=inspected.config_path,
-            server=inspected.server.model_copy(deep=True),
+            server=_server_for_request(inspected.server),
             signature=inspected.signature.model_copy(deep=True) if inspected.signature else None,
-            error=inspected.error.clone() if inspected.error else None,
+            error=_error_for_request(inspected.error),
         )
 
 
@@ -50,7 +80,7 @@ class SkillRequest(BaseModel):
             name=inspected.name,
             installation_path=inspected.installation_path,
             files=[file.model_copy(deep=True) for file in inspected.files],
-            error=inspected.error.clone() if inspected.error else None,
+            error=_error_for_request(inspected.error),
         )
 
 
@@ -68,7 +98,7 @@ class ScanPathRequest(BaseModel):
             path=inspected.path,
             servers=[McpServerRequest.from_inspected(server) for server in inspected.servers],
             skills=[SkillRequest.from_inspected(skill) for skill in inspected.skills],
-            error=inspected.error.clone() if inspected.error else None,
+            error=_error_for_request(inspected.error),
         )
 
 
