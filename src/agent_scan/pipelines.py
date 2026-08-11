@@ -10,8 +10,6 @@ from agent_scan.direct_scanner import direct_scan_to_server_config, is_direct_sc
 from agent_scan.inspect import (
     get_mcp_config_per_client,
     inspect_client,
-    inspect_client_legacy,
-    inspected_client_to_scan_path_result,
 )
 from agent_scan.models import (
     CandidateClient,
@@ -19,7 +17,6 @@ from agent_scan.models import (
     ControlServer,
     InspectedPath,
     ScanError,
-    ScanPathResult,
     ScanResponse,
     SkillServer,
     TokenAndClientInfo,
@@ -55,7 +52,7 @@ class PushArgs(BaseModel):
 
 async def discover_clients_to_inspect(
     inspect_args: InspectArgs,
-) -> tuple[list[ClientToInspect], list[ScanPathResult], list[str]]:
+) -> tuple[list[ClientToInspect], list[InspectedPath], list[str]]:
     """
     Discover the clients/configs that would be inspected, without actually
     starting any MCP servers.
@@ -63,7 +60,7 @@ async def discover_clients_to_inspect(
     home_dirs_with_users = get_readable_home_directories(all_users=inspect_args.all_users)
     all_usernames: list[str] = [username for _path, username in home_dirs_with_users]
 
-    scan_path_results: list[ScanPathResult] = []
+    inspection_errors: list[InspectedPath] = []
     clients_to_inspect: list[ClientToInspect] = []
     if inspect_args.paths:
         for path in inspect_args.paths:
@@ -71,13 +68,10 @@ async def discover_clients_to_inspect(
             if ctis:
                 clients_to_inspect.extend(ctis)
             else:
-                scan_path_results.append(
-                    ScanPathResult(
+                inspection_errors.append(
+                    InspectedPath(
                         path=path,
                         client=path,
-                        servers=[],
-                        issues=[],
-                        labels=[],
                         error=ScanError(
                             message="File or folder not found", is_failure=False, category="file_not_found"
                         ),
@@ -132,47 +126,14 @@ async def discover_clients_to_inspect(
     else:
         scanned_usernames = [getpass.getuser()]
 
-    return clients_to_inspect, scan_path_results, scanned_usernames
-
-
-async def inspect_pipeline_legacy(
-    inspect_args: InspectArgs,
-    *,
-    clients_to_inspect: list[ClientToInspect] | None = None,
-    precomputed_scan_path_results: list[ScanPathResult] | None = None,
-    scanned_usernames: list[str] | None = None,
-    stream_stderr: bool = False,
-    declined_servers: set[tuple[str, str]] | None = None,
-    do_stdio_handshake: bool = False,
-) -> tuple[list[ScanPathResult], list[str]]:
-    """
-    Inspect each discovered client's MCP servers.
-    """
-    if clients_to_inspect is None:
-        clients_to_inspect, precomputed_scan_path_results, scanned_usernames = await discover_clients_to_inspect(
-            inspect_args
-        )
-    scan_path_results: list[ScanPathResult] = list(precomputed_scan_path_results or [])
-
-    for client_to_inspect in clients_to_inspect:
-        inspected_client = await inspect_client_legacy(
-            client_to_inspect,
-            inspect_args.timeout,
-            inspect_args.tokens,
-            inspect_args.scan_skills,
-            stream_stderr=stream_stderr,
-            declined_servers=declined_servers,
-            do_stdio_handshake=do_stdio_handshake,
-        )
-        scan_path_results.append(inspected_client_to_scan_path_result(inspected_client))
-    return scan_path_results, scanned_usernames or []
+    return clients_to_inspect, inspection_errors, scanned_usernames
 
 
 async def inspect_pipeline(
     inspect_args: InspectArgs,
     *,
     clients_to_inspect: list[ClientToInspect] | None = None,
-    precomputed_scan_path_results: list[ScanPathResult] | None = None,
+    precomputed_inspected_paths: list[InspectedPath] | None = None,
     scanned_usernames: list[str] | None = None,
     stream_stderr: bool = False,
     declined_servers: set[tuple[str, str]] | None = None,
@@ -180,20 +141,16 @@ async def inspect_pipeline(
 ) -> tuple[list[InspectedPath], list[str]]:
     """Inspect each discovered client and return ``InspectedPath`` results.
 
-    This is the shared inspection builder for both ``inspect`` and the
-    v2026-07-10 ``scan`` path. The legacy :func:`inspect_pipeline_legacy`
-    remains available while the old ``ScanPathResult`` flow is removed in a
-    later cleanup.
+    This result is shared by both ``inspect`` and the v2026-07-10 ``scan``
+    path.
     Precomputed results are error-only paths (e.g. file-not-found), so their error
     is carried straight onto an otherwise-empty ``InspectedPath``.
     """
     if clients_to_inspect is None:
-        clients_to_inspect, precomputed_scan_path_results, scanned_usernames = await discover_clients_to_inspect(
+        clients_to_inspect, precomputed_inspected_paths, scanned_usernames = await discover_clients_to_inspect(
             inspect_args
         )
-    inspected_paths: list[InspectedPath] = [
-        InspectedPath(client=r.client, path=r.path, error=r.error) for r in (precomputed_scan_path_results or [])
-    ]
+    inspected_paths = list(precomputed_inspected_paths or [])
     for client_to_inspect in clients_to_inspect:
         inspected_paths.append(
             await inspect_client(
@@ -216,7 +173,7 @@ async def inspect_analyze_push_pipeline(
     verbose: bool = False,
     *,
     clients_to_inspect: list[ClientToInspect] | None = None,
-    precomputed_scan_path_results: list[ScanPathResult] | None = None,
+    precomputed_inspected_paths: list[InspectedPath] | None = None,
     scanned_usernames: list[str] | None = None,
     stream_stderr: bool = False,
     declined_servers: set[tuple[str, str]] | None = None,
@@ -229,7 +186,7 @@ async def inspect_analyze_push_pipeline(
     inspected_paths, scanned_usernames = await inspect_pipeline(
         inspect_args,
         clients_to_inspect=clients_to_inspect,
-        precomputed_scan_path_results=precomputed_scan_path_results,
+        precomputed_inspected_paths=precomputed_inspected_paths,
         scanned_usernames=scanned_usernames,
         stream_stderr=stream_stderr,
         declined_servers=declined_servers,

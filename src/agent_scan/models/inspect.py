@@ -2,16 +2,7 @@
 
 from pydantic import BaseModel, Field
 
-from agent_scan.models.errors import (
-    CouldNotParseMCPConfig,
-    FileNotFoundConfig,
-    ScanError,
-    ServerHTTPError,
-    ServerStartupError,
-    SkillScanError,
-    UnknownConfigFormat,
-    UserDeclinedError,
-)
+from agent_scan.models.errors import CouldNotParseMCPConfig, FileNotFoundConfig, ScanError, UnknownConfigFormat
 from agent_scan.models.mcp import RemoteServer, ServerSignature, StdioServer
 from agent_scan.models.skill import SkillFile, SkillServer
 
@@ -42,31 +33,6 @@ class ClientToInspect(BaseModel):
         | CouldNotParseMCPConfig,
     ]
     skills_dirs: dict[str, list[tuple[str, SkillServer]] | FileNotFoundConfig]
-
-
-class InspectedExtension(BaseModel):
-    """Intermediate result for one discovered MCP server or legacy skill."""
-
-    name: str
-    config: StdioServer | RemoteServer | SkillServer
-    # ``None`` means the extension was recorded without being inspected and
-    # without an error to report - used for stdio MCP servers on the push-key
-    # path, where the scan never starts the subprocess and the absence
-    # of a handshake is the documented behavior rather than a failure.
-    signature_or_error: (
-        ServerSignature | ServerStartupError | ServerHTTPError | SkillScanError | UserDeclinedError | None
-    ) = None
-
-
-class InspectedClient(BaseModel):
-    """Intermediate inspection output before it is normalized by component kind."""
-
-    name: str
-    client_path: str
-    extensions: dict[
-        str,
-        list[InspectedExtension] | FileNotFoundConfig | UnknownConfigFormat | CouldNotParseMCPConfig | SkillScanError,
-    ]
 
 
 class InspectedServer(BaseModel):

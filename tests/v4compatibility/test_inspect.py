@@ -1,9 +1,8 @@
-import os
 from typing import Literal
 
 import pytest
 
-from agent_scan.inspect import get_mcp_config_per_client, inspect_client_legacy, inspected_client_to_scan_path_result
+from agent_scan.inspect import get_mcp_config_per_client, inspect_client
 from agent_scan.models import (
     CandidateClient,
     CouldNotParseMCPConfig,
@@ -13,7 +12,6 @@ from agent_scan.models import (
     StdioServer,
     UnknownConfigFormat,
 )
-from agent_scan.skill_client import inspect_skill, inspect_skills_dir
 
 TEST_CANDIDATE_CLIENTS = [
     CandidateClient(
@@ -94,22 +92,21 @@ async def test_get_mcp_config_per_client(
     ],
 )
 @pytest.mark.asyncio
-async def test_inspected_client_to_scan_path_result(
+async def test_inspect_client(
     client: CandidateClient, test_type: Literal["valid", "invalid", "does-not-exist"]
 ):
     ctis = await get_mcp_config_per_client(client, [], False)
     # ``do_stdio_handshake=True`` so the test fixtures' stdio servers are
     # actually handshaked (and fail with ``server_startup``, which is
     # what the ``valid`` assertion below expects).
-    inspected_client = await inspect_client_legacy(ctis[0], 10, [], True, do_stdio_handshake=True)
-    scan_path_result = inspected_client_to_scan_path_result(inspected_client)
+    inspected_path = await inspect_client(ctis[0], 10, [], True, do_stdio_handshake=True)
     if test_type == "invalid":
-        assert scan_path_result.error is not None
-        assert not scan_path_result.error.is_failure
+        assert inspected_path.error is not None
+        assert not inspected_path.error.is_failure
     else:
-        assert scan_path_result.error is None
-    assert scan_path_result.servers is not None
-    errors_by_server = {server.error.category for server in scan_path_result.servers if server.error is not None}
+        assert inspected_path.error is None
+    errors_by_server = {server.error.category for server in inspected_path.servers if server.error is not None}
+    errors_by_server.update(skill.error.category for skill in inspected_path.skills if skill.error is not None)
     print(f"type: {test_type} errors_by_server: {errors_by_server}")
     if test_type == "valid":
         assert errors_by_server == {"server_startup"}
@@ -117,8 +114,3 @@ async def test_inspected_client_to_scan_path_result(
         assert errors_by_server == set()
     else:
         assert errors_by_server == {"skill_scan_error"}
-
-
-@pytest.mark.parametrize("path, skill_server", inspect_skills_dir(os.path.join("tests", "skills")))
-def test_inspect_skill(path: str, skill_server: SkillServer):
-    inspect_skill(skill_server)

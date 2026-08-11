@@ -486,7 +486,7 @@ def main():
         "scan",
         help="Scan one or more MCP config files [default]",
         description=(
-            "Scan one or more MCP configuration files for security issues. "
+            "Scan one or more MCP configuration files for security risks. "
             "If no files are specified, well-known config locations will be checked."
         ),
     )
@@ -744,9 +744,7 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> ScanRespo
     dangerously_run_mcp_servers: bool = bool(getattr(args, "dangerously_run_mcp_servers", False))
 
     # Step 1: Discover everything we would inspect without starting any server.
-    clients_to_inspect, precomputed_scan_path_results, scanned_usernames = await discover_clients_to_inspect(
-        inspect_args
-    )
+    clients_to_inspect, precomputed_inspected_paths, scanned_usernames = await discover_clients_to_inspect(inspect_args)
 
     # Collect consent when applicable; otherwise show the
     # dangerous-flag banner to users at the terminal. Silent
@@ -781,7 +779,7 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> ScanRespo
             push_args,
             verbose=verbose,
             clients_to_inspect=clients_to_inspect,
-            precomputed_scan_path_results=precomputed_scan_path_results,
+            precomputed_inspected_paths=precomputed_inspected_paths,
             scanned_usernames=scanned_usernames,
             stream_stderr=stream_stderr,
             declined_servers=declined_servers,
@@ -791,7 +789,7 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> ScanRespo
         inspected_paths, _scanned_usernames = await inspect_pipeline(
             inspect_args,
             clients_to_inspect=clients_to_inspect,
-            precomputed_scan_path_results=precomputed_scan_path_results,
+            precomputed_inspected_paths=precomputed_inspected_paths,
             scanned_usernames=scanned_usernames,
             stream_stderr=stream_stderr,
             declined_servers=declined_servers,

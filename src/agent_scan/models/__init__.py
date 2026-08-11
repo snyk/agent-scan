@@ -23,8 +23,6 @@ from agent_scan.models.errors import (
 from agent_scan.models.inspect import (
     CandidateClient,
     ClientToInspect,
-    InspectedClient,
-    InspectedExtension,
     InspectedPath,
     InspectedServer,
     InspectedSkill,
@@ -76,8 +74,6 @@ __all__ = [
     "ErrorCategory",
     "FileNotFoundConfig",
     "FileTokenStorage",
-    "InspectedClient",
-    "InspectedExtension",
     "InspectedPath",
     "InspectedServer",
     "InspectedSkill",

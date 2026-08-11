@@ -109,12 +109,10 @@ class TestInspectionResults:
             "scan_metadata": None,
         }
 
-    def test_version_modules_are_directly_importable(self):
-        from agent_scan.models.api.v20250902 import ScanPathResult
+    def test_current_models_are_directly_importable(self):
         from agent_scan.models.api.v20260710 import ScanResponse
         from agent_scan.models.inspect import InspectedPath
 
-        assert ScanPathResult(path="legacy").path == "legacy"
         assert InspectedPath(path="current").servers == []
         assert ScanResponse(scan_path_responses=[]).scan_path_responses == []
 

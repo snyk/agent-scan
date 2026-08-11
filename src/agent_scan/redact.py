@@ -17,7 +17,7 @@ from detect_secrets.plugins.high_entropy_strings import HighEntropyStringsPlugin
 from detect_secrets.plugins.keyword import KeywordDetector
 from detect_secrets.settings import default_settings, get_plugins, transient_settings
 
-from agent_scan.models import RemoteServer, ScanPathResult, ServerScanResult, ServerSignature, StdioServer
+from agent_scan.models import RemoteServer, StdioServer
 
 logger = logging.getLogger(__name__)
 
@@ -93,13 +93,6 @@ def redact_push_keys_in_data(data: dict) -> dict:
 
 
 _EXCLUDED_PLUGINS = frozenset({"IPPublicDetector"})
-
-# Matches the synthetic binary-file marker that ``skill_client`` emits for a
-# binary resource (its ``BINARY_FILE_DESCRIPTION_PREFIX`` followed by a sha256
-# hex digest). Compiled lazily on first use: the prefix lives in
-# ``skill_client``, which imports ``redact_signature`` from this module, so
-# importing it at module scope here would create a circular import.
-_BINARY_FILE_DESCRIPTION_RE: re.Pattern[str] | None = None
 
 
 def _build_detect_secrets_config() -> dict:
@@ -586,9 +579,8 @@ def redact_text(text: str | None) -> str | None:
 
     Absolute paths are intentionally left intact: skill content is documentation
     and code that legitimately references real paths, and stripping them would
-    remove context the downstream analysis relies on. (Path redaction still
-    applies to tracebacks and server output via :func:`redact_server` /
-    :func:`redact_scan_result`, where paths are noise rather than user content.)
+    remove context the downstream analysis relies on. Error paths are sanitized
+    separately at the API boundary, where they are noise rather than user content.
 
     Detection runs line by line so the plugin set is built once and reused;
     secret values are spliced out in place (see :func:`_redact_secrets_in_line`).
@@ -599,50 +591,6 @@ def redact_text(text: str | None) -> str | None:
     with transient_settings(_DETECT_SECRETS_CONFIG):
         plugins = list(get_plugins())
         return "\n".join(_redact_secrets_in_line(line, plugins) for line in text.split("\n"))
-
-
-def _is_synthetic_binary_description(text: str) -> bool:
-    """True if ``text`` is the synthetic binary-file marker emitted for a binary
-    skill resource (see ``skill_client.BINARY_FILE_DESCRIPTION_PREFIX``).
-
-    Such a description is self-generated (a fixed prefix + sha256 digest) and
-    contains no user content, so it is left untouched by redaction.
-
-    The prefix is imported lazily and the compiled pattern cached, so the
-    per-entity redaction path stays off the import and ``skill_client`` (which
-    imports :func:`redact_signature` from this module) can own the constant
-    without a circular import.
-    """
-    global _BINARY_FILE_DESCRIPTION_RE
-    if _BINARY_FILE_DESCRIPTION_RE is None:
-        from agent_scan.skill_client import BINARY_FILE_DESCRIPTION_PREFIX
-
-        _BINARY_FILE_DESCRIPTION_RE = re.compile(rf"^{re.escape(BINARY_FILE_DESCRIPTION_PREFIX)}[0-9a-f]{{64}}$")
-    return bool(_BINARY_FILE_DESCRIPTION_RE.match(text))
-
-
-def redact_signature(signature: ServerSignature) -> ServerSignature:
-    """Redact secrets from a (skill) ``ServerSignature`` in place.
-
-    Skill signatures embed raw file contents in their prompt / resource / tool
-    ``description`` fields, and the skill's frontmatter description in
-    ``metadata.instructions``. Any of these can carry secrets, so every
-    free-text field is run through :func:`redact_text` before the signature
-    leaves the machine. The one exception is a resource whose description is the
-    synthetic binary-file marker (see :func:`_is_synthetic_binary_description`),
-    which is left intact so the file's hash digest survives.
-
-    This is the single redaction point for skill content: nothing downstream
-    redacts the signature (``redact_scan_result`` / ``redact_server`` only touch
-    the server config and errors, never ``.signature``), so it must be sanitized
-    here. It runs once when the skill is read (in ``skill_client.inspect_skill``).
-    """
-    if signature.metadata is not None and signature.metadata.instructions:
-        signature.metadata.instructions = redact_text(signature.metadata.instructions)
-    for entity in signature.entities:
-        if entity.description and not _is_synthetic_binary_description(entity.description):
-            entity.description = redact_text(entity.description)
-    return signature
 
 
 def redact_server_config(server: StdioServer | RemoteServer) -> StdioServer | RemoteServer:
@@ -671,37 +619,6 @@ def redact_server_config(server: StdioServer | RemoteServer) -> StdioServer | Re
             logger.error("Failed to redact URL: %s", server.url)
 
     return server
-
-
-def redact_server(server_scan_result: ServerScanResult) -> ServerScanResult:
-    """Redact sensitive information from a server scan result.
-
-    For StdioServer:
-    - Redacts all environment variable values
-    - Redacts command line argument values (flag values)
-
-    For RemoteServer:
-    - Redacts all HTTP header values
-    - Redacts all URL query parameter values
-
-    Args:
-        server_scan_result: The server scan result to redact
-
-    Returns:
-        The same server scan result with sensitive data redacted
-    """
-    if isinstance(server_scan_result.server, StdioServer | RemoteServer):
-        server_scan_result.server = redact_server_config(server_scan_result.server)
-
-    # Redact traceback in server error
-    if server_scan_result.error and server_scan_result.error.traceback:
-        server_scan_result.error.traceback = redact_absolute_paths(server_scan_result.error.traceback)
-
-    # Redact all absolute paths in server output (stderr, protocol messages)
-    if server_scan_result.error and server_scan_result.error.server_output:
-        server_scan_result.error.server_output = redact_absolute_paths(server_scan_result.error.server_output)
-
-    return server_scan_result
 
 
 def redact_data(data: dict, redact_patterns: list[re.Pattern[str]]) -> dict:
@@ -742,29 +659,3 @@ def redact_data(data: dict, redact_patterns: list[re.Pattern[str]]) -> dict:
 
     _walk(data)
     return data
-
-
-def redact_scan_result(result: ScanPathResult) -> ScanPathResult:
-    """
-    Redact sensitive information from a scan path result before upload.
-
-    This redacts:
-    - Tracebacks in path-level errors
-    - Server-level sensitive data (via redact_server)
-
-    Args:
-        result: The scan path result to redact
-
-    Returns:
-        The same result with sensitive data redacted
-    """
-    # Redact path-level error traceback
-    if result.error and result.error.traceback:
-        result.error.traceback = redact_absolute_paths(result.error.traceback)
-
-    # Redact all server-level sensitive data
-    if result.servers:
-        for i, server in enumerate(result.servers):
-            result.servers[i] = redact_server(server)
-
-    return result

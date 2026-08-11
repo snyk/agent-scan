@@ -1,19 +1,9 @@
 """Unit tests for the redaction module."""
 
 import re
-from urllib.parse import parse_qsl, urlsplit
 
 import pytest
-from mcp.types import (
-    Implementation,
-    InitializeResult,
-    Prompt,
-    Resource,
-    ServerCapabilities,
-    Tool,
-)
 
-from agent_scan.models import RemoteServer, ScanPathResult, ServerScanResult, ServerSignature, StdioServer
 from agent_scan.redact import (
     _is_uuid_like,
     redact_absolute_paths,
@@ -21,8 +11,6 @@ from agent_scan.redact import (
     redact_data,
     redact_push_keys,
     redact_push_keys_in_data,
-    redact_scan_result,
-    redact_signature,
     redact_text,
 )
 from tests.unit._secret_fixtures import synthetic_secret
@@ -581,8 +569,7 @@ class TestRedactText:
     def test_redact_text_preserves_absolute_paths(self):
         """Skill content (docs/code) routinely references real paths as legitimate
         context, so redact_text leaves absolute paths intact and only strips
-        secrets. (Tracebacks and server output still get path redaction via
-        redact_server / redact_scan_result.)"""
+        secrets. Error diagnostics are sanitized separately at the API boundary."""
         text = "Loading from /Users/alice/project/config.json"
         result = redact_text(text)
         assert result == text
@@ -737,229 +724,6 @@ class TestRedactText:
         delimited text: paths, versions, IPs, dotted names, and secret-free URLs
         are returned unchanged."""
         assert redact_text(benign) == benign
-
-
-def _skill_signature(*, instructions="", prompts=None, resources=None, tools=None) -> ServerSignature:
-    return ServerSignature(
-        metadata=InitializeResult(
-            protocolVersion="built-in",
-            instructions=instructions,
-            capabilities=ServerCapabilities(),
-            serverInfo=Implementation(name="skill", version="skills"),
-        ),
-        prompts=prompts or [],
-        resources=resources or [],
-        tools=tools or [],
-    )
-
-
-class TestRedactSignature:
-    """Unit tests for redact_signature (skill ServerSignature redaction)."""
-
-    def test_redact_signature_redacts_instructions(self):
-        sig = _skill_signature(instructions=f"Skill that uses {FAKE_API_KEY}")
-        redact_signature(sig)
-        assert FAKE_API_KEY not in sig.metadata.instructions
-
-    def test_redact_signature_redacts_prompt_description(self):
-        sig = _skill_signature(prompts=[Prompt(name="SKILL.md", description=f"key: {FAKE_API_KEY}")])
-        redact_signature(sig)
-        assert FAKE_API_KEY not in (sig.prompts[0].description or "")
-
-    def test_redact_signature_redacts_resource_and_tool_descriptions(self):
-        sig = _skill_signature(
-            resources=[Resource(name="data", uri="skill://data", description=f"secret {FAKE_API_KEY}")],
-            tools=[
-                Tool(name="run.sh", description=f"Script: run.sh. Code:\nexport TOKEN={FAKE_API_KEY}", inputSchema={})
-            ],
-        )
-        redact_signature(sig)
-        assert FAKE_API_KEY not in (sig.resources[0].description or "")
-        assert FAKE_API_KEY not in (sig.tools[0].description or "")
-        # The non-secret structure around the secret is preserved.
-        assert sig.tools[0].description.startswith("Script: run.sh. Code:")
-
-    def test_redact_signature_preserves_clean_content(self):
-        sig = _skill_signature(
-            instructions="A helpful skill",
-            prompts=[Prompt(name="SKILL.md", description="# Title\nDoes something useful.")],
-        )
-        redact_signature(sig)
-        assert sig.metadata.instructions == "A helpful skill"
-        assert sig.prompts[0].description == "# Title\nDoes something useful."
-
-    def test_redact_signature_preserves_binary_file_hash(self):
-        """The synthetic 'Binary file. Hash: <sha256>' marker is self-generated
-        and secret-free, so redaction must leave the digest intact -- otherwise
-        the 64-char hash trips the hex high-entropy detector and every binary
-        collapses to an identical, useless description."""
-        import hashlib
-
-        digest = hashlib.sha256(b"\x00\x01\x02 binary blob \x80\x81").hexdigest()
-        desc = f"Binary file. Hash: {digest}"
-        sig = _skill_signature(resources=[Resource(name="logo.bin", uri="skill://logo.bin", description=desc)])
-        redact_signature(sig)
-        assert sig.resources[0].description == desc
-
-    def test_redact_signature_still_redacts_text_resembling_binary_marker(self):
-        """The exemption is an exact whole-string match: a description that only
-        starts like the binary marker but carries extra (possibly secret) text
-        is NOT exempt and is still redacted."""
-        import hashlib
-
-        digest = hashlib.sha256(b"blob").hexdigest()
-        desc = f"Binary file. Hash: {digest} -- also token {FAKE_API_KEY}"
-        sig = _skill_signature(resources=[Resource(name="logo.bin", uri="skill://logo.bin", description=desc)])
-        redact_signature(sig)
-        assert FAKE_API_KEY not in (sig.resources[0].description or "")
-
-
-def test_redact_remote_url_query_and_headers():
-    """
-    Ensure RemoteServer headers are redacted and URL query parameter values are replaced with REDACTED.
-    """
-    result = ScanPathResult(
-        path="/dummy/path",
-        servers=[
-            ServerScanResult(
-                name="remote",
-                server=RemoteServer(
-                    url="https://api.example.com/endpoint?token=abc123&api_key=xyz",
-                    type="http",
-                    headers={"Authorization": "Bearer secret", "X-Custom": "value"},
-                ),
-            )
-        ],
-    )
-
-    result = redact_scan_result(result)
-
-    assert result.servers is not None and len(result.servers) == 1
-    srv = result.servers[0]
-    assert isinstance(srv.server, RemoteServer)
-    assert srv.server.headers["Authorization"] == "**REDACTED**"
-    assert srv.server.headers["X-Custom"] == "**REDACTED**"
-    parts = urlsplit(srv.server.url)
-    qs = dict(parse_qsl(parts.query, keep_blank_values=True))
-    assert qs.get("token") == "**REDACTED**"
-    assert qs.get("api_key") == "**REDACTED**"
-
-
-def test_redact_stdio_env_vars():
-    """
-    Ensure StdioServer environment variable values are redacted via redact_scan_result.
-    """
-    result = ScanPathResult(
-        path="/dummy/path",
-        servers=[
-            ServerScanResult(
-                name="stdio",
-                server=StdioServer(
-                    command="echo",
-                    args=["hello"],
-                    env={"SECRET": "shh", "API_TOKEN": "tok"},
-                ),
-            )
-        ],
-    )
-
-    result = redact_scan_result(result)
-
-    assert result.servers is not None and len(result.servers) == 1
-    srv = result.servers[0]
-    assert isinstance(srv.server, StdioServer)
-    assert srv.server.env["SECRET"] == "**REDACTED**"
-    assert srv.server.env["API_TOKEN"] == "**REDACTED**"
-
-
-def test_redact_stdio_args():
-    """
-    Ensure StdioServer argument values are redacted via redact_scan_result.
-
-    -y is a boolean flag; the package name is preserved; only high-entropy
-    secret values are redacted (via detect-secrets).
-    """
-    result = ScanPathResult(
-        path="/dummy/path",
-        servers=[
-            ServerScanResult(
-                name="stdio",
-                server=StdioServer(
-                    command="npx",
-                    args=["-y", "some-server", "--api-key", FAKE_API_KEY, f"--token={FAKE_API_KEY}"],
-                    env={},
-                ),
-            )
-        ],
-    )
-
-    result = redact_scan_result(result)
-
-    assert result.servers is not None and len(result.servers) == 1
-    srv = result.servers[0]
-    assert isinstance(srv.server, StdioServer)
-    assert srv.server.args is not None
-    assert srv.server.args[:3] == ["-y", "some-server", "--api-key"]
-    assert is_secret_marker(srv.server.args[3])
-    flag, sep, value = srv.server.args[4].partition("=")
-    assert (flag, sep) == ("--token", "=")
-    assert is_secret_marker(value)
-    assert FAKE_API_KEY not in " ".join(srv.server.args)
-
-
-@pytest.mark.parametrize(
-    "server,kind",
-    [
-        (
-            ServerScanResult(
-                name="Weather",
-                server=StdioServer(
-                    command="uv run python",
-                    args=["tests/mcp_servers/weather_server.py"],
-                    env={"API_KEY": FAKE_API_KEY},
-                ),
-            ),
-            "env",
-        ),
-        (
-            ServerScanResult(
-                name="Math",
-                server=StdioServer(
-                    command="uv run python",
-                    args=["tests/mcp_servers/math_server.py", f"--api-key={FAKE_API_KEY}"],
-                ),
-            ),
-            "args",
-        ),
-    ],
-)
-def test_redact_scan_result_removes_api_key(server, kind):
-    """
-    Ensure redact_scan_result removes API keys from server configs.
-
-    Env-var values use the legacy REDACTED constant (sibling-constant
-    preservation); CLI arg values use the plugin-named REDACTED_SECRET
-    marker.
-    """
-    result = ScanPathResult(path="/dummy/path", servers=[server])
-
-    redacted = redact_scan_result(result)
-    dump = redacted.model_dump_json()
-
-    assert FAKE_API_KEY not in dump
-
-    srv = redacted.servers[0]
-    assert isinstance(srv.server, StdioServer)
-    if kind == "env":
-        assert srv.server.env is not None
-        assert srv.server.env["API_KEY"] == "**REDACTED**"
-    else:
-        # args case: --api-key=<FAKE_API_KEY> becomes --api-key=<marker>.
-        # FAKE_API_KEY absence is already asserted on the dump above.
-        assert srv.server.args is not None
-        flag, sep, value = srv.server.args[-1].partition("=")
-        assert (flag, sep) == ("--api-key", "=")
-        assert is_secret_marker(value)
 
 
 # ---------------------------------------------------------------------------
