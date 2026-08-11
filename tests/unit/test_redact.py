@@ -13,7 +13,7 @@ from mcp.types import (
     Tool,
 )
 
-from agent_scan.models import RemoteServer, ScanPathResult, ServerScanResult, ServerSignature, StdioServer
+from agent_scan.models import RemoteServer, ScanError, ScanPathResult, ServerScanResult, ServerSignature, StdioServer
 from agent_scan.redact import (
     _is_uuid_like,
     redact_absolute_paths,
@@ -960,6 +960,87 @@ def test_redact_scan_result_removes_api_key(server, kind):
         flag, sep, value = srv.server.args[-1].partition("=")
         assert (flag, sep) == ("--api-key", "=")
         assert is_secret_marker(value)
+
+
+class TestRedactErrorText:
+    """redact_scan_result / redact_server must scrub secrets -- not just
+    absolute paths -- out of tracebacks and captured server_output, since a
+    misbehaving server can echo a header/token back into either."""
+
+    def test_path_level_traceback_redacts_secret_and_path(self):
+        result = ScanPathResult(
+            path="/dummy/path",
+            error=ScanError(
+                message="boom",
+                traceback=(
+                    f"Traceback (most recent call last):\n"
+                    f'  File "/Users/alice/project/agent_scan/inspect.py", line 42, in run\n'
+                    f"    raise RuntimeError(f'auth failed with key {FAKE_API_KEY}')\n"
+                    f"RuntimeError: auth failed with key {FAKE_API_KEY}"
+                ),
+            ),
+        )
+
+        redacted = redact_scan_result(result)
+
+        assert FAKE_API_KEY not in redacted.error.traceback
+        assert "/Users/alice/project/agent_scan/inspect.py" not in redacted.error.traceback
+        assert is_secret_marker(
+            next(tok for tok in redacted.error.traceback.split() if is_secret_marker(tok.rstrip("'")))
+        )
+
+    def test_server_level_traceback_redacts_secret(self):
+        result = ScanPathResult(
+            path="/dummy/path",
+            servers=[
+                ServerScanResult(
+                    name="stdio",
+                    server=StdioServer(command="npx", args=["some-server"]),
+                    error=ScanError(
+                        message="startup failed",
+                        traceback=f"ConnectionError: token={FAKE_API_KEY} rejected",
+                    ),
+                )
+            ],
+        )
+
+        redacted = redact_scan_result(result)
+
+        assert FAKE_API_KEY not in redacted.servers[0].error.traceback
+
+    def test_server_output_redacts_secret_and_path(self):
+        result = ScanPathResult(
+            path="/dummy/path",
+            servers=[
+                ServerScanResult(
+                    name="stdio",
+                    server=StdioServer(command="npx", args=["some-server"]),
+                    error=ScanError(
+                        message="startup failed",
+                        server_output=(
+                            f"stderr: loading /home/alice/.config/server/secrets.json\n"
+                            f'>>> {{"headers": {{"Authorization": "Bearer {FAKE_API_KEY}"}}}}'
+                        ),
+                    ),
+                )
+            ],
+        )
+
+        redacted = redact_scan_result(result)
+
+        assert FAKE_API_KEY not in redacted.servers[0].error.server_output
+        assert "/home/alice/.config/server/secrets.json" not in redacted.servers[0].error.server_output
+
+    def test_none_traceback_and_server_output_are_left_alone(self):
+        result = ScanPathResult(
+            path="/dummy/path",
+            servers=[ServerScanResult(name="stdio", server=StdioServer(command="npx"))],
+        )
+
+        redacted = redact_scan_result(result)
+
+        assert redacted.error is None
+        assert redacted.servers[0].error is None
 
 
 # ---------------------------------------------------------------------------

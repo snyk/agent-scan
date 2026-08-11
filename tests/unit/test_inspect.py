@@ -12,9 +12,13 @@ from agent_scan.models import (
     CandidateClient,
     ClientToInspect,
     RemoteServer,
+    ScanError,
+    ScanPathResult,
+    ServerScanResult,
     StdioServer,
 )
 from agent_scan.pipelines import InspectArgs, inspect_pipeline
+from tests.unit._secret_fixtures import synthetic_secret
 
 TEST_CANDIDATE_CLIENT = CandidateClient(
     name="test-client",
@@ -337,6 +341,50 @@ async def test_inspect_pipeline_no_clients_returns_empty_results():
         assert results == []
     finally:
         shutil.rmtree(tmp)
+
+
+@pytest.mark.asyncio
+async def test_inspect_pipeline_redacts_server_secrets_and_env():
+    """`mcp-scan inspect` must not leak secrets: inspect_pipeline previously
+    only redacted results on the `scan` path (via inspect_analyze_push_pipeline),
+    so `inspect` returned raw env vars and unredacted tracebacks/server_output.
+    Redaction now happens inside inspect_pipeline itself, so every caller
+    (both `scan` and `inspect`) gets sanitized results."""
+    fake_api_key = synthetic_secret()
+    raw_result = ScanPathResult(
+        path="/some/path/mcp.json",
+        servers=[
+            ServerScanResult(
+                name="stdio",
+                server=StdioServer(command="npx", args=["some-server"], env={"API_KEY": "shh"}),
+                error=ScanError(
+                    message="startup failed",
+                    traceback=f"ConnectionError: token={fake_api_key} rejected",
+                    server_output=f'stderr: loading /home/alice/.config/secrets.json\n{{"auth": "{fake_api_key}"}}',
+                ),
+            )
+        ],
+    )
+
+    with (
+        patch("agent_scan.pipelines.get_readable_home_directories", return_value=[]),
+        patch(
+            "agent_scan.pipelines.client_to_inspect_from_path",
+            new_callable=AsyncMock,
+            return_value=[ClientToInspect(name="test", client_path="/some/path", mcp_configs={}, skills_dirs={})],
+        ),
+        patch("agent_scan.pipelines.inspect_client", new_callable=AsyncMock),
+        patch("agent_scan.pipelines.inspected_client_to_scan_path_result", return_value=raw_result),
+    ):
+        args = InspectArgs(timeout=10, tokens=[], paths=["/some/path/mcp.json"])
+        results, _ = await inspect_pipeline(args)
+
+    assert len(results) == 1
+    server = results[0].servers[0]
+    assert server.server.env["API_KEY"] == "**REDACTED**"
+    assert fake_api_key not in server.error.traceback
+    assert fake_api_key not in server.error.server_output
+    assert "/home/alice/.config/secrets.json" not in server.error.server_output
 
 
 @pytest.mark.asyncio
