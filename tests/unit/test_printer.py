@@ -282,8 +282,7 @@ def test_plain_scan_output_renders_external_strings_literally(capsys):
     assert f"traceback {markup}" in output
 
 
-def test_plain_scan_output_preserves_components_and_nests_risks(capsys):
-    """Dropping clean components or flattening risks away from their owner is a scan-output regression."""
+def test_plain_scan_output_summarizes_clean_components_and_only_lists_risk_connected_items(capsys):
     response = ScanResponse(
         scan_path_responses=[
             ScanPathResponse(
@@ -292,16 +291,26 @@ def test_plain_scan_output_preserves_components_and_nests_risks(capsys):
                 server_risks=[
                     McpServerRiskResponse(
                         name="clean-server",
-                        entities=[McpEntitySummary(name="clean_tool", type="tool")],
+                        entities=[
+                            McpEntitySummary(name="clean_tool", type="tool"),
+                            McpEntitySummary(name="clean_prompt", type="prompt"),
+                        ],
                     ),
                     McpServerRiskResponse(
                         name="risky-server",
-                        entities=[McpEntitySummary(name="risky_tool", type="tool")],
+                        entities=[
+                            McpEntitySummary(name="risky_tool", type="tool"),
+                            McpEntitySummary(name="unaffected_tool", type="tool"),
+                            McpEntitySummary(name="unaffected_prompt", type="prompt"),
+                            McpEntitySummary(name="affected_resource", type="resource"),
+                            McpEntitySummary(name="unaffected_resource", type="resource"),
+                            McpEntitySummary(name="unaffected_template", type="resource_template"),
+                        ],
                         risk_indexes=McpServerRiskIndexes(
                             private_data=RiskScore(
                                 score=300,
                                 evidence="Reads private records",
-                                affected_tools=[0],
+                                affected_tools=[0, 3],
                             )
                         ),
                     ),
@@ -309,13 +318,24 @@ def test_plain_scan_output_preserves_components_and_nests_risks(capsys):
                 skill_risks=[
                     SkillRiskResponse(
                         name="clean-skill",
-                        files=[SkillFileSummary(name="SKILL.md", type="instruction")],
+                        files=[
+                            SkillFileSummary(name="SKILL.md", type="instruction"),
+                            SkillFileSummary(name="logo.png", type="asset"),
+                        ],
                     ),
                     SkillRiskResponse(
                         name="risky-skill",
-                        files=[SkillFileSummary(name="scripts/run.py", type="script")],
+                        files=[
+                            SkillFileSummary(name="scripts/run.py", type="script"),
+                            SkillFileSummary(name="scripts/helper.py", type="script"),
+                            SkillFileSummary(name="notes.txt", type="asset"),
+                        ],
                         risk_indexes=SkillRiskIndexes(
-                            malicious_code=SkillRiskScore(score=600, evidence="Runs untrusted code")
+                            malicious_code=SkillRiskScore(
+                                score=600,
+                                evidence="Runs untrusted code",
+                                locations=[Region(start=Occurrence(path="scripts/run.py", line=3))],
+                            )
                         ),
                     ),
                 ],
@@ -329,14 +349,27 @@ def test_plain_scan_output_preserves_components_and_nests_risks(capsys):
     assert "Scanning " in output
     assert "found 2 mcp servers and 2 skills" in output
     assert "clean-server" in output
-    assert "clean_tool" in output
+    assert "1 tool, 1 prompt" in output
+    assert "clean_tool" not in output
+    assert "clean_prompt" not in output
     assert "clean-skill" in output
-    assert "SKILL.md" in output
+    assert "1 instruction, 1 asset" in output
+    assert "SKILL.md" not in output
+    assert "logo.png" not in output
     assert "risky-server" in output
     assert "risky_tool" in output
+    assert "affected_resource" in output
+    assert "unaffected_tool" not in output
+    assert "unaffected_prompt" not in output
+    assert "unaffected_resource" not in output
+    assert "unaffected_template" not in output
+    assert "and 1 more tool, 1 prompt, 1 more resource, 1 resource template" in output
     assert "Private data (300/1000)" in output
     assert "risky-skill" in output
     assert "scripts/run.py" in output
+    assert "scripts/helper.py" not in output
+    assert "notes.txt" not in output
+    assert "and 1 more script, 1 asset" in output
     assert "Malicious code (600/1000)" in output
 
     # Keep each risk after its owner and before
@@ -350,6 +383,83 @@ def test_plain_scan_output_preserves_components_and_nests_risks(capsys):
     malicious_code_line = next(line for line in output.splitlines() if "Malicious code" in line)
     assert "├── ●" not in private_data_line and "└── ●" not in private_data_line
     assert "├── ●" not in malicious_code_line and "└── ●" not in malicious_code_line
+
+
+def test_plain_scan_output_show_all_restores_complete_item_lists(capsys):
+    response = ScanResponse(
+        scan_path_responses=[
+            ScanPathResponse(
+                path="/config",
+                server_risks=[
+                    McpServerRiskResponse(
+                        name="server",
+                        entities=[
+                            McpEntitySummary(name="affected", type="tool"),
+                            McpEntitySummary(name="unaffected", type="resource"),
+                        ],
+                        risk_indexes=McpServerRiskIndexes(
+                            private_data=RiskScore(score=600, evidence="reads data", affected_tools=[0])
+                        ),
+                    )
+                ],
+                skill_risks=[
+                    SkillRiskResponse(
+                        name="skill",
+                        files=[
+                            SkillFileSummary(name="SKILL.md", type="instruction"),
+                            SkillFileSummary(name="run.py", type="script"),
+                        ],
+                    )
+                ],
+            )
+        ]
+    )
+
+    print_scan_response(response, show_all=True)
+
+    output = capsys.readouterr().out
+    for name in ("affected", "unaffected", "SKILL.md", "run.py"):
+        assert name in output
+    assert "and 1 resource" not in output
+
+
+def test_plain_scan_output_uses_contains_when_risk_has_no_affected_items(capsys):
+    response = ScanResponse(
+        scan_path_responses=[
+            ScanPathResponse(
+                path="/config",
+                server_risks=[
+                    McpServerRiskResponse(
+                        name="server-wide-risk",
+                        entities=[McpEntitySummary(name="tool", type="tool")],
+                        risk_indexes=McpServerRiskIndexes(
+                            private_data=RiskScore(score=300, evidence="Server-wide evidence")
+                        ),
+                    )
+                ],
+                skill_risks=[
+                    SkillRiskResponse(
+                        name="locationless-risk",
+                        files=[
+                            SkillFileSummary(name="SKILL.md", type="instruction"),
+                            SkillFileSummary(name="run.py", type="script"),
+                        ],
+                        risk_indexes=SkillRiskIndexes(
+                            missing_skill_md=SkillRiskScore(score=1000, evidence="Manifest is missing")
+                        ),
+                    )
+                ],
+            )
+        ]
+    )
+
+    print_scan_response(response)
+
+    output = capsys.readouterr().out
+    assert "contains 1 tool" in output
+    assert "contains 1 instruction, 1 script" in output
+    assert "and 1 tool" not in output
+    assert "and 1 instruction, 1 script" not in output
 
 
 def test_plain_scan_output_sorts_only_risks_by_descending_score(capsys):
@@ -387,7 +497,7 @@ def test_plain_scan_output_sorts_only_risks_by_descending_score(capsys):
         ]
     )
 
-    print_scan_response(response)
+    print_scan_response(response, show_all=True)
 
     output = capsys.readouterr().out
     assert output.index("Private data") < output.index("Dangerous words")

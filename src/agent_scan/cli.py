@@ -325,7 +325,7 @@ def add_ignore_failure_codes_argument(parser) -> None:
     )
 
 
-def setup_scan_parser(scan_parser, add_files=True, add_ci_ignore_options=True):
+def setup_scan_parser(scan_parser, add_files=True, add_ci_ignore_options=True, add_output_options=True):
     if add_files:
         scan_parser.add_argument(
             "files",
@@ -343,6 +343,13 @@ def setup_scan_parser(scan_parser, add_files=True, add_ci_ignore_options=True):
             help="Comma-separated risk names to omit from --ci output and exit evaluation",
         )
         add_ignore_failure_codes_argument(scan_parser)
+    if add_output_options:
+        scan_parser.add_argument(
+            "--show-all",
+            action="store_true",
+            default=False,
+            help="Show every discovered tool, prompt, resource, and skill file in scan output",
+        )
     add_server_arguments(scan_parser)
     add_scan_arguments(scan_parser)
 
@@ -522,7 +529,7 @@ def main():
     evo_parser = subparsers.add_parser("evo", help="Push scan results to Snyk Evo")
 
     # use the same parser as scan
-    setup_scan_parser(evo_parser, add_ci_ignore_options=False)
+    setup_scan_parser(evo_parser, add_ci_ignore_options=False, add_output_options=False)
 
     # GUARD command
     guard_parser = subparsers.add_parser(
@@ -949,7 +956,7 @@ async def print_scan_inspect(mode="scan", args=None):
     if json_output:
         print(json.dumps(response.model_dump(mode="json", exclude_none=True), indent=2))
     else:
-        print_scan_response(response, print_errors, args)
+        print_scan_response(response, print_errors, args, show_all=bool(getattr(args, "show_all", False)))
 
     if ci_mode:
         _handle_ci_exit(response, json_output, ignored_failure_codes)

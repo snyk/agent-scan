@@ -13,6 +13,8 @@ from pytest_lazy_fixtures import lf
 class _V20260710AnalysisHandler(BaseHTTPRequestHandler):
     requests: ClassVar[list[dict]] = []
     server_error: ClassVar[dict | None] = None
+    server_entities: ClassVar[list[dict]] = []
+    skill_files: ClassVar[list[dict]] = []
 
     def do_POST(self):
         body = self.rfile.read(int(self.headers["Content-Length"]))
@@ -23,7 +25,7 @@ class _V20260710AnalysisHandler(BaseHTTPRequestHandler):
             server_risks = [
                 {
                     "name": server["name"],
-                    "entities": [],
+                    "entities": type(self).server_entities,
                     "risk_indexes": {
                         "private_data": {
                             "score": 750,
@@ -38,7 +40,7 @@ class _V20260710AnalysisHandler(BaseHTTPRequestHandler):
             skill_risks = [
                 {
                     "name": skill["name"],
-                    "files": [],
+                    "files": type(self).skill_files,
                     "risk_indexes": {
                         "suspicious_download_url": {
                             "score": 900,
@@ -73,6 +75,8 @@ class _V20260710AnalysisHandler(BaseHTTPRequestHandler):
 def v20260710_analysis_server():
     _V20260710AnalysisHandler.requests = []
     _V20260710AnalysisHandler.server_error = None
+    _V20260710AnalysisHandler.server_entities = []
+    _V20260710AnalysisHandler.skill_files = []
     server = HTTPServer(("127.0.0.1", 0), _V20260710AnalysisHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -115,6 +119,33 @@ class TestFullScanFlow:
         assert [server["name"] for server in path_request["servers"]] == ["Math"]
         assert path_request["skills"] == []
         assert "server" in path_request["servers"][0]
+
+    @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
+    def test_scan_compacts_components_unless_show_all_is_set(self, agent_scan_cmd, v20260710_analysis_server):
+        _V20260710AnalysisHandler.server_entities = [
+            {"name": "affected_tool", "type": "tool"},
+            {"name": "unaffected_resource", "type": "resource"},
+        ]
+        base_command = [
+            *agent_scan_cmd,
+            "scan",
+            "--dangerously-run-mcp-servers",
+            "tests/mcp_servers/configs_files/math_config.json",
+            "--analysis-url",
+            v20260710_analysis_server,
+        ]
+
+        compact = subprocess.run(base_command, capture_output=True, text=True)
+        complete = subprocess.run([*base_command, "--show-all"], capture_output=True, text=True)
+
+        assert compact.returncode == 0, compact.stderr
+        assert "affected_tool" in compact.stdout
+        assert "unaffected_resource" not in compact.stdout
+        assert "and 1 resource" in compact.stdout
+        assert complete.returncode == 0, complete.stderr
+        assert "affected_tool" in complete.stdout
+        assert "unaffected_resource" in complete.stdout
+        assert "and 1 resource" not in complete.stdout
 
     @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
     @pytest.mark.parametrize(

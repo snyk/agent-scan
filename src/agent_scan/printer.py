@@ -1,4 +1,6 @@
 import os
+from collections import Counter
+from collections.abc import Sequence
 from typing import overload
 
 import rich
@@ -43,6 +45,15 @@ RISK_SCORE_BANDS = (
     (999, "#9456d2"),
     (RISK_SCORE_MAX, "#8446c4"),
 )
+
+MCP_ENTITY_TYPE_ORDER = ("tool", "prompt", "resource", "resource_template")
+MCP_ENTITY_TYPE_LABELS = {
+    "tool": "tool",
+    "prompt": "prompt",
+    "resource": "resource",
+    "resource_template": "resource template",
+}
+SKILL_FILE_TYPE_ORDER = ("instruction", "script", "asset")
 
 
 def _format_entity_type(entity: Entity) -> str:
@@ -228,6 +239,38 @@ def _format_response_skill_file_line(skill_file: SkillFileSummary) -> Text:
     return result
 
 
+def _format_type_counts(
+    types: Sequence[str],
+    order: tuple[str, ...],
+    labels: dict[str, str] | None = None,
+    *,
+    count_suffix: str = "",
+    count_suffix_by_type: dict[str, str] | None = None,
+) -> str:
+    labels = labels or {}
+    count_suffix_by_type = count_suffix_by_type or {}
+    counts = Counter(types)
+    parts = []
+    for item_type in order:
+        count = counts[item_type]
+        if count:
+            label = labels.get(item_type, item_type)
+            suffix = count_suffix_by_type.get(item_type, count_suffix)
+            parts.append(f"{count}{suffix} {label}{'' if count == 1 else 's'}")
+    return ", ".join(parts)
+
+
+def _append_component_summary(component: Text, summary: str) -> None:
+    if summary:
+        component.append(f"  {summary}", style="gray62")
+
+
+def _add_remaining_summary(parent: Tree, summary: str, *, follows_items: bool) -> None:
+    if summary:
+        prefix = "and" if follows_items else "contains"
+        parent.add(Text(f"{prefix} {summary}", style="gray62"))
+
+
 def _risk_score_color(score: int) -> str:
     """Map an Agent Scan score to the same risk bands used by Maverick."""
     for upper_bound, color in RISK_SCORE_BANDS:
@@ -318,7 +361,43 @@ def _append_component_detail(component: Text, detail: Text) -> None:
     component.append(detail)
 
 
-def _add_server(parent: Tree, server: McpServerRiskResponse) -> None:
+def _affected_server_entity_indexes(
+    server: McpServerRiskResponse,
+    risks: list[tuple[str, RiskScore]],
+) -> set[int]:
+    return {index for _, risk in risks for index in (risk.affected_tools or []) if 0 <= index < len(server.entities)}
+
+
+def _add_server_entities(
+    parent: Tree,
+    server: McpServerRiskResponse,
+    affected_indexes: set[int],
+    *,
+    has_risks: bool,
+    show_all: bool,
+) -> None:
+    visible_indexes = set(range(len(server.entities))) if show_all else affected_indexes
+    for index, entity in enumerate(server.entities):
+        if index in visible_indexes:
+            parent.add(_format_response_entity_line(entity))
+
+    if not has_risks or show_all:
+        return
+    remaining = [entity.type for index, entity in enumerate(server.entities) if index not in affected_indexes]
+    affected_types = {server.entities[index].type for index in affected_indexes}
+    _add_remaining_summary(
+        parent,
+        _format_type_counts(
+            remaining,
+            MCP_ENTITY_TYPE_ORDER,
+            MCP_ENTITY_TYPE_LABELS,
+            count_suffix_by_type=dict.fromkeys(affected_types, " more"),
+        ),
+        follows_items=bool(affected_indexes),
+    )
+
+
+def _add_server(parent: Tree, server: McpServerRiskResponse, *, show_all: bool) -> None:
     risks = _sorted_risks(server.risk_indexes)
     component = _format_component_line(
         server.name,
@@ -335,12 +414,28 @@ def _add_server(parent: Tree, server: McpServerRiskResponse) -> None:
         _append_component_detail(component, _format_risk(name, risk, affected_tools=tools))
     if server.error is not None:
         _append_component_detail(component, _format_response_error(server.error))
+
+    affected_indexes = _affected_server_entity_indexes(server, risks)
+    if not risks and not show_all:
+        _append_component_summary(
+            component,
+            _format_type_counts(
+                [entity.type for entity in server.entities],
+                MCP_ENTITY_TYPE_ORDER,
+                MCP_ENTITY_TYPE_LABELS,
+            ),
+        )
     server_tree = parent.add(component)
-    for entity in server.entities:
-        server_tree.add(_format_response_entity_line(entity))
+    _add_server_entities(
+        server_tree,
+        server,
+        affected_indexes,
+        has_risks=bool(risks),
+        show_all=show_all,
+    )
 
 
-def _add_skill(parent: Tree, skill: SkillRiskResponse) -> None:
+def _add_skill(parent: Tree, skill: SkillRiskResponse, *, show_all: bool) -> None:
     risks = _sorted_risks(skill.risk_indexes)
     component = _format_component_line(
         skill.name,
@@ -351,9 +446,44 @@ def _add_skill(parent: Tree, skill: SkillRiskResponse) -> None:
         _append_component_detail(component, _format_risk(name, risk))
     if skill.error is not None:
         _append_component_detail(component, _format_response_error(skill.error))
+
+    affected_paths = {
+        occurrence.path.removeprefix("./").replace("\\", "/")
+        for _, risk in risks
+        for region in (getattr(risk, "locations", None) or [])
+        for occurrence in (region.start, region.end)
+        if occurrence is not None
+    }
+    if not risks and not show_all:
+        _append_component_summary(
+            component,
+            _format_type_counts([skill_file.type for skill_file in skill.files], SKILL_FILE_TYPE_ORDER),
+        )
     skill_tree = parent.add(component)
     for skill_file in skill.files:
+        if not show_all and skill_file.name.removeprefix("./").replace("\\", "/") not in affected_paths:
+            continue
         skill_tree.add(_format_response_skill_file_line(skill_file))
+    if risks and not show_all:
+        remaining = [
+            skill_file.type
+            for skill_file in skill.files
+            if skill_file.name.removeprefix("./").replace("\\", "/") not in affected_paths
+        ]
+        affected_types = {
+            skill_file.type
+            for skill_file in skill.files
+            if skill_file.name.removeprefix("./").replace("\\", "/") in affected_paths
+        }
+        _add_remaining_summary(
+            skill_tree,
+            _format_type_counts(
+                remaining,
+                SKILL_FILE_TYPE_ORDER,
+                count_suffix_by_type=dict.fromkeys(affected_types, " more"),
+            ),
+            follows_items=bool(affected_types),
+        )
 
 
 def _scan_path_message(path: ScanPathResponse, report_skills: bool) -> str:
@@ -373,6 +503,7 @@ def _print_scan_path_response(
     *,
     print_errors: bool,
     report_skills: bool,
+    show_all: bool,
 ) -> None:
     rich.print(
         _format_scan_path_line(
@@ -384,9 +515,9 @@ def _print_scan_path_response(
 
     tree = Tree("│")
     for server in path.server_risks:
-        _add_server(tree, server)
+        _add_server(tree, server, show_all=show_all)
     for skill in path.skill_risks:
-        _add_skill(tree, skill)
+        _add_skill(tree, skill, show_all=show_all)
     if path.server_risks or path.skill_risks:
         rich.print(tree)
 
@@ -403,6 +534,8 @@ def print_scan_response(
     response: ScanResponse,
     print_errors: bool = False,
     args=None,
+    *,
+    show_all: bool = False,
 ) -> None:
     """Render the complete backend-enriched results, with risks under each component."""
     if not response.scan_path_responses:
@@ -410,6 +543,11 @@ def print_scan_response(
         return
     report_skills = hasattr(args, "skills") and args.skills
     for index, path in enumerate(response.scan_path_responses):
-        _print_scan_path_response(path, print_errors=print_errors, report_skills=report_skills)
+        _print_scan_path_response(
+            path,
+            print_errors=print_errors,
+            report_skills=report_skills,
+            show_all=show_all,
+        )
         if index < len(response.scan_path_responses) - 1:
             rich.print()
