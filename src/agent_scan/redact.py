@@ -645,9 +645,36 @@ def redact_signature(signature: ServerSignature) -> ServerSignature:
     return signature
 
 
+def redact_server_config(server: StdioServer | RemoteServer) -> StdioServer | RemoteServer:
+    """Redact sensitive values from an MCP server configuration in place."""
+    if isinstance(server, StdioServer):
+        # Redact all environment variables
+        if server.env:
+            server.env = dict.fromkeys(server.env, REDACTED)
+        # Redact argument values via detect-secrets (plugin-named markers).
+        if server.args:
+            server.args = redact_args(server.args)
+
+    elif isinstance(server, RemoteServer):
+        # Redact all headers
+        if server.headers:
+            server.headers = dict.fromkeys(server.headers, REDACTED)
+        # Redact all query parameter values in the URL
+        try:
+            parts = urlsplit(server.url)
+            if parts.query:
+                qs = parse_qsl(parts.query)
+                redacted_qs = [(key, REDACTED) for key, _value in qs]
+                new_query = urlencode(redacted_qs)
+                server.url = urlunsplit((parts.scheme, parts.netloc, parts.path, new_query, parts.fragment))
+        except Exception:
+            logger.error("Failed to redact URL: %s", server.url)
+
+    return server
+
+
 def redact_server(server_scan_result: ServerScanResult) -> ServerScanResult:
-    """
-    Redact sensitive information from a server scan result.
+    """Redact sensitive information from a server scan result.
 
     For StdioServer:
     - Redacts all environment variable values
@@ -663,30 +690,8 @@ def redact_server(server_scan_result: ServerScanResult) -> ServerScanResult:
     Returns:
         The same server scan result with sensitive data redacted
     """
-    if isinstance(server_scan_result.server, StdioServer):
-        # Redact all environment variables
-        if server_scan_result.server.env:
-            server_scan_result.server.env = dict.fromkeys(server_scan_result.server.env, REDACTED)
-        # Redact argument values via detect-secrets (plugin-named markers).
-        if server_scan_result.server.args:
-            server_scan_result.server.args = redact_args(server_scan_result.server.args)
-
-    elif isinstance(server_scan_result.server, RemoteServer):
-        # Redact all headers
-        if server_scan_result.server.headers:
-            server_scan_result.server.headers = dict.fromkeys(server_scan_result.server.headers, REDACTED)
-        # Redact all query parameter values in the URL
-        try:
-            parts = urlsplit(server_scan_result.server.url)
-            if parts.query:
-                qs = parse_qsl(parts.query)
-                redacted_qs = [(k, REDACTED) for k, _ in qs]
-                new_query = urlencode(redacted_qs)
-                server_scan_result.server.url = urlunsplit(
-                    (parts.scheme, parts.netloc, parts.path, new_query, parts.fragment)
-                )
-        except Exception:
-            logger.error("Failed to redact URL: %s", server_scan_result.server.url)
+    if isinstance(server_scan_result.server, StdioServer | RemoteServer):
+        server_scan_result.server = redact_server_config(server_scan_result.server)
 
     # Redact traceback in server error
     if server_scan_result.error and server_scan_result.error.traceback:
