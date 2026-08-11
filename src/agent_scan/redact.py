@@ -621,6 +621,19 @@ def _is_synthetic_binary_description(text: str) -> bool:
     return bool(_BINARY_FILE_DESCRIPTION_RE.match(text))
 
 
+def redact_error_text(text: str | None) -> str | None:
+    """Redact a traceback or captured server output string.
+
+    These fields are diagnostic noise, not user content, so both absolute
+    paths and secret-shaped values are stripped: a traceback can embed a
+    local filesystem layout, and captured protocol traffic / stderr
+    (``server_output``) can echo back a header, token, or other secret a
+    misbehaving server included in its response. Paths are stripped first
+    so the subsequent detect-secrets pass runs over already-shortened text.
+    """
+    return redact_text(redact_absolute_paths(text))
+
+
 def redact_signature(signature: ServerSignature) -> ServerSignature:
     """Redact secrets from a (skill) ``ServerSignature`` in place.
 
@@ -688,13 +701,14 @@ def redact_server(server_scan_result: ServerScanResult) -> ServerScanResult:
         except Exception:
             logger.error("Failed to redact URL: %s", server_scan_result.server.url)
 
-    # Redact traceback in server error
+    # Redact traceback in server error (paths and any embedded secrets)
     if server_scan_result.error and server_scan_result.error.traceback:
-        server_scan_result.error.traceback = redact_absolute_paths(server_scan_result.error.traceback)
+        server_scan_result.error.traceback = redact_error_text(server_scan_result.error.traceback)
 
-    # Redact all absolute paths in server output (stderr, protocol messages)
+    # Redact server output (stderr, protocol messages): paths and any secrets
+    # the server echoed back (e.g. a token in a captured request/response)
     if server_scan_result.error and server_scan_result.error.server_output:
-        server_scan_result.error.server_output = redact_absolute_paths(server_scan_result.error.server_output)
+        server_scan_result.error.server_output = redact_error_text(server_scan_result.error.server_output)
 
     return server_scan_result
 
@@ -753,9 +767,9 @@ def redact_scan_result(result: ScanPathResult) -> ScanPathResult:
     Returns:
         The same result with sensitive data redacted
     """
-    # Redact path-level error traceback
+    # Redact path-level error traceback (paths and any embedded secrets)
     if result.error and result.error.traceback:
-        result.error.traceback = redact_absolute_paths(result.error.traceback)
+        result.error.traceback = redact_error_text(result.error.traceback)
 
     # Redact all server-level sensitive data
     if result.servers:

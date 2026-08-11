@@ -163,6 +163,12 @@ async def inspect_pipeline(
             do_stdio_handshake=do_stdio_handshake,
         )
         scan_path_results.append(inspected_client_to_scan_path_result(inspected_client))
+
+    # redact: applied here so every caller of inspect_pipeline (both `mcp-scan
+    # scan` and `mcp-scan inspect`) gets sanitized results, since `inspect`
+    # prints/dumps them directly without going through the analyze/push pipeline.
+    scan_path_results = [redact_scan_result(r) if r is not None else r for r in scan_path_results]
+
     return scan_path_results, scanned_usernames or []
 
 
@@ -193,13 +199,10 @@ async def inspect_analyze_push_pipeline(
         do_stdio_handshake=do_stdio_handshake,
     )
 
-    # redact
-    redacted_scan_path_results = [redact_scan_result(rv) for rv in scan_path_results]
-
     scan_context = {"cli_version": push_args.version}
     # analyze
     verified_scan_path_results = await analyze_machine(
-        redacted_scan_path_results,
+        scan_path_results,
         analysis_url=analyze_args.analysis_url,
         identifier=analyze_args.identifier,
         additional_headers=analyze_args.additional_headers,
