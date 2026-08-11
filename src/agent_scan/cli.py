@@ -594,13 +594,14 @@ def main():
 
     args = parser.parse_args()
 
+    argv_to_check = sys.argv[: sys.argv.index("--")] if "--" in sys.argv else sys.argv
     header_flag = "--control-server-H"
-    for header_index, arg in enumerate(sys.argv):
+    for header_index, arg in enumerate(argv_to_check):
         if arg != header_flag:
             continue
         has_preceding_server = any(
-            server_index + 1 < header_index and not sys.argv[server_index + 1].startswith("--")
-            for server_index, server_arg in enumerate(sys.argv[:header_index])
+            server_index + 1 < header_index and not argv_to_check[server_index + 1].startswith("--")
+            for server_index, server_arg in enumerate(argv_to_check[:header_index])
             if server_arg == "--control-server"
         )
         if not has_preceding_server:

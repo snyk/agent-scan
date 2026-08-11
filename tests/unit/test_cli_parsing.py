@@ -227,6 +227,18 @@ class TestCLIArgumentParsing:
         assert "--control-server-H requires --control-server" in capsys.readouterr().err
         mock_scan.assert_not_awaited()
 
+    def test_positional_control_server_header_after_separator_is_not_rejected(self, monkeypatch):
+        from agent_scan.cli import main
+
+        monkeypatch.setattr(sys, "argv", ["snyk-agent-scan", "scan", "--", "--control-server-H"])
+
+        with patch("agent_scan.cli.print_scan_inspect", new_callable=AsyncMock) as mock_scan:
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        mock_scan.assert_awaited_once()
+
     def test_valid_control_server_header_block_still_dispatches(self, monkeypatch):
         from agent_scan.cli import main
 
