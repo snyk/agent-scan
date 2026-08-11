@@ -594,6 +594,18 @@ def main():
 
     args = parser.parse_args()
 
+    header_flag = "--control-server-H"
+    for header_index, arg in enumerate(sys.argv):
+        if arg != header_flag:
+            continue
+        has_preceding_server = any(
+            server_index + 1 < header_index and not sys.argv[server_index + 1].startswith("--")
+            for server_index, server_arg in enumerate(sys.argv[:header_index])
+            if server_arg == "--control-server"
+        )
+        if not has_preceding_server:
+            parser.error("--control-server-H requires --control-server")
+
     # Attach parsed control servers to args
     args.control_servers = control_servers
 

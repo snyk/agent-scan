@@ -183,6 +183,75 @@ class TestControlServerParsing:
 class TestCLIArgumentParsing:
     """Test suite for overall CLI argument parsing with control servers."""
 
+    @pytest.mark.parametrize("token", [None, "test-token"], ids=["without_token", "with_token"])
+    def test_orphaned_control_server_header_is_rejected_before_authentication(self, monkeypatch, capsys, token):
+        from agent_scan.cli import main
+
+        if token is None:
+            monkeypatch.delenv("SNYK_TOKEN", raising=False)
+        else:
+            monkeypatch.setenv("SNYK_TOKEN", token)
+        monkeypatch.setattr(sys, "argv", ["snyk-agent-scan", "scan", "--control-server-H", "x-client-id: key"])
+
+        with patch("agent_scan.cli.print_scan_inspect", new_callable=AsyncMock) as mock_scan:
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 2
+        assert "--control-server-H requires --control-server" in capsys.readouterr().err
+        mock_scan.assert_not_awaited()
+
+    def test_control_server_header_before_later_server_is_rejected(self, monkeypatch, capsys):
+        from agent_scan.cli import main
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "snyk-agent-scan",
+                "scan",
+                "--control-server-H",
+                "x-client-id: key",
+                "--control-server",
+                "https://server.example",
+                "--control-identifier",
+                "test-machine",
+            ],
+        )
+
+        with patch("agent_scan.cli.print_scan_inspect", new_callable=AsyncMock) as mock_scan:
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 2
+        assert "--control-server-H requires --control-server" in capsys.readouterr().err
+        mock_scan.assert_not_awaited()
+
+    def test_valid_control_server_header_block_still_dispatches(self, monkeypatch):
+        from agent_scan.cli import main
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "snyk-agent-scan",
+                "scan",
+                "--control-server",
+                "https://server.example",
+                "--control-server-H",
+                "x-client-id: key",
+                "--control-identifier",
+                "test-machine",
+            ],
+        )
+
+        with patch("agent_scan.cli.print_scan_inspect", new_callable=AsyncMock) as mock_scan:
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+
+        assert exc_info.value.code == 0
+        mock_scan.assert_awaited_once()
+
     def test_scan_with_multiple_control_servers_parses_correctly(self):
         """Test that multiple control servers are parsed correctly."""
         test_argv = [
