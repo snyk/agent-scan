@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 
 from agent_scan.models.errors import CouldNotParseMCPConfig, FileNotFoundConfig, ScanError, UnknownConfigFormat
 from agent_scan.models.mcp import RemoteServer, ServerSignature, StdioServer
-from agent_scan.models.skill import SkillFile, SkillServer
+from agent_scan.models.skill import DiscoveredSkill, SkillFile
 
 
 class CandidateClient(BaseModel):
@@ -32,7 +32,7 @@ class ClientToInspect(BaseModel):
         | UnknownConfigFormat
         | CouldNotParseMCPConfig,
     ]
-    skills_dirs: dict[str, list[tuple[str, SkillServer]] | FileNotFoundConfig]
+    skills_dirs: dict[str, list[DiscoveredSkill] | FileNotFoundConfig]
 
 
 class InspectedServer(BaseModel):
@@ -64,7 +64,7 @@ class InspectedPath(BaseModel):
     """
 
     client: str | None = None
-    path: str
+    path: str = Field(description="Local path represented by this result, such as '~/.cursor' for a discovered client.")
     servers: list[InspectedServer] = Field(default_factory=list)
     skills: list[InspectedSkill] = Field(default_factory=list)
     error: ScanError | None = None

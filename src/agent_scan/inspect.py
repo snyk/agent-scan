@@ -10,6 +10,7 @@ from agent_scan.models import (
     CandidateClient,
     ClientToInspect,
     CouldNotParseMCPConfig,
+    DiscoveredSkill,
     FileNotFoundConfig,
     InspectedPath,
     InspectedServer,
@@ -19,7 +20,6 @@ from agent_scan.models import (
     ServerHTTPError,
     ServerStartupError,
     SkillScanError,
-    SkillServer,
     StdioServer,
     TokenAndClientInfo,
     UnknownConfigFormat,
@@ -166,7 +166,7 @@ async def get_mcp_config_per_home_directory(
             )
 
     # parse skills dirs
-    skills_dirs: dict[str, list[tuple[str, SkillServer]] | FileNotFoundConfig] = {}
+    skills_dirs: dict[str, list[DiscoveredSkill] | FileNotFoundConfig] = {}
 
     all_skills_dir_paths: list[str] = list(client.skills_dir_paths)
     for glob_pattern in client.skills_dir_globs:
@@ -205,9 +205,9 @@ def find_relevant_token(tokens: list[TokenAndClientInfo], name: str) -> TokenAnd
     return None
 
 
-def _inspect_skill(name: str, config: SkillServer) -> InspectedSkill:
+def _inspect_skill(skill: DiscoveredSkill) -> InspectedSkill:
     try:
-        files = collect_skill_files(config.path, validate_manifest=True)
+        files = collect_skill_files(skill.path, validate_skill_md_frontmatter=True)
         error = None
     except SkillInspectionError as inspection_error:
         files = []
@@ -228,8 +228,8 @@ def _inspect_skill(name: str, config: SkillServer) -> InspectedSkill:
             category="skill_scan_error",
         )
     return InspectedSkill(
-        name=_inspection_component_name(name, "skill", config.path),
-        installation_path=config.path,
+        name=_inspection_component_name(skill.name, "skill", skill.path),
+        installation_path=skill.path,
         files=files,
         error=error,
     )
@@ -381,19 +381,18 @@ async def _inspect_server_configs(
             candidate_errors.append(_config_error_to_scan_error(servers_or_error))
             continue
         for name, config in servers_or_error:
-            inspected_name = _inspection_component_name(name, "server", config_path)
-            servers.append(
-                await _inspect_server(
-                    inspected_name,
-                    config,
-                    config_path,
-                    timeout,
-                    tokens,
-                    stream_stderr=stream_stderr,
-                    declined=(config_path, name) in declined_servers,
-                    do_stdio_handshake=do_stdio_handshake,
-                )
+            inspected_server = await _inspect_server(
+                name,
+                config,
+                config_path,
+                timeout,
+                tokens,
+                stream_stderr=stream_stderr,
+                declined=(config_path, name) in declined_servers,
+                do_stdio_handshake=do_stdio_handshake,
             )
+            inspected_server.name = _inspection_component_name(name, "server", config_path)
+            servers.append(inspected_server)
     return servers, candidate_errors
 
 
@@ -404,7 +403,7 @@ def _inspect_skill_configs(client: ClientToInspect) -> tuple[list[InspectedSkill
         if isinstance(skills_or_error, FileNotFoundConfig):
             candidate_errors.append(_config_error_to_scan_error(skills_or_error))
             continue
-        skills.extend(_inspect_skill(name, config) for name, config in skills_or_error)
+        skills.extend(_inspect_skill(skill) for skill in skills_or_error)
     return skills, candidate_errors
 
 

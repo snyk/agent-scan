@@ -5,7 +5,7 @@ import os
 import yaml
 from yaml.error import YAMLError
 
-from agent_scan.models.skill import SkillFile, SkillServer
+from agent_scan.models.skill import DiscoveredSkill, SkillFile
 from agent_scan.redact import redact_text
 from agent_scan.utils import get_relative_path
 
@@ -32,7 +32,7 @@ def get_skill_md_path(path: str) -> str | None:
     return None
 
 
-def _validate_skill_manifest(content: str, skill_path: str) -> None:
+def _validate_skill_md_frontmatter(content: str, skill_path: str) -> None:
     """Validate the required identity fields in directory-skill frontmatter."""
     content_chunks = content.split("---")
     if len(content_chunks) <= 2:
@@ -60,7 +60,7 @@ def _read_skill_file_content(
     full_path: str,
     *,
     allow_binary: bool,
-    manifest_skill_path: str | None = None,
+    skill_path_for_frontmatter_validation: str | None = None,
 ) -> str:
     """Read one skill file's content for the v2026-07-10 request payload.
 
@@ -73,8 +73,8 @@ def _read_skill_file_content(
     try:
         with open(expanded, encoding="utf-8") as f:
             content = f.read()
-        if manifest_skill_path is not None:
-            _validate_skill_manifest(content, manifest_skill_path)
+        if skill_path_for_frontmatter_validation is not None:
+            _validate_skill_md_frontmatter(content, skill_path_for_frontmatter_validation)
         return redact_text(content) or ""
     except UnicodeDecodeError as error:
         if not allow_binary:
@@ -87,10 +87,11 @@ def _read_skill_file_content(
         return f"{BINARY_FILE_DESCRIPTION_PREFIX}{hasher.hexdigest()}"
 
 
-def collect_skill_files(skill_path: str, *, validate_manifest: bool = False) -> list[SkillFile]:
-    """Collect all skill files as raw ``SkillFile`` records for the v2026-07-10 API payload.
+def collect_skill_files(skill_path: str, *, validate_skill_md_frontmatter: bool = False) -> list[SkillFile]:
+    """Collect skill files as redacted ``SkillFile`` records for inspection and analysis.
 
-    Traverses and reads every file within a skill target without requiring legacy wrapper objects:
+    Traverses and reads every file within a skill target without constructing
+    intermediate MCP signature objects:
     - **Single-file command skills** (a flat ``*.md``): returns a single ``SkillFile``
       keyed by the file's basename (e.g., ``"deploy.md"``).
     - **Directory skills** (``<name>/SKILL.md`` + subdirectories and sibling files):
@@ -102,10 +103,8 @@ def collect_skill_files(skill_path: str, *, validate_manifest: bool = False) -> 
     - **Text files** (instruction markdown, scripts, configs, assets): UTF-8 text is read
       and run through secret redaction before being sent to the backend.
     - **Binary assets** (images, archives, compiled binaries): non-UTF-8 binary content is
-      caught gracefully and represented as a synthetic hash marker. Instruction and script
-      files remain UTF-8-only, matching legacy skill validation.
-      (``"Binary file. Hash: <sha256_hex_digest>"``), preserving asset tracking without
-      transmitting raw binary payloads.
+      represented as ``"Binary file. Hash: <sha256_hex_digest>"``, preserving asset tracking
+      without transmitting raw binary payloads. Instruction and script files remain UTF-8-only.
     """
     expanded_path = os.path.expanduser(skill_path)
     if not os.path.exists(expanded_path):
@@ -125,7 +124,7 @@ def collect_skill_files(skill_path: str, *, validate_manifest: bool = False) -> 
         raise ValueError(f"Skill path is not a file or directory: {skill_path}")
 
     files: list[SkillFile] = []
-    found_manifest = False
+    found_skill_md = False
     for root, dirs, filenames in os.walk(expanded_path):
         dirs.sort()  # deterministic traversal order across platforms
         if any(os.path.islink(os.path.join(root, dirname)) for dirname in dirs):
@@ -136,48 +135,50 @@ def collect_skill_files(skill_path: str, *, validate_manifest: bool = False) -> 
                 raise ValueError("Skill directory must not contain symbolic links")
             relative_path = os.path.relpath(full_path, expanded_path).replace(os.path.sep, "/")
             extension = filename.rsplit(".", 1)[-1].lower()
-            is_manifest = relative_path.lower() == "skill.md"
-            found_manifest = found_manifest or is_manifest
+            is_skill_md = relative_path.lower() == "skill.md"
+            found_skill_md = found_skill_md or is_skill_md
             files.append(
                 SkillFile(
                     path=relative_path,
                     content=_read_skill_file_content(
                         full_path,
                         allow_binary=extension not in ("md", "py", "js", "ts", "sh"),
-                        manifest_skill_path=skill_path if validate_manifest and is_manifest else None,
+                        skill_path_for_frontmatter_validation=(
+                            skill_path if validate_skill_md_frontmatter and is_skill_md else None
+                        ),
                     ),
                 )
             )
-    if validate_manifest and not found_manifest:
+    if validate_skill_md_frontmatter and not found_skill_md:
         raise SkillInspectionError(f"neither SKILL.md nor skill.md file found at path: {skill_path}")
     return files
 
 
-def inspect_skills_dir(path: str) -> list[tuple[str, SkillServer]]:
+def inspect_skills_dir(path: str) -> list[DiscoveredSkill]:
     logger.info("Scanning skills dir: %s", path)
 
     expanded_path = os.path.expanduser(path)
     candidate_skills_dirs = os.listdir(expanded_path)
-    skills_servers: list[tuple[str, SkillServer]] = []
+    skills: list[DiscoveredSkill] = []
     for candidate_skill_dir in candidate_skills_dirs:
         candidate_skill_dir_full_path = os.path.join(expanded_path, candidate_skill_dir)
         if os.path.isdir(candidate_skill_dir_full_path):
             skill_md_path = get_skill_md_path(candidate_skill_dir_full_path)
             if skill_md_path is None:
                 continue
-            skills_servers.append((candidate_skill_dir, SkillServer(path=candidate_skill_dir_full_path)))
-    logger.info("Found %d skills servers", len(skills_servers))
-    return skills_servers
+            skills.append(DiscoveredSkill(name=candidate_skill_dir, path=candidate_skill_dir_full_path))
+    logger.info("Found %d skills", len(skills))
+    return skills
 
 
-def inspect_commands_dir(path: str) -> list[tuple[str, SkillServer]]:
+def inspect_commands_dir(path: str) -> list[DiscoveredSkill]:
     """List command files under ``path`` as skill entries.
 
     Unlike :func:`inspect_skills_dir` (which expects ``<name>/SKILL.md``
     subdirectories), command files are flat ``*.md`` files. Claude Code
     namespaces nested command files by their relative path joined with ``:``
     (e.g. ``commands/git/commit.md`` -> ``git:commit``). Each file becomes one
-    ``SkillServer`` pointing at the file itself.
+    ``DiscoveredSkill`` pointing at the file itself.
 
     Traversal is depth-bounded by :data:`_MAX_COMMANDS_WALK_DEPTH`, pruning the
     walk once it would descend past the cap rather than walking the whole subtree
@@ -190,7 +191,7 @@ def inspect_commands_dir(path: str) -> list[tuple[str, SkillServer]]:
     logger.info("Scanning commands dir: %s", path)
 
     expanded_path = os.path.expanduser(path)
-    commands: list[tuple[str, SkillServer]] = []
+    commands: list[DiscoveredSkill] = []
     for root, dirs, files in os.walk(expanded_path):
         relative_root = os.path.relpath(root, expanded_path)
         dir_depth = 0 if relative_root == os.curdir else len(relative_root.split(os.sep))
@@ -200,7 +201,7 @@ def inspect_commands_dir(path: str) -> list[tuple[str, SkillServer]]:
             full_path = os.path.join(root, file)
             relative = os.path.relpath(full_path, expanded_path)
             name = os.path.splitext(relative)[0].replace(os.path.sep, ":")
-            commands.append((name, SkillServer(path=full_path)))
+            commands.append(DiscoveredSkill(name=name, path=full_path))
         # A file inside the current dir sits at depth+1; prune once that reaches
         # the cap so we don't descend into deeper subdirectories.
         if dir_depth + 1 >= _MAX_COMMANDS_WALK_DEPTH:

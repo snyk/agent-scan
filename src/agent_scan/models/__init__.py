@@ -55,7 +55,7 @@ from agent_scan.models.push import (
     TokenAndClientInfo,
     TokenAndClientInfoList,
 )
-from agent_scan.models.skill import SkillFile, SkillServer
+from agent_scan.models.skill import DiscoveredSkill, SkillFile
 
 __all__ = [
     *_api_models,
@@ -70,6 +70,7 @@ __all__ = [
     "ConfigWithoutMCP",
     "ControlServer",
     "CouldNotParseMCPConfig",
+    "DiscoveredSkill",
     "Entity",
     "ErrorCategory",
     "FileNotFoundConfig",
@@ -90,7 +91,6 @@ __all__ = [
     "ServerStartupError",
     "SkillFile",
     "SkillScanError",
-    "SkillServer",
     "StartMCPServerError",
     "StdioServer",
     "TokenAndClientInfo",

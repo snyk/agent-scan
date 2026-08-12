@@ -62,7 +62,7 @@ def test_scan_component_line_uses_highest_risk_score_color():
     assert not any("green" in str(span.style) for span in result.spans)
 
 
-def test_scan_component_line_preserves_legacy_clean_and_error_colors():
+def test_scan_component_line_uses_clean_and_error_colors():
     clean = _format_component_line("clean-server", [])
     failed = _format_component_line("failed-server", [], has_error=True)
 
@@ -339,12 +339,12 @@ def test_plain_scan_output_preserves_components_and_nests_risks(capsys):
     assert "scripts/run.py" in output
     assert "Malicious code (600/1000)" in output
 
-    # Preserve the old hierarchy: each risk appears after its owner and before
+    # Keep each risk after its owner and before
     # the next sibling component, rather than in a separate flat risk report.
     assert output.index("risky-server") < output.index("Private data") < output.index("clean-skill")
     assert output.index("risky-skill") < output.index("Malicious code") < output.index("scripts/run.py")
 
-    # Match the legacy issue layout: findings are continuation lines in the
+    # Risks are continuation lines in the
     # component label, not child nodes with their own tree connectors.
     private_data_line = next(line for line in output.splitlines() if "Private data" in line)
     malicious_code_line = next(line for line in output.splitlines() if "Malicious code" in line)

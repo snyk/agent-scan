@@ -1,6 +1,8 @@
 """Unit tests for the redaction module."""
 
 import re
+import subprocess
+import sys
 
 import pytest
 
@@ -32,6 +34,19 @@ FAKE_ARTIFACTORY_TOKEN = "AKC" + synthetic_secret(b"artifactory fixture token")
 # detect-secrets plugin won the race. The plugin set may change across
 # detect-secrets versions; the marker shape will not.
 _SECRET_MARKER_RE = re.compile(r"^\*\*REDACTED_SECRET_[A-Z0-9_]+\*\*$")
+
+
+@pytest.mark.parametrize(
+    "imports",
+    [
+        "import agent_scan.redact; import agent_scan.models.api.v20260710",
+        "import agent_scan.models.api.v20260710; import agent_scan.redact",
+    ],
+)
+def test_redaction_and_api_models_import_in_either_order(imports):
+    result = subprocess.run([sys.executable, "-c", imports], capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
 
 
 def is_secret_marker(value: str) -> bool:
@@ -237,7 +252,7 @@ class TestRedactArgs:
         assert FAKE_API_KEY not in " ".join(result)
 
     def test_redact_args_marker_names_triggering_plugin(self):
-        """The marker has the form **REDACTED_SECRET_<PLUGIN_NAME>** with balanced asterisks matching the legacy **REDACTED** constant."""
+        """The marker has the form **REDACTED_SECRET_<PLUGIN_NAME>** with balanced asterisks matching **REDACTED**."""
         args = ["--api-key", FAKE_API_KEY]
         result = redact_args(args)
         joined = " ".join(result)

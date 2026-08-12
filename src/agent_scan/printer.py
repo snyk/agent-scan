@@ -67,7 +67,7 @@ def _format_entity_type(entity: Entity) -> str:
 
 
 def _skill_file_type(path: str) -> str:
-    """Human label for a skill file, mirroring ``format_entity_type``'s skill names."""
+    """Return the human-readable type used for a collected skill file."""
     lowered = path.lower()
     if lowered.endswith(".md"):
         return "instruction"
@@ -116,7 +116,7 @@ def _format_inspected_path_line(path: str, message: str, error: ScanError | None
     return result
 
 
-def _format_inspected_component_line(name: str, error: ScanError | None) -> Text:
+def _format_inspected_component_header(name: str, error: ScanError | None) -> Text:
     result = Text(name, style=f"bold {'blue' if error is not None else 'green'}")
     result.append(" " * max(0, INSPECTED_COMPONENT_NAME_COLUMN_WIDTH - len(name)))
     if error is not None:
@@ -154,16 +154,16 @@ def print_inspected_path(
     for server in path.servers:
         if server.error is not None and server.error.traceback:
             tracebacks.append((server.name, server.error.traceback))
-        server_print = tree.add(_format_inspected_component_line(server.name, server.error))
+        server_node = tree.add(_format_inspected_component_header(server.name, server.error))
         entities = server.signature.entities if server.signature is not None else []
         for entity in entities:
-            server_print.add(_format_inspected_entity_line(entity, full_description))
+            server_node.add(_format_inspected_entity_line(entity, full_description))
     for skill in path.skills:
         if skill.error is not None and skill.error.traceback:
             tracebacks.append((skill.name, skill.error.traceback))
-        skill_print = tree.add(_format_inspected_component_line(skill.name, skill.error))
+        skill_node = tree.add(_format_inspected_component_header(skill.name, skill.error))
         for skill_file in skill.files:
-            skill_print.add(format_skill_file_line(skill_file, full_description))
+            skill_node.add(format_skill_file_line(skill_file, full_description))
 
     if server_count > 0 or skill_count > 0:
         rich.print(tree)

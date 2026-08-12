@@ -5,6 +5,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from httpx import HTTPStatusError, Request, Response
+from mcp.shared.auth import OAuthToken
+from mcp.types import Implementation, InitializeResult
 
 from agent_scan.inspect import (
     get_mcp_config_per_client,
@@ -15,10 +17,12 @@ from agent_scan.models import (
     CandidateClient,
     ClientToInspect,
     CouldNotParseMCPConfig,
+    DiscoveredSkill,
     InspectedSkill,
     RemoteServer,
-    SkillServer,
+    ServerSignature,
     StdioServer,
+    TokenAndClientInfo,
 )
 
 TEST_CANDIDATE_CLIENT = CandidateClient(
@@ -31,8 +35,7 @@ TEST_CANDIDATE_CLIENT = CandidateClient(
 
 @pytest.mark.asyncio
 async def test_inspect_client_rejects_symlink_before_reading_skill(tmp_path):
-    """A symlinked skill file must be rejected by collection, not opened by the
-    legacy signature reader first."""
+    """A symlinked skill file must be rejected before its content is read."""
     skill_dir = tmp_path / "skill"
     skill_dir.mkdir()
     outside_file = tmp_path / "outside.md"
@@ -42,7 +45,7 @@ async def test_inspect_client_rejects_symlink_before_reading_skill(tmp_path):
         name="cursor",
         client_path="/proj",
         mcp_configs={},
-        skills_dirs={str(skill_dir.parent): [("skill", SkillServer(path=str(skill_dir)))]},
+        skills_dirs={str(skill_dir.parent): [DiscoveredSkill(name="skill", path=str(skill_dir))]},
     )
 
     result = await inspect_client(client, timeout=1, tokens=[], scan_skills=True)
@@ -88,7 +91,7 @@ async def test_inspect_client_attributes_empty_component_names_to_their_source()
             "/proj/.mcp.json": [("", StdioServer(command="sqlite-mcp"))],
         },
         skills_dirs={
-            "/proj/skills": [("", SkillServer(path="/proj/skills/unnamed"))],
+            "/proj/skills": [DiscoveredSkill(name="", path="/proj/skills/unnamed")],
         },
     )
 
@@ -106,11 +109,45 @@ async def test_inspect_client_attributes_empty_component_names_to_their_source()
 
 
 @pytest.mark.asyncio
-async def test_inspect_client_inspects_server_without_legacy_extension():
-    from mcp.types import Implementation, InitializeResult
+async def test_inspect_client_uses_original_empty_server_name_for_oauth_token_lookup():
+    config = StdioServer(command="sqlite-mcp")
+    token = TokenAndClientInfo(
+        token=OAuthToken(access_token="test-token", token_type="Bearer"),
+        server_name="",
+        client_id="client-id",
+        token_url="https://example.test/token",
+        mcp_server_url="https://example.test/mcp",
+        updated_at=0,
+    )
+    signature = ServerSignature(
+        metadata=InitializeResult(
+            protocolVersion="2024-11-05",
+            capabilities={},
+            serverInfo=Implementation(name="server", version="1"),
+        )
+    )
+    client = ClientToInspect(
+        name="cursor",
+        client_path="/proj",
+        mcp_configs={"/proj/.mcp.json": [("", config)]},
+        skills_dirs={},
+    )
 
-    from agent_scan.models import ServerSignature
+    with patch("agent_scan.inspect.check_server", new_callable=AsyncMock, return_value=(signature, config)) as check:
+        result = await inspect_client(
+            client,
+            timeout=1,
+            tokens=[token],
+            scan_skills=False,
+            do_stdio_handshake=True,
+        )
 
+    assert check.await_args.args[3] == token
+    assert result.servers[0].name == "unnamed server (/proj/.mcp.json)"
+
+
+@pytest.mark.asyncio
+async def test_inspect_client_returns_server_signature():
     remote = RemoteServer(url="https://example.test/mcp", type="http")
     signature = ServerSignature(
         metadata=InitializeResult(
@@ -135,7 +172,7 @@ async def test_inspect_client_inspects_server_without_legacy_extension():
 
 
 @pytest.mark.asyncio
-async def test_inspect_client_converts_server_error_without_legacy_union():
+async def test_inspect_client_converts_server_http_error():
     request = Request("POST", "https://example.test/mcp")
     status_error = HTTPStatusError(
         "server error",
@@ -376,7 +413,7 @@ async def test_inspect_client_collects_skills_and_joins_config_errors(tmp_path):
         mcp_configs={
             "/proj/bad.json": CouldNotParseMCPConfig(message="bad config", traceback="tb"),
         },
-        skills_dirs={"/proj/skills": [("my-skill", SkillServer(path=str(skill_dir)))]},
+        skills_dirs={"/proj/skills": [DiscoveredSkill(name="my-skill", path=str(skill_dir))]},
     )
 
     result = await inspect_client(client, timeout=1, tokens=[], scan_skills=True)

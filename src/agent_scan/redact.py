@@ -17,7 +17,7 @@ from detect_secrets.plugins.high_entropy_strings import HighEntropyStringsPlugin
 from detect_secrets.plugins.keyword import KeywordDetector
 from detect_secrets.settings import default_settings, get_plugins, transient_settings
 
-from agent_scan.models import RemoteServer, StdioServer
+from agent_scan.models.mcp import RemoteServer, StdioServer
 
 logger = logging.getLogger(__name__)
 
@@ -117,7 +117,7 @@ _DETECT_SECRETS_CONFIG: dict = _build_detect_secrets_config()
 def _redaction_marker(plugin_name: str) -> str:
     """Format the redaction marker for a triggering detect-secrets plugin.
 
-    Uses the same ``**...**`` delimiter shape as the legacy ``REDACTED`` constant
+    Uses the same ``**...**`` delimiter shape as the ``REDACTED`` constant
     so both marker styles render and grep consistently.
     """
     return f"**REDACTED_SECRET_{plugin_name.upper()}**"

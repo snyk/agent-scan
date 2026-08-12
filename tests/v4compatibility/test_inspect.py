@@ -6,9 +6,9 @@ from agent_scan.inspect import get_mcp_config_per_client, inspect_client
 from agent_scan.models import (
     CandidateClient,
     CouldNotParseMCPConfig,
+    DiscoveredSkill,
     FileNotFoundConfig,
     RemoteServer,
-    SkillServer,
     StdioServer,
     UnknownConfigFormat,
 )
@@ -72,8 +72,8 @@ async def test_get_mcp_config_per_client(
     for _, skills_dir in ctis[0].skills_dirs.items():
         if test_type in ["valid", "invalid"]:
             assert isinstance(skills_dir, list)
-            for _, skill_dir in skills_dir:
-                assert isinstance(skill_dir, SkillServer)
+            for skill in skills_dir:
+                assert isinstance(skill, DiscoveredSkill)
         elif test_type == "does-not-exist":
             if create_file_not_found_error:
                 assert isinstance(skills_dir, FileNotFoundConfig)
@@ -92,9 +92,7 @@ async def test_get_mcp_config_per_client(
     ],
 )
 @pytest.mark.asyncio
-async def test_inspect_client(
-    client: CandidateClient, test_type: Literal["valid", "invalid", "does-not-exist"]
-):
+async def test_inspect_client(client: CandidateClient, test_type: Literal["valid", "invalid", "does-not-exist"]):
     ctis = await get_mcp_config_per_client(client, [], False)
     # ``do_stdio_handshake=True`` so the test fixtures' stdio servers are
     # actually handshaked (and fail with ``server_startup``, which is

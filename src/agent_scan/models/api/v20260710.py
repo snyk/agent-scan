@@ -21,8 +21,8 @@ def _error_for_request(error: ScanError | None) -> ScanError | None:
     if error is None:
         return None
 
-    # Imported lazily because ``redact`` depends on the public model facade,
-    # which imports this version module while that facade is initialized.
+    # Import lazily because importing ``agent_scan.redact`` initializes the
+    # ``agent_scan.models`` package, whose public facade imports this module.
     from agent_scan.redact import redact_absolute_paths, redact_text
 
     def sanitize(value: Exception | str | None) -> str | None:

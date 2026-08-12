@@ -5,12 +5,13 @@ Code command files are flat ``*.md`` files, so they need their own scanner
 (``inspect_commands_dir``).
 """
 
+import hashlib
 from pathlib import Path
 
 import pytest
 import yaml
 
-from agent_scan.models.skill import SkillServer
+from agent_scan.models.skill import DiscoveredSkill
 from agent_scan.redact import redact_text
 from agent_scan.skill_client import (
     BINARY_FILE_DESCRIPTION_PREFIX,
@@ -29,10 +30,10 @@ def test_inspect_commands_dir_surfaces_flat_md_files(tmp_path):
     (commands / "deploy.md").write_text("# Deploy\nrun the deploy")
     (commands / "release.md").write_text("# Release")
 
-    found = dict(inspect_commands_dir(str(commands)))
+    found = {skill.name: skill for skill in inspect_commands_dir(str(commands))}
 
     assert set(found) == {"deploy", "release"}
-    assert isinstance(found["deploy"], SkillServer)
+    assert isinstance(found["deploy"], DiscoveredSkill)
     # ``inspect_commands_dir`` builds paths with ``os.path.join`` (OS-native
     # separators), so compare via ``Path`` rather than a hardcoded "/" suffix.
     deploy_path = Path(found["deploy"].path)
@@ -45,7 +46,7 @@ def test_inspect_commands_dir_namespaces_nested_files_with_colon(tmp_path):
     (commands / "git").mkdir(parents=True)
     (commands / "git" / "commit.md").write_text("# Commit")
 
-    names = {name for name, _ in inspect_commands_dir(str(commands))}
+    names = {skill.name for skill in inspect_commands_dir(str(commands))}
 
     assert names == {"git:commit"}
 
@@ -57,7 +58,7 @@ def test_inspect_commands_dir_ignores_non_md_files(tmp_path):
     (commands / "README.txt").write_text("not a command")
     (commands / "helper.py").write_text("print('hi')")
 
-    names = {name for name, _ in inspect_commands_dir(str(commands))}
+    names = {skill.name for skill in inspect_commands_dir(str(commands))}
 
     assert names == {"deploy"}
 
@@ -88,7 +89,7 @@ def test_inspect_commands_dir_respects_max_walk_depth(tmp_path, monkeypatch):
     deep.mkdir(parents=True)
     (deep / "deep.md").write_text("# Deep")
 
-    names = {name for name, _ in skill_client.inspect_commands_dir(str(commands))}
+    names = {skill.name for skill in skill_client.inspect_commands_dir(str(commands))}
 
     assert "deploy" in names
     assert "a:b:c:deep" not in names
@@ -148,15 +149,32 @@ def test_collect_skill_files_redacts_secrets(tmp_path):
     assert files[0].content == redact_text(raw)
 
 
+def test_collect_skill_files_redacts_secrets_from_every_text_file_kind(tmp_path):
+    skill = tmp_path / "skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(
+        f"---\nname: skill\ndescription: Safe description\n---\napi_key = {_FAKE_SKILL_SECRET}\n"
+    )
+    (skill / "reference.md").write_text(f"api_key = {_FAKE_SKILL_SECRET}\n")
+    (skill / "run.py").write_text(f'API_KEY = "{_FAKE_SKILL_SECRET}"\n')
+    (skill / "config.txt").write_text(f"api_key = {_FAKE_SKILL_SECRET}\n")
+
+    files = collect_skill_files(str(skill), validate_skill_md_frontmatter=True)
+
+    assert {file.path for file in files} == {"SKILL.md", "reference.md", "run.py", "config.txt"}
+    assert all(_FAKE_SKILL_SECRET not in file.content for file in files)
+
+
 def test_collect_skill_files_binary_hash_marker(tmp_path):
     skill = tmp_path / "skill"
     skill.mkdir()
     (skill / "SKILL.md").write_text("---\nname: s\n---\nx")
-    (skill / "logo.png").write_bytes(b"\xff\xd8\xff\xe0\x00binary\x00data")
+    binary_content = b"\xff\xd8\xff\xe0\x00binary\x00data"
+    (skill / "logo.png").write_bytes(binary_content)
 
     by_path = {f.path: f.content for f in collect_skill_files(str(skill))}
 
-    assert by_path["logo.png"].startswith(BINARY_FILE_DESCRIPTION_PREFIX)
+    assert by_path["logo.png"] == f"{BINARY_FILE_DESCRIPTION_PREFIX}{hashlib.sha256(binary_content).hexdigest()}"
 
 
 def test_collect_skill_files_non_existent_path_raises(tmp_path):
@@ -197,6 +215,46 @@ def test_collect_skill_files_rejects_symlinked_file_inside_skill(tmp_path):
         collect_skill_files(str(skill))
 
 
+def test_collect_skill_files_requires_skill_md_when_frontmatter_validation_is_enabled(tmp_path):
+    skill = tmp_path / "skill"
+    skill.mkdir()
+    (skill / "reference.md").write_text("# Reference")
+
+    with pytest.raises(SkillInspectionError, match=r"neither SKILL\.md nor skill\.md"):
+        collect_skill_files(str(skill), validate_skill_md_frontmatter=True)
+
+
+def test_collect_skill_files_rejects_malformed_skill_md_frontmatter_yaml(tmp_path):
+    skill = tmp_path / "skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("---\nname: [unterminated\n---\n# Instructions\n")
+
+    with pytest.raises(SkillInspectionError, match="invalid yaml"):
+        collect_skill_files(str(skill), validate_skill_md_frontmatter=True)
+
+
+@pytest.mark.parametrize("frontmatter", ["[one, two]", "plain text", "42", "null"])
+def test_collect_skill_files_rejects_non_mapping_skill_md_frontmatter(tmp_path, frontmatter):
+    skill = tmp_path / "skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(f"---\n{frontmatter}\n---\n# Instructions\n")
+
+    with pytest.raises(SkillInspectionError, match="frontmatter must be a mapping"):
+        collect_skill_files(str(skill), validate_skill_md_frontmatter=True)
+
+
+@pytest.mark.parametrize("missing_field", ["name", "description"])
+def test_collect_skill_files_requires_skill_md_frontmatter_identity_fields(tmp_path, missing_field):
+    skill = tmp_path / "skill"
+    skill.mkdir()
+    frontmatter = {"name": "skill", "description": "Does useful work"}
+    del frontmatter[missing_field]
+    (skill / "SKILL.md").write_text(f"---\n{yaml.safe_dump(frontmatter)}---\n# Instructions\n")
+
+    with pytest.raises(SkillInspectionError, match=rf"Missing {missing_field}"):
+        collect_skill_files(str(skill), validate_skill_md_frontmatter=True)
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -206,11 +264,11 @@ def test_collect_skill_files_rejects_symlinked_file_inside_skill(tmp_path):
         ("description", "   "),
     ],
 )
-def test_collect_skill_files_rejects_non_text_manifest_identity_fields(tmp_path, field, value):
+def test_collect_skill_files_rejects_non_text_skill_md_frontmatter_identity_fields(tmp_path, field, value):
     skill = tmp_path / "skill"
     skill.mkdir()
-    manifest = {"name": "skill", "description": "Does useful work", field: value}
-    (skill / "SKILL.md").write_text(f"---\n{yaml.safe_dump(manifest)}---\n# Instructions\n")
+    frontmatter = {"name": "skill", "description": "Does useful work", field: value}
+    (skill / "SKILL.md").write_text(f"---\n{yaml.safe_dump(frontmatter)}---\n# Instructions\n")
 
     with pytest.raises(SkillInspectionError, match=rf"{field}.*non-empty string"):
-        collect_skill_files(str(skill), validate_manifest=True)
+        collect_skill_files(str(skill), validate_skill_md_frontmatter=True)

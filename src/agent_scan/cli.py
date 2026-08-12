@@ -744,7 +744,7 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> ScanRespo
     dangerously_run_mcp_servers: bool = bool(getattr(args, "dangerously_run_mcp_servers", False))
 
     # Step 1: Discover everything we would inspect without starting any server.
-    clients_to_inspect, precomputed_inspected_paths, scanned_usernames = await discover_clients_to_inspect(inspect_args)
+    clients_to_inspect, unresolved_paths, scanned_usernames = await discover_clients_to_inspect(inspect_args)
 
     # Collect consent when applicable; otherwise show the
     # dangerous-flag banner to users at the terminal. Silent
@@ -779,7 +779,7 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> ScanRespo
             push_args,
             verbose=verbose,
             clients_to_inspect=clients_to_inspect,
-            precomputed_inspected_paths=precomputed_inspected_paths,
+            unresolved_paths=unresolved_paths,
             scanned_usernames=scanned_usernames,
             stream_stderr=stream_stderr,
             declined_servers=declined_servers,
@@ -789,7 +789,7 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> ScanRespo
         inspected_paths, _scanned_usernames = await inspect_pipeline(
             inspect_args,
             clients_to_inspect=clients_to_inspect,
-            precomputed_inspected_paths=precomputed_inspected_paths,
+            unresolved_paths=unresolved_paths,
             scanned_usernames=scanned_usernames,
             stream_stderr=stream_stderr,
             declined_servers=declined_servers,
