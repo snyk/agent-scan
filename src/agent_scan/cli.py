@@ -33,7 +33,7 @@ from agent_scan.pipelines import (
     PushArgs,
     discover_clients_to_inspect,
     inspect_analyze_push_pipeline,
-    inspect_pipeline_inspected,
+    inspect_pipeline,
 )
 from agent_scan.printer import print_inspected_machine, print_scan_result
 from agent_scan.utils import ensure_unicode_console, get_hostname, get_push_key, parse_headers, suppress_stdout
@@ -773,7 +773,7 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[Scan
             do_stdio_handshake=decision.do_stdio_handshake,
         )
     elif mode == "inspect":
-        inspected_paths, _scanned_usernames = await inspect_pipeline_inspected(
+        inspected_paths, _scanned_usernames = await inspect_pipeline(
             inspect_args,
             clients_to_inspect=clients_to_inspect,
             precomputed_scan_path_results=precomputed_scan_path_results,

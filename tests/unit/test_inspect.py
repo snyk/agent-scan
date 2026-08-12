@@ -29,7 +29,7 @@ from agent_scan.models import (
     SkillServer,
     StdioServer,
 )
-from agent_scan.pipelines import InspectArgs, inspect_pipeline
+from agent_scan.pipelines import InspectArgs, inspect_legacy_pipeline
 
 TEST_CANDIDATE_CLIENT = CandidateClient(
     name="test-client",
@@ -169,12 +169,12 @@ async def test_detected_usernames_falls_back_to_all_when_none_detected():
         shutil.rmtree(tmp)
 
 
-# --- inspect_pipeline username-reporting tests ---
+# --- inspect_legacy_pipeline username-reporting tests ---
 
 
 @pytest.mark.asyncio
-async def test_inspect_pipeline_reports_only_detected_usernames(home_dirs_with_agent):
-    """inspect_pipeline should only include usernames where an agent was actually found."""
+async def test_inspect_legacy_pipeline_reports_only_detected_usernames(home_dirs_with_agent):
+    """inspect_legacy_pipeline should only include usernames where an agent was actually found."""
     candidate, home_dirs = home_dirs_with_agent
 
     with (
@@ -187,15 +187,15 @@ async def test_inspect_pipeline_reports_only_detected_usernames(home_dirs_with_a
         mock_to_result.return_value = None
 
         args = InspectArgs(timeout=10, tokens=[], paths=[])
-        _, scanned_usernames = await inspect_pipeline(args)
+        _, scanned_usernames = await inspect_legacy_pipeline(args)
 
     assert sorted(scanned_usernames) == ["alice", "bob"]
     assert "charlie" not in scanned_usernames
 
 
 @pytest.mark.asyncio
-async def test_inspect_pipeline_falls_back_to_all_usernames_when_no_agents_detected():
-    """When no agents are detected and all_users is set, inspect_pipeline should report all usernames."""
+async def test_inspect_legacy_pipeline_falls_back_to_all_usernames_when_no_agents_detected():
+    """When no agents are detected and all_users is set, the legacy pipeline should report all usernames."""
     tmp = tempfile.mkdtemp()
     try:
         home_dirs = [
@@ -217,7 +217,7 @@ async def test_inspect_pipeline_falls_back_to_all_usernames_when_no_agents_detec
             patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
         ):
             args = InspectArgs(timeout=10, tokens=[], paths=[], all_users=True)
-            _, scanned_usernames = await inspect_pipeline(args)
+            _, scanned_usernames = await inspect_legacy_pipeline(args)
 
         assert sorted(scanned_usernames) == ["alice", "bob"]
     finally:
@@ -225,7 +225,7 @@ async def test_inspect_pipeline_falls_back_to_all_usernames_when_no_agents_detec
 
 
 @pytest.mark.asyncio
-async def test_inspect_pipeline_detected_usernames_are_sorted():
+async def test_inspect_legacy_pipeline_detected_usernames_are_sorted():
     """Detected usernames should be returned in sorted order for deterministic output."""
     tmp = tempfile.mkdtemp()
     try:
@@ -255,7 +255,7 @@ async def test_inspect_pipeline_detected_usernames_are_sorted():
             mock_to_result.return_value = None
 
             args = InspectArgs(timeout=10, tokens=[], paths=[])
-            _, scanned_usernames = await inspect_pipeline(args)
+            _, scanned_usernames = await inspect_legacy_pipeline(args)
 
         assert scanned_usernames == ["alice", "bob", "charlie"]
     finally:
@@ -263,7 +263,7 @@ async def test_inspect_pipeline_detected_usernames_are_sorted():
 
 
 @pytest.mark.asyncio
-async def test_inspect_pipeline_single_user_detected_among_many():
+async def test_inspect_legacy_pipeline_single_user_detected_among_many():
     """When only one user out of many has an agent, only that username should be reported."""
     tmp = tempfile.mkdtemp()
     try:
@@ -294,7 +294,7 @@ async def test_inspect_pipeline_single_user_detected_among_many():
             mock_to_result.return_value = None
 
             args = InspectArgs(timeout=10, tokens=[], paths=[])
-            _, scanned_usernames = await inspect_pipeline(args)
+            _, scanned_usernames = await inspect_legacy_pipeline(args)
 
         assert scanned_usernames == ["bob"]
     finally:
@@ -302,7 +302,7 @@ async def test_inspect_pipeline_single_user_detected_among_many():
 
 
 @pytest.mark.asyncio
-async def test_inspect_pipeline_deduplicates_usernames_across_clients():
+async def test_inspect_legacy_pipeline_deduplicates_usernames_across_clients():
     """When multiple clients detect the same user, the username should appear only once."""
     tmp = tempfile.mkdtemp()
     try:
@@ -340,7 +340,7 @@ async def test_inspect_pipeline_deduplicates_usernames_across_clients():
             mock_to_result.return_value = None
 
             args = InspectArgs(timeout=10, tokens=[], paths=[])
-            _, scanned_usernames = await inspect_pipeline(args)
+            _, scanned_usernames = await inspect_legacy_pipeline(args)
 
         assert scanned_usernames == ["alice"]
     finally:
@@ -348,8 +348,8 @@ async def test_inspect_pipeline_deduplicates_usernames_across_clients():
 
 
 @pytest.mark.asyncio
-async def test_inspect_pipeline_no_clients_returns_empty_results():
-    """When no MCP clients are installed, inspect_pipeline should return empty scan_path_results."""
+async def test_inspect_legacy_pipeline_no_clients_returns_empty_results():
+    """When no MCP clients are installed, the legacy pipeline should return no scan path results."""
     tmp = tempfile.mkdtemp()
     try:
         home_dirs = [(Path(tmp) / "alice", "alice")]
@@ -367,7 +367,7 @@ async def test_inspect_pipeline_no_clients_returns_empty_results():
             patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
         ):
             args = InspectArgs(timeout=10, tokens=[], paths=[])
-            results, _ = await inspect_pipeline(args)
+            results, _ = await inspect_legacy_pipeline(args)
 
         assert results == []
     finally:
@@ -375,14 +375,14 @@ async def test_inspect_pipeline_no_clients_returns_empty_results():
 
 
 @pytest.mark.asyncio
-async def test_inspect_pipeline_missing_explicit_path_returns_file_not_found_error():
-    """When an explicit path doesn't exist, inspect_pipeline should return a file_not_found error result."""
+async def test_inspect_legacy_pipeline_missing_explicit_path_returns_file_not_found_error():
+    """An explicit missing path should produce a legacy file-not-found error result."""
     with (
         patch("agent_scan.pipelines.get_readable_home_directories", return_value=[]),
         patch("agent_scan.pipelines.client_to_inspect_from_path", new_callable=AsyncMock, return_value=[]),
     ):
         args = InspectArgs(timeout=10, tokens=[], paths=["/nonexistent/path.json"])
-        results, _ = await inspect_pipeline(args)
+        results, _ = await inspect_legacy_pipeline(args)
 
     assert len(results) == 1
     assert results[0].path == "/nonexistent/path.json"
@@ -391,7 +391,7 @@ async def test_inspect_pipeline_missing_explicit_path_returns_file_not_found_err
 
 
 @pytest.mark.asyncio
-async def test_inspect_pipeline_paths_mode_does_not_leak_all_usernames():
+async def test_inspect_legacy_pipeline_paths_mode_does_not_leak_all_usernames():
     """When using --paths, scanned_usernames should not fall back to all readable usernames."""
     tmp = tempfile.mkdtemp()
     try:
@@ -416,7 +416,7 @@ async def test_inspect_pipeline_paths_mode_does_not_leak_all_usernames():
             mock_to_result.return_value = None
 
             args = InspectArgs(timeout=10, tokens=[], paths=["/some/path/mcp.json"])
-            _, scanned_usernames = await inspect_pipeline(args)
+            _, scanned_usernames = await inspect_legacy_pipeline(args)
 
         assert scanned_usernames == [getpass.getuser()]
     finally:
@@ -424,7 +424,7 @@ async def test_inspect_pipeline_paths_mode_does_not_leak_all_usernames():
 
 
 @pytest.mark.asyncio
-async def test_inspect_pipeline_discovery_mode_falls_back_to_all_usernames_when_no_agents_detected():
+async def test_inspect_legacy_pipeline_discovery_mode_falls_back_to_all_usernames_when_no_agents_detected():
     """Without --paths but with --scan-all-users, when no agents are detected, all readable usernames should be reported."""
     tmp = tempfile.mkdtemp()
     try:
@@ -447,7 +447,7 @@ async def test_inspect_pipeline_discovery_mode_falls_back_to_all_usernames_when_
             patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
         ):
             args = InspectArgs(timeout=10, tokens=[], paths=[], all_users=True)
-            _, scanned_usernames = await inspect_pipeline(args)
+            _, scanned_usernames = await inspect_legacy_pipeline(args)
 
         assert sorted(scanned_usernames) == ["alice", "bob"]
     finally:
@@ -601,7 +601,7 @@ async def test_glob_respects_max_depth():
 
 
 @pytest.mark.asyncio
-async def test_inspect_pipeline_discovery_mode_without_all_users_falls_back_to_current_user():
+async def test_inspect_legacy_pipeline_discovery_mode_without_all_users_falls_back_to_current_user():
     """Without --paths and without --scan-all-users, when no agents are detected, only the current user should be reported."""
     tmp = tempfile.mkdtemp()
     try:
@@ -624,7 +624,7 @@ async def test_inspect_pipeline_discovery_mode_without_all_users_falls_back_to_c
             patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
         ):
             args = InspectArgs(timeout=10, tokens=[], paths=[], all_users=False)
-            _, scanned_usernames = await inspect_pipeline(args)
+            _, scanned_usernames = await inspect_legacy_pipeline(args)
 
         assert scanned_usernames == [getpass.getuser()]
     finally:
