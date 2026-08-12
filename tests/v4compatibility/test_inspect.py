@@ -3,7 +3,7 @@ from typing import Literal
 
 import pytest
 
-from agent_scan.inspect import get_mcp_config_per_client, inspect_client, inspected_client_to_scan_path_result
+from agent_scan.inspect import get_mcp_config_per_client, inspect_client_legacy, inspected_client_to_scan_path_result
 from agent_scan.models import (
     CandidateClient,
     CouldNotParseMCPConfig,
@@ -101,7 +101,7 @@ async def test_inspected_client_to_scan_path_result(
     # ``do_stdio_handshake=True`` so the test fixtures' stdio servers are
     # actually handshaked (and fail with ``server_startup``, which is
     # what the ``valid`` assertion below expects).
-    inspected_client = await inspect_client(ctis[0], 10, [], True, do_stdio_handshake=True)
+    inspected_client = await inspect_client_legacy(ctis[0], 10, [], True, do_stdio_handshake=True)
     scan_path_result = inspected_client_to_scan_path_result(inspected_client)
     if test_type == "invalid":
         assert scan_path_result.error is not None

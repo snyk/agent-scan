@@ -1,6 +1,6 @@
 """Request and response models for the v2026-07-10 analysis contract.
 
-The request carries the normalized inventory produced by inspection. The
+The request carries the normalized results produced by inspection. The
 response reports MCP and skill risks separately, then groups both component
 types under the path that was analyzed.
 """
@@ -46,7 +46,7 @@ def _server_for_request(server: StdioServer | RemoteServer) -> StdioServer | Rem
     return redact_server_config(server.model_copy(deep=True))
 
 
-# Request inventory and envelope
+# Request models and envelope
 # ------------------------------
 # These are deliberately distinct from the local inspection models. Conversion
 # at the API boundary controls exactly which inspected data leaves the process.

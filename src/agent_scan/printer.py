@@ -398,7 +398,7 @@ def print_scan_result(
 
 
 # ---------------------------------------------------------------------------
-# InspectedPath rendering for the `inspect` command (v2026-07-10 inventory).
+# InspectedPath rendering for the `inspect` command.
 # `inspect` never analyzes, so there are no risks/issues here - just the
 # discovered MCP servers (with their tool/prompt/resource entities) and skills
 # (with their files).
