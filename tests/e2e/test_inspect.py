@@ -438,16 +438,14 @@ class TestInspectBehaviorContract:
 
     @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
     @pytest.mark.parametrize(
-        "config_content, expected_code, ignored_code",
+        "config_content, expected_code",
         [
-            ('{"mcpServers": {', "X005", "X005"),
-            (json.dumps({"mcpServers": {"broken": {"command": "/definitely/not/a/server"}}}), "X001", "X001"),
+            ('{"mcpServers": {', "X005"),
+            (json.dumps({"mcpServers": {"broken": {"command": "/definitely/not/a/server"}}}), "X001"),
         ],
         ids=["parse_error", "server_startup"],
     )
-    def test_ci_fails_for_operational_errors_and_honors_ignore(
-        self, agent_scan_cmd, tmp_path, config_content, expected_code, ignored_code
-    ):
+    def test_ci_fails_for_operational_errors(self, agent_scan_cmd, tmp_path, config_content, expected_code):
         config = tmp_path / "failure.json"
         config.write_text(config_content)
 
@@ -457,17 +455,7 @@ class TestInspectBehaviorContract:
             "--dangerously-run-mcp-servers",
             str(config),
         )
-        ignored, _ = inspect_json(
-            agent_scan_cmd,
-            "--ci",
-            "--ignore-issues-codes",
-            ignored_code,
-            "--dangerously-run-mcp-servers",
-            str(config),
-        )
-
         assert failed.returncode == 1, f"Expected {expected_code} to fail CI: {failed.stderr}"
-        assert ignored.returncode == 0, f"Expected {ignored_code} to be ignored: {ignored.stderr}"
 
     @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
     def test_rich_ci_prints_failure_code_before_exit(self, agent_scan_cmd, tmp_path):
@@ -518,7 +506,7 @@ class TestInspectBehaviorContract:
         assert "--ci requires --dangerously-run-mcp-servers" in result.stderr
 
     @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
-    def test_ignore_codes_requires_ci(self, agent_scan_cmd, tmp_path):
+    def test_removed_ignore_issues_codes_flag_is_rejected(self, agent_scan_cmd, tmp_path):
         config = tmp_path / "config.json"
         config.write_text('{"unrelated": true}')
 
@@ -531,7 +519,7 @@ class TestInspectBehaviorContract:
         )
 
         assert result.returncode == 2
-        assert "--ignore-issues-codes can only be used with --ci" in result.stderr
+        assert "unrecognized arguments: --ignore-issues-codes" in result.stderr
 
     @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
     def test_skill_failure_is_reported_and_obeys_ci(self, agent_scan_cmd, tmp_path):
@@ -552,21 +540,10 @@ class TestInspectBehaviorContract:
             "--dangerously-run-mcp-servers",
             str(skill),
         )
-        ignored, _ = inspect_json(
-            agent_scan_cmd,
-            "--skills",
-            "--ci",
-            "--ignore-issues-codes",
-            "X002",
-            "--dangerously-run-mcp-servers",
-            str(skill),
-        )
-
         assert normal.returncode == 0
         skill_result = only_result(output)["skills"][0]
         assert skill_result["error"]["category"] == "skill_scan_error"
         assert failed.returncode == 1
-        assert ignored.returncode == 0
 
     @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
     def test_symlinked_skill_file_is_reported_as_skill_error(self, agent_scan_cmd, tmp_path):
@@ -746,12 +723,12 @@ class TestInspectBehaviorContract:
             "--json",
             "--skills",
             "--ci",
-            "--ignore-issues-codes",
             "--server-timeout",
             "--suppress-mcpserver-io",
             "--dangerously-run-mcp-servers",
         ):
             assert flag in result.stdout
+        assert "--ignore-issues-codes" not in result.stdout
 
     @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
     @pytest.mark.parametrize("oauth_content", [None, "not-json"], ids=["missing", "malformed"])

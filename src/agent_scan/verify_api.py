@@ -11,12 +11,7 @@ import certifi
 import rich
 
 from agent_scan.models.api.common import ScanUserInfo
-from agent_scan.models.api.v20250902 import (
-    ScalarToolLabels,
-    ScanPathResult,
-    ScanPathResultsCreate,
-)
-from agent_scan.models.api.v20260710 import ScanRequest
+from agent_scan.models.api.v20260710 import ScanPathResponse, ScanRequest, ScanResponse
 from agent_scan.models.errors import ScanError
 from agent_scan.models.inspect import InspectedPath
 from agent_scan.utils import get_environment, get_relative_path
@@ -38,14 +33,15 @@ def build_scan_request(
     remain absolute because the backend forwards them to Maverick as the asset
     location.
 
-    This remains additive: ``analyze_machine`` still sends the legacy payload.
+    ``analyze_machine`` sends this request directly to the v2026-07-10 API.
     """
     request = ScanRequest.from_inspected_paths(
         inspected_paths,
         scan_user_info=scan_user_info,
         scan_metadata=scan_metadata,
     )
-    for path_request in request.scan_path_requests:
+    for inspected_path, path_request in zip(inspected_paths, request.scan_path_requests, strict=True):
+        path_request.client = get_client_from_path(inspected_path.path) or path_request.client or inspected_path.path
         path_request.path = get_relative_path(path_request.path)
     return request
 
@@ -194,7 +190,7 @@ def setup_tcp_connector(skip_ssl_verify: bool = False) -> aiohttp.TCPConnector:
 
 
 async def analyze_machine(
-    scan_paths: list[ScanPathResult],
+    inspected_paths: list[InspectedPath],
     analysis_url: str,
     identifier: str | None,
     additional_headers: dict | None = None,
@@ -206,12 +202,12 @@ async def analyze_machine(
     raise_on_error: bool = False,
     scan_context: dict | None = None,
     scanned_usernames: list[str] | None = None,
-) -> list[ScanPathResult]:
+) -> ScanResponse:
     """
     Analyze the scan paths with the analysis server.
 
     Args:
-        scan_paths: List of scan path results to analyze
+        inspected_paths: Local MCP server and skill inspection results to analyze
         analysis_url: URL of the analysis server
         identifier: Identifier for the user
         additional_headers: Additional headers to send to the analysis server
@@ -232,17 +228,8 @@ async def analyze_machine(
         anonymous_identifier=None,
     )
 
-    # Use relative paths in the analysis payload to strip the username from absolute paths,
-    # anonymizing the user. Clone to preserve the absolute paths for the control backend call.
-    analysis_path_results = []
-    for result in scan_paths:
-        result.client = get_client_from_path(result.path) or result.client or result.path
-        analysis_path_copy = result.clone()
-        analysis_path_copy.path = get_relative_path(result.path)
-        analysis_path_results.append(analysis_path_copy)
-
-    payload = ScanPathResultsCreate(
-        scan_path_results=analysis_path_results,
+    payload = build_scan_request(
+        inspected_paths,
         scan_user_info=user_info,
         scan_metadata=scan_context if scan_context else None,
     )
@@ -297,23 +284,9 @@ async def analyze_machine(
                 ) as response:
                     response.raise_for_status()
                     if response.status == 200:
-                        response_data = ScanPathResultsCreate.model_validate_json(await response.text())
+                        response_data = ScanResponse.model_validate_json(await response.text())
                         logger.info("Successfully analyzed scan results.")
-                        for sent_scan_path_result, response_scan_path_result in zip(
-                            scan_paths, response_data.scan_path_results, strict=True
-                        ):
-                            sent_scan_path_result.issues = response_scan_path_result.issues
-                            sent_scan_path_result.labels = response_scan_path_result.labels
-                            for server_given, server_received in zip(
-                                sent_scan_path_result.servers or [],
-                                response_scan_path_result.servers or [],
-                                strict=True,
-                            ):
-                                if server_given.signature is None and server_received.signature is not None:
-                                    server_given.signature = server_received.signature
-                                    if server_given.error is not None:
-                                        server_given.error.is_failure = False
-                        return scan_paths  # Success - exit the function
+                        return response_data
 
         except TimeoutError as e:
             logger.warning(f"API timeout while scanning discovered servers (attempt {attempt + 1}/{max_retries}): {e}.")
@@ -332,25 +305,7 @@ async def analyze_machine(
                 error_text = f"Could not reach analysis server: {e.status} - {e.message}"
 
             logger.warning(error_text)
-            for scan_path in scan_paths:
-                if scan_path.servers is not None:
-                    for server in scan_path.servers:
-                        if server.error is None:
-                            server.error = ScanError(
-                                message=error_text,
-                                exception=e,
-                                traceback=traceback.format_exc(),
-                                is_failure=True,
-                                category="analysis_error",
-                            )
-                    scan_path.labels = [
-                        [
-                            ScalarToolLabels(is_public_sink=0, destructive=0, untrusted_content=0, private_data=0)
-                            for _ in s.entities
-                        ]
-                        for s in scan_path.servers
-                    ]
-            return scan_paths
+            return _analysis_error_response(payload, error_text, e)
 
         except RuntimeError as e:
             logger.warning(f"Network error while uploading (attempt {attempt + 1}/{max_retries}): {e}")
@@ -370,14 +325,32 @@ async def analyze_machine(
         raise RuntimeError(
             f"Tried calling verification api {max_retries} times. Could not reach analysis server. Last error: {error_text}"
         )
-    # failed even after all retries
-    for scan_path in scan_paths:
-        if scan_path.servers is not None and scan_path.error is None:
-            scan_path.error = ScanError(
-                message=f"Tried calling verification api {max_retries} times. Could not reach analysis server. Last error: {error_text}",
-                exception=None,
-                traceback=traceback.format_exc(),
-                is_failure=True,
-                category="analysis_error",
+    # Failed even after all retries.
+    return _analysis_error_response(
+        payload,
+        f"Tried calling verification api {max_retries} times. Could not reach analysis server. Last error: {error_text}",
+    )
+
+
+def _analysis_error_response(
+    request: ScanRequest,
+    message: str,
+    exception: Exception | None = None,
+) -> ScanResponse:
+    """Return one analysis failure response for every inspected path."""
+    return ScanResponse(
+        scan_path_responses=[
+            ScanPathResponse(
+                client=path_request.client,
+                path=path_request.path,
+                error=ScanError(
+                    message=message,
+                    exception=exception,
+                    traceback=traceback.format_exc(),
+                    is_failure=True,
+                    category="analysis_error",
+                ),
             )
-    return scan_paths
+            for path_request in request.scan_path_requests
+        ]
+    )
