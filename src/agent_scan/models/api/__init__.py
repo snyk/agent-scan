@@ -1,15 +1,6 @@
 """Versioned analysis API contracts."""
 
 from agent_scan.models.api.common import ScanUserInfo
-from agent_scan.models.api.v20250902 import (
-    Issue,
-    ScalarToolLabels,
-    ScanPathResult,
-    ScanPathResultsCreate,
-    ServerScanResult,
-    ToolReferenceWithLabel,
-    ToxicFlowExtraData,
-)
 from agent_scan.models.api.v20260710 import (
     MCP_SERVER_RISK_DISPLAY_NAMES,
     RISK_DISPLAY_NAMES,
@@ -38,7 +29,6 @@ __all__ = [
     "MCP_SERVER_RISK_DISPLAY_NAMES",
     "RISK_DISPLAY_NAMES",
     "SKILL_RISK_DISPLAY_NAMES",
-    "Issue",
     "MaliciousURLSkillRiskScore",
     "McpEntitySummary",
     "McpServerRequest",
@@ -47,21 +37,15 @@ __all__ = [
     "Occurrence",
     "Region",
     "RiskScore",
-    "ScalarToolLabels",
     "ScanPathRequest",
     "ScanPathResponse",
-    "ScanPathResult",
-    "ScanPathResultsCreate",
     "ScanRequest",
     "ScanResponse",
     "ScanUserInfo",
-    "ServerScanResult",
     "SkillFileSummary",
     "SkillRequest",
     "SkillRiskIndexes",
     "SkillRiskResponse",
     "SkillRiskScore",
-    "ToolReferenceWithLabel",
-    "ToxicFlowExtraData",
     "UnverifiableURLSkillRiskScore",
 ]

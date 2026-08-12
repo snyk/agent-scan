@@ -16,7 +16,7 @@ from agent_scan.cli import (
     run_scan,
     str2bool,
 )
-from agent_scan.models import ControlServer, ScanPathResult
+from agent_scan.models import ControlServer, InspectedPath
 
 
 def _ns(**kwargs) -> Namespace:
@@ -653,7 +653,7 @@ class TestRunScanConsentAndStreamStderrWiring:
             patch(
                 "agent_scan.cli.inspect_analyze_push_pipeline",
                 new_callable=AsyncMock,
-                return_value=[ScanPathResult(path="/cfg.json")],
+                return_value=[InspectedPath(path="/cfg.json")],
             ) as mock_pipeline,
         ):
             await run_scan(args, mode="scan")

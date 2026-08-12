@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from agent_scan.cli import MissingIdentifierError, parse_control_servers
-from agent_scan.models import ControlServer, ScanPathResult
+from agent_scan.models import ControlServer, InspectedPath
 
 
 class TestControlServerParsing:
@@ -292,7 +292,7 @@ class TestControlServerUploadIntegration:
 
         from agent_scan.cli import run_scan
 
-        mock_result = ScanPathResult(path="/test/path")
+        mock_result = InspectedPath(path="/test/path")
 
         with patch(
             "agent_scan.cli.inspect_analyze_push_pipeline", new_callable=AsyncMock, return_value=[mock_result]
@@ -329,7 +329,7 @@ class TestControlServerUploadIntegration:
 
         from agent_scan.cli import run_scan
 
-        mock_result = ScanPathResult(path="/test/path")
+        mock_result = InspectedPath(path="/test/path")
 
         with (
             patch("agent_scan.cli.collect_consent", return_value=set()),
@@ -362,7 +362,7 @@ class TestControlServerUploadIntegration:
 
         from agent_scan.cli import run_scan
 
-        mock_result = ScanPathResult(path="/test/path")
+        mock_result = InspectedPath(path="/test/path")
 
         with patch(
             "agent_scan.cli.inspect_analyze_push_pipeline", new_callable=AsyncMock, return_value=[mock_result]

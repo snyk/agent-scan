@@ -1,35 +1,34 @@
-"""Skill location and file-content models.
+"""Skill discovery and file-content models.
 
 Contains models for representing skill files during local discovery and analysis.
 """
 
-from typing import Literal
-
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 
 
-class SkillServer(BaseModel):
-    """Legacy skill representation model.
+class DiscoveredSkill(BaseModel):
+    """A skill or command found locally and awaiting file collection.
 
-    In the legacy v2025-09-02 scan pipeline, skills were wrapped as a server variant
-    under ``ServerScanResult.server`` alongside ``StdioServer`` and ``RemoteServer``.
-    Maintained for local discovery and backward compatibility; will be deprecated as
-    callers migrate fully to ``SkillRequest`` and ``SkillFile``.
+    ``name`` is the local discovery name: the containing directory name for a
+    directory skill (for example, ``review`` for ``skills/review/SKILL.md``), or
+    the namespaced relative filename for a command (for example, ``git:commit``
+    for ``commands/git/commit.md``). It is not read from YAML frontmatter.
+
+    ``path`` points to the content to collect: the skill directory for a
+    directory skill, or the Markdown file itself for a single-file command.
     """
 
-    model_config = ConfigDict()
-    path: str
-    type: Literal["skill"] | None = "skill"
+    name: str = Field(description="Directory-derived or command-path-derived local discovery name.")
+    path: str = Field(
+        description="Path to the skill directory or command file, such as '~/.claude/skills/review' "
+        "or '~/.claude/commands/git/commit.md'."
+    )
 
 
 class SkillFile(BaseModel):
-    """New model representing an individual file inside a Skill directory.
-
-    Used by ``SkillRequest`` in the v2026-07-10 API contract to send relative file paths
-    and raw file contents to the backend for analysis.
-    """
+    """An individual file collected from a skill directory."""
 
     path: str = Field(
         description="Relative path of the file within the skill directory (e.g., 'SKILL.md', 'scripts/run.py')."
     )
-    content: str = Field(description="Raw UTF-8 text content of the file.")
+    content: str = Field(description="Redacted UTF-8 text or a synthetic binary hash marker.")

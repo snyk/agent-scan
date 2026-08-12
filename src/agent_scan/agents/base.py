@@ -21,11 +21,11 @@ from agent_scan.models import (
     SERVER_CONFIG_DISCRIMINATOR_KEYS,
     ClientToInspect,
     CouldNotParseMCPConfig,
+    DiscoveredSkill,
     FileNotFoundConfig,
     MCPConfig,
     MCPServerMap,
     RemoteServer,
-    SkillServer,
     StdioServer,
     UnknownConfigFormat,
 )
@@ -37,7 +37,7 @@ McpConfigsResult = dict[
     str,
     list[tuple[str, StdioServer | RemoteServer]] | FileNotFoundConfig | UnknownConfigFormat | CouldNotParseMCPConfig,
 ]
-SkillsDirsResult = dict[str, list[tuple[str, SkillServer]] | FileNotFoundConfig]
+SkillsDirsResult = dict[str, list[DiscoveredSkill] | FileNotFoundConfig]
 # Return type of the per-file MCP parsers (``_parse_mcp_file`` /
 # ``_parse_settings_mcp_gated``): parsed servers, a parse failure, or ``None``
 # when the file is absent/empty/not-MCP.
@@ -382,7 +382,7 @@ class AgentDiscoverer(ABC):
             is_failure=True,
         )
 
-    def _scan_skills_dir(self, path: Path) -> list[tuple[str, SkillServer]] | None:
+    def _scan_skills_dir(self, path: Path) -> list[DiscoveredSkill] | None:
         """Return the parsed skill list for ``path`` if it's an existing directory,
         else ``None``. Thin wrapper that hides the existence check from callers.
         """
@@ -397,7 +397,7 @@ class AgentDiscoverer(ABC):
         self,
         bases: list[Path],
         subdir_name: str,
-        inspect_fn: Callable[[str], list[tuple[str, SkillServer]]],
+        inspect_fn: Callable[[str], list[DiscoveredSkill]],
     ) -> SkillsDirsResult:
         """Walk each base dir for ``subdir_name`` directories and inspect each hit.
 
