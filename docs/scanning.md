@@ -1,73 +1,111 @@
 # Scanning with `snyk-agent-scan`
 
-Scan your machine for agents, MCP servers, and skills, and detect security vulnerabilities like prompt injections, tool poisoning, toxic flows, or malware payloads. See the [Issue Code Reference](issue-codes.md) for a full list of detected issues.
+Agent Scan discovers agents, MCP servers, and skills on your machine and checks them for security concerns. It supports interactive local scans and scheduled background scans that report results to [Snyk Evo](https://evo.ai.snyk.io).
 
-Agent Scan operates in two main modes which can be used jointly or separately:
-
-1. **Scan Mode**: The CLI command `snyk-agent-scan` scans the current machine for agents and agent components such as skills and MCP servers. Upon completion, it will output a comprehensive report for the user to review.
-
-2. **Background Mode** (MDM): Agent Scan scans the machine in regular intervals in the background, and reports the results to a [Snyk Evo](https://evo.ai.snyk.io) instance. This can be used by security teams to monitor the company-wide agent supply chain in a central location. To set this up, please [contact us](https://evo.ai.snyk.io/#contact-us).
+This guide covers both Agent Scan v0.5.x and v0.6 and later. v0.5.x remains supported for now but is planned for deprecation. Where behavior differs, the relevant version is called out explicitly.
 
 ## Quick Start
 
-To run a full scan of your machine (auto-discovers agents, MCP servers, and skills), run:
+Run the command for the version you want to use:
+
+### Agent Scan v0.6 and later
 
 ```bash
 uvx snyk-agent-scan@latest
 ```
 
-This will scan for security vulnerabilities in servers, skills, tools, prompts, and resources. It will automatically discover a variety of agent configurations, including Claude Code/Desktop, Cursor, Gemini CLI, and Windsurf.
+### Agent Scan v0.5.x
 
-You can also scan particular configuration files or skills:
+Pin a v0.5.x release so that a future `latest` release does not change the API or output format underneath an existing workflow. The examples use v0.5.17 as a concrete release:
 
 ```bash
-# scan an MCP configuration
-uvx snyk-agent-scan@latest ~/.vscode/mcp.json
-# scan a single agent skill
-uvx snyk-agent-scan@latest ~/path/to/my/SKILL.md
-# scan all claude skills
-uvx snyk-agent-scan@latest ~/.claude/skills
-# MCP only (skip skills)
-uvx snyk-agent-scan@latest --no-skills
+uvx snyk-agent-scan@0.5.17
 ```
+
+Both versions automatically discover supported agent configurations, including Claude Code/Desktop, Cursor, Gemini CLI, and Windsurf. Both also accept explicit MCP configuration or skill paths:
+
+```bash
+# Scan an MCP configuration
+snyk-agent-scan ~/.vscode/mcp.json
+
+# Scan a single agent skill
+snyk-agent-scan ~/path/to/my/SKILL.md
+
+# Scan all Claude skills
+snyk-agent-scan ~/.claude/skills
+
+# Scan MCP components but skip skills
+snyk-agent-scan --no-skills
+```
+
+When running these examples through `uvx`, replace `snyk-agent-scan` with `uvx snyk-agent-scan@latest` for v0.6 and later or `uvx snyk-agent-scan@0.5.17` for v0.5.x.
+
+## Scan and Background Modes
+
+Agent Scan has two main modes of operation:
+
+1. **Scan mode:** discovers and analyzes agents, MCP servers, and skills, then prints a report for review.
+2. **Background mode (MDM):** scans machines at regular intervals and reports the results to Snyk Evo so security teams can monitor their agent supply chain centrally. To set this up, [contact us](https://evo.ai.snyk.io/#contact-us).
 
 ## How It Works
 
 ![Scanning overview](assets/scan.svg)
 
-Agent Scan searches through your local agent's configuration files to find agents, skills, and MCP servers. For MCP, it connects to servers and retrieves tool descriptions. Skills are scanned by default; use `--no-skills` to skip skill analysis.
+Agent Scan searches local agent configuration files for agents, skills, and MCP servers. It connects to MCP servers to retrieve their declared tools, prompts, resources, and resource templates. Skills are included by default; use `--no-skills` to skip them.
 
-It then validates the components, both with local checks and by invoking the Agent Scan API. For this, skills, agent applications, tool names, and descriptions are shared with Snyk. By using Agent Scan, you agree to the Snyk [terms of use for Agent Scan](../TERMS.md).
+It then performs local checks and sends the data required for analysis to the Agent Scan API. Agent Scan does not store or log MCP tool-call usage data, including the contents or results of tool calls. By using Agent Scan, you agree to the Snyk [terms of use for Agent Scan](../TERMS.md).
 
-Agent Scan does not store or log any usage data, i.e. the contents and results of your MCP tool calls.
+The data sent for analysis differs by version:
 
-## CLI Parameters
+### Agent Scan v0.5.x
 
-For the complete, up-to-date list of commands, flags, options, environment variables, and exit codes, see **[CLI reference](cli-reference.md)**.
+Agent applications, skills, tool names, and descriptions are shared with Snyk. Results use issue codes and severity labels; see the [issue code reference](issue-codes.md). Operational errors use the separate [failure code reference](failure-codes.md).
 
-Quick summary:
+### Agent Scan v0.6 and later
 
-- **Default command:** `scan` (omit the subcommand to scan well-known agent configs)
-- **`inspect`:** discovery and MCP handshake only — no security analysis
-- **Skills:** included by default; use `--no-skills` for MCP-only (`--skills` is deprecated — see [CLI reference](cli-reference.md))
-- **`--ci`:** non-zero exit on findings (requires `--dangerously-run-mcp-servers` in CI)
-- **`--json`:** machine-readable output — see [JSON output](json-output.md)
+Discovered client information, MCP server configurations and signatures, and skill files are shared with Snyk. Secrets in configuration values and text are redacted before transmission. Results use scored risk indicators; see the [risk reference](risks.md). Operational errors remain separate in the [failure code reference](failure-codes.md).
 
-### Examples
+## CLI Usage
+
+The command structure and most options are shared by both versions:
+
+- **Default command:** `scan`; omit the subcommand to scan well-known agent configurations.
+- **`inspect`:** discover components and inspect MCP capabilities without requesting security analysis.
+- **Skills:** included by default; use `--no-skills` for MCP-only scanning.
+- **`--ci`:** return a non-zero exit code when relevant findings or operational failures remain; use `--dangerously-run-mcp-servers` when consent cannot be provided interactively.
+- **`--json`:** print machine-readable output; see [JSON output](json-output.md) for the versioned schemas.
+
+Common examples:
 
 ```bash
-# Scan all known MCP configs and agent skills
+# Scan all known MCP configurations and agent skills
 snyk-agent-scan
 
-# Scan a specific config file
+# Scan a specific configuration file
 snyk-agent-scan ~/custom/config.json
 
-# MCP only
+# Scan MCP components but skip skills
 snyk-agent-scan --no-skills
 
-# Just inspect tools without verification
+# Inspect without requesting security analysis
 snyk-agent-scan inspect
 
-# CI mode
+# Run in CI
 snyk-agent-scan --ci --dangerously-run-mcp-servers
 ```
+
+### Agent Scan v0.5.x differences
+
+- Security findings use issue codes and severity labels.
+- `--ignore-issues-codes` controls which security issue and operational failure codes affect the CI exit status.
+- `--json` prints the path-keyed `ScanPathResult` format.
+
+See the [v0.5.x CLI reference](cli-reference.md#agent-scan-v05x) for the complete list of commands, flags, defaults, and exit behavior.
+
+### Agent Scan v0.6 and later differences
+
+- Security findings use risk names and scores.
+- `--ignore-risks` and `--ignore-failure-codes` independently control which risks and operational failures affect the CI exit status.
+- `--json` prints the `ScanResponse` format for `scan`; `inspect --json` remains a local inspection result.
+
+See the [v0.6 and later CLI reference](cli-reference.md#agent-scan-v06-and-later) for the complete list of commands, flags, defaults, and exit behavior.

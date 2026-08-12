@@ -1,6 +1,9 @@
-# Issue Code Reference
+# Issue code reference (v0.5.x)
 
-This is the reference for all issues that can be detected via `snyk-agent-scan`.
+> [!WARNING]
+> **Planned deprecation.** These issue codes apply to Agent Scan v0.5.x, which uses the `2025-09-02` analysis API. Agent Scan v0.6 and later report [risk indicators](risks.md) instead. Operational `X*` conditions are documented separately in the [failure-code reference](failure-codes.md) for both versions.
+
+This is the reference for issues reported by the v0.5.x `snyk-agent-scan` pipeline.
 
 ---
 
@@ -180,3 +183,9 @@ Detected hidden or invisible Unicode characters (Format/Cf or Control/Cc categor
 These characters are invisible when rendered but are still processed by AI models. Attackers use them to smuggle instructions past human review. For example, zero-width spaces, bidirectional overrides, invisible formatters, or Unicode Tag characters (`U+E0000`–`U+E007F`) that encode an entire hidden message. When such a tag sequence is found, the analysis decodes and surfaces the hidden message as evidence.
 
 The severity escalates to **high** when three or more distinct hidden character types are present, or when a hidden tag-encoded message is successfully decoded, as these strongly indicate intentional obfuscation rather than incidental formatting.
+
+## Related documentation
+
+- [Failure-code reference](failure-codes.md) — `X001`–`X009` operational conditions
+- [v0.5.x JSON output](json-output.md#agent-scan-v05x) — issue and error response structure
+- [v0.5.x CLI reference](cli-reference.md#agent-scan-v05x) — CI behavior and `--ignore-issues-codes`

@@ -239,7 +239,7 @@ def add_bootstrap_argument(parser):
         "--no-bootstrap",
         default=False,
         action="store_true",
-        help="Disable the startup bootstrap call to the control server.",
+        help="No-op retained for backward compatibility; does not change behavior.",
     )
 
 
@@ -310,7 +310,7 @@ def add_scan_arguments(scan_parser):
         "--checks-per-server",
         type=int,
         default=1,
-        help="Number of times to check each server (default: 1)",
+        help="No-op retained for backward compatibility; does not change behavior.",
         metavar="NUM",
     )
     add_control_server_arguments(scan_parser)
