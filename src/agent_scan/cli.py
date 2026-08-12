@@ -859,7 +859,7 @@ async def print_scan_inspect(mode="scan", args=None):
     else:
         result = await run_scan(args, mode=mode)
 
-    # `inspect` produces the v2026-07-10 InspectedPath inventory (no analysis, so
+    # `inspect` produces v2026-07-10 InspectedPath results (no analysis, so
     # no issues / --ci). `scan` still produces ScanPathResult on the legacy path.
     if mode == "inspect":
         inspected_paths = cast("list[InspectedPath]", result)

@@ -10,7 +10,7 @@ from agent_scan.direct_scanner import direct_scan_to_server_config, is_direct_sc
 from agent_scan.inspect import (
     get_mcp_config_per_client,
     inspect_client,
-    inspect_client_inventory,
+    inspect_client_legacy,
     inspected_client_to_scan_path_result,
 )
 from agent_scan.models import (
@@ -135,7 +135,7 @@ async def discover_clients_to_inspect(
     return clients_to_inspect, scan_path_results, scanned_usernames
 
 
-async def inspect_legacy_pipeline(
+async def inspect_pipeline_legacy(
     inspect_args: InspectArgs,
     *,
     clients_to_inspect: list[ClientToInspect] | None = None,
@@ -155,7 +155,7 @@ async def inspect_legacy_pipeline(
     scan_path_results: list[ScanPathResult] = list(precomputed_scan_path_results or [])
 
     for client_to_inspect in clients_to_inspect:
-        inspected_client = await inspect_client(
+        inspected_client = await inspect_client_legacy(
             client_to_inspect,
             inspect_args.timeout,
             inspect_args.tokens,
@@ -178,9 +178,9 @@ async def inspect_pipeline(
     declined_servers: set[tuple[str, str]] | None = None,
     do_stdio_handshake: bool = False,
 ) -> tuple[list[InspectedPath], list[str]]:
-    """Inspect each discovered client and return the ``InspectedPath`` inventory.
+    """Inspect each discovered client and return ``InspectedPath`` results.
 
-    The legacy scan flow still uses :func:`inspect_legacy_pipeline` to produce
+    The legacy scan flow still uses :func:`inspect_pipeline_legacy` to produce
     ``ScanPathResult`` objects. Precomputed results are error-only paths (e.g.
     file-not-found), so their error is carried straight onto an otherwise-empty
     ``InspectedPath``.
@@ -194,7 +194,7 @@ async def inspect_pipeline(
     ]
     for client_to_inspect in clients_to_inspect:
         inspected_paths.append(
-            await inspect_client_inventory(
+            await inspect_client(
                 client_to_inspect,
                 inspect_args.timeout,
                 inspect_args.tokens,
@@ -224,7 +224,7 @@ async def inspect_analyze_push_pipeline(
     Pipeline the scan and analyze the machine.
     """
     # inspect
-    scan_path_results, scanned_usernames = await inspect_legacy_pipeline(
+    scan_path_results, scanned_usernames = await inspect_pipeline_legacy(
         inspect_args,
         clients_to_inspect=clients_to_inspect,
         precomputed_scan_path_results=precomputed_scan_path_results,

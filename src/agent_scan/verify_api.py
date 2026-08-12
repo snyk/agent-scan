@@ -31,7 +31,7 @@ def build_scan_request(
     scan_user_info: ScanUserInfo | None = None,
     scan_metadata: dict[str, Any] | None = None,
 ) -> ScanRequest:
-    """Convert inspection inventory into a v2026-07-10 scan request.
+    """Convert inspection results into a v2026-07-10 scan request.
 
     The versioned API models own the structural conversion from inspection-domain
     models to wire models. This transport boundary additionally makes each top-level

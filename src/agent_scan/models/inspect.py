@@ -1,4 +1,4 @@
-"""Models for the discovery-to-inspection lifecycle and its final inventory."""
+"""Models for the discovery-to-inspection lifecycle and its results."""
 
 from pydantic import BaseModel, Field
 
@@ -93,7 +93,7 @@ class InspectedSkill(BaseModel):
 class InspectedPath(BaseModel):
     """Minimal normalized result of inspecting one client or explicit path.
 
-    The v2026-07-10 API boundary converts this inventory into its versioned wire
+    The v2026-07-10 API boundary converts this result into its versioned wire
     models and can anonymize ``path`` before transmission.
     """
 
