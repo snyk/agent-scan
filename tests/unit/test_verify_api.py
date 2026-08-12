@@ -843,7 +843,7 @@ class TestAnalyzeMachineHttpErrors:
 
 
 class TestBuildScanRequest:
-    """The API boundary turns inspection-domain inventory into v2026-07-10 wire models."""
+    """The API boundary turns inspection-domain results into v2026-07-10 wire models."""
 
     def test_maps_mcp_servers_and_skills(self):
         inspected = InspectedPath(
@@ -964,7 +964,7 @@ class TestBuildScanRequest:
         assert server_error.exception is not None and secret in str(server_error.exception)
         assert skill_error.server_output is not None and secret in skill_error.server_output
 
-    def test_redacts_stdio_server_config_without_mutating_local_inventory(self):
+    def test_redacts_stdio_server_config_without_mutating_local_result(self):
         secret = "ghp_abcdefghijklmnopqrstuvwxyz1234567890"
         local_server = StdioServer(
             command="server",
@@ -988,7 +988,7 @@ class TestBuildScanRequest:
         assert local_server.args == ["--token", secret, "--mode", "safe"]
         assert local_server.env == {"API_TOKEN": secret, "MODE": "development"}
 
-    def test_redacts_remote_server_config_without_mutating_local_inventory(self):
+    def test_redacts_remote_server_config_without_mutating_local_result(self):
         local_server = RemoteServer(
             url="https://example.com/mcp?token=private-token&mode=development",
             headers={"Authorization": "Bearer private-token", "X-Mode": "development"},

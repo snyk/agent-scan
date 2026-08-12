@@ -10,8 +10,8 @@ from httpx import HTTPStatusError, Request, Response
 from agent_scan.inspect import (
     get_mcp_config_per_client,
     inspect_client,
-    inspect_client_inventory,
-    inspect_extension,
+    inspect_client_legacy,
+    inspect_extension_legacy,
     inspected_client_to_scan_path_result,
 )
 from agent_scan.mcp_client import scan_mcp_config_file
@@ -26,7 +26,7 @@ from agent_scan.models import (
     SkillServer,
     StdioServer,
 )
-from agent_scan.pipelines import InspectArgs, inspect_legacy_pipeline
+from agent_scan.pipelines import InspectArgs, inspect_pipeline_legacy
 from tests.unit._secret_fixtures import synthetic_secret
 
 TEST_CANDIDATE_CLIENT = CandidateClient(
@@ -38,7 +38,7 @@ TEST_CANDIDATE_CLIENT = CandidateClient(
 
 
 @pytest.mark.asyncio
-async def test_inspect_client_inventory_rejects_symlink_before_reading_skill(tmp_path):
+async def test_inspect_client_rejects_symlink_before_reading_skill(tmp_path):
     """A symlinked skill file must be rejected by collection, not opened by the
     legacy signature reader first."""
     skill_dir = tmp_path / "skill"
@@ -53,7 +53,7 @@ async def test_inspect_client_inventory_rejects_symlink_before_reading_skill(tmp
         skills_dirs={str(skill_dir.parent): [("skill", SkillServer(path=str(skill_dir)))]},
     )
 
-    result = await inspect_client_inventory(client, timeout=1, tokens=[], scan_skills=True)
+    result = await inspect_client(client, timeout=1, tokens=[], scan_skills=True)
 
     assert len(result.skills) == 1
     assert result.skills[0].files == []
@@ -62,7 +62,7 @@ async def test_inspect_client_inventory_rejects_symlink_before_reading_skill(tmp
 
 
 @pytest.mark.asyncio
-async def test_inspect_client_inventory_records_stdio_server_without_handshake():
+async def test_inspect_client_records_stdio_server_without_handshake():
     client = ClientToInspect(
         name="cursor",
         client_path="/proj",
@@ -72,7 +72,7 @@ async def test_inspect_client_inventory_records_stdio_server_without_handshake()
         skills_dirs={},
     )
 
-    result = await inspect_client_inventory(
+    result = await inspect_client(
         client,
         timeout=1,
         tokens=[],
@@ -88,7 +88,7 @@ async def test_inspect_client_inventory_records_stdio_server_without_handshake()
 
 
 @pytest.mark.asyncio
-async def test_inspect_extension_preserves_direct_http_status_error_category():
+async def test_inspect_extension_legacy_preserves_direct_http_status_error_category():
     request = Request("POST", "https://example.test/mcp")
     status_error = HTTPStatusError(
         "server error",
@@ -97,7 +97,7 @@ async def test_inspect_extension_preserves_direct_http_status_error_category():
     )
 
     with patch("agent_scan.inspect.check_server", new_callable=AsyncMock, side_effect=status_error):
-        result = await inspect_extension(
+        result = await inspect_extension_legacy(
             "remote",
             RemoteServer(url="https://example.test/mcp", type="http"),
             timeout=1,
@@ -108,7 +108,7 @@ async def test_inspect_extension_preserves_direct_http_status_error_category():
 
 
 @pytest.mark.asyncio
-async def test_inspect_client_inventory_inspects_server_without_legacy_extension():
+async def test_inspect_client_inspects_server_without_legacy_extension():
     from mcp.types import Implementation, InitializeResult
 
     from agent_scan.models import ServerSignature
@@ -129,10 +129,10 @@ async def test_inspect_client_inventory_inspects_server_without_legacy_extension
     )
 
     with (
-        patch("agent_scan.inspect.inspect_extension", side_effect=AssertionError("legacy path used")),
+        patch("agent_scan.inspect.inspect_extension_legacy", side_effect=AssertionError("legacy path used")),
         patch("agent_scan.inspect.check_server", new_callable=AsyncMock, return_value=(signature, remote)),
     ):
-        result = await inspect_client_inventory(client, timeout=1, tokens=[], scan_skills=False)
+        result = await inspect_client(client, timeout=1, tokens=[], scan_skills=False)
 
     assert len(result.servers) == 1
     assert result.servers[0].signature == signature
@@ -140,7 +140,7 @@ async def test_inspect_client_inventory_inspects_server_without_legacy_extension
 
 
 @pytest.mark.asyncio
-async def test_inspect_client_inventory_converts_server_error_without_legacy_union():
+async def test_inspect_client_converts_server_error_without_legacy_union():
     request = Request("POST", "https://example.test/mcp")
     status_error = HTTPStatusError(
         "server error",
@@ -150,14 +150,12 @@ async def test_inspect_client_inventory_converts_server_error_without_legacy_uni
     client = ClientToInspect(
         name="cursor",
         client_path="/proj",
-        mcp_configs={
-            "/proj/.mcp.json": [("remote", RemoteServer(url="https://example.test/mcp", type="http"))]
-        },
+        mcp_configs={"/proj/.mcp.json": [("remote", RemoteServer(url="https://example.test/mcp", type="http"))]},
         skills_dirs={},
     )
 
     with patch("agent_scan.inspect.check_server", new_callable=AsyncMock, side_effect=status_error):
-        result = await inspect_client_inventory(client, timeout=1, tokens=[], scan_skills=False)
+        result = await inspect_client(client, timeout=1, tokens=[], scan_skills=False)
 
     assert len(result.servers) == 1
     assert result.servers[0].signature is None
@@ -275,32 +273,32 @@ async def test_detected_usernames_falls_back_to_all_when_none_detected():
         shutil.rmtree(tmp)
 
 
-# --- inspect_legacy_pipeline username-reporting tests ---
+# --- inspect_pipeline_legacy username-reporting tests ---
 
 
 @pytest.mark.asyncio
-async def test_inspect_legacy_pipeline_reports_only_detected_usernames(home_dirs_with_agent):
-    """inspect_legacy_pipeline should only include usernames where an agent was actually found."""
+async def test_inspect_pipeline_legacy_reports_only_detected_usernames(home_dirs_with_agent):
+    """inspect_pipeline_legacy should only include usernames where an agent was actually found."""
     candidate, home_dirs = home_dirs_with_agent
 
     with (
         patch("agent_scan.pipelines.get_readable_home_directories", return_value=home_dirs),
         patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
-        patch("agent_scan.pipelines.inspect_client", new_callable=AsyncMock) as mock_inspect,
+        patch("agent_scan.pipelines.inspect_client_legacy", new_callable=AsyncMock) as mock_inspect,
         patch("agent_scan.pipelines.inspected_client_to_scan_path_result") as mock_to_result,
     ):
         mock_inspect.return_value = None
         mock_to_result.return_value = None
 
         args = InspectArgs(timeout=10, tokens=[], paths=[])
-        _, scanned_usernames = await inspect_legacy_pipeline(args)
+        _, scanned_usernames = await inspect_pipeline_legacy(args)
 
     assert sorted(scanned_usernames) == ["alice", "bob"]
     assert "charlie" not in scanned_usernames
 
 
 @pytest.mark.asyncio
-async def test_inspect_legacy_pipeline_falls_back_to_all_usernames_when_no_agents_detected():
+async def test_inspect_pipeline_legacy_falls_back_to_all_usernames_when_no_agents_detected():
     """When no agents are detected and all_users is set, the legacy pipeline should report all usernames."""
     tmp = tempfile.mkdtemp()
     try:
@@ -323,7 +321,7 @@ async def test_inspect_legacy_pipeline_falls_back_to_all_usernames_when_no_agent
             patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
         ):
             args = InspectArgs(timeout=10, tokens=[], paths=[], all_users=True)
-            _, scanned_usernames = await inspect_legacy_pipeline(args)
+            _, scanned_usernames = await inspect_pipeline_legacy(args)
 
         assert sorted(scanned_usernames) == ["alice", "bob"]
     finally:
@@ -331,7 +329,7 @@ async def test_inspect_legacy_pipeline_falls_back_to_all_usernames_when_no_agent
 
 
 @pytest.mark.asyncio
-async def test_inspect_legacy_pipeline_detected_usernames_are_sorted():
+async def test_inspect_pipeline_legacy_detected_usernames_are_sorted():
     """Detected usernames should be returned in sorted order for deterministic output."""
     tmp = tempfile.mkdtemp()
     try:
@@ -354,14 +352,14 @@ async def test_inspect_legacy_pipeline_detected_usernames_are_sorted():
         with (
             patch("agent_scan.pipelines.get_readable_home_directories", return_value=home_dirs),
             patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
-            patch("agent_scan.pipelines.inspect_client", new_callable=AsyncMock) as mock_inspect,
+            patch("agent_scan.pipelines.inspect_client_legacy", new_callable=AsyncMock) as mock_inspect,
             patch("agent_scan.pipelines.inspected_client_to_scan_path_result") as mock_to_result,
         ):
             mock_inspect.return_value = None
             mock_to_result.return_value = None
 
             args = InspectArgs(timeout=10, tokens=[], paths=[])
-            _, scanned_usernames = await inspect_legacy_pipeline(args)
+            _, scanned_usernames = await inspect_pipeline_legacy(args)
 
         assert scanned_usernames == ["alice", "bob", "charlie"]
     finally:
@@ -369,7 +367,7 @@ async def test_inspect_legacy_pipeline_detected_usernames_are_sorted():
 
 
 @pytest.mark.asyncio
-async def test_inspect_legacy_pipeline_single_user_detected_among_many():
+async def test_inspect_pipeline_legacy_single_user_detected_among_many():
     """When only one user out of many has an agent, only that username should be reported."""
     tmp = tempfile.mkdtemp()
     try:
@@ -393,14 +391,14 @@ async def test_inspect_legacy_pipeline_single_user_detected_among_many():
         with (
             patch("agent_scan.pipelines.get_readable_home_directories", return_value=home_dirs),
             patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
-            patch("agent_scan.pipelines.inspect_client", new_callable=AsyncMock) as mock_inspect,
+            patch("agent_scan.pipelines.inspect_client_legacy", new_callable=AsyncMock) as mock_inspect,
             patch("agent_scan.pipelines.inspected_client_to_scan_path_result") as mock_to_result,
         ):
             mock_inspect.return_value = None
             mock_to_result.return_value = None
 
             args = InspectArgs(timeout=10, tokens=[], paths=[])
-            _, scanned_usernames = await inspect_legacy_pipeline(args)
+            _, scanned_usernames = await inspect_pipeline_legacy(args)
 
         assert scanned_usernames == ["bob"]
     finally:
@@ -408,7 +406,7 @@ async def test_inspect_legacy_pipeline_single_user_detected_among_many():
 
 
 @pytest.mark.asyncio
-async def test_inspect_legacy_pipeline_deduplicates_usernames_across_clients():
+async def test_inspect_pipeline_legacy_deduplicates_usernames_across_clients():
     """When multiple clients detect the same user, the username should appear only once."""
     tmp = tempfile.mkdtemp()
     try:
@@ -439,14 +437,14 @@ async def test_inspect_legacy_pipeline_deduplicates_usernames_across_clients():
         with (
             patch("agent_scan.pipelines.get_readable_home_directories", return_value=home_dirs),
             patch("agent_scan.pipelines.get_well_known_clients", return_value=candidates),
-            patch("agent_scan.pipelines.inspect_client", new_callable=AsyncMock) as mock_inspect,
+            patch("agent_scan.pipelines.inspect_client_legacy", new_callable=AsyncMock) as mock_inspect,
             patch("agent_scan.pipelines.inspected_client_to_scan_path_result") as mock_to_result,
         ):
             mock_inspect.return_value = None
             mock_to_result.return_value = None
 
             args = InspectArgs(timeout=10, tokens=[], paths=[])
-            _, scanned_usernames = await inspect_legacy_pipeline(args)
+            _, scanned_usernames = await inspect_pipeline_legacy(args)
 
         assert scanned_usernames == ["alice"]
     finally:
@@ -454,7 +452,7 @@ async def test_inspect_legacy_pipeline_deduplicates_usernames_across_clients():
 
 
 @pytest.mark.asyncio
-async def test_inspect_legacy_pipeline_no_clients_returns_empty_results():
+async def test_inspect_pipeline_legacy_no_clients_returns_empty_results():
     """When no MCP clients are installed, the legacy pipeline should return no scan path results."""
     tmp = tempfile.mkdtemp()
     try:
@@ -473,7 +471,7 @@ async def test_inspect_legacy_pipeline_no_clients_returns_empty_results():
             patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
         ):
             args = InspectArgs(timeout=10, tokens=[], paths=[])
-            results, _ = await inspect_legacy_pipeline(args)
+            results, _ = await inspect_pipeline_legacy(args)
 
         assert results == []
     finally:
@@ -481,14 +479,14 @@ async def test_inspect_legacy_pipeline_no_clients_returns_empty_results():
 
 
 @pytest.mark.asyncio
-async def test_inspect_legacy_pipeline_missing_explicit_path_returns_file_not_found_error():
+async def test_inspect_pipeline_legacy_missing_explicit_path_returns_file_not_found_error():
     """An explicit missing path should produce a legacy file-not-found error result."""
     with (
         patch("agent_scan.pipelines.get_readable_home_directories", return_value=[]),
         patch("agent_scan.pipelines.client_to_inspect_from_path", new_callable=AsyncMock, return_value=[]),
     ):
         args = InspectArgs(timeout=10, tokens=[], paths=["/nonexistent/path.json"])
-        results, _ = await inspect_legacy_pipeline(args)
+        results, _ = await inspect_pipeline_legacy(args)
 
     assert len(results) == 1
     assert results[0].path == "/nonexistent/path.json"
@@ -497,7 +495,7 @@ async def test_inspect_legacy_pipeline_missing_explicit_path_returns_file_not_fo
 
 
 @pytest.mark.asyncio
-async def test_inspect_legacy_pipeline_paths_mode_does_not_leak_all_usernames():
+async def test_inspect_pipeline_legacy_paths_mode_does_not_leak_all_usernames():
     """When using --paths, scanned_usernames should not fall back to all readable usernames."""
     tmp = tempfile.mkdtemp()
     try:
@@ -515,14 +513,14 @@ async def test_inspect_legacy_pipeline_paths_mode_does_not_leak_all_usernames():
                 new_callable=AsyncMock,
                 return_value=[ClientToInspect(name="test", client_path="/some/path", mcp_configs={}, skills_dirs={})],
             ),
-            patch("agent_scan.pipelines.inspect_client", new_callable=AsyncMock) as mock_inspect,
+            patch("agent_scan.pipelines.inspect_client_legacy", new_callable=AsyncMock) as mock_inspect,
             patch("agent_scan.pipelines.inspected_client_to_scan_path_result") as mock_to_result,
         ):
             mock_inspect.return_value = None
             mock_to_result.return_value = None
 
             args = InspectArgs(timeout=10, tokens=[], paths=["/some/path/mcp.json"])
-            _, scanned_usernames = await inspect_legacy_pipeline(args)
+            _, scanned_usernames = await inspect_pipeline_legacy(args)
 
         assert scanned_usernames == [getpass.getuser()]
     finally:
@@ -530,7 +528,7 @@ async def test_inspect_legacy_pipeline_paths_mode_does_not_leak_all_usernames():
 
 
 @pytest.mark.asyncio
-async def test_inspect_legacy_pipeline_discovery_mode_falls_back_to_all_usernames_when_no_agents_detected():
+async def test_inspect_pipeline_legacy_discovery_mode_falls_back_to_all_usernames_when_no_agents_detected():
     """Without --paths but with --scan-all-users, when no agents are detected, all readable usernames should be reported."""
     tmp = tempfile.mkdtemp()
     try:
@@ -553,7 +551,7 @@ async def test_inspect_legacy_pipeline_discovery_mode_falls_back_to_all_username
             patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
         ):
             args = InspectArgs(timeout=10, tokens=[], paths=[], all_users=True)
-            _, scanned_usernames = await inspect_legacy_pipeline(args)
+            _, scanned_usernames = await inspect_pipeline_legacy(args)
 
         assert sorted(scanned_usernames) == ["alice", "bob"]
     finally:
@@ -707,7 +705,7 @@ async def test_glob_respects_max_depth():
 
 
 @pytest.mark.asyncio
-async def test_inspect_legacy_pipeline_discovery_mode_without_all_users_falls_back_to_current_user():
+async def test_inspect_pipeline_legacy_discovery_mode_without_all_users_falls_back_to_current_user():
     """Without --paths and without --scan-all-users, when no agents are detected, only the current user should be reported."""
     tmp = tempfile.mkdtemp()
     try:
@@ -730,7 +728,7 @@ async def test_inspect_legacy_pipeline_discovery_mode_without_all_users_falls_ba
             patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
         ):
             args = InspectArgs(timeout=10, tokens=[], paths=[], all_users=False)
-            _, scanned_usernames = await inspect_legacy_pipeline(args)
+            _, scanned_usernames = await inspect_pipeline_legacy(args)
 
         assert scanned_usernames == [getpass.getuser()]
     finally:
@@ -738,7 +736,7 @@ async def test_inspect_legacy_pipeline_discovery_mode_without_all_users_falls_ba
 
 
 @pytest.mark.asyncio
-async def test_inspect_client_default_does_not_handshake_stdio_servers():
+async def test_inspect_client_legacy_default_does_not_handshake_stdio_servers():
     """The default behavior (no ``do_stdio_handshake`` kwarg) must NOT start
     any stdio subprocess. This is the load-bearing safe-default property:
     spawning subprocesses from a user config is the dangerous action, so
@@ -747,9 +745,9 @@ async def test_inspect_client_default_does_not_handshake_stdio_servers():
     A caller that forgets to forward ``do_stdio_handshake=True`` falls
     through to this safe path: every stdio server is recorded on the
     InspectedExtension list with no signature and no error, and
-    ``inspect_extension`` is only invoked for remote MCP servers (skills
+    ``inspect_extension_legacy`` is only invoked for remote MCP servers (skills
     do not flow through this code path). The test installs a side_effect
-    that raises if ``inspect_extension`` is ever called for a stdio
+    that raises if ``inspect_extension_legacy`` is ever called for a stdio
     server — so any future refactor that flips the default fails loudly
     here.
 
@@ -775,7 +773,7 @@ async def test_inspect_client_default_does_not_handshake_stdio_servers():
         skills_dirs={},
     )
 
-    with patch("agent_scan.inspect.inspect_extension", new_callable=AsyncMock) as mock_inspect_extension:
+    with patch("agent_scan.inspect.inspect_extension_legacy", new_callable=AsyncMock) as mock_inspect_extension:
 
         async def fake_inspect(name, server, *args, **kwargs):
             from mcp.types import Implementation, InitializeResult
@@ -784,7 +782,7 @@ async def test_inspect_client_default_does_not_handshake_stdio_servers():
 
             if isinstance(server, StdioServer):
                 raise AssertionError(
-                    f"inspect_extension must not be called for stdio server {name!r} on the default path"
+                    f"inspect_extension_legacy must not be called for stdio server {name!r} on the default path"
                 )
             return InspectedExtension(
                 name=name,
@@ -802,7 +800,7 @@ async def test_inspect_client_default_does_not_handshake_stdio_servers():
 
         # Intentionally omit ``do_stdio_handshake`` to verify the safe
         # default kicks in.
-        result = await inspect_client(client, timeout=10, tokens=[], scan_skills=False)
+        result = await inspect_client_legacy(client, timeout=10, tokens=[], scan_skills=False)
 
     extensions = result.extensions["/cfg.json"]
     assert len(extensions) == 3
@@ -829,9 +827,9 @@ async def test_inspect_client_default_does_not_handshake_stdio_servers():
 
 
 @pytest.mark.asyncio
-async def test_inspect_client_explicit_do_stdio_handshake_runs_stdio_servers():
+async def test_inspect_client_legacy_explicit_do_stdio_handshake_runs_stdio_servers():
     """When the caller explicitly opts in via ``do_stdio_handshake=True``,
-    stdio servers flow through ``inspect_extension`` as expected. This
+    stdio servers flow through ``inspect_extension_legacy`` as expected. This
     is the path taken by every command that wants real stdio handshakes
     (interactive ``scan`` / ``inspect``, or ``--ci --dangerously-run-mcp-servers``
     overriding the push-key skip)."""
@@ -844,7 +842,7 @@ async def test_inspect_client_explicit_do_stdio_handshake_runs_stdio_servers():
         skills_dirs={},
     )
 
-    with patch("agent_scan.inspect.inspect_extension", new_callable=AsyncMock) as mock_inspect_extension:
+    with patch("agent_scan.inspect.inspect_extension_legacy", new_callable=AsyncMock) as mock_inspect_extension:
         from mcp.types import Implementation, InitializeResult
 
         from agent_scan.models import InspectedExtension, ServerSignature
@@ -861,7 +859,7 @@ async def test_inspect_client_explicit_do_stdio_handshake_runs_stdio_servers():
             ),
         )
 
-        await inspect_client(client, timeout=10, tokens=[], scan_skills=False, do_stdio_handshake=True)
+        await inspect_client_legacy(client, timeout=10, tokens=[], scan_skills=False, do_stdio_handshake=True)
 
     mock_inspect_extension.assert_awaited_once()
 
@@ -985,7 +983,7 @@ def test_config_path_survives_serialization_round_trip():
 
 
 @pytest.mark.asyncio
-async def test_inspect_client_inventory_collects_skills_and_joins_config_errors(tmp_path):
+async def test_inspect_client_collects_skills_and_joins_config_errors(tmp_path):
     skill_dir = tmp_path / "my-skill"
     skill_dir.mkdir()
     (skill_dir / "SKILL.md").write_text("---\nname: my-skill\ndescription: test\n---\ndo things")
@@ -999,7 +997,7 @@ async def test_inspect_client_inventory_collects_skills_and_joins_config_errors(
         skills_dirs={"/proj/skills": [("my-skill", SkillServer(path=str(skill_dir)))]},
     )
 
-    result = await inspect_client_inventory(client, timeout=1, tokens=[], scan_skills=True)
+    result = await inspect_client(client, timeout=1, tokens=[], scan_skills=True)
 
     assert result.client == "cursor"
     assert result.path == "/proj"
@@ -1014,7 +1012,7 @@ async def test_inspect_client_inventory_collects_skills_and_joins_config_errors(
 
 
 @pytest.mark.asyncio
-async def test_inspect_client_inventory_carries_skill_file_collection_error(tmp_path):
+async def test_inspect_client_carries_skill_file_collection_error(tmp_path):
     skill_path = tmp_path / "missing-skill"
     client = ClientToInspect(
         name="cursor",
@@ -1023,7 +1021,7 @@ async def test_inspect_client_inventory_carries_skill_file_collection_error(tmp_
         skills_dirs={"/proj/skills": [("missing-skill", SkillServer(path=str(skill_path)))]},
     )
 
-    result = await inspect_client_inventory(client, timeout=1, tokens=[], scan_skills=True)
+    result = await inspect_client(client, timeout=1, tokens=[], scan_skills=True)
 
     assert len(result.skills) == 1
     skill = result.skills[0]
@@ -1035,7 +1033,7 @@ async def test_inspect_client_inventory_carries_skill_file_collection_error(tmp_
 
 
 @pytest.mark.asyncio
-async def test_inspect_client_inventory_reports_manifest_validation_as_inspection_error(tmp_path):
+async def test_inspect_client_reports_manifest_validation_as_inspection_error(tmp_path):
     skill_path = tmp_path / "malformed-skill"
     skill_path.mkdir()
     (skill_path / "SKILL.md").write_text("---\nname: malformed\n---\nmissing description")
@@ -1046,7 +1044,7 @@ async def test_inspect_client_inventory_reports_manifest_validation_as_inspectio
         skills_dirs={"/proj/skills": [("malformed", SkillServer(path=str(skill_path)))]},
     )
 
-    result = await inspect_client_inventory(client, timeout=1, tokens=[], scan_skills=True)
+    result = await inspect_client(client, timeout=1, tokens=[], scan_skills=True)
 
     assert result.skills[0].error is not None
     assert result.skills[0].error.message == "could not inspect skill"
@@ -1055,7 +1053,7 @@ async def test_inspect_client_inventory_reports_manifest_validation_as_inspectio
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("frontmatter", ["", "a scalar", "- a list item"])
-async def test_inspect_client_inventory_rejects_non_mapping_manifest_frontmatter(tmp_path, frontmatter):
+async def test_inspect_client_rejects_non_mapping_manifest_frontmatter(tmp_path, frontmatter):
     skill_path = tmp_path / "malformed-skill"
     skill_path.mkdir()
     (skill_path / "SKILL.md").write_text(f"---\n{frontmatter}\n---\nbody")
@@ -1066,7 +1064,7 @@ async def test_inspect_client_inventory_rejects_non_mapping_manifest_frontmatter
         skills_dirs={"/proj/skills": [("malformed", SkillServer(path=str(skill_path)))]},
     )
 
-    result = await inspect_client_inventory(client, timeout=1, tokens=[], scan_skills=True)
+    result = await inspect_client(client, timeout=1, tokens=[], scan_skills=True)
 
     assert result.skills[0].error is not None
     assert result.skills[0].error.message == "could not inspect skill"
@@ -1074,7 +1072,7 @@ async def test_inspect_client_inventory_rejects_non_mapping_manifest_frontmatter
 
 
 @pytest.mark.asyncio
-async def test_inspect_client_inventory_validates_manifest_before_redaction(tmp_path):
+async def test_inspect_client_validates_manifest_before_redaction(tmp_path):
     secret = synthetic_secret()
     skill_path = tmp_path / "secret-skill"
     skill_path.mkdir()
@@ -1086,7 +1084,7 @@ async def test_inspect_client_inventory_validates_manifest_before_redaction(tmp_
         skills_dirs={"/proj/skills": [("secret-skill", SkillServer(path=str(skill_path)))]},
     )
 
-    result = await inspect_client_inventory(client, timeout=1, tokens=[], scan_skills=True)
+    result = await inspect_client(client, timeout=1, tokens=[], scan_skills=True)
 
     assert result.skills[0].error is None
     assert secret not in result.skills[0].files[0].content
@@ -1094,7 +1092,7 @@ async def test_inspect_client_inventory_validates_manifest_before_redaction(tmp_
 
 
 @pytest.mark.asyncio
-async def test_inspect_client_inventory_recovers_from_unexpected_collection_error(tmp_path):
+async def test_inspect_client_recovers_from_unexpected_collection_error(tmp_path):
     skill_path = tmp_path / "skill"
     skill_path.mkdir()
     client = ClientToInspect(
@@ -1105,7 +1103,7 @@ async def test_inspect_client_inventory_recovers_from_unexpected_collection_erro
     )
 
     with patch("agent_scan.inspect.collect_skill_files", side_effect=RuntimeError("unexpected")):
-        result = await inspect_client_inventory(client, timeout=1, tokens=[], scan_skills=True)
+        result = await inspect_client(client, timeout=1, tokens=[], scan_skills=True)
 
     assert result.skills[0].files == []
     assert result.skills[0].error is not None

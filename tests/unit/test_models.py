@@ -4,7 +4,7 @@ from pydantic import ValidationError
 from agent_scan.models import CommandParsingError, RemoteServer, StdioServer
 
 
-class TestInspectionInventory:
+class TestInspectionResults:
     def test_v20260710_wire_models_are_distinct_from_inspection_models(self):
         from agent_scan.models.api.v20260710 import McpServerRequest, ScanPathRequest, SkillRequest
         from agent_scan.models.inspect import InspectedPath, InspectedServer, InspectedSkill
@@ -46,7 +46,7 @@ class TestInspectionInventory:
         assert inspected.servers[0].config_path.endswith("mcp.json")
         assert inspected.skills[0].files[0].path == "SKILL.md"
 
-    def test_v20260710_request_converts_inspection_inventory_at_boundary(self):
+    def test_v20260710_request_converts_inspection_results_at_boundary(self):
         from agent_scan.models import SkillFile
         from agent_scan.models.api.v20260710 import McpServerRequest, ScanPathRequest, ScanRequest, SkillRequest
         from agent_scan.models.inspect import InspectedPath, InspectedServer, InspectedSkill

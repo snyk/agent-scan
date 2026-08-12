@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 def _inspection_error_to_scan_error(
     error: ServerStartupError | ServerHTTPError | SkillScanError | UserDeclinedError,
 ) -> ScanError:
-    """Normalize a concrete failure for the new inspect inventory.
+    """Normalize a concrete failure for the new inspection result.
 
     The legacy scan converter intentionally keeps its equivalent mapping inline
     until that pipeline is removed, so the two result paths remain independent.
@@ -208,7 +208,7 @@ def find_relevant_token(tokens: list[TokenAndClientInfo], name: str) -> TokenAnd
     return None
 
 
-async def inspect_extension(
+async def inspect_extension_legacy(
     name: str,
     config: StdioServer | RemoteServer | SkillServer,
     timeout: int,
@@ -309,7 +309,7 @@ async def inspect_extension(
             )
 
 
-async def inspect_client(
+async def inspect_client_legacy(
     client: ClientToInspect,
     timeout: int,
     tokens: list[TokenAndClientInfo],
@@ -360,7 +360,7 @@ async def inspect_client(
             if not do_stdio_handshake and isinstance(server, StdioServer):
                 extensions_for_mcp_config.append(InspectedExtension(name=name, config=server))
                 continue
-            extension = await inspect_extension(
+            extension = await inspect_extension_legacy(
                 name,
                 server,
                 timeout,
@@ -378,13 +378,13 @@ async def inspect_client(
                 continue
             extensions_for_skills_dir: list[InspectedExtension] = []
             for name, skill in skills_dirs:
-                extension = await inspect_extension(name, skill, timeout)
+                extension = await inspect_extension_legacy(name, skill, timeout)
                 extensions_for_skills_dir.append(extension)
             extensions[skills_dir_path] = extensions_for_skills_dir
     return InspectedClient(name=client.name, client_path=client.client_path, extensions=extensions)
 
 
-def _inspect_skill_inventory(name: str, config: SkillServer) -> InspectedSkill:
+def _inspect_skill(name: str, config: SkillServer) -> InspectedSkill:
     try:
         files = collect_skill_files(config.path, validate_manifest=True)
         error = None
@@ -409,7 +409,7 @@ def _inspect_skill_inventory(name: str, config: SkillServer) -> InspectedSkill:
     return InspectedSkill(name=name, installation_path=config.path, files=files, error=error)
 
 
-async def _inspect_stdio_server_inventory(
+async def _inspect_stdio_server(
     name: str,
     config: StdioServer,
     config_path: str,
@@ -451,7 +451,7 @@ async def _inspect_stdio_server_inventory(
         )
 
 
-async def _inspect_remote_server_inventory(
+async def _inspect_remote_server(
     name: str,
     config: RemoteServer,
     config_path: str,
@@ -503,7 +503,7 @@ async def _inspect_remote_server_inventory(
     )
 
 
-async def _inspect_server_inventory(
+async def _inspect_server(
     name: str,
     config: StdioServer | RemoteServer,
     config_path: str,
@@ -528,7 +528,7 @@ async def _inspect_server_inventory(
     if not do_stdio_handshake and isinstance(config, StdioServer):
         return InspectedServer(name=name, config_path=config_path, server=config)
     if isinstance(config, StdioServer):
-        return await _inspect_stdio_server_inventory(
+        return await _inspect_stdio_server(
             name,
             config,
             config_path,
@@ -536,7 +536,7 @@ async def _inspect_server_inventory(
             tokens,
             stream_stderr=stream_stderr,
         )
-    return await _inspect_remote_server_inventory(name, config, config_path, timeout, tokens)
+    return await _inspect_remote_server(name, config, config_path, timeout, tokens)
 
 
 async def _inspect_server_configs(
@@ -556,7 +556,7 @@ async def _inspect_server_configs(
             continue
         for name, config in servers_or_error:
             servers.append(
-                await _inspect_server_inventory(
+                await _inspect_server(
                     name,
                     config,
                     config_path,
@@ -577,11 +577,11 @@ def _inspect_skill_configs(client: ClientToInspect) -> tuple[list[InspectedSkill
         if isinstance(skills_or_error, FileNotFoundConfig):
             candidate_errors.append(_config_error_to_scan_error(skills_or_error))
             continue
-        skills.extend(_inspect_skill_inventory(name, config) for name, config in skills_or_error)
+        skills.extend(_inspect_skill(name, config) for name, config in skills_or_error)
     return skills, candidate_errors
 
 
-async def inspect_client_inventory(
+async def inspect_client(
     client: ClientToInspect,
     timeout: int,
     tokens: list[TokenAndClientInfo],
@@ -591,7 +591,7 @@ async def inspect_client_inventory(
     declined_servers: set[tuple[str, str]] | None = None,
     do_stdio_handshake: bool = False,
 ) -> InspectedPath:
-    """Inspect one client directly into the normalized inspect inventory."""
+    """Inspect one client and return its normalized inspection result."""
     servers, candidate_errors = await _inspect_server_configs(
         client,
         timeout,
