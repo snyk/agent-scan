@@ -5,6 +5,15 @@ from agent_scan.models import CommandParsingError, RemoteServer, StdioServer
 
 
 class TestInspectionResults:
+    def test_discovered_skill_keeps_name_and_path_together(self):
+        from agent_scan.models.skill import DiscoveredSkill
+
+        skill = DiscoveredSkill(name="git:commit", path="/project/.claude/commands/git/commit.md")
+
+        assert skill.name == "git:commit"
+        assert skill.path == "/project/.claude/commands/git/commit.md"
+        assert set(skill.model_dump()) == {"name", "path"}
+
     def test_v20260710_wire_models_are_distinct_from_inspection_models(self):
         from agent_scan.models.api.v20260710 import McpServerRequest, ScanPathRequest, SkillRequest
         from agent_scan.models.inspect import InspectedPath, InspectedServer, InspectedSkill
@@ -109,12 +118,10 @@ class TestInspectionResults:
             "scan_metadata": None,
         }
 
-    def test_version_modules_are_directly_importable(self):
-        from agent_scan.models.api.v20250902 import ScanPathResult
+    def test_current_models_are_directly_importable(self):
         from agent_scan.models.api.v20260710 import ScanResponse
         from agent_scan.models.inspect import InspectedPath
 
-        assert ScanPathResult(path="legacy").path == "legacy"
         assert InspectedPath(path="current").servers == []
         assert ScanResponse(scan_path_responses=[]).scan_path_responses == []
 
