@@ -340,9 +340,10 @@ v0.5.x emits issue-code findings and path-keyed `ScanPathResult` JSON. See the [
 --analysis-url URL                Defaults to the 2026-07-10 analysis API
 --ignore-risks NAMES              Comma-separated risk names to omit from output and CI evaluation
 --ignore-failure-codes CODES      Comma-separated X codes to omit from CI evaluation
+--show-full-discovery             List every MCP entity and skill file instead of compact scan summaries
 ```
 
-v0.6 and later emit scored risk indicators and `scan_path_responses` JSON. See the [v0.6-and-later CLI reference](docs/cli-reference.md#agent-scan-v06-and-later), [risk reference](docs/risks.md), and [failure-code reference](docs/failure-codes.md).
+v0.6 and later emit scored risk indicators and `scan_path_responses` JSON. Human-readable scan output is compact by default; `--show-full-discovery` expands it without changing JSON or `inspect` output. See the [v0.6-and-later CLI reference](docs/cli-reference.md#agent-scan-v06-and-later), [risk reference](docs/risks.md), and [failure-code reference](docs/failure-codes.md).
 
 ### Examples
 

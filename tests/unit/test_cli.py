@@ -25,6 +25,7 @@ def _cli_args(
     ci: bool,
     ignore_risks: str | None = None,
     ignore_failure_codes: str | None = None,
+    show_full_discovery: bool = False,
 ) -> Namespace:
     return Namespace(
         json=json_output,
@@ -35,6 +36,7 @@ def _cli_args(
         ignore_risks=ignore_risks,
         ignore_failure_codes=ignore_failure_codes,
         skills=True,
+        show_full_discovery=show_full_discovery,
     )
 
 
@@ -63,6 +65,28 @@ def test_scan_parser_accepts_ignore_failure_codes():
     args = parser.parse_args(["--ignore-failure-codes", "X001,X007"])
 
     assert args.ignore_failure_codes == "X001,X007"
+
+
+def test_scan_parser_accepts_show_full_discovery():
+    parser = argparse.ArgumentParser()
+    setup_scan_parser(parser)
+
+    assert parser.parse_args([]).show_full_discovery is False
+    assert parser.parse_args(["--show-full-discovery"]).show_full_discovery is True
+
+
+@pytest.mark.asyncio
+async def test_show_full_discovery_is_forwarded_to_plain_printer():
+    response = ScanResponse(scan_path_responses=[])
+    args = _cli_args(json_output=False, ci=False, show_full_discovery=True)
+
+    with (
+        patch("agent_scan.cli.run_scan", new_callable=AsyncMock, return_value=response),
+        patch("agent_scan.cli.print_scan_response") as print_response,
+    ):
+        await print_scan_inspect(mode="scan", args=args)
+
+    print_response.assert_called_once_with(response, False, args, show_all=True)
 
 
 @pytest.mark.asyncio
