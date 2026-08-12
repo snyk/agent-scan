@@ -1216,6 +1216,28 @@ def test_find_discoverers_returns_empty_when_no_agents_installed(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_discover_clients_to_inspect_normalizes_unresolved_windows_path():
+    from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
+
+    windows_path = r"C:\Users\alice\missing.json"
+
+    def expand_windows_home(path: str) -> str:
+        return r"C:\Users\alice" if path == "~" else path
+
+    with (
+        patch("agent_scan.pipelines.get_readable_home_directories", return_value=[]),
+        patch("agent_scan.pipelines.client_to_inspect_from_path", return_value=[]),
+        patch("agent_scan.utils.os.path.expanduser", side_effect=expand_windows_home),
+    ):
+        _, unresolved_paths, _ = await discover_clients_to_inspect(
+            InspectArgs(timeout=10, tokens=[], paths=[windows_path])
+        )
+
+    assert unresolved_paths[0].path == "C:/Users/alice/missing.json"
+    assert unresolved_paths[0].client == "C:/Users/alice/missing.json"
+
+
+@pytest.mark.asyncio
 async def test_discover_clients_to_inspect_runs_legacy_for_claude_code(tmp_path):
     """Legacy get_mcp_config_per_client is invoked for Claude Code (no longer bypassed)."""
     from agent_scan.inspect import get_mcp_config_per_client as real_legacy

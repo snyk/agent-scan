@@ -1,33 +1,47 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="570" viewBox="0 0 1000 570" role="img" aria-labelledby="title description">
-  <title id="title">Agent Scan risk report</title>
-  <desc id="description">Terminal output showing discovered MCP servers and skills with scored security risks.</desc>
-  <rect width="1000" height="570" rx="12" fill="#17171c"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="640" viewBox="0 0 1000 640" role="img" aria-labelledby="title description">
+  <title id="title">Agent Scan compact risk report</title>
+  <desc id="description">Default Agent Scan v0.6 terminal output. Clean components show discovered item counts, while risky components show affected items and compact summaries of the remaining discovery.</desc>
+  <style>
+    .terminal { fill: #17171c; }
+    .text { fill: #e6e6e9; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 14px; }
+    .bold { font-weight: 700; }
+    .muted { fill: #9a9aa2; }
+    .clean { fill: #28a745; }
+    .low { fill: #e2d2f4; }
+    .high { fill: #9456d2; }
+    .critical { fill: #8446c4; }
+  </style>
+
+  <rect class="terminal" width="1000" height="640" rx="12"/>
   <circle cx="26" cy="25" r="6" fill="#ff5f57"/>
   <circle cx="46" cy="25" r="6" fill="#febc2e"/>
   <circle cx="66" cy="25" r="6" fill="#28c840"/>
-  <g font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="15" fill="#e6e6e9">
-    <text x="24" y="65" font-weight="700">Snyk Agent Scan</text>
 
-    <text x="24" y="103">● Scanning <tspan font-weight="700">~/.cursor/mcp.json</tspan><tspan fill="#9a9aa2"> found 2 mcp servers and 1 skill</tspan></text>
+  <g class="text">
+    <text x="24" y="65" class="bold">Snyk Agent Scan v0.6.0</text>
+
+    <text x="24" y="103">● Scanning <tspan class="bold">~/.cursor/mcp.json</tspan><tspan class="muted"> found 2 mcp servers and 1 skill</tspan></text>
     <text x="24" y="131">│</text>
 
-    <text x="24" y="159">├── <tspan font-weight="700" fill="#7535b6">github</tspan> 2 risks</text>
-    <text x="58" y="187" fill="#7535b6">● <tspan font-weight="700">Prompt injection in tool 1000/1000</tspan><tspan fill="#e6e6e9">: Hidden instructions target the agent.</tspan></text>
-    <text x="78" y="213"><tspan font-weight="700" fill="#9a9aa2">Affected tools: </tspan>create_pull_request</text>
-    <text x="58" y="241" fill="#55555d">● <tspan font-weight="700">Dangerous words 100/1000</tspan><tspan fill="#e6e6e9">: Manipulative wording found.</tspan></text>
-    <text x="78" y="267"><tspan font-weight="700" fill="#9a9aa2">Affected tools: </tspan>search_code</text>
-    <text x="58" y="295">├── tool         <tspan font-weight="700">create_pull_request</tspan></text>
-    <text x="58" y="321">└── tool         <tspan font-weight="700">search_code</tspan></text>
+    <text x="24" y="159">├── <tspan class="bold critical">github</tspan> 2 risks</text>
+    <text x="58" y="187" class="critical">● <tspan class="bold">Prompt injection in tool (1000/1000)</tspan><tspan class="text">: Hidden instructions target the agent.</tspan></text>
+    <text x="78" y="213"><tspan class="bold muted">Affected tools: </tspan>create_pull_request</text>
+    <text x="58" y="241" class="low">● <tspan class="bold">Dangerous words (100/1000)</tspan><tspan class="text">: Manipulative wording found.</tspan></text>
+    <text x="78" y="267"><tspan class="bold muted">Affected tools: </tspan>search_code</text>
+    <text x="58" y="295">├── tool         <tspan class="bold">create_pull_request</tspan></text>
+    <text x="58" y="321">├── tool         <tspan class="bold">search_code</tspan></text>
+    <text x="58" y="347" class="muted">└── and 6 more tools, 2 resources</text>
 
-    <text x="24" y="355">├── <tspan font-weight="700" fill="#28a745">playwright</tspan></text>
-    <text x="58" y="381">└── tool         <tspan font-weight="700">navigate</tspan></text>
+    <text x="24" y="383">├── <tspan class="bold clean">playwright</tspan><tspan class="muted">  5 tools, 2 resources</tspan></text>
 
-    <text x="24" y="415">└── <tspan font-weight="700" fill="#9456d2">release-helper</tspan> 1 risk</text>
-    <text x="58" y="443" fill="#9456d2">● <tspan font-weight="700">Suspicious download URL 600/1000</tspan><tspan fill="#e6e6e9">: Downloads an untrusted executable.</tspan></text>
-    <text x="78" y="469"><tspan font-weight="700" fill="#9a9aa2">Locations: </tspan>scripts/install.sh:12</text>
-    <text x="78" y="495"><tspan font-weight="700" fill="#9a9aa2">Malicious URLs: </tspan>https://downloads.example.invalid/install.sh</text>
-    <text x="58" y="523">├── instruction  <tspan font-weight="700">SKILL.md</tspan></text>
-    <text x="58" y="549">└── script       <tspan font-weight="700">scripts/install.sh</tspan></text>
+    <text x="24" y="419">└── <tspan class="bold high">release-helper</tspan> 1 risk</text>
+    <text x="58" y="447" class="high">● <tspan class="bold">Suspicious download URL (600/1000)</tspan><tspan class="text">: Downloads an untrusted executable.</tspan></text>
+    <text x="78" y="473"><tspan class="bold muted">Locations: </tspan>scripts/install.sh:12</text>
+    <text x="78" y="499"><tspan class="bold muted">Malicious URLs: </tspan>https://downloads.example.invalid/install.sh</text>
+    <text x="58" y="527">├── script       <tspan class="bold">scripts/install.sh</tspan></text>
+    <text x="58" y="553" class="muted">└── and 1 instruction, 1 more script, 2 assets</text>
+
+    <text x="24" y="601" class="muted">Use --show-full-discovery to list every discovered entity and skill file.</text>
   </g>
 </svg>

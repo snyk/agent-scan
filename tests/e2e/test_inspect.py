@@ -472,6 +472,7 @@ class TestInspectBehaviorContract:
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
 
         assert result.returncode == 1
@@ -595,6 +596,7 @@ class TestInspectBehaviorContract:
             [*agent_scan_cmd, "inspect", "--dangerously-run-mcp-servers", str(config)],
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
         detailed = subprocess.run(
             [
@@ -607,6 +609,7 @@ class TestInspectBehaviorContract:
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
 
         assert concise.returncode == detailed.returncode == 0
@@ -631,6 +634,7 @@ class TestInspectBehaviorContract:
             ],
             capture_output=True,
             text=True,
+            encoding="utf-8",
         )
 
         assert result.returncode == 0

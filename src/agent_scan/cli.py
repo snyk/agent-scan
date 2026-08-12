@@ -199,7 +199,7 @@ def add_common_arguments(parser):
         "--print-full-descriptions",
         default=False,
         action="store_true",
-        help="Show error details and tracebacks",
+        help="Show full entity and skill-file descriptions without truncation",
     )
     parser.add_argument(
         "--json",

@@ -15,6 +15,8 @@ from agent_scan.models.api.common import ScanUserInfo
 from agent_scan.models.api.v20260710 import (
     McpServerRequest,
     ScanPathRequest,
+    ScanPathResponse,
+    ScanRequest,
     ScanResponse,
     SkillRequest,
 )
@@ -889,9 +891,7 @@ def _make_sync_ok_session():
     mock_session = MagicMock()
     mock_response = AsyncMock()
     mock_response.status = 200
-    mock_response.text = AsyncMock(
-        return_value='{"scan_path_results": [{"path": "/test/path", "issues": [], "labels": []}], "scan_user_info": {}}'
-    )
+    mock_response.text = AsyncMock(return_value='{"scan_path_responses": [{"path": "/test/path"}]}')
     mock_response.raise_for_status = MagicMock()
 
     mock_post = MagicMock()
@@ -907,7 +907,7 @@ def _make_sync_ok_session():
 class TestAsyncAnalysisEnabled:
     """The push-key config lookup that decides sync vs async analysis per tenant."""
 
-    _CONFIG_URL = "https://api.snyk.io/hidden/agent-scan/config?version=2025-09-02"
+    _CONFIG_URL = "https://api.snyk.io/hidden/agent-scan/config?version=2026-07-10"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
@@ -960,7 +960,7 @@ class TestAsyncAnalysisEnabled:
 class TestSubmitAsyncAnalysis:
     """The fire-and-forget async submission: gzipped body, headers, and no-raise on failure."""
 
-    _ASYNC_URL = "https://api.snyk.io/hidden/agent-scan/async/analysis?version=2025-09-02"
+    _ASYNC_URL = "https://api.snyk.io/hidden/agent-scan/async/analysis?version=2026-07-10"
 
     @pytest.mark.asyncio
     async def test_gzips_payload_and_sets_headers(self):
@@ -1029,11 +1029,37 @@ class TestSubmitAsyncAnalysis:
 class TestAnalyzeMachineAsyncRouting:
     """analyze_machine's push-key routing: async when the tenant is flagged, sync otherwise, no fallback."""
 
-    _ANALYSIS_URL = "https://api.snyk.io/hidden/mcp-scan/analysis-machine?version=2025-09-02"
+    _ANALYSIS_URL = "https://api.snyk.io/hidden/mcp-scan/analysis-machine?version=2026-07-10"
 
     @pytest.mark.asyncio
     async def test_async_enabled_submits_async_and_skips_sync(self):
-        scan_paths = [ScanPathResult(path="/test/path")]
+        inspected_paths = [
+            InspectedPath(
+                client="cursor",
+                path="/test/path",
+                servers=[
+                    InspectedServer(
+                        name="server",
+                        server=StdioServer(command="server"),
+                        signature=ServerSignature(
+                            metadata=InitializeResult(
+                                protocolVersion="2024-11-05",
+                                capabilities=ServerCapabilities(),
+                                serverInfo=Implementation(name="server", version="1"),
+                            ),
+                            tools=[Tool(name="search", inputSchema={})],
+                        ),
+                    )
+                ],
+                skills=[
+                    InspectedSkill(
+                        name="skill",
+                        installation_path="/test/skill",
+                        files=[SkillFile(path="SKILL.md", content="instructions")],
+                    )
+                ],
+            )
+        ]
 
         with (
             patch(
@@ -1043,7 +1069,7 @@ class TestAnalyzeMachineAsyncRouting:
             patch("agent_scan.verify_api.aiohttp.ClientSession") as mock_session_class,
         ):
             result = await analyze_machine(
-                scan_paths=scan_paths,
+                inspected_paths=inspected_paths,
                 analysis_url=self._ANALYSIS_URL,
                 identifier="id-1",
                 push_key="push-abc",
@@ -1053,14 +1079,25 @@ class TestAnalyzeMachineAsyncRouting:
         mock_submit.assert_awaited_once()
         # No synchronous analysis session is ever opened once async is chosen.
         mock_session_class.assert_not_called()
-        assert result is scan_paths
+        response_path = result.scan_path_responses[0]
+        assert response_path.client == "cursor"
+        assert response_path.path == "/test/path"
+        assert response_path.server_risks[0].name == "server"
+        assert response_path.server_risks[0].entities[0].name == "search"
+        assert response_path.server_risks[0].entities[0].type == "tool"
+        assert response_path.skill_risks[0].name == "skill"
+        assert response_path.skill_risks[0].files[0].name == "SKILL.md"
+        assert response_path.skill_risks[0].files[0].type == "instruction"
+        assert isinstance(mock_submit.call_args.args[1], ScanRequest)
         # Config + async URLs are derived from the sync analysis URL, preserving the version query.
-        assert mock_enabled.call_args[0][0] == "https://api.snyk.io/hidden/agent-scan/config?version=2025-09-02"
-        assert mock_submit.call_args[0][0] == "https://api.snyk.io/hidden/agent-scan/async/analysis?version=2025-09-02"
+        assert mock_enabled.call_args.args[0] == "https://api.snyk.io/hidden/agent-scan/config?version=2026-07-10"
+        assert (
+            mock_submit.call_args.args[0] == "https://api.snyk.io/hidden/agent-scan/async/analysis?version=2026-07-10"
+        )
 
     @pytest.mark.asyncio
     async def test_async_disabled_falls_through_to_sync(self):
-        scan_paths = [ScanPathResult(path="/test/path")]
+        inspected_paths = [InspectedPath(path="/test/path")]
 
         with (
             patch(
@@ -1071,7 +1108,7 @@ class TestAnalyzeMachineAsyncRouting:
         ):
             mock_session_class.return_value = _make_sync_ok_session()
             result = await analyze_machine(
-                scan_paths=scan_paths,
+                inspected_paths=inspected_paths,
                 analysis_url=self._ANALYSIS_URL,
                 identifier=None,
                 push_key="push-abc",
@@ -1084,7 +1121,7 @@ class TestAnalyzeMachineAsyncRouting:
         call = mock_session_class.return_value.post.call_args
         assert call[0][0] == self._ANALYSIS_URL
         assert call[1]["headers"]["X-Push-Key"] == "push-abc"
-        assert len(result) == 1
+        assert result == ScanResponse(scan_path_responses=[ScanPathResponse(path="/test/path")])
 
 
 class TestBuildScanRequest:
@@ -1463,3 +1500,29 @@ async def test_analyze_machine_preserves_raise_on_retry_exhaustion():
                 max_retries=1,
                 raise_on_error=True,
             )
+
+
+@pytest.mark.asyncio
+async def test_analyze_machine_preserves_runtime_error_from_upload():
+    upload_error = RuntimeError("connection pool closed")
+    session = MagicMock()
+    post = MagicMock()
+    post.__aenter__ = AsyncMock(side_effect=upload_error)
+    post.__aexit__ = AsyncMock(return_value=None)
+    session.post = MagicMock(return_value=post)
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=None)
+
+    with (
+        patch("agent_scan.verify_api.aiohttp.ClientSession", return_value=session),
+        patch.dict(os.environ, {"SNYK_TOKEN": "test-token"}),
+    ):
+        with pytest.raises(RuntimeError) as exc_info:
+            await analyze_machine(
+                inspected_paths=[InspectedPath(path="/config")],
+                analysis_url="https://test.example/api",
+                identifier=None,
+                max_retries=1,
+            )
+
+    assert exc_info.value is upload_error

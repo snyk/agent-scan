@@ -49,6 +49,14 @@ def test_scan_parser_defaults_to_v20260710_and_rejects_removed_issue_flag():
         parser.parse_args(["--ignore-issues-codes", "W001"])
 
 
+def test_scan_parser_describes_print_full_descriptions_flag():
+    parser = argparse.ArgumentParser()
+    setup_scan_parser(parser)
+
+    action = next(action for action in parser._actions if "--print-full-descriptions" in action.option_strings)
+    assert action.help == "Show full entity and skill-file descriptions without truncation"
+
+
 def test_scan_parser_accepts_ignore_risks():
     parser = argparse.ArgumentParser()
     setup_scan_parser(parser)

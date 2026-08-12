@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 # Synthetic description emitted when binary skill content is allowed.
 BINARY_FILE_DESCRIPTION_PREFIX = "Binary file. Hash: "
+_FILE_HASH_CHUNK_SIZE = 64 * 1024
 
 # Cap traversal depth when walking a commands dir, mirroring the value used by
 # the discoverer plugin/extension walks (``agents.base._MAX_PLUGIN_RGLOB_DEPTH``).
@@ -82,7 +83,7 @@ def _read_skill_file_content(
         logger.debug("File %s is not valid UTF-8; treating as binary", get_relative_path(full_path))
         hasher = hashlib.sha256()
         with open(expanded, "rb") as f:
-            while chunk := f.read(65536):
+            while chunk := f.read(_FILE_HASH_CHUNK_SIZE):
                 hasher.update(chunk)
         return f"{BINARY_FILE_DESCRIPTION_PREFIX}{hasher.hexdigest()}"
 

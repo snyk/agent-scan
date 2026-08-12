@@ -137,8 +137,10 @@ class TestFullScanFlow:
             v20260710_analysis_server,
         ]
 
-        compact = subprocess.run(base_command, capture_output=True, text=True)
-        complete = subprocess.run([*base_command, "--show-full-discovery"], capture_output=True, text=True)
+        compact = subprocess.run(base_command, capture_output=True, text=True, encoding="utf-8")
+        complete = subprocess.run(
+            [*base_command, "--show-full-discovery"], capture_output=True, text=True, encoding="utf-8"
+        )
 
         assert compact.returncode == 0, compact.stderr
         assert "affected_tool" in compact.stdout
@@ -240,8 +242,10 @@ class TestFullScanFlow:
             "--analysis-url",
             v20260710_analysis_server,
         ]
-        result = subprocess.run(base_command, capture_output=True, text=True)
-        complete = subprocess.run([*base_command, "--show-full-discovery"], capture_output=True, text=True)
+        result = subprocess.run(base_command, capture_output=True, text=True, encoding="utf-8")
+        complete = subprocess.run(
+            [*base_command, "--show-full-discovery"], capture_output=True, text=True, encoding="utf-8"
+        )
 
         assert result.returncode == 0, result.stderr
         assert "Suspicious download URL (900/1000)" in result.stdout

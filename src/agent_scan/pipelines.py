@@ -68,10 +68,11 @@ async def discover_clients_to_inspect(
             if ctis:
                 clients_to_inspect.extend(ctis)
             else:
+                normalized_path = path.replace("\\", "/")
                 unresolved_paths.append(
                     InspectedPath(
-                        path=path,
-                        client=path,
+                        path=normalized_path,
+                        client=normalized_path,
                         error=ScanError(
                             message="File or folder not found", is_failure=False, category="file_not_found"
                         ),

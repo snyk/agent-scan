@@ -10,11 +10,23 @@ from typing import Any
 import aiohttp
 import certifi
 import rich
+from mcp.types import Prompt, Resource, ResourceTemplate, Tool
 
 from agent_scan.models.api.common import ScanUserInfo
-from agent_scan.models.api.v20260710 import ScanPathResponse, ScanRequest, ScanResponse
+from agent_scan.models.api.v20260710 import (
+    McpEntitySummary,
+    McpServerRequest,
+    McpServerRiskResponse,
+    ScanPathResponse,
+    ScanRequest,
+    ScanResponse,
+    SkillFileSummary,
+    SkillRequest,
+    SkillRiskResponse,
+)
 from agent_scan.models.errors import ScanError
 from agent_scan.models.inspect import InspectedPath
+from agent_scan.models.mcp import Entity
 from agent_scan.utils import get_environment, get_relative_path
 from agent_scan.well_known_clients import get_client_from_path
 
@@ -89,7 +101,7 @@ async def _async_analysis_enabled(
 
 async def _submit_async_analysis(
     async_url: str,
-    payload: "ScanPathResultsCreate",
+    payload: ScanRequest,
     base_headers: dict[str, str],
     identifier: str | None,
     trace_configs: list | None,
@@ -118,6 +130,64 @@ async def _submit_async_analysis(
                     logger.warning("Async analysis returned status %s.", response.status)
     except (TimeoutError, aiohttp.ClientError) as e:
         logger.warning("Async analysis request failed: %s", e)
+
+
+def _entity_summary(entity: Entity) -> McpEntitySummary:
+    if isinstance(entity, Tool):
+        entity_type = "tool"
+    elif isinstance(entity, Prompt):
+        entity_type = "prompt"
+    elif isinstance(entity, Resource):
+        entity_type = "resource"
+    elif isinstance(entity, ResourceTemplate):
+        entity_type = "resource_template"
+    else:
+        raise ValueError(f"Unknown entity type: {type(entity)}")
+    return McpEntitySummary(name=entity.name, type=entity_type)
+
+
+def _skill_file_summary(path: str) -> SkillFileSummary:
+    lowered = path.lower()
+    if lowered.endswith(".md"):
+        file_type = "instruction"
+    elif lowered.rsplit(".", 1)[-1] in ("py", "js", "ts", "sh"):
+        file_type = "script"
+    else:
+        file_type = "asset"
+    return SkillFileSummary(name=path, type=file_type)
+
+
+def _accepted_server_response(server: McpServerRequest) -> McpServerRiskResponse:
+    return McpServerRiskResponse(
+        name=server.name,
+        entities=[_entity_summary(entity) for entity in server.signature.entities] if server.signature else [],
+        error=server.error.model_copy(deep=True) if server.error else None,
+    )
+
+
+def _accepted_skill_response(skill: SkillRequest) -> SkillRiskResponse:
+    return SkillRiskResponse(
+        name=skill.name,
+        files=[_skill_file_summary(file.path) for file in skill.files],
+        error=skill.error.model_copy(deep=True) if skill.error else None,
+    )
+
+
+def _accepted_async_response(request: ScanRequest) -> ScanResponse:
+    """Represent paths accepted for async analysis without fabricating risks."""
+
+    return ScanResponse(
+        scan_path_responses=[
+            ScanPathResponse(
+                client=path.client,
+                path=path.path,
+                server_risks=[_accepted_server_response(server) for server in path.servers],
+                skill_risks=[_accepted_skill_response(skill) for skill in path.skills],
+                error=path.error.model_copy(deep=True) if path.error else None,
+            )
+            for path in request.scan_path_requests
+        ]
+    )
 
 
 def get_hostname() -> str:
@@ -333,7 +403,7 @@ async def analyze_machine(
         if await _async_analysis_enabled(config_url, push_key, trace_configs, skip_ssl_verify):
             async_url = analysis_url.replace(_SYNC_ANALYSIS_PATH, _ASYNC_ANALYSIS_PATH)
             await _submit_async_analysis(async_url, payload, headers, identifier, trace_configs, skip_ssl_verify)
-            return scan_paths
+            return _accepted_async_response(payload)
     elif snyk_token:
         # CLI mode with SNYK_TOKEN environment variable for authentication
         analysis_url = analysis_url.replace(
@@ -389,7 +459,7 @@ async def analyze_machine(
 
         except RuntimeError as e:
             logger.warning(f"Network error while uploading (attempt {attempt + 1}/{max_retries}): {e}")
-            raise RuntimeError(error_text) from e
+            raise
 
         except Exception as e:
             logger.error(f"Unexpected error while uploading scan results (attempt {attempt + 1}/{max_retries}): {e}")
