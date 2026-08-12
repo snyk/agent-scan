@@ -82,7 +82,7 @@ class TestControlServerPushKeySkipsConsent:
                 "agent_scan.cli.discover_clients_to_inspect",
                 new=AsyncMock(return_value=(_fake_client_with_stdio(), [], [])),
             ),
-            patch("agent_scan.pipelines.inspect_pipeline", new=mock_inspect),
+            patch("agent_scan.pipelines.inspect_legacy_pipeline", new=mock_inspect),
             patch("agent_scan.pipelines.analyze_machine", new=mock_analyze),
         ):
             await run_scan(args, mode="scan")
@@ -113,7 +113,7 @@ class TestControlServerPushKeySkipsConsent:
                 new=AsyncMock(return_value=(_fake_client_with_stdio(), [], [])),
             ),
             patch(
-                "agent_scan.pipelines.inspect_pipeline",
+                "agent_scan.pipelines.inspect_legacy_pipeline",
                 new=AsyncMock(return_value=([path_result], [])),
             ),
             patch("agent_scan.pipelines.analyze_machine", new=AsyncMock(side_effect=lambda p, **kw: p)),

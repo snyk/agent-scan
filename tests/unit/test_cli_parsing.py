@@ -540,6 +540,69 @@ class TestCIMode:
             args = Namespace(json=True, print_errors=False, print_full_descriptions=False, verbose=False, ci=True)
             await print_scan_inspect(mode="scan", args=args)
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("level", ["path", "server", "skill"])
+    async def test_inspect_ci_exits_1_on_operational_failure(self, level):
+        """Inspect preserves the old CI behavior for path/server failures and includes skills."""
+        from argparse import Namespace
+
+        from agent_scan.cli import print_scan_inspect
+        from agent_scan.models import InspectedPath, InspectedServer, InspectedSkill
+
+        error = ScanError(message="inspection failed", is_failure=True, category="skill_scan_error")
+        result = InspectedPath(
+            path="/test/path",
+            error=error if level == "path" else None,
+            servers=[InspectedServer(name="server", server=RemoteServer(url="http://localhost"), error=error)]
+            if level == "server"
+            else [],
+            skills=[InspectedSkill(name="skill", installation_path="/skill", error=error)] if level == "skill" else [],
+        )
+
+        with patch("agent_scan.cli.run_scan", new_callable=AsyncMock, return_value=[result]):
+            args = Namespace(
+                json=True,
+                print_errors=False,
+                print_full_descriptions=False,
+                verbose=False,
+                ci=True,
+                ignore_issues_codes=None,
+                skills=True,
+            )
+            with pytest.raises(SystemExit) as exc_info:
+                await print_scan_inspect(mode="inspect", args=args)
+            assert exc_info.value.code == 1
+
+    @pytest.mark.asyncio
+    async def test_inspect_ci_honors_ignored_operational_failure_code(self):
+        from argparse import Namespace
+
+        from agent_scan.cli import print_scan_inspect
+        from agent_scan.models import InspectedPath, InspectedSkill
+
+        result = InspectedPath(
+            path="/test/path",
+            skills=[
+                InspectedSkill(
+                    name="skill",
+                    installation_path="/skill",
+                    error=ScanError(message="failed", is_failure=True, category="skill_scan_error"),
+                )
+            ],
+        )
+
+        with patch("agent_scan.cli.run_scan", new_callable=AsyncMock, return_value=[result]):
+            args = Namespace(
+                json=True,
+                print_errors=False,
+                print_full_descriptions=False,
+                verbose=False,
+                ci=True,
+                ignore_issues_codes="X002",
+                skills=True,
+            )
+            await print_scan_inspect(mode="inspect", args=args)
+
 
 class TestJSONOutput:
     """Test suite for JSON output functionality."""

@@ -10,9 +10,11 @@ from rich.tree import Tree
 from agent_scan.models import (
     FAILURE_CATEGORY_TO_CODE,
     Entity,
+    InspectedPath,
     Issue,
     ScanError,
     ScanPathResult,
+    SkillFile,
     ToxicFlowExtraData,
 )
 
@@ -392,5 +394,119 @@ def print_scan_result(
     for i, path_result in enumerate(result):
         print_scan_path_result(path_result, print_errors, inspect_mode, full_description, args)
         if i < len(result) - 1:
+            rich.print()
+
+
+# ---------------------------------------------------------------------------
+# InspectedPath rendering for the `inspect` command (v2026-07-10 inventory).
+# `inspect` never analyzes, so there are no risks/issues here - just the
+# discovered MCP servers (with their tool/prompt/resource entities) and skills
+# (with their files).
+# ---------------------------------------------------------------------------
+
+
+def _skill_file_type(path: str) -> str:
+    """Human label for a skill file, mirroring ``format_entity_type``'s skill names."""
+    lowered = path.lower()
+    if lowered.endswith(".md"):
+        return "instruction"
+    if lowered.rsplit(".", 1)[-1] in ("py", "js", "ts", "sh"):
+        return "script"
+    return "asset"
+
+
+def format_skill_file_line(skill_file: SkillFile, full_description: bool = False) -> Text:
+    name = skill_file.path
+    if not full_description:
+        name = name + " " * max(0, MAX_ENTITY_NAME_LENGTH_SKILL - len(name))
+    type_str = _skill_file_type(skill_file.path)
+    type_str = type_str + " " * (len("instruction") + 1 - len(type_str))
+    result = Text(type_str)
+    result.append(name, style="bold")
+    return result
+
+
+def print_inspected_path(
+    path: InspectedPath,
+    print_errors: bool = False,
+    full_description: bool = False,
+    args=None,
+) -> None:
+    issues = []
+    if path.error is not None:
+        error_issue, traceback = format_error(path.error)
+        issues.append(error_issue)
+        if print_errors and traceback is not None:
+            rich.console.Console().print(traceback)
+
+    server_count = len(path.servers)
+    skill_count = len(path.skills)
+    report_skills = hasattr(args, "skills") and args.skills
+    if server_count > 0 and skill_count > 0:
+        message = f"found {server_count} mcp server{'' if server_count == 1 else 's'} and {skill_count} skill{'' if skill_count == 1 else 's'}"
+    elif server_count > 0:
+        message = f"found {server_count} mcp server{'' if server_count == 1 else 's'}"
+    elif skill_count > 0:
+        message = f"found {skill_count} skill{'' if skill_count == 1 else 's'}"
+    elif report_skills:
+        message = "no mcp servers or skills found"
+    else:
+        message = "no mcp servers found"
+    rich.print(format_path_line(path.path, message, issues))
+
+    tree = Tree("│")
+    tracebacks: list[tuple[str, rTraceback]] = []
+    for server in path.servers:
+        server_issues = []
+        severities: list[Literal["info", "low", "medium", "high", "critical"]] | None = None
+        if server.error is not None:
+            error_issue, traceback = format_error(server.error)
+            server_issues.append(error_issue)
+            severities = ["info"]
+            if traceback is not None:
+                tracebacks.append((server.name, traceback))
+        server_print = tree.add(format_servers_line(server.name, severities, server_issues))
+        entities = server.signature.entities if server.signature is not None else []
+        for entity in entities:
+            server_print.add(
+                format_entity_line(entity, [], inspect_mode=True, is_skill=False, full_description=full_description)
+            )
+    for skill in path.skills:
+        skill_issues = []
+        severities = None
+        if skill.error is not None:
+            error_issue, traceback = format_error(skill.error)
+            skill_issues.append(error_issue)
+            severities = ["info"]
+            if traceback is not None:
+                tracebacks.append((skill.name, traceback))
+        skill_print = tree.add(format_servers_line(skill.name, severities, skill_issues))
+        for skill_file in skill.files:
+            skill_print.add(format_skill_file_line(skill_file, full_description))
+
+    if server_count > 0 or skill_count > 0:
+        rich.print(tree)
+
+    if print_errors and tracebacks:
+        console = rich.console.Console()
+        for name, traceback in tracebacks:
+            console.print()
+            console.print(f"[bold]Exception when scanning {name}[/bold]")
+            console.print(traceback)
+    print(end="", flush=True)
+
+
+def print_inspected_machine(
+    paths: list[InspectedPath],
+    print_errors: bool = False,
+    full_description: bool = False,
+    args=None,
+) -> None:
+    if not paths:
+        rich.print("No MCP client configurations found on this machine.")
+        return
+    for i, path in enumerate(paths):
+        print_inspected_path(path, print_errors, full_description, args)
+        if i < len(paths) - 1:
             rich.print()
     print(end="", flush=True)

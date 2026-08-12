@@ -1,7 +1,7 @@
 # fix ssl certificates if custom certificates (i.e. ZScaler) are used
 # as this needs to occur at the beginning of the file, we need to disable the ruff rule
 # ruff: noqa: E402
-from typing import Literal
+from typing import Literal, cast
 
 import truststore
 
@@ -22,6 +22,7 @@ from agent_scan.consent import collect_consent
 from agent_scan.models import (
     FAILURE_CATEGORY_TO_CODE,
     ControlServer,
+    InspectedPath,
     ScanPathResult,
     TokenAndClientInfo,
     TokenAndClientInfoList,
@@ -34,7 +35,7 @@ from agent_scan.pipelines import (
     inspect_analyze_push_pipeline,
     inspect_pipeline,
 )
-from agent_scan.printer import print_scan_result
+from agent_scan.printer import print_inspected_machine, print_scan_result
 from agent_scan.utils import ensure_unicode_console, get_hostname, get_push_key, parse_headers, suppress_stdout
 from agent_scan.version import version_info
 
@@ -681,9 +682,14 @@ async def evo(args):
         rich.print(f"[bold red]Error revoking client_id[/bold red]: {e}")
 
 
-async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[ScanPathResult]:
+async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[ScanPathResult] | list[InspectedPath]:
     """
     Run the scan/inspect pipeline and return results.
+
+    This is a transitional compatibility dispatcher: ``scan`` still consumes
+    the legacy ``ScanPathResult`` representation, while ``inspect`` has
+    migrated to ``InspectedPath``. The union can be removed once the
+    scan/analyze pipeline no longer uses ``ScanPathResult`` internally.
 
     Flow:
     1. Build InspectArgs from CLI args.
@@ -767,7 +773,7 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[Scan
             do_stdio_handshake=decision.do_stdio_handshake,
         )
     elif mode == "inspect":
-        scan_path_results, _scanned_usernames = await inspect_pipeline(
+        inspected_paths, _scanned_usernames = await inspect_pipeline(
             inspect_args,
             clients_to_inspect=clients_to_inspect,
             precomputed_scan_path_results=precomputed_scan_path_results,
@@ -776,7 +782,7 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[Scan
             declined_servers=declined_servers,
             do_stdio_handshake=decision.do_stdio_handshake,
         )
-        return scan_path_results
+        return inspected_paths
     else:
         raise ValueError(f"Unknown mode: {mode}, expected 'scan' or 'inspect'")
 
@@ -796,8 +802,8 @@ def _parse_ignore_codes(args, ci_mode: bool) -> set[str]:
     return ignore_codes
 
 
-def _collect_failure_codes(result: list[ScanPathResult]) -> set[str]:
-    """Collect X00x codes from ScanError failures on paths and servers."""
+def _collect_failure_codes(result: list[ScanPathResult] | list[InspectedPath]) -> set[str]:
+    """Collect X00x codes from operational failures in scan or inspect results."""
     codes: set[str] = set()
     for r in result:
         if r.error and r.error.is_failure:
@@ -805,6 +811,10 @@ def _collect_failure_codes(result: list[ScanPathResult]) -> set[str]:
         for s in r.servers or []:
             if s.error and s.error.is_failure:
                 codes.add(FAILURE_CATEGORY_TO_CODE.get(s.error.category, FAILURE_CATEGORY_TO_CODE[None]))
+        if isinstance(r, InspectedPath):
+            for skill in r.skills:
+                if skill.error and skill.error.is_failure:
+                    codes.add(FAILURE_CATEGORY_TO_CODE.get(skill.error.category, FAILURE_CATEGORY_TO_CODE[None]))
     return codes
 
 
@@ -814,15 +824,18 @@ def _apply_ignore_codes(result: list[ScanPathResult], ignore_codes: set[str]) ->
         scan_result.issues = [i for i in scan_result.issues if i.code not in ignore_codes]
 
 
-def _handle_ci_exit(result: list[ScanPathResult], json_output: bool, ignore_codes: set[str]) -> None:
+def _handle_ci_exit(
+    result: list[ScanPathResult] | list[InspectedPath], json_output: bool, ignore_codes: set[str]
+) -> None:
     """In CI mode, exit with code 1 if any issues or unignored failures remain."""
-    has_issues = any(scan_result.issues for scan_result in result)
+    scan_results = [scan_result for scan_result in result if isinstance(scan_result, ScanPathResult)]
+    has_issues = any(scan_result.issues for scan_result in scan_results)
     failure_codes = _collect_failure_codes(result) - ignore_codes
     if not has_issues and not failure_codes:
         return
 
     if not json_output:
-        issue_codes = {issue.code for scan_result in result for issue in scan_result.issues if issue.code}
+        issue_codes = {issue.code for scan_result in scan_results for issue in scan_result.issues if issue.code}
         all_codes = sorted(issue_codes | failure_codes)
         codes_part = ", ".join(all_codes) if all_codes else "none"
         rich.print(
@@ -846,17 +859,30 @@ async def print_scan_inspect(mode="scan", args=None):
     else:
         result = await run_scan(args, mode=mode)
 
+    # `inspect` produces the v2026-07-10 InspectedPath inventory (no analysis, so
+    # no issues / --ci). `scan` still produces ScanPathResult on the legacy path.
+    if mode == "inspect":
+        inspected_paths = cast("list[InspectedPath]", result)
+        if json_output:
+            print(json.dumps({p.path: p.model_dump(mode="json") for p in inspected_paths}, indent=2))
+        else:
+            print_inspected_machine(inspected_paths, print_errors, full_description, args)
+        if ci_mode:
+            _handle_ci_exit(inspected_paths, json_output, ignore_codes)
+        return
+
+    scan_paths = cast("list[ScanPathResult]", result)
     if ci_mode and ignore_codes:
-        _apply_ignore_codes(result, ignore_codes)
+        _apply_ignore_codes(scan_paths, ignore_codes)
 
     if json_output:
-        result_dict = {r.path: r.model_dump(mode="json") for r in result}
+        result_dict = {r.path: r.model_dump(mode="json") for r in scan_paths}
         print(json.dumps(result_dict, indent=2))
     else:
         print_scan_result(
-            result,
+            scan_paths,
             print_errors,
-            inspect_mode=mode == "inspect",
+            inspect_mode=False,
             internal_issues=verbose,
             full_description=full_description,
             args=args,
