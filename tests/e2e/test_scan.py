@@ -207,7 +207,8 @@ class TestFullScanFlow:
         )
 
         assert result.returncode == 0, result.stderr
-        assert "Suspicious download URL (score: 900)" in result.stdout
+        assert "Suspicious download URL (900/1000)" in result.stdout
+        assert "Malicious URLs: https://malware.example/payload" in result.stdout
         assert "SKILL.md:1:0" in result.stdout
         assert "https://malware.example/payload" in result.stdout
         path_request = _V20260710AnalysisHandler.requests[0]["scan_path_requests"][0]
