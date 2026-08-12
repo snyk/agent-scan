@@ -4,7 +4,22 @@ Agent Scan uses `X001` through `X009` for operational conditions encountered dur
 
 Failure codes can appear beside an MCP server, skill, or scan path in the human-readable report. In JSON, the corresponding `error` object contains the structured `category`, message, and `is_failure` value.
 
-Use these codes with [`--ignore-failure-codes`](cli-reference.md#ci-mode). Codes are case-sensitive. Ignoring a failure code prevents that code from causing a `--ci` exit, but does not remove the error from human-readable or JSON output.
+## Agent Scan v0.5.x
+
+> [!IMPORTANT]
+> Agent Scan v0.5.x is planned for deprecation. This remains the correct failure-code reference for current v0.5.x users.
+
+In v0.5.x, security finding codes and operational failure codes share the `--ignore-issues-codes` flag. For example, `--ignore-issues-codes W001,X001` ignores one security finding and one operational failure during `--ci` evaluation. The `X*` codes themselves are operational and are not security issues.
+
+See the [v0.5.x CI flags](cli-reference.md#ci-mode) and [v0.5.x JSON errors](json-output.md#runtime-failure-codes-x) for details.
+
+## Agent Scan v0.6 and later
+
+In v0.6 and later, operational failures have their own `--ignore-failure-codes` flag, separate from `--ignore-risks`. Codes are case-sensitive. Ignoring a failure code prevents that code from causing a `--ci` exit but does not remove the error from human-readable or JSON output.
+
+See the [v0.6-and-later CI flags](cli-reference.md#v06-ci-mode).
+
+## Code mapping
 
 | Code | Error category | Meaning | Normally fails `--ci` |
 | --- | --- | --- | :---: |
@@ -18,11 +33,11 @@ Use these codes with [`--ignore-failure-codes`](cli-reference.md#ci-mode). Codes
 | `X008` | Unclassified | An operational error did not have a recognized category. | Yes |
 | `X009` | `user_declined` | The user declined permission to start a stdio MCP server. | Yes |
 
-The `is_failure` field is the source of truth for CI behavior. `X003` and `X004` normally carry `is_failure: false`, so they do not fail CI even though they are displayed for context. Agent Scan exits with code 1 when at least one security risk or unignored operational error with `is_failure: true` remains.
+The `is_failure` field is the source of truth for CI behavior. `X003` and `X004` normally carry `is_failure: false`, so they do not fail CI even though they are displayed for context. Agent Scan exits with code 1 when at least one security finding or unignored operational error with `is_failure: true` remains.
 
 There is no `X010` code.
 
-## Ignoring operational failures in CI
+## Ignoring operational failures in v0.6 and later
 
 `--ignore-failure-codes` accepts a comma-separated list and is valid only with `--ci`:
 
@@ -38,5 +53,6 @@ Unknown codes produce a warning and are not applied. Security risks are unaffect
 ## Related documentation
 
 - [Risk reference](risks.md) — security risk indicators and scores
+- [Issue-code reference](issue-codes.md) — v0.5.x security finding codes
 - [JSON output](json-output.md) — structured error objects and CI examples
-- [CLI reference](cli-reference.md#ci-mode) — exit behavior and ignore flags
+- [CLI reference](cli-reference.md) — versioned exit behavior and ignore flags

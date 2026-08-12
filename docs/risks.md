@@ -1,8 +1,11 @@
 # Risk reference
 
+> [!NOTE]
+> This reference applies to Agent Scan v0.6 and later, using the `2026-07-10` analysis API. Agent Scan v0.5.x uses the [issue-code reference](issue-codes.md).
+
 Agent Scan reports security findings as risk indicators on each discovered MCP server or agent skill. A risk indicator is present only when the analysis finds evidence for that risk. Every indicator contains a score and human-readable evidence. MCP server indicators can identify affected tools. Skill indicators can identify relevant file locations, and the URL-related skill indicators can also include the detected URLs.
 
-Use the indicator names in this document with [`--ignore-risks`](cli-reference.md#ci-mode). Risk names are case-sensitive.
+Use the indicator names in this document with [`--ignore-risks`](cli-reference.md#v06-ci-mode). Risk names are case-sensitive.
 
 Operational problems such as an MCP server failing to start are not security risks. They use separate `X` codes documented in the [failure code reference](failure-codes.md).
 
@@ -121,4 +124,4 @@ The skill does not include the required `SKILL.md` manifest describing its purpo
 
 - [Failure codes](failure-codes.md) — operational discovery, inspection, and analysis failures
 - [JSON output](json-output.md) — risk fields and programmatic examples
-- [CLI reference](cli-reference.md#ci-mode) — CI behavior and ignore flags
+- [CLI reference](cli-reference.md#v06-ci-mode) — CI behavior and ignore flags
