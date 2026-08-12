@@ -1,4 +1,5 @@
 import builtins
+import os
 from typing import Literal, cast
 
 import rich
@@ -14,8 +15,20 @@ from agent_scan.models import (
     Issue,
     ScanError,
     ScanPathResult,
+    ScanResponse,
     SkillFile,
     ToxicFlowExtraData,
+)
+from agent_scan.models.api.v20260710 import (
+    RISK_DISPLAY_NAMES,
+    MaliciousURLSkillRiskScore,
+    McpEntitySummary,
+    McpServerRiskResponse,
+    Region,
+    ScanPathResponse,
+    SkillFileSummary,
+    SkillRiskResponse,
+    UnverifiableURLSkillRiskScore,
 )
 
 MAX_ENTITY_NAME_LENGTH = 25
@@ -510,3 +523,184 @@ def print_inspected_machine(
         if i < len(paths) - 1:
             rich.print()
     print(end="", flush=True)
+
+
+def _format_region(region: Region) -> str:
+    start = region.start
+    location = start.path
+    if start.line is not None:
+        location += f":{start.line}"
+        if start.offset is not None:
+            location += f":{start.offset}"
+    if region.end is not None:
+        location += f"-{_format_region(Region(start=region.end))}"
+    return location
+
+
+def _format_response_entity_line(entity: McpEntitySummary) -> Text:
+    type_names = {
+        "prompt": "prompt",
+        "resource": "resource",
+        "resource_template": "res. temp.",
+        "tool": "tool",
+    }
+    type_str = type_names[entity.type]
+    type_str += " " * (len("instruction") + 1 - len(type_str))
+    name = entity.name + " " * max(0, MAX_ENTITY_NAME_LENGTH - len(entity.name))
+    result = Text(type_str)
+    result.append(name, style="bold")
+    return result
+
+
+def _format_response_skill_file_line(skill_file: SkillFileSummary) -> Text:
+    type_str = skill_file.type + " " * (len("instruction") + 1 - len(skill_file.type))
+    name = skill_file.name + " " * max(0, MAX_ENTITY_NAME_LENGTH_SKILL - len(skill_file.name))
+    result = Text(type_str)
+    result.append(name, style="bold")
+    return result
+
+
+def _format_component_line(name: str, risk_count: int) -> Text:
+    result = Text()
+    result.append(name, style="bold green")
+    if risk_count:
+        result.append(f" {risk_count} risk{'' if risk_count == 1 else 's'}")
+    return result
+
+
+def _format_response_error(error: ScanError) -> Text:
+    code = FAILURE_CATEGORY_TO_CODE[error.category]
+    result = Text(f"● [{code} info]: ", style="blue")
+    result.append(error.message or str(error.exception or "unknown error"))
+    return result
+
+
+def _format_scan_path_line(path: str, message: str, error: ScanError | None) -> Text:
+    result = Text("● Scanning ")
+    result.append(path, style="bold")
+    if error is not None:
+        result.append(" ")
+        result.append(_format_response_error(error))
+    result.append(f" {message}", style="gray62")
+    return result
+
+
+def _format_risk(
+    name: str,
+    risk,
+    *,
+    affected_tools: list[str] | None = None,
+) -> Text:
+    line = Text("● ", style="yellow")
+    line.append(f"{RISK_DISPLAY_NAMES[name]} (score: {risk.score})", style="bold")
+    line.append(f": {risk.evidence}")
+    if affected_tools:
+        line.append("\n  Affected tools: ")
+        line.append(", ".join(affected_tools))
+    locations = getattr(risk, "locations", None)
+    if locations:
+        line.append("\n  Locations: ")
+        line.append(", ".join(_format_region(region) for region in locations))
+    urls: list[str] = []
+    if isinstance(risk, MaliciousURLSkillRiskScore):
+        urls = risk.malicious_urls
+    elif isinstance(risk, UnverifiableURLSkillRiskScore):
+        urls = risk.unverifiable_urls
+    for url in urls:
+        line.append("\n  ")
+        line.append(url)
+    return line
+
+
+def _append_component_detail(component: Text, detail: Text) -> None:
+    component.append("\n")
+    component.append(detail)
+
+
+def _add_server(parent: Tree, server: McpServerRiskResponse) -> None:
+    risks = [(name, risk) for name, risk in server.risk_indexes if risk is not None]
+    component = _format_component_line(server.name, len(risks))
+    for name, risk in risks:
+        tools = []
+        for index in risk.affected_tools or []:
+            if 0 <= index < len(server.entities):
+                tools.append(server.entities[index].name)
+            else:
+                tools.append(str(index))
+        _append_component_detail(component, _format_risk(name, risk, affected_tools=tools))
+    if server.error is not None:
+        _append_component_detail(component, _format_response_error(server.error))
+    server_tree = parent.add(component)
+    for entity in server.entities:
+        server_tree.add(_format_response_entity_line(entity))
+
+
+def _add_skill(parent: Tree, skill: SkillRiskResponse) -> None:
+    risks = [(name, risk) for name, risk in skill.risk_indexes if risk is not None]
+    component = _format_component_line(skill.name, len(risks))
+    for name, risk in risks:
+        _append_component_detail(component, _format_risk(name, risk))
+    if skill.error is not None:
+        _append_component_detail(component, _format_response_error(skill.error))
+    skill_tree = parent.add(component)
+    for skill_file in skill.files:
+        skill_tree.add(_format_response_skill_file_line(skill_file))
+
+
+def _scan_path_message(path: ScanPathResponse, report_skills: bool) -> str:
+    server_count = len(path.server_risks)
+    skill_count = len(path.skill_risks)
+    if server_count and skill_count:
+        return f"found {server_count} mcp server{'' if server_count == 1 else 's'} and {skill_count} skill{'' if skill_count == 1 else 's'}"
+    if server_count:
+        return f"found {server_count} mcp server{'' if server_count == 1 else 's'}"
+    if skill_count:
+        return f"found {skill_count} skill{'' if skill_count == 1 else 's'}"
+    return "no mcp servers or skills found" if report_skills else "no mcp servers found"
+
+
+def _print_scan_path_response(
+    path: ScanPathResponse,
+    *,
+    print_errors: bool,
+    report_skills: bool,
+) -> None:
+    rich.print(
+        _format_scan_path_line(
+            os.path.expanduser(path.path),
+            _scan_path_message(path, report_skills),
+            path.error,
+        )
+    )
+
+    tree = Tree("│")
+    for server in path.server_risks:
+        _add_server(tree, server)
+    for skill in path.skill_risks:
+        _add_skill(tree, skill)
+    if path.server_risks or path.skill_risks:
+        rich.print(tree)
+
+    if print_errors:
+        errors = [path.error]
+        errors.extend(server.error for server in path.server_risks)
+        errors.extend(skill.error for skill in path.skill_risks)
+        for error in errors:
+            if error is not None and error.traceback:
+                rich.print(Text(error.traceback))
+
+
+def print_scan_response(
+    response: ScanResponse,
+    print_errors: bool = False,
+    args=None,
+) -> None:
+    """Render the complete backend-enriched results, with risks under each component."""
+    if not response.scan_path_responses:
+        rich.print("No MCP client configurations found on this machine.")
+        return
+    report_skills = hasattr(args, "skills") and args.skills
+    for index, path in enumerate(response.scan_path_responses):
+        _print_scan_path_response(path, print_errors=print_errors, report_skills=report_skills)
+        if index < len(response.scan_path_responses) - 1:
+            rich.print()

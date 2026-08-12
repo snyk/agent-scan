@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from agent_scan.cli import run_scan
-from agent_scan.models import ClientToInspect, ControlServer, ScanPathResult, StdioServer
+from agent_scan.models import ClientToInspect, ControlServer, InspectedPath, ScanResponse, StdioServer
 
 
 def _push_key_scan_args(**overrides) -> Namespace:
@@ -25,7 +25,7 @@ def _push_key_scan_args(**overrides) -> Namespace:
                 identifier="some-machine-id-dh7g62dyug7d",
             )
         ],
-        "analysis_url": "https://some.analysis.endpoint.com/hidden/mcp-scan/analysis-machine?version=2025-09-02",
+        "analysis_url": "https://some.analysis.endpoint.com/hidden/mcp-scan/analysis-machine?version=2026-07-10",
         "verification_H": None,
         "skip_ssl_verify": True,
         "verbose": False,
@@ -71,9 +71,9 @@ class TestControlServerPushKeySkipsConsent:
         ``aiohttp.ClientSession`` is never used in that module.
         """
         args = _push_key_scan_args()
-        path_result = ScanPathResult(path="/fake/mcp.json", servers=[])
+        path_result = InspectedPath(path="/fake/mcp.json", servers=[])
 
-        mock_analyze = AsyncMock(side_effect=lambda paths, **kw: paths)
+        mock_analyze = AsyncMock(return_value=ScanResponse(scan_path_responses=[]))
         mock_inspect = AsyncMock(return_value=([path_result], ["testuser"]))
 
         with (
@@ -82,7 +82,7 @@ class TestControlServerPushKeySkipsConsent:
                 "agent_scan.cli.discover_clients_to_inspect",
                 new=AsyncMock(return_value=(_fake_client_with_stdio(), [], [])),
             ),
-            patch("agent_scan.pipelines.inspect_pipeline_legacy", new=mock_inspect),
+            patch("agent_scan.pipelines.inspect_pipeline", new=mock_inspect),
             patch("agent_scan.pipelines.analyze_machine", new=mock_analyze),
         ):
             await run_scan(args, mode="scan")
@@ -104,7 +104,7 @@ class TestControlServerPushKeySkipsConsent:
             suppress_mcpserver_io=True,
             dangerously_run_mcp_servers=False,
         )
-        path_result = ScanPathResult(path="/fake/mcp.json", servers=[])
+        path_result = InspectedPath(path="/fake/mcp.json", servers=[])
 
         with (
             patch("agent_scan.cli.collect_consent") as mock_consent,
@@ -113,10 +113,13 @@ class TestControlServerPushKeySkipsConsent:
                 new=AsyncMock(return_value=(_fake_client_with_stdio(), [], [])),
             ),
             patch(
-                "agent_scan.pipelines.inspect_pipeline_legacy",
+                "agent_scan.pipelines.inspect_pipeline",
                 new=AsyncMock(return_value=([path_result], [])),
             ),
-            patch("agent_scan.pipelines.analyze_machine", new=AsyncMock(side_effect=lambda p, **kw: p)),
+            patch(
+                "agent_scan.pipelines.analyze_machine",
+                new=AsyncMock(return_value=ScanResponse(scan_path_responses=[])),
+            ),
         ):
             await run_scan(args, mode="scan")
 

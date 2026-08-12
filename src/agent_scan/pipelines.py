@@ -20,10 +20,10 @@ from agent_scan.models import (
     InspectedPath,
     ScanError,
     ScanPathResult,
+    ScanResponse,
     SkillServer,
     TokenAndClientInfo,
 )
-from agent_scan.redact import redact_scan_result
 from agent_scan.utils import get_push_key, get_readable_home_directories
 from agent_scan.verify_api import analyze_machine
 from agent_scan.well_known_clients import get_well_known_clients
@@ -180,10 +180,12 @@ async def inspect_pipeline(
 ) -> tuple[list[InspectedPath], list[str]]:
     """Inspect each discovered client and return ``InspectedPath`` results.
 
-    The legacy scan flow still uses :func:`inspect_pipeline_legacy` to produce
-    ``ScanPathResult`` objects. Precomputed results are error-only paths (e.g.
-    file-not-found), so their error is carried straight onto an otherwise-empty
-    ``InspectedPath``.
+    This is the shared inspection builder for both ``inspect`` and the
+    v2026-07-10 ``scan`` path. The legacy :func:`inspect_pipeline_legacy`
+    remains available while the old ``ScanPathResult`` flow is removed in a
+    later cleanup.
+    Precomputed results are error-only paths (e.g. file-not-found), so their error
+    is carried straight onto an otherwise-empty ``InspectedPath``.
     """
     if clients_to_inspect is None:
         clients_to_inspect, precomputed_scan_path_results, scanned_usernames = await discover_clients_to_inspect(
@@ -219,12 +221,12 @@ async def inspect_analyze_push_pipeline(
     stream_stderr: bool = False,
     declined_servers: set[tuple[str, str]] | None = None,
     do_stdio_handshake: bool = False,
-) -> list[ScanPathResult]:
+) -> ScanResponse:
     """
     Pipeline the scan and analyze the machine.
     """
     # inspect
-    scan_path_results, scanned_usernames = await inspect_pipeline_legacy(
+    inspected_paths, scanned_usernames = await inspect_pipeline(
         inspect_args,
         clients_to_inspect=clients_to_inspect,
         precomputed_scan_path_results=precomputed_scan_path_results,
@@ -234,13 +236,10 @@ async def inspect_analyze_push_pipeline(
         do_stdio_handshake=do_stdio_handshake,
     )
 
-    # redact
-    redacted_scan_path_results = [redact_scan_result(rv) for rv in scan_path_results]
-
     scan_context = {"cli_version": push_args.version}
     # analyze
-    verified_scan_path_results = await analyze_machine(
-        redacted_scan_path_results,
+    response = await analyze_machine(
+        inspected_paths,
         analysis_url=analyze_args.analysis_url,
         identifier=analyze_args.identifier,
         additional_headers=analyze_args.additional_headers,
@@ -253,7 +252,7 @@ async def inspect_analyze_push_pipeline(
         scanned_usernames=scanned_usernames,
     )
 
-    return verified_scan_path_results
+    return response
 
 
 async def client_to_inspect_from_path(
