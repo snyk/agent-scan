@@ -1,31 +1,56 @@
 # Agent Scan CLI reference
 
-Complete reference for **Agent Scan** command-line flags and options. Agent Scan ships in two forms:
+This reference covers both the `2025-09-02` API used by Agent Scan v0.5.x and the risk-based `2026-07-10` API used by Agent Scan v0.6 and later. Commands and flags are documented once when their behavior is shared; version-specific behavior is called out where it differs.
+
+## Version selection
+
+<a id="agent-scan-v05x"></a>
+
+### Agent Scan v0.5.x
+
+> [!IMPORTANT]
+> Agent Scan v0.5.x is planned for deprecation but remains supported for now. Pin a concrete v0.5.x release so an existing workflow does not silently switch APIs or output formats.
+
+```bash
+uvx snyk-agent-scan@0.5.17
+```
+
+v0.5.x uses issue codes and severity labels. Its JSON schema and CI ignore flag differ from v0.6 and later.
+
+<a id="agent-scan-v06-and-later"></a>
+
+### Agent Scan v0.6 and later
+
+```bash
+uvx snyk-agent-scan@latest
+```
+
+v0.6 and later uses named, scored risk indicators and separates risk ignores from operational failure-code ignores.
+
+Agent Scan ships in two forms:
 
 | Entrypoint | Command | Notes |
 | --- | --- | --- |
-| **Standalone CLI** | `snyk-agent-scan` (or `uvx snyk-agent-scan@latest`) | Python package; primary surface documented below |
-| **Snyk CLI extension** | `snyk agent-scan --experimental` | Go wrapper that downloads a pinned binary and forwards flags — see [Snyk CLI extension flags](#snyk-cli-extension-flags) |
+| **Standalone CLI** | `snyk-agent-scan` or `uvx snyk-agent-scan@VERSION` | Python package; primary surface documented below |
+| **Snyk CLI extension** | `snyk agent-scan --experimental` | Go wrapper that downloads a pinned binary and forwards flags; see [Snyk CLI extension flags](#snyk-cli-extension-flags) |
 
-Unless noted, flags apply to the standalone CLI. When no subcommand is given, **`scan` is assumed**.
+Unless noted, flags apply to the standalone CLI. When no subcommand is given, `scan` is assumed.
 
-> **Experimental output.** Issue codes, JSON field names, and human-readable output may change between releases. See the [project README](../README.md) for the stability notice.
-
----
+> **Experimental output.** Issue/risk names, JSON field names, and human-readable output may change between releases. See the [project README](../README.md) for the stability notice.
 
 ## Commands
 
 | Command | Description |
 | --- | --- |
-| `scan` | Scan MCP configs, agents, and skills for security issues (default) |
-| `inspect` | List tools, prompts, and resources without running security analysis |
+| `scan` | Discover and inspect MCP configs, agents, and skills, then request security analysis (default) |
+| `inspect` | List tools, prompts, resources, and skills without requesting security analysis |
 | `help` | Print top-level help |
-| `evo` | Interactive flow: mint a push key, scan, upload to Snyk Evo, revoke the key |
-| `guard` | Install, uninstall, or show status of Agent Guard hooks |
+| `evo` | Interactive flow: mint a push key, scan, upload to Snyk Evo, and revoke the key |
+| `guard` | Install, uninstall, or show the status of Agent Guard hooks |
 
 ### Positional arguments
 
-Most scan-like commands accept optional config paths:
+The scan-like commands accept optional paths:
 
 ```bash
 snyk-agent-scan [scan] [CONFIG_FILE ...]
@@ -35,59 +60,64 @@ snyk-agent-scan evo [CONFIG_FILE ...]
 
 | Argument | Applies to | Description |
 | --- | --- | --- |
-| `CONFIG_FILE ...` | `scan`, `inspect`, `evo` | One or more MCP config files, `SKILL.md` files, or directories to scan. If omitted, well-known agent config locations on the machine are discovered automatically. |
+| `CONFIG_FILE ...` | `scan`, `inspect`, `evo` | One or more MCP configuration files, `SKILL.md` files, or directories. If omitted, well-known agent configuration locations are discovered automatically. |
 
----
-
-## Global options (scan, inspect, evo)
-
-These flags are shared by `scan`, `inspect`, and `evo`.
+## Shared options (`scan`, `inspect`, and `evo`)
 
 ### Output and logging
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| `--json` | boolean | `false` | Emit results as JSON on stdout instead of rich text. Non-JSON status lines are suppressed during the scan. See [JSON output](json-output.md). |
+| `--json` | boolean | `false` | Emit JSON on stdout instead of rich text. Non-JSON status lines are suppressed. The schema depends on the command and CLI version; see [JSON output](json-output.md). |
 | `--verbose` | boolean | `false` | Enable debug logging to stderr. |
 | `--print-errors` | boolean | `false` | Show error details and tracebacks in the human-readable report. |
-| `--print-full-descriptions` | boolean | `false` | Show full tool/skill descriptions in output (not truncated). |
+| `--print-full-descriptions` | boolean | `false` | Show full tool and skill descriptions rather than truncating them. |
 
 ### Discovery and scope
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| `--no-skills` | boolean | off | Scan MCP servers only — skip agent skill discovery and analysis. Skills are **included by default** on every scan/inspect/evo invocation; you normally do not need to pass anything to enable them. |
-| `--skills` | boolean | on (implicit) | **Deprecated / no-op.** Accepted for backward compatibility (`BooleanOptionalAction`) but redundant because skills are already enabled by default. Prefer omitting it; use `--no-skills` to opt out. |
-| `--scan-all-users` | boolean | `false` | Scan all readable user home directories on the machine (and WSL profiles on Windows), not just the current user. Also expands the control-server bootstrap payload to list those homes. |
+| `--no-skills` | boolean | off | Skip agent skill discovery and analysis. Skills are included by default. |
+| `--skills` | boolean | on (implicit) | **Deprecated/no-op.** Accepted for backward compatibility but redundant because skills are enabled by default. Prefer omitting it; use `--no-skills` to opt out. |
+| `--scan-all-users` | boolean | `false` | Scan all readable user home directories (and WSL profiles on Windows), rather than only the current user. |
 
-**Behavior:** `scan_skills` flows from the CLI into discovery and inspection — with `--no-skills`, explicit skill paths, skill directories, and auto-discovered agent skills are all skipped (see `client_to_inspect_from_path` and `inspect_client` in the codebase). E2E tests assert that `--no-skills` produces no skill servers even when a skill path is passed as a positional argument.
+With `--no-skills`, explicit skill paths, skill directories, and automatically discovered skills are all skipped.
 
 ### Analysis and upload
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
 | `--storage-file FILE` | string | `~/.mcp-scan` | Path for local scan state and cached results. |
-| `--analysis-url URL` | string | `https://api.snyk.io/hidden/mcp-scan/analysis-machine?version=2025-09-02` | Analysis API endpoint. With `SNYK_TOKEN`, the CLI rewrites this to the `/cli/analysis-machine` variant automatically. |
-| `--verification-H HEADER` | repeatable | — | Extra HTTP header for the analysis request. Format: `Name: value` (repeat for multiple headers). |
-| `--skip-ssl-verify` | boolean | `false` | Disable TLS certificate verification for analysis and upload HTTP calls. |
-| `--mcp-oauth-tokens-path PATH` | string | — | JSON file containing MCP OAuth tokens (`TokenAndClientInfoList` schema) used when connecting to OAuth-protected remote MCP servers. |
+| `--analysis-url URL` | string | version-specific | Analysis API endpoint; see the defaults below. With `SNYK_TOKEN`, the CLI rewrites it to the `/cli/analysis-machine` variant automatically. |
+| `--verification-H HEADER` | repeatable | — | Extra HTTP header for the analysis request, in `Name: value` format. Repeat for multiple headers. |
+| `--skip-ssl-verify` | boolean | `false` | Disable TLS certificate verification for analysis and upload calls. |
+| `--mcp-oauth-tokens-path PATH` | string | — | JSON file containing MCP OAuth tokens (`TokenAndClientInfoList` schema) for OAuth-protected remote MCP servers. |
 
-### Control server (enterprise upload, **on deprecation path**)
+The default analysis URL is the main version-dependent value:
 
-Upload analyzed results to one or more control servers (typically Snyk Evo). Will be replaced soon.
+| CLI version | Default analysis URL |
+| --- | --- |
+| v0.5.x | `https://api.snyk.io/hidden/mcp-scan/analysis-machine?version=2025-09-02` |
+| v0.6 and later | `https://api.snyk.io/hidden/mcp-scan/analysis-machine?version=2026-07-10` |
+
+The URL version must match the request and response models used by the installed Agent Scan version.
+
+### Control server (enterprise upload, on deprecation path)
+
+Upload analyzed results to one or more control servers, typically Snyk Evo. This upload mechanism is on a deprecation path and will be replaced.
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| `--control-server URL` | repeatable | — | Upload destination URL. Each block **must** include a matching `--control-identifier`. Can be specified multiple times for multi-tenant upload. |
-| `--control-server-H HEADER` | repeatable | — | HTTP header for the **current** `--control-server` block (e.g. `x-client-id: <push-key>`). Repeat within a block for multiple headers. |
-| `--control-identifier ID` | repeatable | — | Non-anonymous machine identifier for the **current** `--control-server` block (email, hostname, serial number, etc.). **Required** for every `--control-server`. |
-| `--no-bootstrap` | boolean | `false` | Skip the one-shot startup bootstrap request to the first control server. |
+| `--control-server URL` | repeatable | — | Upload destination. Each block must include a matching `--control-identifier`. Repeat for multiple destinations. |
+| `--control-server-H HEADER` | repeatable | — | Header for the current `--control-server` block, such as `x-client-id: <push-key>`. Repeat within a block for multiple headers. |
+| `--control-identifier ID` | repeatable | — | Non-anonymous identifier for the current block, such as an email, hostname, or serial number. Required for every `--control-server`. |
+| `--no-bootstrap` | boolean | `false` | See [historical bootstrap behavior](#historical-bootstrap-behavior). In v0.5.14 and later it is an accepted compatibility no-op. |
 
-**Control-server block syntax** — options after a `--control-server` apply only to that server until the next `--control-server`:
+Options following a `--control-server` apply to that server until the next `--control-server`:
 
 ```bash
 snyk-agent-scan scan \
-  --control-server https://api.snyk.io/hidden/mcp-scan/push?version=2025-08-28 \
+  --control-server "https://api.snyk.io/hidden/mcp-scan/push?version=2025-08-28" \
   --control-server-H "x-client-id: <push-key>" \
   --control-identifier user@example.com \
   --control-server https://other.example/push \
@@ -95,56 +125,76 @@ snyk-agent-scan scan \
   --control-identifier serial-123
 ```
 
-**Push key and stdio MCP servers (`scan` only).** Enterprise uploads include an `x-client-id` push key in `--control-server-H`. Agent Scan treats that as an **unattended** run — there is no one at the terminal to answer y/n consent prompts.
+#### Historical bootstrap behavior
 
-On `scan`, that changes stdio MCP behavior as follows:
+Agent Scan v0.5.4 through v0.5.13 sent a startup bootstrap request to the first eligible control server before doing other work. This applied to every command that accepted `--control-server`: `scan`, `inspect`, and `evo`. Therefore, in those releases, `inspect --control-server ...` sent a bootstrap request even though `inspect` did not call the analysis API. `--no-bootstrap` disabled that request.
+
+Only the first configured control server received bootstrap. The request was restricted to the Snyk-managed `/mcp-scan/push` endpoint, bootstrap failures did not abort the command, and the eventual scan result could still be uploaded to every configured control server.
+
+The bootstrap implementation was removed in v0.5.14. In v0.5.14 and later—including v0.6—the `--no-bootstrap` flag remains accepted for command-line compatibility but does not change behavior.
+
+#### Push keys and stdio MCP servers (`scan` only)
+
+Enterprise uploads include an `x-client-id` push key in `--control-server-H`. Agent Scan treats this as an unattended run, so there is no terminal consent prompt.
 
 | `--dangerously-run-mcp-servers` | Consent prompts | Stdio MCP subprocesses |
 | --- | --- | --- |
-| not set (default) | skipped | **not started** — servers stay in the report as configured but not live-inspected; remote MCP servers and skills are still scanned |
-| set | skipped | **started** for every stdio server in the scanned configs |
+| not set (default) | skipped | Not started; servers remain in the result as configured, while remote servers and skills are still inspected |
+| set | skipped | Started for every stdio server in the scanned configurations |
 
-Add `--dangerously-run-mcp-servers` when a fleet or CI job must actually execute stdio MCP commands (typical for trusted MDM policies). This is the same flag required by `--ci` in non-interactive environments.
+Use `--dangerously-run-mcp-servers` only when a trusted fleet or CI job must execute configured stdio MCP commands.
 
-`inspect` is unaffected: it always runs interactively (consent prompts when applicable), even if a push key is configured. See [MCP server options](#mcp-server-options) for the full handshake matrix.
+## CI mode
 
-Bootstrap behavior is described in the [README — Control Server Bootstrap](../README.md#control-server-bootstrap).
+`--ci` makes scan-like commands return a non-zero status when relevant security findings or operational failures remain. It must be paired with `--dangerously-run-mcp-servers` in non-interactive use.
 
-### CI mode
+### Agent Scan v0.5.x
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| `--ci` | boolean | `false` | Exit with code **1** if any analysis issues or runtime failure codes remain after the scan. Requires `--dangerously-run-mcp-servers` in non-interactive environments. |
-| `--ignore-issues-codes CODES` | string | — | Comma-separated issue/failure codes to ignore for `--ci` exit status (e.g. `W001,W015,X001`). **Only valid with `--ci`.** Ignored codes are also removed from JSON output in CI mode. |
-
-**Exit codes (scan / inspect with `--ci`):**
+| `--ci` | boolean | `false` | Exit with code `1` if analysis issues or runtime failures remain. |
+| `--ignore-issues-codes CODES` | string | — | Comma-separated issue and failure codes to ignore for CI, such as `W001,W015,X001`. Only valid with `--ci`; ignored codes are also removed from JSON output in CI mode. |
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Success; no remaining issues or failures (after ignores) |
-| `1` | `--ci`: findings or unignored runtime failures present |
-| `2` | Invalid flag combination |
+| `0` | No remaining issues or failures after ignores |
+| `1` | Issues or unignored runtime failures remain |
+| `2` | Invalid command-line usage or flag combination |
 
----
+<a id="v06-ci-mode"></a>
 
-## MCP server options
-
-Applies to: `scan`, `inspect`, `evo`.
+### Agent Scan v0.6 and later
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| `--server-timeout SECONDS` | float | `10` | Timeout for MCP server connections (stdio handshake and remote servers). |
-| `--suppress-mcpserver-io BOOL` | boolean | see below | Suppress **stderr** from stdio MCP servers. Stdout is always consumed as JSON-RPC and never shown. Accepted values: `true`, `false`, `1`, `0`, `yes`, `no`, `y`, `n`, `t`, `f`. |
-| `--dangerously-run-mcp-servers` | boolean | `false` | Skip interactive per-server consent and start every stdio MCP server listed in scanned configs. **Required with `--ci` in CI/CD.** Use only in trusted environments. |
+| `--ci` | boolean | `false` | Exit with code `1` if security risks or operational failures remain. |
+| `--ignore-risks NAMES` | string | — | Comma-separated [risk names](risks.md) to omit from output and CI evaluation, such as `dangerous_words,suspicious_download_url`. Only valid with `--ci`. |
+| `--ignore-failure-codes CODES` | string | — | Comma-separated [failure codes](failure-codes.md) to omit from CI evaluation, such as `X001,X007`. Errors remain visible in output. Only valid with `--ci`. |
 
-**Default for `--suppress-mcpserver-io`:**
+Risk names and failure codes are case-sensitive. Unknown values produce a warning and are not applied. `inspect` supports `--ignore-failure-codes` because it can encounter operational failures but has no risks to ignore. `evo` supports neither ignore flag.
 
-| Run type | Default |
+| Code | Meaning |
 | --- | --- |
-| Interactive (`inspect`, or `scan` without push key) | `false` — stderr streamed with a `[server-name]` prefix |
-| Unattended (push-key scan, `evo`, etc.) | `true` — stderr hidden |
+| `0` | No remaining risks or operational failures after ignores |
+| `1` | Risks or unignored operational failures remain |
+| `2` | Invalid command-line usage or flag combination |
 
-**Handshake and consent matrix** (stdio MCP servers):
+## MCP server options
+
+These options apply to `scan`, `inspect`, and `evo` in both CLI versions.
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--server-timeout SECONDS` | float | `10` | Timeout for MCP server connections, including stdio handshakes and remote servers. |
+| `--suppress-mcpserver-io BOOL` | boolean | see below | Suppress stderr from stdio MCP servers. Stdout carries JSON-RPC and is never shown. Accepted values: `true`, `false`, `1`, `0`, `yes`, `no`, `y`, `n`, `t`, `f`. |
+| `--dangerously-run-mcp-servers` | boolean | `false` | Skip per-server consent and start every configured stdio MCP server. Required with `--ci` in CI/CD. Use only in trusted environments. |
+
+| Run type | Default for `--suppress-mcpserver-io` |
+| --- | --- |
+| Interactive (`inspect`, or `scan` without a push key) | `false`; stderr is streamed with a `[server-name]` prefix |
+| Unattended (push-key scan, `evo`, and similar flows) | `true`; stderr is hidden |
+
+**Handshake and consent matrix for stdio MCP servers:**
 
 | Command | Push key | `--dangerously-run-mcp-servers` | Start servers | Consent prompt |
 | --- | --- | --- | --- | --- |
@@ -154,50 +204,56 @@ Applies to: `scan`, `inspect`, `evo`.
 | `scan` | no | yes | yes | no |
 | `scan` | yes | no | no | no |
 | `scan` | yes | yes | yes | no |
-| `evo` | yes (auto) | no | no | no |
+| `evo` | yes (automatic) | no | no | no |
 
-> Scanning MCP configs **executes** the commands defined in them. Review consent prompts carefully or run inside a sandbox. See [Security Warning](../README.md#security-warning) in the README.
+> Scanning MCP configurations executes the commands defined in them. Review consent prompts carefully or run inside a sandbox. See the README [Security Warning](../README.md#security-warning).
 
----
+## `scan`
 
-## `scan`-only options
+`scan` runs the full pipeline: discover → inspect → redact → analyze → optional upload.
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| `--checks-per-server NUM` | integer | `1` | Number of analysis passes per MCP server. |
+| `--checks-per-server NUM` | integer | `1` | **No-op.** Accepted for backward compatibility; does not change behavior. |
 
-`scan` runs the full pipeline: discover → inspect → redact → analyze → (optional) upload.
+The analysis result is the main version difference:
 
----
+### Agent Scan v0.5.x
+
+- Uses the `2025-09-02` analysis API.
+- Reports issue codes and severity labels.
+- `scan --json` prints the path-keyed `ScanPathResult` schema.
+- Uses `--ignore-issues-codes` for both security issues and operational failures in CI.
+
+### Agent Scan v0.6 and later
+
+- Uses the `2026-07-10` analysis API.
+- Reports named risk indicators with scores from 0 to 1000.
+- `scan --json` prints a `ScanResponse` containing `scan_path_responses`.
+- Uses `--ignore-risks` and `--ignore-failure-codes` independently in CI.
 
 ## `inspect`
 
-Same global and MCP options as `scan`, but **no security analysis** — only discovery and MCP handshake to print tool/prompt/resource metadata.
-
-When `--control-server` is set, `inspect` still sends the startup bootstrap request (unless `--no-bootstrap`). It does not call the analysis API unless you use `scan`.
-
----
+`inspect` uses the shared discovery and MCP options but does not request security analysis. It prints the locally discovered servers, skills, tools, prompts, resources, and resource templates. Its behavior is shared across the documented versions except for the [historical bootstrap behavior](#historical-bootstrap-behavior) in v0.5.4–v0.5.13.
 
 ## `evo`
 
-Uses the same flags as `scan`. Additionally:
+`evo` uses the scan discovery, inspection, analysis, and upload flow:
 
-1. Prompts interactively for **tenant ID** (from the Snyk app URL) and **API token** (from https://app.snyk.io/account).
-2. Mints a short-lived push key (`x-client-id` header).
-3. Runs `scan` with the Snyk push endpoint configured automatically.
-4. Revokes the push key when finished.
+1. Prompt for a Snyk tenant ID and API token.
+2. Mint a short-lived push key (`x-client-id`).
+3. Run `scan` with the Snyk push endpoint configured automatically.
+4. Revoke the push key when finished.
 
-No extra flags beyond the shared scan options.
-
----
+`--ci` is accepted for compatibility but does not change `evo` output or exit status. Shared argument validation still requires it to be paired with `--dangerously-run-mcp-servers`. Use `scan` when CI risk/failure evaluation is required.
 
 ## `guard`
 
-Manage [Agent Guard](https://evo.ai.snyk.io) hooks for Claude Code, Cursor, and Codex.
+Manage [Agent Guard](https://evo.ai.snyk.io) hooks for Claude Code, Cursor, and Codex:
 
 ```bash
 snyk-agent-scan guard [install|uninstall] [OPTIONS]
-snyk-agent-scan guard              # show installation status (default)
+snyk-agent-scan guard
 ```
 
 ### `guard install`
@@ -208,11 +264,11 @@ snyk-agent-scan guard install {claude,cursor,codex,all} [OPTIONS]
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| `--url URL` | string | `https://api.snyk.io` | Remote hooks base URL for the Snyk API environment. |
-| `--tenant-id ID` | string | — | Snyk tenant UUID. Required when minting a push key; not needed if `PUSH_KEY` is already set. |
-| `--file PATH` | string | — | Override the client config file path (default: client-specific well-known path). |
-| `--managed` | boolean | `false` | Install to the admin/MDM managed config path instead of the user-level path. |
-| `--test` | boolean | `false` | **Deprecated.** No-op. |
+| `--url URL` | string | `https://api.snyk.io` | Remote hook base URL for the Snyk API environment. |
+| `--tenant-id ID` | string | — | Snyk tenant UUID. Required when minting a push key; unnecessary when `PUSH_KEY` is set. |
+| `--file PATH` | string | — | Override the client configuration path. |
+| `--managed` | boolean | `false` | Install in the admin/MDM-managed configuration rather than the user configuration. |
+| `--test` | boolean | `false` | **Deprecated/no-op.** |
 
 ### `guard uninstall`
 
@@ -222,40 +278,36 @@ snyk-agent-scan guard uninstall {claude,cursor,codex,all} [OPTIONS]
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| `--file PATH` | string | — | Override the config file path. |
-| `--managed` | boolean | `false` | Uninstall from the managed (admin/MDM) path. |
+| `--file PATH` | string | — | Override the client configuration path. |
+| `--managed` | boolean | `false` | Uninstall from the admin/MDM-managed configuration. |
 
 ### Guard environment variables
 
 | Variable | Purpose |
 | --- | --- |
 | `PUSH_KEY` | Pre-provisioned push key; skips minting when set |
-| `TENANT_ID` | Tenant UUID (alternative to `--tenant-id`) |
-| `SNYK_TOKEN` | Required to mint/revoke push keys and to verify Guard is enabled for the tenant |
-
----
+| `TENANT_ID` | Tenant UUID alternative to `--tenant-id` |
+| `SNYK_TOKEN` | Required to mint/revoke push keys and verify that Guard is enabled for the tenant |
 
 ## Environment variables
 
 | Variable | Used by | Description |
 | --- | --- | --- |
-| `SNYK_TOKEN` | Standalone CLI | Snyk API token for analysis (`Authorization: token …`). Required for `scan`/`evo` unless a push key is configured via `--control-server-H`. Get a token at https://app.snyk.io/account. |
-| `SNYK_CLI_USE` | Standalone binary via Snyk CLI | Set to `true` by the Snyk CLI extension so analysis uses the proxy-authenticated `/cli/analysis-machine` endpoint without embedding the token in env. |
-| `SNYK_API` | Standalone CLI | Override Snyk API base URL (local dev / custom regions). |
+| `SNYK_TOKEN` | Standalone CLI | Snyk API token for analysis (`Authorization: token …`). Required for `scan`/`evo` unless a push key is configured through `--control-server-H`. Obtain it from https://app.snyk.io/account. |
+| `SNYK_CLI_USE` | Binary invoked through Snyk CLI | Set to `true` by the extension so analysis uses the proxy-authenticated `/cli/analysis-machine` endpoint. |
+| `SNYK_API` | Standalone CLI | Override the Snyk API base URL for local development or custom regions. |
 | `SNYK_TENANT_ID` | Snyk CLI extension | Alternative to `--tenant-id` for the Go wrapper. |
-| `AGENT_SCAN_ENVIRONMENT` | Bootstrap, analysis | Environment label sent as `X-Environment` (default: `production`). Also accepts legacy `MCP_SCAN_ENVIRONMENT`. |
-| `AGENT_SCAN_CI_HOSTNAME` | Bootstrap, upload | When `AGENT_SCAN_ENVIRONMENT=ci`, use this hostname instead of the machine node name. |
-| `PUSH_KEY` | `guard install` | Pre-provisioned push key for hook installation |
-| `TENANT_ID` | `guard install` | Tenant UUID for hook installation |
-| `HOOK_VERSION` | Agent Guard hooks | Override the hook/API line version baked into Guard artifacts |
-
----
+| `AGENT_SCAN_ENVIRONMENT` | Analysis and upload | Environment label sent as `X-Environment` (default: `production`). Also accepts the older `MCP_SCAN_ENVIRONMENT` name. |
+| `AGENT_SCAN_CI_HOSTNAME` | Upload | When `AGENT_SCAN_ENVIRONMENT=ci`, use this hostname instead of the machine node name. |
+| `PUSH_KEY` | `guard install` | Pre-provisioned push key for hook installation. |
+| `TENANT_ID` | `guard install` | Tenant UUID for hook installation. |
+| `HOOK_VERSION` | Agent Guard hooks | Override the hook/API line version built into Guard artifacts. |
 
 ## Snyk CLI extension flags
 
-The Snyk CLI command `snyk agent-scan` is implemented by [**cli-extension-agent-scan**](https://github.com/snyk/cli-extension-agent-scan). It requires `--experimental` and delegates to the embedded Agent Scan binary.
+The Snyk CLI command `snyk agent-scan` is implemented by [cli-extension-agent-scan](https://github.com/snyk/cli-extension-agent-scan). It requires `--experimental` and delegates to the embedded Agent Scan binary.
 
-**Authentication:** Run `snyk auth` before using the extension. Analysis always goes through the Snyk API via a local credential proxy, so a valid Snyk CLI session is required in every mode — including `--no-upload`.
+Run `snyk auth` first. Analysis passes through a local credential proxy, so a valid Snyk CLI session is required even with `--no-upload`.
 
 ```bash
 snyk agent-scan --experimental [EXTENSION_FLAGS] [AGENT_SCAN_ARGS...]
@@ -265,79 +317,65 @@ snyk agent-scan --experimental [EXTENSION_FLAGS] [AGENT_SCAN_ARGS...]
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
-| `--experimental` | boolean | `false` | **Required.** Enables the agent-scan workflow. |
-| `--tenant-id UUID` | string | — | Snyk tenant ID. Required when using `--json` without a client ID; otherwise resolved interactively or from `SNYK_TENANT_ID`. Must be a valid UUID. |
-| `--client-id UUID` | string | — | Push-key client ID passed as `x-client-id` to the control server. If omitted (and not using `--no-upload`), the extension mints one via the authenticated Snyk CLI session. Must be a valid UUID when provided. |
-| `--no-upload` | boolean | `false` | Skip uploading results to Evo (analysis still runs). When omitted on a default scan invocation, the extension uploads by configuring `--control-server` automatically. |
-| `--json` | boolean | `false` | Forwarded to the Agent Scan binary. |
-| `--skills [PATH]` | string / boolean | skills on | **Deprecated** when used alone (`--skills` without a path) — skills are already enabled by default in the embedded binary. Still supported by the extension: `--skills /path/to/skills` forwards `/path/to/skills` as a scan target (equivalent to passing the path as a positional argument). |
+| `--experimental` | boolean | `false` | Required to enable the Agent Scan workflow. |
+| `--tenant-id UUID` | string | — | Snyk tenant ID. Required with `--json` when no client ID is supplied; otherwise resolved interactively or from `SNYK_TENANT_ID`. |
+| `--client-id UUID` | string | — | Push-key client ID passed to the control server as `x-client-id`. If omitted and upload is enabled, the extension mints one. |
+| `--no-upload` | boolean | `false` | Do not upload results to Evo. Analysis still runs. |
+| `--json` | boolean | `false` | Forward JSON output to the embedded binary. |
+| `--skills [PATH]` | string/boolean | skills on | Using `--skills` alone is deprecated because skills are enabled by default. A supplied path remains supported and is forwarded as a scan target. |
 
 ### Snyk CLI flags consumed by the extension
 
 | Snyk CLI flag | Effect on Agent Scan |
 | --- | --- |
-| `--insecure` | Adds `--skip-ssl-verify` to the binary |
-| `--debug` / `-d` | Adds `--verbose` to the binary |
+| `--insecure` | Adds `--skip-ssl-verify` to the embedded binary |
+| `--debug` / `-d` | Adds `--verbose` to the embedded binary |
 
 ### What the extension adds automatically
 
-**Default scan invocation** (`snyk agent-scan --experimental` with no explicit subcommand such as `inspect` or `help`, and without `--no-upload`):
+For a default scan without `--no-upload`, the extension:
 
-- Prepends `scan` if no config path is given
-- Sets `--analysis-url` from the configured Snyk API URL
-- Mints or reuses a push key and appends `--control-server`, `--control-server-H "x-client-id: …"`, and `--control-identifier <hostname>` so results upload to Evo (unless `--client-id` was supplied)
-- Starts a local MITM proxy for Snyk CLI credential injection
+- Prepends `scan` if no path is supplied.
+- Sets `--analysis-url` from the configured Snyk API URL.
+- Mints or reuses a push key and appends the corresponding `--control-server`, `--control-server-H`, and `--control-identifier` arguments.
+- Starts a local proxy for Snyk CLI credential injection.
 
-**With `--no-upload`:**
+With `--no-upload`, it does not mint a client ID or add control-server arguments, but analysis still runs through the authenticated proxy. Explicit subcommands such as `inspect`, `help`, and `guard` do not configure upload.
 
-- Does not mint a client ID or add control-server arguments
-- Analysis still runs through the authenticated proxy
-
-**Explicit subcommands** (`inspect`, `help`, `guard`, etc.): no upload is configured, regardless of `--no-upload` (the flag is effectively irrelevant for those commands).
-
-### Deprecated alias
-
-`snyk mcp-scan` is deprecated. The extension prints a warning and treats it like `agent-scan`.
-
----
+The older `snyk mcp-scan` alias is deprecated and is treated as `snyk agent-scan`.
 
 ## Examples
 
 ### Standalone
 
 ```bash
-# Full machine scan (default command is scan)
+# Full scan with v0.6 or later
 uvx snyk-agent-scan@latest
 
-# MCP only, no skills
-uvx snyk-agent-scan@latest --no-skills
+# Full scan pinned to v0.5.x
+uvx snyk-agent-scan@0.5.17
 
-# Specific config or skill directory
-uvx snyk-agent-scan@latest ~/.cursor/mcp.json
-uvx snyk-agent-scan@latest ~/.claude/skills
+# Scan MCP components but skip skills
+snyk-agent-scan --no-skills
+
+# Scan a specific configuration or skill directory
+snyk-agent-scan ~/.cursor/mcp.json
+snyk-agent-scan ~/.claude/skills
 
 # Inspect without analysis
-uvx snyk-agent-scan@latest inspect
+snyk-agent-scan inspect
 
-# JSON for CI parsing (skill path — skills included by default)
-uvx snyk-agent-scan@latest --json ./my-skill
+# v0.5.x CI with selected issue/failure codes ignored
+snyk-agent-scan --ci --dangerously-run-mcp-servers \
+  --ignore-issues-codes W001,X001
 
-# JSON for MCP-only scan
-uvx snyk-agent-scan@latest --json --no-skills ~/.cursor/mcp.json
+# v0.6+ CI with selected risks and failures ignored
+snyk-agent-scan --ci --dangerously-run-mcp-servers \
+  --ignore-risks dangerous_words,suspicious_download_url \
+  --ignore-failure-codes X001
 
-# CI pipeline (non-interactive)
-uvx snyk-agent-scan@latest --ci --dangerously-run-mcp-servers --json
-
-# CI with ignored warnings
-uvx snyk-agent-scan@latest --ci --dangerously-run-mcp-servers \
-  --ignore-issues-codes W001,W015
-
-# All users on a shared machine
-uvx snyk-agent-scan@latest --scan-all-users
-
-# Enterprise upload with push key
-export SNYK_TOKEN=...   # not required when push key is in control-server headers
-uvx snyk-agent-scan@latest scan \
+# Enterprise upload with a push key
+snyk-agent-scan scan \
   --control-server "https://api.snyk.io/hidden/mcp-scan/push?version=2025-08-28" \
   --control-server-H "x-client-id: <push-key>" \
   --control-identifier "$(hostname)"
@@ -350,18 +388,13 @@ uvx snyk-agent-scan@latest scan \
 snyk auth
 snyk agent-scan --experimental
 
-# Explicit tenant and client IDs
-snyk agent-scan --experimental \
-  --tenant-id "<tenant-uuid>" \
-  --client-id "<client-uuid>"
-
-# Local scan only, no upload
+# Local analysis without Evo upload
 snyk agent-scan --experimental --no-upload
 
 # JSON output
 snyk agent-scan --experimental --json --tenant-id "<tenant-uuid>"
 
-# Scan a specific path (skills included by default)
+# Scan a specific path
 snyk agent-scan --experimental ~/.claude/skills
 ```
 
@@ -371,21 +404,21 @@ snyk agent-scan --experimental ~/.claude/skills
 # Check hook status
 snyk-agent-scan guard
 
-# Install for all supported clients (user-level)
+# Install for all supported clients
 SNYK_TOKEN=... snyk-agent-scan guard install all --tenant-id "<tenant-uuid>"
 
-# MDM managed install
+# Install through an MDM-managed configuration
 PUSH_KEY=... snyk-agent-scan guard install cursor --managed
 
 # Uninstall
 snyk-agent-scan guard uninstall all
 ```
 
----
-
 ## Related documentation
 
-- [Scanning overview](scanning.md) — how discovery and analysis work
-- [Issue codes](issue-codes.md) — security finding reference
-- [JSON output](json-output.md) — programmatic output schema
-- [Developer guide — entrypoints](https://github.com/snyk/agent-scan-dev-guide/blob/main/agent-scan-entrypoints-and-release.md) — standalone vs Snyk CLI vs MDM paths
+- [Scanning overview](scanning.md) — shared discovery and analysis workflow
+- [Issue codes](issue-codes.md) — v0.5.x security findings
+- [Risk reference](risks.md) — v0.6+ security risk indicators and scores
+- [Failure codes](failure-codes.md) — operational discovery, inspection, and analysis failures
+- [JSON output](json-output.md) — versioned programmatic output schemas
+- [Developer guide — entrypoints](https://github.com/snyk/agent-scan-dev-guide/blob/main/agent-scan-entrypoints-and-release.md) — standalone, Snyk CLI, and MDM paths
