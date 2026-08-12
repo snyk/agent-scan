@@ -8,7 +8,7 @@ from agent_scan.models.errors import (
     ScanError,
     ServerHTTPError,
     ServerStartupError,
-    SkillScannError,
+    SkillScanError,
     UnknownConfigFormat,
     UserDeclinedError,
 )
@@ -44,7 +44,7 @@ class ClientToInspect(BaseModel):
     skills_dirs: dict[str, list[tuple[str, SkillServer]] | FileNotFoundConfig]
 
 
-class InspectedExtensions(BaseModel):
+class InspectedExtension(BaseModel):
     """Intermediate result for one discovered MCP server or legacy skill."""
 
     name: str
@@ -54,7 +54,7 @@ class InspectedExtensions(BaseModel):
     # path, where the scan never starts the subprocess and the absence
     # of a handshake is the documented behavior rather than a failure.
     signature_or_error: (
-        ServerSignature | ServerStartupError | ServerHTTPError | SkillScannError | UserDeclinedError | None
+        ServerSignature | ServerStartupError | ServerHTTPError | SkillScanError | UserDeclinedError | None
     ) = None
 
 
@@ -65,7 +65,7 @@ class InspectedClient(BaseModel):
     client_path: str
     extensions: dict[
         str,
-        list[InspectedExtensions] | FileNotFoundConfig | UnknownConfigFormat | CouldNotParseMCPConfig | SkillScannError,
+        list[InspectedExtension] | FileNotFoundConfig | UnknownConfigFormat | CouldNotParseMCPConfig | SkillScanError,
     ]
 
 

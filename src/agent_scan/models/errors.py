@@ -98,7 +98,7 @@ class ServerStartupError(SerializedException):
     server_output: str | None = None
 
 
-class SkillScannError(SerializedException):
+class SkillScanError(SerializedException):
     category: Literal["skill_scan_error"] = "skill_scan_error"
 
 

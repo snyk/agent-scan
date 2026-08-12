@@ -40,6 +40,10 @@ BINARY_FILE_DESCRIPTION_PREFIX = "Binary file. Hash: "
 _MAX_COMMANDS_WALK_DEPTH = 10
 
 
+class SkillInspectionError(Exception):
+    """A collected skill could not be interpreted as a valid text skill."""
+
+
 def get_skill_md_path(path: str) -> str | None:
     for file in os.listdir(path):
         if file.lower() == "skill.md":
@@ -105,6 +109,27 @@ def inspect_skill(config: SkillServer) -> ServerSignature:
     return redact_signature(_inspect_skill(config))
 
 
+def _parse_skill_manifest(content: str, skill_path: str) -> tuple[str, str]:
+    """Validate directory-skill frontmatter and return its identity fields."""
+    content_chunks = content.split("---")
+    if len(content_chunks) <= 2:
+        raise SkillInspectionError(
+            f"Invalid SKILL.md file: {skill_path}. Could not find the YAML and the MD parts in the SKILL.md file."
+        )
+    yaml_content = content_chunks[1].strip()
+    try:
+        yaml_data = yaml.safe_load(yaml_content)
+    except YAMLError as e:
+        raise SkillInspectionError(f"Invalid SKILL.md file: {skill_path}. YAML formatter contains invalid yaml.") from e
+    if not isinstance(yaml_data, dict):
+        raise SkillInspectionError(f"Invalid SKILL.md file: {skill_path}. YAML frontmatter must be a mapping.")
+    if "name" not in yaml_data:
+        raise SkillInspectionError(f"Invalid SKILL.md file: {skill_path}. Missing name in the YAML frontmatter.")
+    if "description" not in yaml_data:
+        raise SkillInspectionError(f"Invalid SKILL.md file: {skill_path}. Missing description in the YAML frontmatter.")
+    return yaml_data["name"], yaml_data["description"]
+
+
 def _inspect_skill(config: SkillServer) -> ServerSignature:
     logger.info(f"Scanning skill at path: {config.path}")
     expanded_path = os.path.expanduser(config.path)
@@ -118,23 +143,7 @@ def _inspect_skill(config: SkillServer) -> ServerSignature:
 
     logger.debug("Skill file read successfully")
 
-    # parse SKILL.md file
-    content_chunks = content.split("---")
-    if len(content_chunks) <= 2:
-        raise Exception(
-            f"Invalid SKILL.md file: {config.path}. Could not find the YAML and the MD parts in the SKILL.md file."
-        )
-    yaml_content = content_chunks[1].strip()
-    try:
-        yaml_data = yaml.safe_load(yaml_content)
-    except YAMLError as e:
-        raise Exception(f"Invalid SKILL.md file: {config.path}. YAML formatter contains invalid yaml.") from e
-    if "name" not in yaml_data:
-        raise Exception(f"Invalid SKILL.md file: {config.path}. Missing name in the YAML frontmatter.")
-    name = yaml_data["name"]
-    if "description" not in yaml_data:
-        raise Exception(f"Invalid SKILL.md file: {config.path}. Missing description in the YAML frontmatter.")
-    description = yaml_data["description"]
+    name, description = _parse_skill_manifest(content, config.path)
     base_prompt = Prompt(
         name="SKILL.md",
         description=content,
@@ -228,19 +237,30 @@ def traverse_skill_tree(skill_path: str, relative_path: str | None) -> tuple[lis
     return prompts, resources, tools
 
 
-def _read_skill_file_content(full_path: str) -> str:
+def _read_skill_file_content(
+    full_path: str,
+    *,
+    allow_binary: bool,
+    manifest_skill_path: str | None = None,
+) -> str:
     """Read one skill file's content for the v2026-07-10 request payload.
 
     Secrets are redacted in place (this is the single point where the raw files
-    are read for the request). Binary files collapse to the same synthetic hash
-    marker ``traverse_skill_tree`` uses; that marker is self-generated and holds
-    no user content, so it is not run through redaction.
+    are read for the request). When ``allow_binary`` is true, non-UTF-8 files
+    collapse to the same synthetic hash marker ``traverse_skill_tree`` uses;
+    that marker is self-generated and holds no user content, so it is not run
+    through redaction.
     """
     expanded = os.path.expanduser(full_path)
     try:
         with open(expanded, encoding="utf-8") as f:
-            return redact_text(f.read()) or ""
-    except UnicodeDecodeError:
+            content = f.read()
+        if manifest_skill_path is not None:
+            _parse_skill_manifest(content, manifest_skill_path)
+        return redact_text(content) or ""
+    except UnicodeDecodeError as error:
+        if not allow_binary:
+            raise SkillInspectionError(str(error)) from error
         logger.debug("File %s is not valid UTF-8; treating as binary", get_relative_path(full_path))
         hasher = hashlib.sha256()
         with open(expanded, "rb") as f:
@@ -249,7 +269,7 @@ def _read_skill_file_content(full_path: str) -> str:
         return f"{BINARY_FILE_DESCRIPTION_PREFIX}{hasher.hexdigest()}"
 
 
-def collect_skill_files(skill_path: str) -> list[SkillFile]:
+def collect_skill_files(skill_path: str, *, validate_manifest: bool = False) -> list[SkillFile]:
     """Collect all skill files as raw ``SkillFile`` records for the v2026-07-10 API payload.
 
     Traverses and reads every file within a skill target without requiring legacy wrapper objects:
@@ -263,8 +283,9 @@ def collect_skill_files(skill_path: str) -> list[SkillFile]:
     **File Content Handling:**
     - **Text files** (instruction markdown, scripts, configs, assets): UTF-8 text is read
       and run through secret redaction before being sent to the backend.
-    - **Binary files** (images, archives, compiled binaries): non-UTF-8 binary content is
-      caught gracefully and represented as a synthetic hash marker
+    - **Binary assets** (images, archives, compiled binaries): non-UTF-8 binary content is
+      caught gracefully and represented as a synthetic hash marker. Instruction and script
+      files remain UTF-8-only, matching legacy skill validation.
       (``"Binary file. Hash: <sha256_hex_digest>"``), preserving asset tracking without
       transmitting raw binary payloads.
     """
@@ -278,7 +299,7 @@ def collect_skill_files(skill_path: str) -> list[SkillFile]:
         return [
             SkillFile(
                 path=os.path.basename(expanded_path),
-                content=_read_skill_file_content(expanded_path),
+                content=_read_skill_file_content(expanded_path, allow_binary=False),
             )
         ]
 
@@ -286,6 +307,7 @@ def collect_skill_files(skill_path: str) -> list[SkillFile]:
         raise ValueError(f"Skill path is not a file or directory: {skill_path}")
 
     files: list[SkillFile] = []
+    found_manifest = False
     for root, dirs, filenames in os.walk(expanded_path):
         dirs.sort()  # deterministic traversal order across platforms
         if any(os.path.islink(os.path.join(root, dirname)) for dirname in dirs):
@@ -295,7 +317,21 @@ def collect_skill_files(skill_path: str) -> list[SkillFile]:
             if os.path.islink(full_path):
                 raise ValueError("Skill directory must not contain symbolic links")
             relative_path = os.path.relpath(full_path, expanded_path).replace(os.path.sep, "/")
-            files.append(SkillFile(path=relative_path, content=_read_skill_file_content(full_path)))
+            extension = filename.rsplit(".", 1)[-1].lower()
+            is_manifest = relative_path.lower() == "skill.md"
+            found_manifest = found_manifest or is_manifest
+            files.append(
+                SkillFile(
+                    path=relative_path,
+                    content=_read_skill_file_content(
+                        full_path,
+                        allow_binary=extension not in ("md", "py", "js", "ts", "sh"),
+                        manifest_skill_path=skill_path if validate_manifest and is_manifest else None,
+                    ),
+                )
+            )
+    if validate_manifest and not found_manifest:
+        raise SkillInspectionError(f"neither SKILL.md nor skill.md file found at path: {skill_path}")
     return files
 
 
