@@ -260,14 +260,14 @@ def _format_type_counts(
     return ", ".join(parts)
 
 
-def _append_component_summary(component: Text, summary: str) -> None:
+def _append_compact_counts_to_header(component: Text, summary: str) -> None:
     if summary:
         component.append(f"  {summary}", style="gray62")
 
 
-def _add_remaining_summary(parent: Tree, summary: str, *, follows_items: bool) -> None:
+def _add_undisplayed_item_counts(parent: Tree, summary: str, *, follows_visible_items: bool) -> None:
     if summary:
-        prefix = "and" if follows_items else "contains"
+        prefix = "and" if follows_visible_items else "contains"
         parent.add(Text(f"{prefix} {summary}", style="gray62"))
 
 
@@ -361,7 +361,7 @@ def _append_component_detail(component: Text, detail: Text) -> None:
     component.append(detail)
 
 
-def _affected_server_entity_indexes(
+def _collect_risk_affected_entity_indexes(
     server: McpServerRiskResponse,
     risks: list[tuple[str, RiskScore]],
 ) -> set[int]:
@@ -371,21 +371,21 @@ def _affected_server_entity_indexes(
 def _add_server_entities(
     parent: Tree,
     server: McpServerRiskResponse,
-    affected_indexes: set[int],
+    affected_entity_indexes: set[int],
     *,
     has_risks: bool,
     show_all: bool,
 ) -> None:
-    visible_indexes = set(range(len(server.entities))) if show_all else affected_indexes
+    visible_indexes = set(range(len(server.entities))) if show_all else affected_entity_indexes
     for index, entity in enumerate(server.entities):
         if index in visible_indexes:
             parent.add(_format_response_entity_line(entity))
 
     if not has_risks or show_all:
         return
-    remaining = [entity.type for index, entity in enumerate(server.entities) if index not in affected_indexes]
-    affected_types = {server.entities[index].type for index in affected_indexes}
-    _add_remaining_summary(
+    remaining = [entity.type for index, entity in enumerate(server.entities) if index not in affected_entity_indexes]
+    affected_types = {server.entities[index].type for index in affected_entity_indexes}
+    _add_undisplayed_item_counts(
         parent,
         _format_type_counts(
             remaining,
@@ -393,7 +393,7 @@ def _add_server_entities(
             MCP_ENTITY_TYPE_LABELS,
             count_suffix_by_type=dict.fromkeys(affected_types, " more"),
         ),
-        follows_items=bool(affected_indexes),
+        follows_visible_items=bool(affected_entity_indexes),
     )
 
 
@@ -415,9 +415,9 @@ def _add_server(parent: Tree, server: McpServerRiskResponse, *, show_all: bool) 
     if server.error is not None:
         _append_component_detail(component, _format_response_error(server.error))
 
-    affected_indexes = _affected_server_entity_indexes(server, risks)
+    affected_entity_indexes = _collect_risk_affected_entity_indexes(server, risks)
     if not risks and not show_all:
-        _append_component_summary(
+        _append_compact_counts_to_header(
             component,
             _format_type_counts(
                 [entity.type for entity in server.entities],
@@ -429,7 +429,7 @@ def _add_server(parent: Tree, server: McpServerRiskResponse, *, show_all: bool) 
     _add_server_entities(
         server_tree,
         server,
-        affected_indexes,
+        affected_entity_indexes,
         has_risks=bool(risks),
         show_all=show_all,
     )
@@ -455,7 +455,7 @@ def _add_skill(parent: Tree, skill: SkillRiskResponse, *, show_all: bool) -> Non
         if occurrence is not None
     }
     if not risks and not show_all:
-        _append_component_summary(
+        _append_compact_counts_to_header(
             component,
             _format_type_counts([skill_file.type for skill_file in skill.files], SKILL_FILE_TYPE_ORDER),
         )
@@ -475,14 +475,14 @@ def _add_skill(parent: Tree, skill: SkillRiskResponse, *, show_all: bool) -> Non
             for skill_file in skill.files
             if skill_file.name.removeprefix("./").replace("\\", "/") in affected_paths
         }
-        _add_remaining_summary(
+        _add_undisplayed_item_counts(
             skill_tree,
             _format_type_counts(
                 remaining,
                 SKILL_FILE_TYPE_ORDER,
                 count_suffix_by_type=dict.fromkeys(affected_types, " more"),
             ),
-            follows_items=bool(affected_types),
+            follows_visible_items=bool(affected_types),
         )
 
 
@@ -537,7 +537,12 @@ def print_scan_response(
     *,
     show_all: bool = False,
 ) -> None:
-    """Render the complete backend-enriched results, with risks under each component."""
+    """Render backend-enriched scan results.
+
+    By default, clean components show type counts and risky components show
+    only risk-connected entities or files. ``show_all`` expands every
+    component's complete entity and file list.
+    """
     if not response.scan_path_responses:
         rich.print("No MCP client configurations found on this machine.")
         return

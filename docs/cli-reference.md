@@ -229,8 +229,14 @@ The analysis result is the main version difference:
 
 - Uses the `2026-07-10` analysis API.
 - Reports named risk indicators with scores from 0 to 1000.
+- Human-readable output is compact by default: clean servers and skills show counts by entity or file type, while risky components list only the entities or files connected to a risk and summarize the remainder.
+- `--show-full-discovery` expands the human-readable report to list every MCP tool, prompt, resource, resource template, and skill file. It does not affect JSON output, which is always complete, or `inspect`, which always lists all locally inspected details.
 - `scan --json` prints a `ScanResponse` containing `scan_path_responses`.
 - Uses `--ignore-risks` and `--ignore-failure-codes` independently in CI.
+
+| v0.6 flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--show-full-discovery` | boolean | `false` | Expand human-readable `scan` output to list every MCP entity and skill file instead of the compact summary. |
 
 ## `inspect`
 

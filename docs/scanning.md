@@ -106,6 +106,7 @@ See the [v0.5.x CLI reference](cli-reference.md#agent-scan-v05x) for the complet
 
 - Security findings use risk names and scores.
 - `--ignore-risks` and `--ignore-failure-codes` independently control which risks and operational failures affect the CI exit status.
+- Human-readable `scan` output is compact by default. Clean servers and skills show counts by entity or file type; risky components list only risk-connected entities or files and summarize the remainder. Pass `--show-full-discovery` to list every MCP entity and skill file. This flag does not affect JSON output or `inspect`, which already returns complete details.
 - `--json` prints the `ScanResponse` format for `scan`; `inspect --json` remains a local inspection result.
 
 See the [v0.6 and later CLI reference](cli-reference.md#agent-scan-v06-and-later) for the complete list of commands, flags, defaults, and exit behavior.
