@@ -5,6 +5,7 @@ import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import ClassVar
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from pytest_lazy_fixtures import lf
@@ -12,14 +13,41 @@ from pytest_lazy_fixtures import lf
 
 class _V20260710AnalysisHandler(BaseHTTPRequestHandler):
     requests: ClassVar[list[dict]] = []
+    request_paths: ClassVar[list[str]] = []
+    request_headers: ClassVar[list[dict[str, str]]] = []
+    config_request_paths: ClassVar[list[str]] = []
+    config_request_headers: ClassVar[list[dict[str, str]]] = []
     server_error: ClassVar[dict | None] = None
     server_entities: ClassVar[list[dict]] = []
     skill_files: ClassVar[list[dict]] = []
+
+    def do_GET(self):
+        type(self).config_request_paths.append(self.path)
+        type(self).config_request_headers.append(dict(self.headers))
+        response = json.dumps({"async_analysis_enabled": False}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(response)))
+        self.end_headers()
+        self.wfile.write(response)
 
     def do_POST(self):
         body = self.rfile.read(int(self.headers["Content-Length"]))
         request = json.loads(body)
         type(self).requests.append(request)
+        type(self).request_paths.append(self.path)
+        type(self).request_headers.append(dict(self.headers))
+
+        requested_version = parse_qs(urlsplit(self.path).query).get("version")
+        if requested_version != ["2026-07-10"]:
+            response = json.dumps({"scan_path_results": []}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(response)))
+            self.end_headers()
+            self.wfile.write(response)
+            return
+
         path_responses = []
         for path in request["scan_path_requests"]:
             server_risks = [
@@ -74,6 +102,10 @@ class _V20260710AnalysisHandler(BaseHTTPRequestHandler):
 @pytest.fixture
 def v20260710_analysis_server():
     _V20260710AnalysisHandler.requests = []
+    _V20260710AnalysisHandler.request_paths = []
+    _V20260710AnalysisHandler.request_headers = []
+    _V20260710AnalysisHandler.config_request_paths = []
+    _V20260710AnalysisHandler.config_request_headers = []
     _V20260710AnalysisHandler.server_error = None
     _V20260710AnalysisHandler.server_entities = []
     _V20260710AnalysisHandler.skill_files = []
@@ -119,6 +151,45 @@ class TestFullScanFlow:
         assert [server["name"] for server in path_request["servers"]] == ["Math"]
         assert path_request["skills"] == []
         assert "server" in path_request["servers"][0]
+
+    @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
+    def test_ads_style_push_key_scan_forces_v20260710_when_analysis_url_requests_legacy_version(
+        self, agent_scan_cmd, v20260710_analysis_server
+    ):
+        legacy_analysis_url = v20260710_analysis_server.replace("version=2026-07-10", "version=2025-09-02")
+        control_server_url = legacy_analysis_url.replace(
+            "/hidden/mcp-scan/analysis-machine", "/hidden/mcp-scan/push"
+        ).replace("version=2025-09-02", "version=2025-08-28")
+        result = subprocess.run(
+            [
+                *agent_scan_cmd,
+                "scan",
+                "--json",
+                "--dangerously-run-mcp-servers",
+                "tests/mcp_servers/configs_files/math_config.json",
+                "--analysis-url",
+                legacy_analysis_url,
+                "--control-server",
+                control_server_url,
+                "--control-server-H",
+                "x-client-id: 8cd00172-0825-43a8-8990-16bdb15de7d6",
+                "--control-identifier",
+                "ads-installer-test-host",
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0, result.stderr
+        output = json.loads(result.stdout)
+        assert "scan_path_responses" in output
+        assert parse_qs(urlsplit(_V20260710AnalysisHandler.config_request_paths[0]).query)["version"] == ["2026-07-10"]
+        assert parse_qs(urlsplit(_V20260710AnalysisHandler.request_paths[0]).query)["version"] == ["2026-07-10"]
+        assert _V20260710AnalysisHandler.config_request_headers[0]["X-Push-Key"] == (
+            "8cd00172-0825-43a8-8990-16bdb15de7d6"
+        )
+        assert _V20260710AnalysisHandler.request_headers[0]["X-Push-Key"] == ("8cd00172-0825-43a8-8990-16bdb15de7d6")
+        assert _V20260710AnalysisHandler.request_headers[0]["X-Push"] == "skip"
 
     @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
     def test_scan_compacts_components_unless_show_full_discovery_is_set(

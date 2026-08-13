@@ -653,7 +653,13 @@ class TestAnalyzeMachineAuthPrecedence:
         mock_session.__aexit__ = AsyncMock(return_value=None)
         return mock_session
 
-    async def _run(self, *, push_key: str | None, env: dict[str, str]):
+    async def _run(
+        self,
+        *,
+        push_key: str | None,
+        env: dict[str, str],
+        analysis_url: str | None = None,
+    ):
         inspected_paths = [InspectedPath(path="/test/path")]
         with (
             patch("agent_scan.verify_api.aiohttp.ClientSession") as mock_session_class,
@@ -664,7 +670,7 @@ class TestAnalyzeMachineAuthPrecedence:
             mock_session_class.return_value = self._make_mock_session()
             await analyze_machine(
                 inspected_paths=inspected_paths,
-                analysis_url=self._ANALYSIS_URL,
+                analysis_url=analysis_url or self._ANALYSIS_URL,
                 identifier=None,
                 push_key=push_key,
             )
@@ -673,6 +679,17 @@ class TestAnalyzeMachineAuthPrecedence:
             posted_url = call_args[0][0]
             posted_headers = call_args[1]["headers"]
         return posted_url, posted_headers
+
+    @pytest.mark.asyncio
+    async def test_push_key_forces_v20260710_when_analysis_url_requests_legacy_version(self):
+        os.environ.pop("SNYK_TOKEN", None)
+        posted_url, _ = await self._run(
+            push_key="push-abc",
+            env={},
+            analysis_url=("https://api.snyk.io/hidden/mcp-scan/analysis-machine?region=us&version=2025-09-02"),
+        )
+
+        assert posted_url == ("https://api.snyk.io/hidden/mcp-scan/analysis-machine?region=us&version=2026-07-10")
 
     @pytest.mark.asyncio
     async def test_push_key_only_uses_x_push_key_header_on_unrewritten_url(self):

@@ -170,7 +170,7 @@ def add_common_arguments(parser):
         "--analysis-url",
         type=str,
         default="https://api.snyk.io/hidden/mcp-scan/analysis-machine?version=2026-07-10",
-        help="URL endpoint for the verification server",
+        help="URL endpoint for the verification server; Agent Scan always uses the 2026-07-10 API version",
         metavar="URL",
     )
     parser.add_argument(

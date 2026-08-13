@@ -88,7 +88,7 @@ With `--no-skills`, explicit skill paths, skill directories, and automatically d
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
 | `--storage-file FILE` | string | `~/.mcp-scan` | Path for local scan state and cached results. |
-| `--analysis-url URL` | string | version-specific | Analysis API endpoint; see the defaults below. With `SNYK_TOKEN`, the CLI rewrites it to the `/cli/analysis-machine` variant automatically. |
+| `--analysis-url URL` | string | version-specific | Analysis API endpoint; see the defaults below. With `SNYK_TOKEN`, the CLI rewrites it to the `/cli/analysis-machine` variant automatically. In v0.6+, any supplied `version` query parameter is replaced with `2026-07-10` so the URL cannot select an incompatible wire contract. |
 | `--verification-H HEADER` | repeatable | — | Extra HTTP header for the analysis request, in `Name: value` format. Repeat for multiple headers. |
 | `--skip-ssl-verify` | boolean | `false` | Disable TLS certificate verification for analysis and upload calls. |
 | `--mcp-oauth-tokens-path PATH` | string | — | JSON file containing MCP OAuth tokens (`TokenAndClientInfoList` schema) for OAuth-protected remote MCP servers. |

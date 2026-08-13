@@ -6,6 +6,7 @@ import os
 import ssl
 import traceback
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import aiohttp
 import certifi
@@ -67,6 +68,20 @@ class SnykTokenError(Exception):
 _SYNC_ANALYSIS_PATH = "/hidden/mcp-scan/analysis-machine"
 _ASYNC_ANALYSIS_PATH = "/hidden/agent-scan/async/analysis"
 _AGENT_SCAN_CONFIG_PATH = "/hidden/agent-scan/config"
+_ANALYSIS_API_VERSION = "2026-07-10"
+
+
+def _force_analysis_api_version(analysis_url: str) -> str:
+    """Use the API version implemented by this Agent Scan release.
+
+    ``--analysis-url`` selects the server, not the wire contract. Allowing its
+    query string to select a legacy version can pair the v2026 request model
+    with a v2025 response, which the client cannot deserialize.
+    """
+    parsed = urlsplit(analysis_url)
+    query = [(name, value) for name, value in parse_qsl(parsed.query, keep_blank_values=True) if name != "version"]
+    query.append(("version", _ANALYSIS_API_VERSION))
+    return urlunsplit(parsed._replace(query=urlencode(query)))
 
 
 async def _async_analysis_enabled(
@@ -366,6 +381,7 @@ async def analyze_machine(
         skip_ssl_verify: Whether to skip SSL verification
         scan_context: Optional dict containing scan metadata to include in the request
     """
+    analysis_url = _force_analysis_api_version(analysis_url)
     logger.debug(f"Analyzing scan path with URL: {analysis_url}")
 
     # for analysis server we never push personal information
