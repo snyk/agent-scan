@@ -120,6 +120,25 @@ def _build_detect_secrets_config() -> dict:
 
 _DETECT_SECRETS_CONFIG: dict = _build_detect_secrets_config()
 
+# Lazily-built, process-wide cache of the plugin list for _DETECT_SECRETS_CONFIG.
+# Plugin instances are self-contained after construction (their regexes/config are
+# bound at init -- see _detect_secret's docstring on reusing an already-built
+# ``plugins`` list outside its constructing context), so building them once and
+# reusing across every redact_text() call is safe. This avoids re-entering
+# transient_settings per call: its cache_bust() (on both enter and exit, ~1.3ms
+# each) would otherwise run once per redact_text() call, which redact_error_text
+# makes twice per failing server (traceback + server_output) -- real overhead
+# when a scan has many failing servers.
+_CACHED_PLUGINS: list | None = None
+
+
+def _get_cached_plugins() -> list:
+    global _CACHED_PLUGINS
+    if _CACHED_PLUGINS is None:
+        with transient_settings(_DETECT_SECRETS_CONFIG):
+            _CACHED_PLUGINS = list(get_plugins())
+    return _CACHED_PLUGINS
+
 
 def _redaction_marker(plugin_name: str) -> str:
     """Format the redaction marker for a triggering detect-secrets plugin.
@@ -590,15 +609,15 @@ def redact_text(text: str | None) -> str | None:
     applies to tracebacks and server output via :func:`redact_server` /
     :func:`redact_scan_result`, where paths are noise rather than user content.)
 
-    Detection runs line by line so the plugin set is built once and reused;
-    secret values are spliced out in place (see :func:`_redact_secrets_in_line`).
-    Returns ``None`` for ``None`` input and the input unchanged when it is empty.
+    Detection runs line by line against the process-wide cached plugin set (see
+    :func:`_get_cached_plugins`); secret values are spliced out in place (see
+    :func:`_redact_secrets_in_line`). Returns ``None`` for ``None`` input and the
+    input unchanged when it is empty.
     """
     if not text:
         return text
-    with transient_settings(_DETECT_SECRETS_CONFIG):
-        plugins = list(get_plugins())
-        return "\n".join(_redact_secrets_in_line(line, plugins) for line in text.split("\n"))
+    plugins = _get_cached_plugins()
+    return "\n".join(_redact_secrets_in_line(line, plugins) for line in text.split("\n"))
 
 
 def _is_synthetic_binary_description(text: str) -> bool:

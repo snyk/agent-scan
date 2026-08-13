@@ -596,18 +596,26 @@ class TestRedactText:
         assert lines[2] == "line three"
 
     def test_redact_text_enters_detect_secrets_context_once(self, monkeypatch):
-        """redact_text must enter the detect-secrets settings context exactly
-        once for the whole text, not once per token.
+        """redact_text must enter the detect-secrets settings context at most
+        once for the whole text (to build the process-wide cached plugin list
+        the first time it's needed), never once per token or once per call.
 
         Re-entering ``transient_settings`` runs detect-secrets' ``cache_bust``
-        twice each time (~1.3ms), so a per-token re-entry makes redaction
-        O(tokens) -- a large bundled script then takes tens of seconds. The
-        per-token detection path must reuse the already-built plugin set under
-        the single outer context instead.
+        twice each time (~1.3ms), so a per-token (or per-call) re-entry makes
+        redaction O(tokens) / O(calls) -- costly for a large bundled script, or
+        for many failing servers each redacting a traceback/server_output. The
+        per-token detection path must reuse the already-built (and cached)
+        plugin set under at most one outer context instead.
         """
         import contextlib
 
         import agent_scan.redact as redact_mod
+
+        # Force a rebuild for this test regardless of what earlier tests in
+        # this process already primed, so the "once" assertion below is
+        # meaningful rather than trivially satisfied by the cache already
+        # being warm.
+        monkeypatch.setattr(redact_mod, "_CACHED_PLUGINS", None)
 
         real_transient_settings = redact_mod.transient_settings
         entries = 0
@@ -632,6 +640,11 @@ class TestRedactText:
         # ...and detection still works under the single-context path.
         assert FAKE_API_KEY not in result
         assert "**REDACTED_SECRET_" in result
+
+        # A second, independent call reuses the now-cached plugin list instead
+        # of re-entering transient_settings again.
+        redact_mod.redact_text(f"another secret: {FAKE_API_KEY}")
+        assert entries == 1
 
     @pytest.mark.parametrize(
         "wrapped",
