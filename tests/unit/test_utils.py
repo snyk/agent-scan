@@ -31,6 +31,10 @@ class TestGetRelativePath:
         result = get_relative_path("/etc/config.json")
         assert result == "/etc/config.json"
 
+    def test_windows_path_outside_home_uses_forward_slashes(self):
+        result = get_relative_path(r"C:\Users\someone\AppData\Local\config.json")
+        assert result == "C:/Users/someone/AppData/Local/config.json"
+
     def test_empty_path(self):
         result = get_relative_path("")
         assert result == ""

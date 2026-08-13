@@ -2,151 +2,272 @@
 
 import json
 import subprocess
-from pathlib import PurePosixPath, PureWindowsPath
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from typing import ClassVar
 
 import pytest
 from pytest_lazy_fixtures import lf
 
 
-def posix(path: str) -> str:
-    """Normalize a path to forward slashes so it matches the scanner's JSON output keys."""
-    return PurePosixPath(PureWindowsPath(path)).as_posix()
+class _V20260710AnalysisHandler(BaseHTTPRequestHandler):
+    requests: ClassVar[list[dict]] = []
+    server_error: ClassVar[dict | None] = None
+    server_entities: ClassVar[list[dict]] = []
+    skill_files: ClassVar[list[dict]] = []
+
+    def do_POST(self):
+        body = self.rfile.read(int(self.headers["Content-Length"]))
+        request = json.loads(body)
+        type(self).requests.append(request)
+        path_responses = []
+        for path in request["scan_path_requests"]:
+            server_risks = [
+                {
+                    "name": server["name"],
+                    "entities": type(self).server_entities,
+                    "risk_indexes": {
+                        "private_data": {
+                            "score": 750,
+                            "evidence": "Reads private records",
+                            "affected_tools": [0],
+                        }
+                    },
+                    **({"error": type(self).server_error} if type(self).server_error else {}),
+                }
+                for server in path["servers"]
+            ]
+            skill_risks = [
+                {
+                    "name": skill["name"],
+                    "files": type(self).skill_files,
+                    "risk_indexes": {
+                        "suspicious_download_url": {
+                            "score": 900,
+                            "evidence": "Downloads an untrusted executable",
+                            "locations": [{"start": {"path": "SKILL.md", "line": 1, "offset": 0}}],
+                            "malicious_urls": ["https://malware.example/payload"],
+                        }
+                    },
+                }
+                for skill in path["skills"]
+            ]
+            path_responses.append(
+                {
+                    "client": path.get("client"),
+                    "path": path["path"],
+                    "server_risks": server_risks,
+                    "skill_risks": skill_risks,
+                }
+            )
+        response = json.dumps({"scan_path_responses": path_responses}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(response)))
+        self.end_headers()
+        self.wfile.write(response)
+
+    def log_message(self, format, *args):
+        pass
+
+
+@pytest.fixture
+def v20260710_analysis_server():
+    _V20260710AnalysisHandler.requests = []
+    _V20260710AnalysisHandler.server_error = None
+    _V20260710AnalysisHandler.server_entities = []
+    _V20260710AnalysisHandler.skill_files = []
+    server = HTTPServer(("127.0.0.1", 0), _V20260710AnalysisHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/hidden/mcp-scan/analysis-machine?version=2026-07-10"
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
 
 
 class TestFullScanFlow:
     """Test cases for end-to-end scanning workflows."""
 
     @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
-    @pytest.mark.parametrize(
-        "sample_config_file",
-        [
-            lf("claudestyle_config_file"),
-            lf("vscode_mcp_config_file"),
-            lf("vscode_config_file"),
-            lf("streamable_http_transport_config_file"),
-            lf("sse_transport_config_file"),
-        ],
-    )
-    def test_basic(self, agent_scan_cmd, sample_config_file):
-        """Test a basic complete scan workflow from CLI to results. This does not mean that the results are correct or the servers can be run."""
-        # Run mcp-scan with JSON output mode
-        result = subprocess.run(
-            [*agent_scan_cmd, "scan", "--json", "--dangerously-run-mcp-servers", sample_config_file],
-            capture_output=True,
-            text=True,
-        )
-
-        # Check that the command executed successfully
-        assert result.returncode == 0, f"Command failed with error: {result.stderr}"
-
-        print(result.stdout)
-        print(result.stderr)
-
-        # Try to parse the output as JSON
-        try:
-            output = json.loads(result.stdout)
-            assert posix(sample_config_file) in output
-        except json.JSONDecodeError:
-            print(result.stdout)
-            pytest.fail("Failed to parse JSON output")
-
-    @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
-    @pytest.mark.parametrize(
-        "sample_config_file",
-        [
-            lf("streamable_http_transport_config_file"),
-            lf("sse_transport_config_file"),
-        ],
-    )
-    def test_scan_sse_http(self, agent_scan_cmd, sample_config_file):
-        """Test scanning with SSE and HTTP transport configurations."""
-        result = subprocess.run(
-            [*agent_scan_cmd, "scan", "--json", "--dangerously-run-mcp-servers", sample_config_file],
-            capture_output=True,
-            text=True,
-        )
-        assert result.returncode == 0, f"Command failed with error: {result.stderr}"
-        output = json.loads(result.stdout)
-        assert len(output) == 1, "Output should contain exactly one entry for the config file"
-        assert {tool["name"] for tool in output[posix(sample_config_file)]["servers"][0]["signature"]["tools"]} == {
-            "is_prime",
-            "gcd",
-            "lcm",
-        }, "Tools in signature do not match expected values"
-        print(output)
-
-    @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
-    @pytest.mark.parametrize(
-        "path, server_names",
-        [
-            ("tests/mcp_servers/configs_files/weather_config.json", ["Weather"]),
-            ("tests/mcp_servers/configs_files/math_config.json", ["Math"]),
-            ("tests/mcp_servers/configs_files/all_config.json", ["Weather", "Math"]),
-        ],
-    )
-    def test_scan(self, agent_scan_cmd, path, server_names):
+    def test_v20260710_mcp_scan_request_response_and_ci(self, agent_scan_cmd, v20260710_analysis_server):
+        config = "tests/mcp_servers/configs_files/math_config.json"
         result = subprocess.run(
             [
                 *agent_scan_cmd,
                 "scan",
                 "--json",
+                "--ci",
                 "--dangerously-run-mcp-servers",
-                path,
+                config,
                 "--analysis-url",
-                "https://api.snyk.io/hidden/mcp-scan/analysis-machine?version=2025-09-02",
+                v20260710_analysis_server,
             ],
             capture_output=True,
             text=True,
         )
-        assert result.returncode == 0, f"Command failed with error: {result.stderr}"
+
+        assert result.returncode == 1, result.stderr
         output = json.loads(result.stdout)
+        risk = output["scan_path_responses"][0]["server_risks"][0]["risk_indexes"]["private_data"]
+        assert risk == {"score": 750, "evidence": "Reads private records", "affected_tools": [0]}
+        request = _V20260710AnalysisHandler.requests[0]
+        assert len(request["scan_path_requests"]) == 1
+        path_request = request["scan_path_requests"][0]
+        assert [server["name"] for server in path_request["servers"]] == ["Math"]
+        assert path_request["skills"] == []
+        assert "server" in path_request["servers"][0]
 
-        for server in output[path]["servers"]:
-            server["signature"]["metadata"]["serverInfo"]["version"] = (
-                "mcp_version"  # swap actual version with placeholder
-            )
-
-            with open(f"tests/mcp_servers/signatures/{server['name'].lower()}_server_signature.json") as f:
-                assert server["signature"] == json.load(f), f"Signature mismatch for {server['name']} server"
-
-        assert len(output) == 1, "Output should contain exactly one entry for the config file"
-        path = next(iter(output.keys()))
-        errors = output[path]["error"]
-        assert errors is None, f"Error should not be present, found: {errors}"
-        issues = output[path]["issues"]
-
-        issue_set = {issue["code"] for issue in issues}
-
-        if "Weather" in server_names:
-            assert "W016" in issue_set
-        if "Math" in server_names:
-            assert "W001" in issue_set and "W020" in issue_set
-
-    @pytest.mark.parametrize("agent_scan_cmd", ["binary"], indirect=True)
-    def test_ci_exit_code_with_flag(self, agent_scan_cmd):
-        """Math config + analysis yields W001; --ci exits 1."""
-        math_config = "tests/mcp_servers/configs_files/math_config.json"
-        analysis_url = "https://api.snyk.io/hidden/mcp-scan/analysis-machine?version=2025-09-02"
-        base_cmd = [
+    @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
+    def test_scan_compacts_components_unless_show_full_discovery_is_set(
+        self, agent_scan_cmd, v20260710_analysis_server
+    ):
+        _V20260710AnalysisHandler.server_entities = [
+            {"name": "affected_tool", "type": "tool"},
+            {"name": "unaffected_resource", "type": "resource"},
+        ]
+        base_command = [
             *agent_scan_cmd,
             "scan",
-            "--json",
             "--dangerously-run-mcp-servers",
-            math_config,
+            "tests/mcp_servers/configs_files/math_config.json",
             "--analysis-url",
-            analysis_url,
+            v20260710_analysis_server,
         ]
 
-        with_ci = subprocess.run(
-            [*base_cmd, "--ci", "--suppress-mcpserver-io=false"],
-            capture_output=True,
-            text=True,
+        compact = subprocess.run(base_command, capture_output=True, text=True, encoding="utf-8")
+        complete = subprocess.run(
+            [*base_command, "--show-full-discovery"], capture_output=True, text=True, encoding="utf-8"
         )
-        assert with_ci.returncode == 1, f"Expected exit 1 with --ci when analysis issues exist: {with_ci.stderr}"
+
+        assert compact.returncode == 0, compact.stderr
+        assert "affected_tool" in compact.stdout
+        assert "unaffected_resource" not in compact.stdout
+        assert "and 1 resource" in compact.stdout
+        assert complete.returncode == 0, complete.stderr
+        assert "affected_tool" in complete.stdout
+        assert "unaffected_resource" in complete.stdout
+        assert "and 1 resource" not in complete.stdout
 
     @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
     @pytest.mark.parametrize(
-        "skill_path",
+        ("ignored_risk", "expected_exit"),
+        [("private_data", 0), ("dangerous_words", 1)],
+    )
+    def test_ignore_risks_filters_output_and_ci_exit(
+        self,
+        agent_scan_cmd,
+        v20260710_analysis_server,
+        ignored_risk,
+        expected_exit,
+    ):
+        result = subprocess.run(
+            [
+                *agent_scan_cmd,
+                "scan",
+                "--json",
+                "--ci",
+                "--ignore-risks",
+                ignored_risk,
+                "--dangerously-run-mcp-servers",
+                "tests/mcp_servers/configs_files/math_config.json",
+                "--analysis-url",
+                v20260710_analysis_server,
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == expected_exit, result.stderr
+        output = json.loads(result.stdout)
+        risk_indexes = output["scan_path_responses"][0]["server_risks"][0]["risk_indexes"]
+        if ignored_risk == "private_data":
+            assert "private_data" not in risk_indexes
+        else:
+            assert risk_indexes["private_data"]["score"] == 750
+
+    @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
+    def test_ignore_failure_codes_suppresses_ci_exit_but_preserves_error(
+        self,
+        agent_scan_cmd,
+        v20260710_analysis_server,
+    ):
+        _V20260710AnalysisHandler.server_error = {
+            "message": "could not start server",
+            "category": "server_startup",
+            "is_failure": True,
+        }
+        result = subprocess.run(
+            [
+                *agent_scan_cmd,
+                "scan",
+                "--json",
+                "--ci",
+                "--ignore-risks",
+                "private_data",
+                "--ignore-failure-codes",
+                "X001",
+                "--dangerously-run-mcp-servers",
+                "tests/mcp_servers/configs_files/math_config.json",
+                "--analysis-url",
+                v20260710_analysis_server,
+            ],
+            capture_output=True,
+            text=True,
+        )
+
+        assert result.returncode == 0, result.stderr
+        output = json.loads(result.stdout)
+        server = output["scan_path_responses"][0]["server_risks"][0]
+        assert "private_data" not in server["risk_indexes"]
+        assert server["error"]["category"] == "server_startup"
+        assert server["error"]["message"] == "could not start server"
+
+    @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
+    def test_v20260710_skill_scan_compacts_files_unless_show_full_discovery_is_set(
+        self, agent_scan_cmd, v20260710_analysis_server
+    ):
+        skill = "tests/mcp_servers/.test-client/skills/test-skill"
+        _V20260710AnalysisHandler.skill_files = [
+            {"name": "SKILL.md", "type": "instruction"},
+            {"name": "scripts/helper.py", "type": "script"},
+        ]
+        base_command = [
+            *agent_scan_cmd,
+            "scan",
+            "--dangerously-run-mcp-servers",
+            skill,
+            "--analysis-url",
+            v20260710_analysis_server,
+        ]
+        result = subprocess.run(base_command, capture_output=True, text=True, encoding="utf-8")
+        complete = subprocess.run(
+            [*base_command, "--show-full-discovery"], capture_output=True, text=True, encoding="utf-8"
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "Suspicious download URL (900/1000)" in result.stdout
+        assert "Malicious URLs: https://malware.example/payload" in result.stdout
+        assert "SKILL.md:1:0" in result.stdout
+        assert "instruction SKILL.md" in result.stdout
+        assert "scripts/helper.py" not in result.stdout
+        assert "1 script" in result.stdout
+        assert "https://malware.example/payload" in result.stdout
+        assert complete.returncode == 0, complete.stderr
+        assert "instruction SKILL.md" in complete.stdout
+        assert "script" in complete.stdout
+        assert "scripts/helper.py" in complete.stdout
+        assert "1 script" not in complete.stdout
+        path_request = _V20260710AnalysisHandler.requests[0]["scan_path_requests"][0]
+        assert path_request["servers"] == []
+        assert path_request["skills"][0]["name"] == "test-skill"
+        assert any(file["path"] == "SKILL.md" for file in path_request["skills"][0]["files"])
+
+    @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
+    @pytest.mark.parametrize(
+        "skill",
         [
             "tests/mcp_servers/.test-client/skills",
             "tests/mcp_servers/.test-client/skills/test-skill",
@@ -154,24 +275,64 @@ class TestFullScanFlow:
         ],
         ids=["skills_parent_dir", "skill_folder", "skill_md_file"],
     )
-    def test_scan_skills_with_negative_flag(self, agent_scan_cmd, skill_path):
-        """Test that scanning skill paths does NOT produce skill results without --skills flag."""
+    def test_v20260710_no_skills_omits_skills(self, agent_scan_cmd, v20260710_analysis_server, skill):
         result = subprocess.run(
-            [*agent_scan_cmd, "scan", "--json", "--no-skills", "--dangerously-run-mcp-servers", skill_path],
+            [
+                *agent_scan_cmd,
+                "scan",
+                "--json",
+                "--no-skills",
+                "--dangerously-run-mcp-servers",
+                skill,
+                "--analysis-url",
+                v20260710_analysis_server,
+            ],
             capture_output=True,
             text=True,
         )
-        assert result.returncode == 0, f"Command failed with error: {result.stderr}"
-        output = json.loads(result.stdout)
-        all_servers = [server for entry in output.values() for server in entry["servers"]]
-        skill_servers = [s for s in all_servers if s["server"]["type"] == "skill"]
-        assert len(skill_servers) == 0, (
-            f"Expected no skill servers without --skills flag, got: {[s['name'] for s in skill_servers]}"
+
+        assert result.returncode == 0, result.stderr
+        path_request = _V20260710AnalysisHandler.requests[0]["scan_path_requests"][0]
+        assert path_request["skills"] == []
+
+    @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
+    @pytest.mark.parametrize(
+        "sample_config_file",
+        [
+            lf("streamable_http_transport_config_file"),
+            lf("sse_transport_config_file"),
+        ],
+    )
+    def test_v20260710_scan_preserves_remote_server_signature(
+        self, agent_scan_cmd, sample_config_file, v20260710_analysis_server
+    ):
+        result = subprocess.run(
+            [
+                *agent_scan_cmd,
+                "scan",
+                "--json",
+                "--dangerously-run-mcp-servers",
+                sample_config_file,
+                "--analysis-url",
+                v20260710_analysis_server,
+            ],
+            capture_output=True,
+            text=True,
         )
 
-    @pytest.mark.parametrize("agent_scan_cmd", ["uv"], indirect=True)
-    def test_scan_server_in_catalog(self, agent_scan_cmd, remote_server_with_oauth_in_catalog_file):
-        """Test that scanning a server in the catalog works."""
+        assert result.returncode == 0, result.stderr
+        request = _V20260710AnalysisHandler.requests[0]["scan_path_requests"][0]
+        assert {tool["name"] for tool in request["servers"][0]["signature"]["tools"]} == {
+            "is_prime",
+            "gcd",
+            "lcm",
+        }
+
+    @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
+    def test_catalog_server_is_sent_to_v20260710_analysis(
+        self, agent_scan_cmd, remote_server_with_oauth_in_catalog_file, v20260710_analysis_server
+    ):
+        """Catalog-backed remote configs still reach the new analysis boundary."""
         result = subprocess.run(
             [
                 *agent_scan_cmd,
@@ -179,17 +340,16 @@ class TestFullScanFlow:
                 "--json",
                 "--dangerously-run-mcp-servers",
                 remote_server_with_oauth_in_catalog_file,
+                "--analysis-url",
+                v20260710_analysis_server,
             ],
             capture_output=True,
             text=True,
         )
         assert result.returncode == 0, f"Command failed with error: {result.stderr}"
-        output = json.loads(result.stdout)
-        assert len(output) == 1, "Output should contain exactly one entry for the config file"
-        key = posix(remote_server_with_oauth_in_catalog_file)
-        assert output[key]["servers"][0]["signature"] is not None, "Signature should not be None"
-        assert output[key]["servers"][0]["error"] is not None, json.dumps(output, indent=4)
-        assert output[key]["servers"][0]["error"]["is_failure"] is False, "Error should not be a failure"
+        request = _V20260710AnalysisHandler.requests[0]["scan_path_requests"][0]
+        assert len(request["servers"]) == 1
+        assert request["servers"][0]["server"]["type"] in {"http", "sse"}
 
     @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
     def test_ci_without_dangerous_flag_exits_2(self, agent_scan_cmd):

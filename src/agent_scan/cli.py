@@ -1,7 +1,7 @@
 # fix ssl certificates if custom certificates (i.e. ZScaler) are used
 # as this needs to occur at the beginning of the file, we need to disable the ruff rule
 # ruff: noqa: E402
-from typing import Literal
+from typing import Literal, cast
 
 import truststore
 
@@ -22,7 +22,10 @@ from agent_scan.consent import collect_consent
 from agent_scan.models import (
     FAILURE_CATEGORY_TO_CODE,
     ControlServer,
-    ScanPathResult,
+    InspectedPath,
+    McpServerRiskIndexes,
+    ScanResponse,
+    SkillRiskIndexes,
     TokenAndClientInfo,
     TokenAndClientInfoList,
 )
@@ -34,7 +37,7 @@ from agent_scan.pipelines import (
     inspect_analyze_push_pipeline,
     inspect_pipeline,
 )
-from agent_scan.printer import print_scan_result
+from agent_scan.printer import print_inspected_machine, print_scan_response
 from agent_scan.utils import ensure_unicode_console, get_hostname, get_push_key, parse_headers, suppress_stdout
 from agent_scan.version import version_info
 
@@ -42,6 +45,8 @@ from agent_scan.version import version_info
 logging.getLogger().setLevel(logging.CRITICAL + 1)  # Higher than any standard level
 # Add null handler to prevent "No handler found" warnings
 logging.getLogger().addHandler(logging.NullHandler())
+
+CLI_USAGE_ERROR_EXIT_CODE = 2
 
 
 class MissingIdentifierError(Exception):
@@ -164,7 +169,7 @@ def add_common_arguments(parser):
     parser.add_argument(
         "--analysis-url",
         type=str,
-        default="https://api.snyk.io/hidden/mcp-scan/analysis-machine?version=2025-09-02",
+        default="https://api.snyk.io/hidden/mcp-scan/analysis-machine?version=2026-07-10",
         help="URL endpoint for the verification server",
         metavar="URL",
     )
@@ -194,7 +199,7 @@ def add_common_arguments(parser):
         "--print-full-descriptions",
         default=False,
         action="store_true",
-        help="Show error details and tracebacks",
+        help="Show full entity and skill-file descriptions without truncation",
     )
     parser.add_argument(
         "--json",
@@ -227,12 +232,6 @@ def add_common_arguments(parser):
         default=False,
         help="Exit with a non-zero code when there are analysis findings or runtime failures. Requires --dangerously-run-mcp-servers.",
     )
-    parser.add_argument(
-        "--ignore-issues-codes",
-        type=str,
-        default=None,
-        help="Comma-separated list of issue codes to ignore (e.g. W001,W015)",
-    )
 
 
 def add_bootstrap_argument(parser):
@@ -240,7 +239,7 @@ def add_bootstrap_argument(parser):
         "--no-bootstrap",
         default=False,
         action="store_true",
-        help="Disable the startup bootstrap call to the control server.",
+        help="No-op retained for backward compatibility; does not change behavior.",
     )
 
 
@@ -311,13 +310,22 @@ def add_scan_arguments(scan_parser):
         "--checks-per-server",
         type=int,
         default=1,
-        help="Number of times to check each server (default: 1)",
+        help="No-op retained for backward compatibility; does not change behavior.",
         metavar="NUM",
     )
     add_control_server_arguments(scan_parser)
 
 
-def setup_scan_parser(scan_parser, add_files=True):
+def add_ignore_failure_codes_argument(parser) -> None:
+    parser.add_argument(
+        "--ignore-failure-codes",
+        type=str,
+        default=None,
+        help="Comma-separated X-codes to omit from --ci exit evaluation",
+    )
+
+
+def setup_scan_parser(scan_parser, add_files=True, add_ci_ignore_options=True, add_show_full_discovery_option=True):
     if add_files:
         scan_parser.add_argument(
             "files",
@@ -327,6 +335,21 @@ def setup_scan_parser(scan_parser, add_files=True):
             metavar="CONFIG_FILE",
         )
     add_common_arguments(scan_parser)
+    if add_ci_ignore_options:
+        scan_parser.add_argument(
+            "--ignore-risks",
+            type=str,
+            default=None,
+            help="Comma-separated risk names to omit from --ci output and exit evaluation",
+        )
+        add_ignore_failure_codes_argument(scan_parser)
+    if add_show_full_discovery_option:
+        scan_parser.add_argument(
+            "--show-full-discovery",
+            action="store_true",
+            default=False,
+            help="Show every MCP entity and skill file in human-readable scan output",
+        )
     add_server_arguments(scan_parser)
     add_scan_arguments(scan_parser)
 
@@ -429,7 +452,7 @@ def enforce_consent_requirements(args) -> None:
             "scans, so CI runs must confirm trust explicitly.",
             file=sys.stderr,
         )
-        sys.exit(2)
+        sys.exit(CLI_USAGE_ERROR_EXIT_CODE)
 
 
 def main():
@@ -470,7 +493,7 @@ def main():
         "scan",
         help="Scan one or more MCP config files [default]",
         description=(
-            "Scan one or more MCP configuration files for security issues. "
+            "Scan one or more MCP configuration files for security risks. "
             "If no files are specified, well-known config locations will be checked."
         ),
     )
@@ -483,6 +506,7 @@ def main():
         description="Inspect and display MCP tools, prompts, and resources without security verification.",
     )
     add_common_arguments(inspect_parser)
+    add_ignore_failure_codes_argument(inspect_parser)
     add_server_arguments(inspect_parser)
     add_control_server_arguments(inspect_parser)
     inspect_parser.add_argument(
@@ -505,7 +529,7 @@ def main():
     evo_parser = subparsers.add_parser("evo", help="Push scan results to Snyk Evo")
 
     # use the same parser as scan
-    setup_scan_parser(evo_parser)
+    setup_scan_parser(evo_parser, add_ci_ignore_options=False, add_show_full_discovery_option=False)
 
     # GUARD command
     guard_parser = subparsers.add_parser(
@@ -681,9 +705,13 @@ async def evo(args):
         rich.print(f"[bold red]Error revoking client_id[/bold red]: {e}")
 
 
-async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[ScanPathResult]:
+async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> ScanResponse | list[InspectedPath]:
     """
-    Run the scan/inspect pipeline and return results.
+    Run the scan or inspect flow through their shared discovery and consent setup.
+
+    ``inspect`` stops after producing the local ``InspectedPath`` results.
+    ``scan`` sends those results to the analysis backend and returns the final,
+    potentially backend-enriched ``ScanResponse``.
 
     Flow:
     1. Build InspectArgs from CLI args.
@@ -723,9 +751,7 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[Scan
     dangerously_run_mcp_servers: bool = bool(getattr(args, "dangerously_run_mcp_servers", False))
 
     # Step 1: Discover everything we would inspect without starting any server.
-    clients_to_inspect, precomputed_scan_path_results, scanned_usernames = await discover_clients_to_inspect(
-        inspect_args
-    )
+    clients_to_inspect, unresolved_paths, scanned_usernames = await discover_clients_to_inspect(inspect_args)
 
     # Collect consent when applicable; otherwise show the
     # dangerous-flag banner to users at the terminal. Silent
@@ -760,73 +786,140 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> list[Scan
             push_args,
             verbose=verbose,
             clients_to_inspect=clients_to_inspect,
-            precomputed_scan_path_results=precomputed_scan_path_results,
+            unresolved_paths=unresolved_paths,
             scanned_usernames=scanned_usernames,
             stream_stderr=stream_stderr,
             declined_servers=declined_servers,
             do_stdio_handshake=decision.do_stdio_handshake,
         )
     elif mode == "inspect":
-        scan_path_results, _scanned_usernames = await inspect_pipeline(
+        inspected_paths, _scanned_usernames = await inspect_pipeline(
             inspect_args,
             clients_to_inspect=clients_to_inspect,
-            precomputed_scan_path_results=precomputed_scan_path_results,
+            unresolved_paths=unresolved_paths,
             scanned_usernames=scanned_usernames,
             stream_stderr=stream_stderr,
             declined_servers=declined_servers,
             do_stdio_handshake=decision.do_stdio_handshake,
         )
-        return scan_path_results
+        return inspected_paths
     else:
         raise ValueError(f"Unknown mode: {mode}, expected 'scan' or 'inspect'")
 
 
-def _parse_ignore_codes(args, ci_mode: bool) -> set[str]:
-    """Parse --ignore-issues-codes and validate it is only used with --ci."""
-    ignore_codes_raw = getattr(args, "ignore_issues_codes", None)
-    ignore_codes: set[str] = (
-        {c.strip() for c in ignore_codes_raw.split(",") if c.strip()} if ignore_codes_raw else set()
-    )
-    if ignore_codes and not ci_mode:
-        rich.print(
-            "[bold red]Error: --ignore-issues-codes can only be used with --ci.[/bold red]",
-            file=sys.stderr,
-        )
-        sys.exit(2)
-    return ignore_codes
-
-
-def _collect_failure_codes(result: list[ScanPathResult]) -> set[str]:
-    """Collect X00x codes from ScanError failures on paths and servers."""
+def _collect_failure_codes(result: list[InspectedPath]) -> set[str]:
+    """Collect X00x codes from operational failures in inspected paths."""
     codes: set[str] = set()
     for r in result:
         if r.error and r.error.is_failure:
             codes.add(FAILURE_CATEGORY_TO_CODE.get(r.error.category, FAILURE_CATEGORY_TO_CODE[None]))
-        for s in r.servers or []:
+        for s in r.servers:
             if s.error and s.error.is_failure:
                 codes.add(FAILURE_CATEGORY_TO_CODE.get(s.error.category, FAILURE_CATEGORY_TO_CODE[None]))
+        for skill in r.skills:
+            if skill.error and skill.error.is_failure:
+                codes.add(FAILURE_CATEGORY_TO_CODE.get(skill.error.category, FAILURE_CATEGORY_TO_CODE[None]))
     return codes
 
 
-def _apply_ignore_codes(result: list[ScanPathResult], ignore_codes: set[str]) -> None:
-    """Remove issues whose code is in the ignore set from each scan result."""
-    for scan_result in result:
-        scan_result.issues = [i for i in scan_result.issues if i.code not in ignore_codes]
+_VALID_RISK_NAMES = frozenset(McpServerRiskIndexes.model_fields) | frozenset(SkillRiskIndexes.model_fields)
+_VALID_FAILURE_CODES = frozenset(FAILURE_CATEGORY_TO_CODE.values())
 
 
-def _handle_ci_exit(result: list[ScanPathResult], json_output: bool, ignore_codes: set[str]) -> None:
-    """In CI mode, exit with code 1 if any issues or unignored failures remain."""
-    has_issues = any(scan_result.issues for scan_result in result)
-    failure_codes = _collect_failure_codes(result) - ignore_codes
-    if not has_issues and not failure_codes:
+def _parse_comma_separated(raw_value: str | None) -> set[str]:
+    """Parse a comma-separated CLI option into non-empty, stripped values."""
+    return {value.strip() for value in raw_value.split(",") if value.strip()} if raw_value else set()
+
+
+def _parse_ignore_risks(args, ci_mode: bool) -> set[str]:
+    """Parse --ignore-risks, which is valid only for CI scans."""
+    requested = _parse_comma_separated(getattr(args, "ignore_risks", None))
+    if requested and not ci_mode:
+        rich.print(
+            "[bold red]Error: --ignore-risks can only be used with --ci.[/bold red]",
+            file=sys.stderr,
+        )
+        sys.exit(CLI_USAGE_ERROR_EXIT_CODE)
+
+    unknown = requested - _VALID_RISK_NAMES
+    for name in sorted(unknown):
+        rich.print(f"[yellow]Warning: unknown risk name: {name}[/yellow]", file=sys.stderr)
+    return requested - unknown
+
+
+def _parse_ignore_failure_codes(args, ci_mode: bool) -> set[str]:
+    """Parse --ignore-failure-codes, which is valid only for CI scans."""
+    requested = _parse_comma_separated(getattr(args, "ignore_failure_codes", None))
+    if requested and not ci_mode:
+        rich.print(
+            "[bold red]Error: --ignore-failure-codes can only be used with --ci.[/bold red]",
+            file=sys.stderr,
+        )
+        sys.exit(CLI_USAGE_ERROR_EXIT_CODE)
+
+    unknown = requested - _VALID_FAILURE_CODES
+    for code in sorted(unknown):
+        rich.print(f"[yellow]Warning: unknown failure code: {code}[/yellow]", file=sys.stderr)
+    return requested - unknown
+
+
+def _apply_ignore_risks(response: ScanResponse, ignored_risks: set[str]) -> None:
+    """Remove ignored risks before rendering and CI exit evaluation."""
+    for path in response.scan_path_responses:
+        risk_indexes = [server.risk_indexes for server in path.server_risks]
+        risk_indexes.extend(skill.risk_indexes for skill in path.skill_risks)
+        for indexes in risk_indexes:
+            for name in ignored_risks & indexes.__class__.model_fields.keys():
+                setattr(indexes, name, None)
+
+
+def _has_risks(response: ScanResponse) -> bool:
+    for path in response.scan_path_responses:
+        for server in path.server_risks:
+            if any(value is not None for value in server.risk_indexes.model_dump().values()):
+                return True
+        for skill in path.skill_risks:
+            if any(value is not None for value in skill.risk_indexes.model_dump().values()):
+                return True
+    return False
+
+
+def _collect_response_failure_codes(response: ScanResponse) -> set[str]:
+    codes: set[str] = set()
+    for path in response.scan_path_responses:
+        errors = [path.error]
+        errors.extend(server.error for server in path.server_risks)
+        errors.extend(skill.error for skill in path.skill_risks)
+        for error in errors:
+            if error and error.is_failure:
+                codes.add(FAILURE_CATEGORY_TO_CODE.get(error.category, FAILURE_CATEGORY_TO_CODE[None]))
+    return codes
+
+
+def _handle_ci_exit(
+    result: list[InspectedPath] | ScanResponse,
+    json_output: bool,
+    ignored_failure_codes: set[str] | None = None,
+) -> None:
+    """In CI mode, exit with code 1 if any risk or runtime failure remains."""
+    if isinstance(result, ScanResponse):
+        failure_codes = _collect_response_failure_codes(result)
+        has_risks = _has_risks(result)
+    else:
+        failure_codes = _collect_failure_codes(result)
+        has_risks = False
+    failure_codes -= ignored_failure_codes or set()
+    if not has_risks and not failure_codes:
         return
 
     if not json_output:
-        issue_codes = {issue.code for scan_result in result for issue in scan_result.issues if issue.code}
-        all_codes = sorted(issue_codes | failure_codes)
-        codes_part = ", ".join(all_codes) if all_codes else "none"
+        reasons = []
+        if has_risks:
+            reasons.append("risks found")
+        if failure_codes:
+            reasons.append(f"runtime failure codes: {', '.join(sorted(failure_codes))}")
         rich.print(
-            f"[bold red]CI (--ci): exiting with code 1 (issue codes: {codes_part}).[/bold red]",
+            f"[bold red]CI (--ci): exiting with code 1 ({'; '.join(reasons)}).[/bold red]",
             file=sys.stderr,
         )
     sys.exit(1)
@@ -836,9 +929,9 @@ async def print_scan_inspect(mode="scan", args=None):
     json_output: bool = hasattr(args, "json") and args.json
     print_errors: bool = hasattr(args, "print_errors") and args.print_errors
     full_description: bool = hasattr(args, "print_full_descriptions") and args.print_full_descriptions
-    verbose: bool = hasattr(args, "verbose") and args.verbose
     ci_mode: bool = hasattr(args, "ci") and args.ci
-    ignore_codes = _parse_ignore_codes(args, ci_mode)
+    ignored_risks = _parse_ignore_risks(args, ci_mode)
+    ignored_failure_codes = _parse_ignore_failure_codes(args, ci_mode)
 
     if json_output:
         with suppress_stdout():
@@ -846,24 +939,32 @@ async def print_scan_inspect(mode="scan", args=None):
     else:
         result = await run_scan(args, mode=mode)
 
-    if ci_mode and ignore_codes:
-        _apply_ignore_codes(result, ignore_codes)
+    if mode == "inspect":
+        inspected_paths = cast("list[InspectedPath]", result)
+        if json_output:
+            print(json.dumps({p.path: p.model_dump(mode="json") for p in inspected_paths}, indent=2))
+        else:
+            print_inspected_machine(inspected_paths, print_errors, full_description, args)
+        if ci_mode:
+            _handle_ci_exit(inspected_paths, json_output, ignored_failure_codes)
+        return
+
+    response = cast("ScanResponse", result)
+    if ignored_risks:
+        _apply_ignore_risks(response, ignored_risks)
 
     if json_output:
-        result_dict = {r.path: r.model_dump(mode="json") for r in result}
-        print(json.dumps(result_dict, indent=2))
+        print(json.dumps(response.model_dump(mode="json", exclude_none=True), indent=2))
     else:
-        print_scan_result(
-            result,
+        print_scan_response(
+            response,
             print_errors,
-            inspect_mode=mode == "inspect",
-            internal_issues=verbose,
-            full_description=full_description,
-            args=args,
+            args,
+            show_all=bool(getattr(args, "show_full_discovery", False)),
         )
 
     if ci_mode:
-        _handle_ci_exit(result, json_output, ignore_codes)
+        _handle_ci_exit(response, json_output, ignored_failure_codes)
 
 
 if __name__ == "__main__":

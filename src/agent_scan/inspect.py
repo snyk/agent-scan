@@ -10,18 +10,16 @@ from agent_scan.models import (
     CandidateClient,
     ClientToInspect,
     CouldNotParseMCPConfig,
+    DiscoveredSkill,
     FileNotFoundConfig,
-    InspectedClient,
-    InspectedExtensions,
+    InspectedPath,
+    InspectedServer,
+    InspectedSkill,
     RemoteServer,
     ScanError,
-    ScanPathResult,
     ServerHTTPError,
-    ServerScanResult,
-    ServerSignature,
     ServerStartupError,
-    SkillScannError,
-    SkillServer,
+    SkillScanError,
     StdioServer,
     TokenAndClientInfo,
     UnknownConfigFormat,
@@ -29,11 +27,31 @@ from agent_scan.models import (
     UserDeclinedError,
 )
 from agent_scan.signed_binary import check_server_signature
-from agent_scan.skill_client import inspect_skill, inspect_skills_dir
+from agent_scan.skill_client import SkillInspectionError, collect_skill_files, inspect_skills_dir
 from agent_scan.traffic_capture import TrafficCapture
+from agent_scan.utils import get_relative_path
 from agent_scan.well_known_clients import expand_path
 
 logger = logging.getLogger(__name__)
+
+
+def _inspection_component_name(name: str, component_type: str, source_path: str) -> str:
+    """Keep unnamed components attributable without exposing a home-directory path."""
+    return name or f"unnamed {component_type} ({get_relative_path(source_path)})"
+
+
+def _inspection_error_to_scan_error(
+    error: ServerStartupError | ServerHTTPError | SkillScanError | UserDeclinedError,
+) -> ScanError:
+    """Normalize a concrete inspection failure."""
+    return ScanError(
+        message=error.message,
+        exception=error.sub_exception_message,
+        traceback=error.traceback,
+        is_failure=error.is_failure,
+        category=error.category,
+        server_output=error.server_output if isinstance(error, ServerStartupError | ServerHTTPError) else None,
+    )
 
 
 def _resolve_glob_with_depth(pattern: str, max_depth: int) -> list[str]:
@@ -148,7 +166,7 @@ async def get_mcp_config_per_home_directory(
             )
 
     # parse skills dirs
-    skills_dirs: dict[str, list[tuple[str, SkillServer]] | FileNotFoundConfig] = {}
+    skills_dirs: dict[str, list[DiscoveredSkill] | FileNotFoundConfig] = {}
 
     all_skills_dir_paths: list[str] = list(client.skills_dir_paths)
     for glob_pattern in client.skills_dir_globs:
@@ -187,105 +205,206 @@ def find_relevant_token(tokens: list[TokenAndClientInfo], name: str) -> TokenAnd
     return None
 
 
-async def inspect_extension(
+def _inspect_skill(skill: DiscoveredSkill) -> InspectedSkill:
+    try:
+        files = collect_skill_files(skill.path, validate_skill_md_frontmatter=True)
+        error = None
+    except SkillInspectionError as inspection_error:
+        files = []
+        error = ScanError(
+            message="could not inspect skill",
+            exception=str(inspection_error),
+            traceback=traceback.format_exc(),
+            is_failure=True,
+            category="skill_scan_error",
+        )
+    except Exception as collection_error:
+        files = []
+        error = ScanError(
+            message="could not collect skill files",
+            exception=str(collection_error),
+            traceback=traceback.format_exc(),
+            is_failure=True,
+            category="skill_scan_error",
+        )
+    return InspectedSkill(
+        name=_inspection_component_name(skill.name, "skill", skill.path),
+        installation_path=skill.path,
+        files=files,
+        error=error,
+    )
+
+
+async def _inspect_stdio_server(
     name: str,
-    config: StdioServer | RemoteServer | SkillServer,
+    config: StdioServer,
+    config_path: str,
     timeout: int,
-    token: TokenAndClientInfo | None = None,
+    tokens: list[TokenAndClientInfo],
     *,
-    config_path: str | None = None,
-    stream_stderr: bool = False,
-) -> InspectedExtensions:
-    """
-    Scan an extension (MCP server or skill) and return a InspectedExtensions object.
-
-    When ``stream_stderr`` is True, stdio server stderr is streamed to the
-    console with a ``[name]`` prefix while also being captured for error
-    reports.
-    """
+    stream_stderr: bool,
+) -> InspectedServer:
     traffic_capture = TrafficCapture()
+    try:
+        signature, _ = await check_server(
+            config,
+            timeout,
+            traffic_capture,
+            find_relevant_token(tokens, name),
+            server_name=name,
+            config_path=config_path,
+            stream_stderr=stream_stderr,
+        )
+        return InspectedServer(
+            name=name,
+            config_path=config_path,
+            server=config,
+            signature=signature,
+        )
+    except Exception as exception:
+        error = ServerStartupError(
+            message="could not start server",
+            traceback=traceback.format_exc(),
+            sub_exception_message=str(exception),
+            is_failure=True,
+            server_output=traffic_capture.get_traffic_log(),
+        )
+        return InspectedServer(
+            name=name,
+            config_path=config_path,
+            server=config,
+            error=_inspection_error_to_scan_error(error),
+        )
+
+
+async def _inspect_remote_server(
+    name: str,
+    config: RemoteServer,
+    config_path: str,
+    timeout: int,
+    tokens: list[TokenAndClientInfo],
+) -> InspectedServer:
+    traffic_capture = TrafficCapture()
+    try:
+        signature, fixed_config = await check_server(
+            config.model_copy(deep=True),
+            timeout,
+            traffic_capture,
+            find_relevant_token(tokens, name),
+            server_name=name,
+            config_path=config_path,
+            stream_stderr=False,
+        )
+        assert isinstance(fixed_config, RemoteServer), f"Fixed config is not a RemoteServer: {fixed_config}"
+        return InspectedServer(
+            name=name,
+            config_path=config_path,
+            server=fixed_config,
+            signature=signature,
+        )
+    except HTTPStatusError as exception:
+        config.type = "http" if config.type is None else config.type
+        error: ServerHTTPError | ServerStartupError = ServerHTTPError(
+            message="server returned HTTP status code",
+            traceback=traceback.format_exc(),
+            is_failure=True,
+            sub_exception_message=str(exception),
+            server_output=traffic_capture.get_traffic_log(),
+        )
+    except Exception as exception:
+        config.type = "http" if config.type is None else config.type
+        error = ServerStartupError(
+            message="could not start server",
+            traceback=traceback.format_exc(),
+            sub_exception_message=str(exception),
+            is_failure=True,
+            category="server_startup",
+            server_output=traffic_capture.get_traffic_log(),
+        )
+    return InspectedServer(
+        name=name,
+        config_path=config_path,
+        server=config,
+        error=_inspection_error_to_scan_error(error),
+    )
+
+
+async def _inspect_server(
+    name: str,
+    config: StdioServer | RemoteServer,
+    config_path: str,
+    timeout: int,
+    tokens: list[TokenAndClientInfo],
+    *,
+    stream_stderr: bool,
+    declined: bool,
+    do_stdio_handshake: bool,
+) -> InspectedServer:
+    if declined:
+        error = UserDeclinedError(
+            message="Skipped by user consent (stdio server was not started)",
+            is_failure=True,
+        )
+        return InspectedServer(
+            name=name,
+            config_path=config_path,
+            server=config,
+            error=_inspection_error_to_scan_error(error),
+        )
+    if not do_stdio_handshake and isinstance(config, StdioServer):
+        return InspectedServer(name=name, config_path=config_path, server=config)
     if isinstance(config, StdioServer):
-        try:
-            signature, _ = await check_server(
+        return await _inspect_stdio_server(
+            name,
+            config,
+            config_path,
+            timeout,
+            tokens,
+            stream_stderr=stream_stderr,
+        )
+    return await _inspect_remote_server(name, config, config_path, timeout, tokens)
+
+
+async def _inspect_server_configs(
+    client: ClientToInspect,
+    timeout: int,
+    tokens: list[TokenAndClientInfo],
+    *,
+    stream_stderr: bool,
+    declined_servers: set[tuple[str, str]],
+    do_stdio_handshake: bool,
+) -> tuple[list[InspectedServer], list[ScanError]]:
+    servers: list[InspectedServer] = []
+    candidate_errors: list[ScanError] = []
+    for config_path, servers_or_error in client.mcp_configs.items():
+        if isinstance(servers_or_error, FileNotFoundConfig | UnknownConfigFormat | CouldNotParseMCPConfig):
+            candidate_errors.append(_config_error_to_scan_error(servers_or_error))
+            continue
+        for name, config in servers_or_error:
+            inspected_server = await _inspect_server(
+                name,
                 config,
+                config_path,
                 timeout,
-                traffic_capture,
-                token,
-                server_name=name,
-                config_path=config_path,
+                tokens,
                 stream_stderr=stream_stderr,
+                declined=(config_path, name) in declined_servers,
+                do_stdio_handshake=do_stdio_handshake,
             )
-            return InspectedExtensions(name=name, config=config, signature_or_error=signature)
-        except Exception as e:
-            return InspectedExtensions(
-                name=name,
-                config=config,
-                signature_or_error=ServerStartupError(
-                    message="could not start server",
-                    traceback=traceback.format_exc(),
-                    sub_exception_message=str(e),
-                    is_failure=True,
-                    server_output=traffic_capture.get_traffic_log(),
-                ),
-            )
+            inspected_server.name = _inspection_component_name(name, "server", config_path)
+            servers.append(inspected_server)
+    return servers, candidate_errors
 
-    if isinstance(config, RemoteServer):
-        try:
-            signature, fixed_config = await check_server(
-                config.model_copy(deep=True),
-                timeout,
-                traffic_capture,
-                token,
-                server_name=name,
-                config_path=config_path,
-                stream_stderr=False,  # no-op for remote; flag is stdio-only
-            )
-            assert isinstance(fixed_config, RemoteServer), f"Fixed config is not a RemoteServer: {fixed_config}"
-            return InspectedExtensions(name=name, config=fixed_config, signature_or_error=signature)
-        except HTTPStatusError as e:
-            config.type = "http" if config.type is None else config.type
-            return InspectedExtensions(
-                name=name,
-                config=config,
-                signature_or_error=ServerHTTPError(
-                    message="server returned HTTP status code",
-                    traceback=traceback.format_exc(),
-                    is_failure=True,
-                    sub_exception_message=str(e),
-                    server_output=traffic_capture.get_traffic_log(),
-                ),
-            )
-        except Exception as e:
-            config.type = "http" if config.type is None else config.type
-            return InspectedExtensions(
-                name=name,
-                config=config,
-                signature_or_error=ServerStartupError(
-                    message="could not start server",
-                    traceback=traceback.format_exc(),
-                    sub_exception_message=str(e),
-                    is_failure=True,
-                    category="server_startup",
-                    server_output=traffic_capture.get_traffic_log() if traffic_capture else None,
-                ),
-            )
 
-    elif isinstance(config, SkillServer):
-        try:
-            signature = inspect_skill(config)
-            return InspectedExtensions(name=name, config=config, signature_or_error=signature)
-        except Exception as e:
-            return InspectedExtensions(
-                name=name,
-                config=config,
-                signature_or_error=SkillScannError(
-                    message="could not inspect skill",
-                    traceback=traceback.format_exc(),
-                    is_failure=True,
-                    category="skill_scan_error",
-                    sub_exception_message=str(e),
-                ),
-            )
+def _inspect_skill_configs(client: ClientToInspect) -> tuple[list[InspectedSkill], list[ScanError]]:
+    skills: list[InspectedSkill] = []
+    candidate_errors: list[ScanError] = []
+    for skills_or_error in client.skills_dirs.values():
+        if isinstance(skills_or_error, FileNotFoundConfig):
+            candidate_errors.append(_config_error_to_scan_error(skills_or_error))
+            continue
+        skills.extend(_inspect_skill(skill) for skill in skills_or_error)
+    return skills, candidate_errors
 
 
 async def inspect_client(
@@ -297,149 +416,54 @@ async def inspect_client(
     stream_stderr: bool = False,
     declined_servers: set[tuple[str, str]] | None = None,
     do_stdio_handshake: bool = False,
-) -> InspectedClient:
-    """
-    Scan a client (Cursor, VSCode, etc.) and return a InspectedClient object.
-
-    declined_servers is an optional set of (mcp_config_path, server_name)
-    pairs the user declined during the consent flow. Declined stdio servers are
-    not started. They are recorded as errors with category user_declined.
-
-    do_stdio_handshake when False, every stdio server is recorded with
-    ``signature_or_error=None`` (configured but not inspected) and no
-    subprocess is started. Remote servers and skills are unaffected
-    - they never handshake.
-    """
-    declined = declined_servers or set()
-    extensions: dict[
-        str,
-        list[InspectedExtensions] | FileNotFoundConfig | UnknownConfigFormat | CouldNotParseMCPConfig | SkillScannError,
-    ] = {}
-    for mcp_config_path, mcp_configs in client.mcp_configs.items():
-        if isinstance(mcp_configs, FileNotFoundConfig | UnknownConfigFormat | CouldNotParseMCPConfig):
-            extensions[mcp_config_path] = mcp_configs
-            continue
-        extensions_for_mcp_config: list[InspectedExtensions] = []
-        for name, server in mcp_configs:
-            # Possible cases where we skip scanning a server:
-            # 1. Skip servers that the user declined during the consent flow.
-            if (mcp_config_path, name) in declined:
-                extensions_for_mcp_config.append(
-                    InspectedExtensions(
-                        name=name,
-                        config=server,
-                        signature_or_error=UserDeclinedError(
-                            message="Skipped by user consent (stdio server was not started)",
-                            is_failure=True,
-                        ),
-                    )
-                )
-                continue
-            # 2. If do_stdio_handshake is False, skip stdio servers.
-            if not do_stdio_handshake and isinstance(server, StdioServer):
-                extensions_for_mcp_config.append(InspectedExtensions(name=name, config=server, signature_or_error=None))
-                continue
-            extension = await inspect_extension(
-                name,
-                server,
-                timeout,
-                find_relevant_token(tokens, name),
-                config_path=mcp_config_path,
-                stream_stderr=stream_stderr,
-            )
-            extensions_for_mcp_config.append(extension)
-        extensions[mcp_config_path] = extensions_for_mcp_config
+) -> InspectedPath:
+    """Inspect one client and return its normalized inspection result."""
+    servers, candidate_errors = await _inspect_server_configs(
+        client,
+        timeout,
+        tokens,
+        stream_stderr=stream_stderr,
+        declined_servers=declined_servers or set(),
+        do_stdio_handshake=do_stdio_handshake,
+    )
 
     if scan_skills:
-        for skills_dir_path, skills_dirs in client.skills_dirs.items():
-            if isinstance(skills_dirs, FileNotFoundConfig):
-                extensions[skills_dir_path] = skills_dirs
-                continue
-            extensions_for_skills_dir: list[InspectedExtensions] = []
-            for name, skill in skills_dirs:
-                extension = await inspect_extension(name, skill, timeout)
-                extensions_for_skills_dir.append(extension)
-            extensions[skills_dir_path] = extensions_for_skills_dir
-    return InspectedClient(name=client.name, client_path=client.client_path, extensions=extensions)
+        skills, skill_errors = _inspect_skill_configs(client)
+        candidate_errors.extend(skill_errors)
+    else:
+        skills = []
 
-
-def inspected_client_to_scan_path_result(inspected_client: InspectedClient) -> ScanPathResult:
-    """
-    Convert a InspectedClient object to a ScanPathResult object.
-    """
-    servers: list[ServerScanResult] = []
-    candidate_errors: list[ScanError] = []
-    for config_path, extensions_or_error in inspected_client.extensions.items():
-        if isinstance(
-            extensions_or_error, FileNotFoundConfig | UnknownConfigFormat | CouldNotParseMCPConfig | SkillScannError
-        ):
-            candidate_errors.append(
-                ScanError(
-                    message=extensions_or_error.message,
-                    exception=extensions_or_error.sub_exception_message,
-                    traceback=extensions_or_error.traceback,
-                    is_failure=extensions_or_error.is_failure,
-                    category=extensions_or_error.category,
-                )
-            )
-            continue
-        for extension in extensions_or_error:
-            if isinstance(extension.signature_or_error, ServerSignature):
-                servers.append(
-                    ServerScanResult(
-                        name=extension.name,
-                        config_path=config_path,
-                        server=extension.config,
-                        signature=extension.signature_or_error,
-                        error=None,
-                    )
-                )
-            elif extension.signature_or_error is None:
-                # Recorded but not inspected (e.g. stdio MCP server on the
-                # push-key path).
-                servers.append(
-                    ServerScanResult(
-                        name=extension.name,
-                        config_path=config_path,
-                        server=extension.config,
-                        signature=None,
-                        error=None,
-                    )
-                )
-            else:
-                servers.append(
-                    ServerScanResult(
-                        name=extension.name,
-                        config_path=config_path,
-                        server=extension.config,
-                        signature=None,
-                        error=ScanError(
-                            message=extension.signature_or_error.message,
-                            exception=extension.signature_or_error.sub_exception_message,
-                            traceback=extension.signature_or_error.traceback,
-                            is_failure=extension.signature_or_error.is_failure,
-                            category=extension.signature_or_error.category,
-                            server_output=extension.signature_or_error.server_output
-                            if isinstance(extension.signature_or_error, ServerStartupError | ServerHTTPError)
-                            else None,
-                        ),
-                    )
-                )
-    joined_error: None | ScanError = None
-    if len(candidate_errors) > 0:
-        error_category = next((error.category for error in candidate_errors if error.category is not None), None)
-        joined_error = ScanError(
-            message="\n".join([error.message or "" for error in candidate_errors]),
-            exception="\n".join([str(error.exception) for error in candidate_errors]),
-            traceback="\n".join([error.traceback or "missing traceback" for error in candidate_errors]),
-            is_failure=any(error.is_failure for error in candidate_errors),
-            category=error_category,
-        )
-    return ScanPathResult(
-        client=inspected_client.name,
-        path=inspected_client.client_path,
+    return InspectedPath(
+        client=client.name,
+        path=client.client_path,
         servers=servers,
-        issues=[],
-        labels=[],
-        error=joined_error,
+        skills=skills,
+        error=_join_scan_errors(candidate_errors),
+    )
+
+
+def _config_error_to_scan_error(
+    error: FileNotFoundConfig | UnknownConfigFormat | CouldNotParseMCPConfig | SkillScanError,
+) -> ScanError:
+    """Normalize a config-level inspection error for either result model."""
+    return ScanError(
+        message=error.message,
+        exception=error.sub_exception_message,
+        traceback=error.traceback,
+        is_failure=error.is_failure,
+        category=error.category,
+    )
+
+
+def _join_scan_errors(errors: list[ScanError]) -> ScanError | None:
+    """Combine config-level errors into the single error carried by a path."""
+    if not errors:
+        return None
+    error_category = next((error.category for error in errors if error.category is not None), None)
+    return ScanError(
+        message="\n".join(error.message or "" for error in errors),
+        exception="\n".join(str(error.exception) for error in errors),
+        traceback="\n".join(error.traceback or "missing traceback" for error in errors),
+        is_failure=any(error.is_failure for error in errors),
+        category=error_category,
     )

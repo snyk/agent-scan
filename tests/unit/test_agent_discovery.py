@@ -8,8 +8,8 @@ import pytest
 from agent_scan.models import (
     ClientToInspect,
     CouldNotParseMCPConfig,
+    DiscoveredSkill,
     RemoteServer,
-    SkillServer,
     StdioServer,
 )
 
@@ -177,9 +177,9 @@ def test_claude_code_discoverer_parses_skills(tmp_path):
     skills = skills_dirs[dir_path]
     assert isinstance(skills, list)
     assert len(skills) == 1
-    skill_name, skill = skills[0]
-    assert skill_name == "my-skill"
-    assert isinstance(skill, SkillServer)
+    skill = skills[0]
+    assert skill.name == "my-skill"
+    assert isinstance(skill, DiscoveredSkill)
 
 
 def test_claude_code_discoverer_skills_returns_empty_when_dir_missing(tmp_path):
@@ -556,9 +556,9 @@ def test_claude_code_discoverer_project_skills_scans_per_project_dotclaude(tmp_p
     assert key.endswith("/.claude/skills")
     entries = skills_dirs[key]
     assert isinstance(entries, list) and len(entries) == 1
-    skill_name, skill = entries[0]
-    assert skill_name == "proj-skill"
-    assert isinstance(skill, SkillServer)
+    skill = entries[0]
+    assert skill.name == "proj-skill"
+    assert isinstance(skill, DiscoveredSkill)
 
 
 def test_claude_code_discoverer_project_skills_scans_agents_skills(tmp_path):
@@ -583,9 +583,9 @@ def test_claude_code_discoverer_project_skills_scans_agents_skills(tmp_path):
     assert len(keys) == 1
     entries = skills_dirs[keys[0]]
     assert isinstance(entries, list) and len(entries) == 1
-    skill_name, skill = entries[0]
-    assert skill_name == "agents-skill"
-    assert isinstance(skill, SkillServer)
+    skill = entries[0]
+    assert skill.name == "agents-skill"
+    assert isinstance(skill, DiscoveredSkill)
 
 
 def test_claude_code_discoverer_project_skills_skips_missing_project_folders(tmp_path):
@@ -904,9 +904,9 @@ def test_claude_code_discoverer_plugin_skills_scans_cache(tmp_path):
     assert key.endswith("/my-plugin/skills")
     entries = skills_dirs[key]
     assert isinstance(entries, list) and len(entries) == 1
-    skill_name, skill = entries[0]
-    assert skill_name == "plug-skill"
-    assert isinstance(skill, SkillServer)
+    skill = entries[0]
+    assert skill.name == "plug-skill"
+    assert isinstance(skill, DiscoveredSkill)
 
 
 def test_claude_code_discoverer_plugin_skills_empty_when_cache_missing(tmp_path):
@@ -1213,6 +1213,28 @@ def test_find_discoverers_returns_empty_when_no_agents_installed(tmp_path):
 
 
 # --- Pipeline dispatch: legacy for all + ABC merge phase ---
+
+
+@pytest.mark.asyncio
+async def test_discover_clients_to_inspect_normalizes_unresolved_windows_path():
+    from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
+
+    windows_path = r"C:\Users\alice\missing.json"
+
+    def expand_windows_home(path: str) -> str:
+        return r"C:\Users\alice" if path == "~" else path
+
+    with (
+        patch("agent_scan.pipelines.get_readable_home_directories", return_value=[]),
+        patch("agent_scan.pipelines.client_to_inspect_from_path", return_value=[]),
+        patch("agent_scan.utils.os.path.expanduser", side_effect=expand_windows_home),
+    ):
+        _, unresolved_paths, _ = await discover_clients_to_inspect(
+            InspectArgs(timeout=10, tokens=[], paths=[windows_path])
+        )
+
+    assert unresolved_paths[0].path == "C:/Users/alice/missing.json"
+    assert unresolved_paths[0].client == "C:/Users/alice/missing.json"
 
 
 @pytest.mark.asyncio
@@ -2753,7 +2775,7 @@ def test_windsurf_discoverer_discovers_workspace_root_mcp_json(tmp_path):
     assert len(workspace_keys) == 1
     entries = mcp_configs[workspace_keys[0]]
     assert isinstance(entries, list) and len(entries) == 1
-    name, server = entries[0]
+    name, _server = entries[0]
     assert name == "ws-root-srv"
 
 
@@ -2806,9 +2828,9 @@ def test_vscode_discoverer_parses_copilot_skills_dir(tmp_path):
     assert len(keys) == 1
     entries = skills_dirs[keys[0]]
     assert isinstance(entries, list)
-    skill_name, skill = entries[0]
-    assert skill_name == "my-skill"
-    assert isinstance(skill, SkillServer)
+    skill = entries[0]
+    assert skill.name == "my-skill"
+    assert isinstance(skill, DiscoveredSkill)
 
 
 @pytest.mark.parametrize("relative", ["~/.copilot/skills", "~/.claude/skills", "~/.agents/skills"])
@@ -2834,8 +2856,7 @@ def test_vscode_discoverer_reads_each_documented_user_skills_path(tmp_path, rela
     assert len(matching) == 1, f"VSCodeDiscoverer must surface skills at {relative}; got keys: {list(skills_dirs)}"
     entries = skills_dirs[matching[0]]
     assert isinstance(entries, list)
-    skill_name, _ = entries[0]
-    assert skill_name == "user-skill"
+    assert entries[0].name == "user-skill"
 
 
 def _setup_vscode_workspace(tmp_path, workspace_relpath):
@@ -2874,9 +2895,9 @@ def test_vscode_discoverer_reads_each_documented_workspace_skills_path(tmp_path,
     )
     entries = skills_dirs[matching[0]]
     assert isinstance(entries, list)
-    skill_name, skill = entries[0]
-    assert skill_name == "ws-skill"
-    assert isinstance(skill, SkillServer)
+    skill = entries[0]
+    assert skill.name == "ws-skill"
+    assert isinstance(skill, DiscoveredSkill)
 
 
 def test_kiro_discoverer_has_no_skills_dir(tmp_path):
@@ -3107,14 +3128,14 @@ def test_cursor_discovers_workspace_skills_at_each_supported_relative_path(tmp_p
     assert len(matching) == 1
     entries = skills_dirs[matching[0]]
     assert isinstance(entries, list)
-    skill_name, skill = entries[0]
-    assert skill_name == "ws-skill"
-    assert isinstance(skill, SkillServer)
+    skill = entries[0]
+    assert skill.name == "ws-skill"
+    assert isinstance(skill, DiscoveredSkill)
 
 
 def test_cursor_workspace_skills_picked_up_from_ancestor(tmp_path):
     """A skills dir at an ancestor of the opened workspace must be surfaced (monorepo case)."""
-    discoverer, workspace = _setup_cursor_workspace(tmp_path, "monorepo/packages/web")
+    discoverer, _workspace = _setup_cursor_workspace(tmp_path, "monorepo/packages/web")
     # Skills live at the monorepo root, not inside the opened subpackage.
     _write_skill(tmp_path / "monorepo" / ".cursor" / "skills", "root-skill")
 
@@ -3173,7 +3194,7 @@ def test_cursor_user_level_skills_still_discovered(tmp_path):
 
 def test_cursor_workspace_mcp_picked_up_from_ancestor(tmp_path):
     """``.cursor/mcp.json`` at an ancestor of the opened workspace is included — same as Claude Code's project walk."""
-    discoverer, workspace = _setup_cursor_workspace(tmp_path, "monorepo/apps/web")
+    discoverer, _workspace = _setup_cursor_workspace(tmp_path, "monorepo/apps/web")
     ancestor_mcp = tmp_path / "monorepo" / ".cursor"
     ancestor_mcp.mkdir()
     (ancestor_mcp / "mcp.json").write_text('{"mcpServers": {"root-mcp": {"command": "r"}}}')
@@ -3326,9 +3347,9 @@ def test_vscode_extension_skills_discovers_skills_dir(tmp_path):
     assert len(matching) == 1
     entries = skills_dirs[matching[0]]
     assert isinstance(entries, list)
-    name, skill = entries[0]
-    assert name == "ext-skill"
-    assert isinstance(skill, SkillServer)
+    skill = entries[0]
+    assert skill.name == "ext-skill"
+    assert isinstance(skill, DiscoveredSkill)
 
 
 def test_vscode_extension_skills_empty_when_extensions_dir_missing(tmp_path, monkeypatch):
@@ -3906,7 +3927,7 @@ def test_windsurf_discovers_workspace_skills_at_each_supported_relative_path(tmp
     assert len(matching) == 1
     entries = skills_dirs[matching[0]]
     assert isinstance(entries, list)
-    assert any(name == "ws-skill" for name, _ in entries)
+    assert any(skill.name == "ws-skill" for skill in entries)
 
 
 def test_kiro_user_global_skills_discovered(tmp_path):
@@ -3920,7 +3941,7 @@ def test_kiro_user_global_skills_discovered(tmp_path):
     matching = [k for k in skills_dirs if k.endswith("/.kiro/skills")]
     assert len(matching) == 1
     entries = skills_dirs[matching[0]]
-    assert any(name == "kiro-user-skill" for name, _ in entries)
+    assert any(skill.name == "kiro-user-skill" for skill in entries)
 
 
 def test_kiro_user_data_dir_resolves_to_capital_kiro(tmp_path):
@@ -3958,7 +3979,7 @@ def test_kiro_discovers_workspace_skills_at_each_supported_relative_path(tmp_pat
     matching = [k for k in skills_dirs if k.endswith(f"/myproj/{relative}")]
     assert len(matching) == 1
     entries = skills_dirs[matching[0]]
-    assert any(name == "kr-ws-skill" for name, _ in entries)
+    assert any(skill.name == "kr-ws-skill" for skill in entries)
 
 
 def test_antigravity_user_global_skills_discovered(tmp_path):
@@ -3972,7 +3993,7 @@ def test_antigravity_user_global_skills_discovered(tmp_path):
     matching = [k for k in skills_dirs if k.endswith("/.gemini/antigravity/skills")]
     assert len(matching) == 1
     entries = skills_dirs[matching[0]]
-    assert any(name == "ag-user-skill" for name, _ in entries)
+    assert any(skill.name == "ag-user-skill" for skill in entries)
 
 
 def test_antigravity_user_data_dir_resolves_to_capital_antigravity(tmp_path):
@@ -4000,7 +4021,7 @@ def test_antigravity_discovers_workspace_skills_at_singular_agent_relative(tmp_p
     matching = [k for k in skills_dirs if k.endswith("/myproj/.agent/skills")]
     assert len(matching) == 1
     entries = skills_dirs[matching[0]]
-    assert any(name == "ag-ws-skill" for name, _ in entries)
+    assert any(skill.name == "ag-ws-skill" for skill in entries)
 
 
 # NOTE: ``.agents/skills`` (plural) IS now a documented Antigravity workspace
@@ -4064,7 +4085,7 @@ def test_antigravity_workspace_skills_discovered_via_gemini_projects_registry(tm
     matching = [k for k in skills_dirs if k.endswith("/myproj/.agents/skills")]
     assert len(matching) == 1
     entries = skills_dirs[matching[0]]
-    assert any(name == "ws-skill" for name, _ in entries)
+    assert any(skill.name == "ws-skill" for skill in entries)
 
 
 @pytest.mark.parametrize(
@@ -4234,7 +4255,7 @@ def test_antigravity_discovers_workspace_skills_via_v2_userdata(tmp_path):
     matching = [k for k in skills_dirs if k.endswith("/v2proj/.agent/skills")]
     assert len(matching) == 1
     entries = skills_dirs[matching[0]]
-    assert any(name == "v2-skill" for name, _ in entries)
+    assert any(skill.name == "v2-skill" for skill in entries)
 
 
 def test_antigravity_client_exists_detects_v2_userdata_only_install(tmp_path):
@@ -4274,7 +4295,7 @@ def test_cursor_user_global_cross_compat_skills_discovered(tmp_path, relative):
     matching = [k for k in skills_dirs if k.endswith(f"/{relative}")]
     assert len(matching) == 1
     entries = skills_dirs[matching[0]]
-    assert any(name == "cur-user-cross-skill" for name, _ in entries)
+    assert any(skill.name == "cur-user-cross-skill" for skill in entries)
 
 
 @pytest.mark.parametrize(
@@ -4295,7 +4316,7 @@ def test_windsurf_user_global_cross_compat_skills_discovered(tmp_path, relative)
     matching = [k for k in skills_dirs if k.endswith(f"/{relative}")]
     assert len(matching) == 1
     entries = skills_dirs[matching[0]]
-    assert any(name == "ws-user-cross-skill" for name, _ in entries)
+    assert any(skill.name == "ws-user-cross-skill" for skill in entries)
 
 
 # --- Kiro: workspace MCP under ``.kiro/settings/mcp.json`` ---
@@ -4415,7 +4436,7 @@ def test_antigravity_user_shared_skills_discovered(tmp_path):
     matching = [k for k in skills_dirs if k.endswith("/.gemini/skills")]
     assert len(matching) == 1
     entries = skills_dirs[matching[0]]
-    assert any(name == "shared-skill" for name, _ in entries)
+    assert any(skill.name == "shared-skill" for skill in entries)
 
 
 # --- Antigravity: extension walks under ``~/.gemini/extensions/`` ---
@@ -5063,7 +5084,7 @@ def test_claude_code_discovers_inline_plugin_manifest_skills(tmp_path):
 
     keys = [k for k in skills if k.endswith("/my-plugin/custom-skills")]
     assert len(keys) == 1
-    assert {n for n, _ in skills[keys[0]]} == {"special"}
+    assert {skill.name for skill in skills[keys[0]]} == {"special"}
 
 
 # --- VSCode family: NEW gaps (agentSkillsLocations, devcontainer, .code-workspace,
@@ -5087,7 +5108,7 @@ def test_vscode_agent_skills_locations_dotted_key_absolute_path(tmp_path):
 
     keys = [k for k in skills_dirs if k.endswith("/my-custom-skills")]
     assert len(keys) == 1
-    assert {n for n, _ in skills_dirs[keys[0]]} == {"custom-skill"}
+    assert {skill.name for skill in skills_dirs[keys[0]]} == {"custom-skill"}
 
 
 def test_vscode_agent_skills_locations_nested_key(tmp_path):
@@ -5120,7 +5141,7 @@ def test_vscode_agent_skills_locations_workspace_relative(tmp_path):
 
     keys = [k for k in skills_dirs if k.endswith("/proj/team-skills")]
     assert len(keys) == 1
-    assert {n for n, _ in skills_dirs[keys[0]]} == {"team-skill"}
+    assert {skill.name for skill in skills_dirs[keys[0]]} == {"team-skill"}
 
 
 def test_vscode_agent_skills_locations_object_form_enabled(tmp_path):
@@ -5143,7 +5164,7 @@ def test_vscode_agent_skills_locations_object_form_enabled(tmp_path):
 
     keys = [k for k in skills_dirs if k.endswith("/object-skills")]
     assert len(keys) == 1, f"object-form agentSkillsLocations must be honored; got: {list(skills_dirs)}"
-    assert {n for n, _ in skills_dirs[keys[0]]} == {"object-skill"}
+    assert {skill.name for skill in skills_dirs[keys[0]]} == {"object-skill"}
 
 
 def test_vscode_agent_skills_locations_object_form_false_excluded(tmp_path):
@@ -5464,7 +5485,7 @@ def test_windsurf_discovers_system_skills_dir(tmp_path, monkeypatch):
 
     keys = [k for k in skills_dirs if k.endswith("/system-windsurf-skills")]
     assert len(keys) == 1
-    assert {n for n, _ in skills_dirs[keys[0]]} == {"system-skill"}
+    assert {skill.name for skill in skills_dirs[keys[0]]} == {"system-skill"}
 
 
 @pytest.mark.skipif(
@@ -5544,7 +5565,7 @@ def test_antigravity_discovers_singular_agent_home_skills(tmp_path):
 
     keys = [k for k in skills_dirs if k.endswith("/.agent/skills")]
     assert len(keys) == 1
-    assert {n for n, _ in skills_dirs[keys[0]]} == {"home-skill"}
+    assert {skill.name for skill in skills_dirs[keys[0]]} == {"home-skill"}
 
 
 def test_antigravity_discovers_plural_agents_home_skills(tmp_path):
@@ -5560,7 +5581,7 @@ def test_antigravity_discovers_plural_agents_home_skills(tmp_path):
 
     keys = [k for k in skills_dirs if k.endswith("/.agents/skills")]
     assert len(keys) == 1, f"plural ~/.agents/skills must be scanned; got: {list(skills_dirs)}"
-    assert {n for n, _ in skills_dirs[keys[0]]} == {"plural-home-skill"}
+    assert {skill.name for skill in skills_dirs[keys[0]]} == {"plural-home-skill"}
 
 
 def test_vscode_devcontainer_non_dict_intermediate_does_not_crash(tmp_path):
@@ -5609,9 +5630,9 @@ def test_vscode_builtin_extension_skills_discovered(tmp_path, monkeypatch):
 
     matching = [k for k in skills_dirs if k.endswith("/github.copilot-chat/assets/prompts/skills")]
     assert len(matching) == 1, f"built-in extension skills must surface; got: {list(skills_dirs)}"
-    name, skill = skills_dirs[matching[0]][0]
-    assert name == "create-skill"
-    assert isinstance(skill, SkillServer)
+    skill = skills_dirs[matching[0]][0]
+    assert skill.name == "create-skill"
+    assert isinstance(skill, DiscoveredSkill)
 
 
 def test_vscode_builtin_extension_mcp_discovered(tmp_path, monkeypatch):
@@ -5794,7 +5815,7 @@ def test_cursor_builtin_skills_discovered_in_discover_skills(tmp_path, monkeypat
     skills_dirs = discoverer.discover_skills()
 
     assert builtin_dir.as_posix() in skills_dirs, f"built-in skills dir must be surfaced; got: {list(skills_dirs)}"
-    skill_names = {name for name, _ in skills_dirs[builtin_dir.as_posix()]}
+    skill_names = {skill.name for skill in skills_dirs[builtin_dir.as_posix()]}
     assert "migrate-to-skills" in skill_names, f"migrate-to-skills must be discovered; got: {skill_names}"
     assert "loop" in skill_names, f"loop must be discovered; got: {skill_names}"
 
@@ -5854,7 +5875,7 @@ def test_cursor_skills_cursor_dir_discovered(tmp_path):
 
     key = skills_cursor.as_posix()
     assert key in skills_dirs, f"~/.cursor/skills-cursor must be surfaced; got: {list(skills_dirs)}"
-    skill_names = {name for name, _ in skills_dirs[key]}
+    skill_names = {skill.name for skill in skills_dirs[key]}
     assert {"migrate-to-skills", "loop"} <= skill_names, f"managed skills must be discovered; got: {skill_names}"
 
 
@@ -6534,8 +6555,8 @@ def test_codex_discoverer_discovers_user_skills(tmp_path, monkeypatch):
 
     keys = [k for k in skills_dirs if k.endswith("/.agents/skills")]
     assert len(keys) == 1
-    assert {n for n, _ in skills_dirs[keys[0]]} == {"my-skill"}
-    assert isinstance(skills_dirs[keys[0]][0][1], SkillServer)
+    assert {skill.name for skill in skills_dirs[keys[0]]} == {"my-skill"}
+    assert isinstance(skills_dirs[keys[0]][0], DiscoveredSkill)
 
 
 def test_codex_discoverer_discovers_admin_skills(tmp_path, monkeypatch):
@@ -6552,7 +6573,7 @@ def test_codex_discoverer_discovers_admin_skills(tmp_path, monkeypatch):
 
     keys = [k for k in skills_dirs if k.endswith("/etc-codex-skills")]
     assert len(keys) == 1
-    assert {n for n, _ in skills_dirs[keys[0]]} == {"ops-skill"}
+    assert {skill.name for skill in skills_dirs[keys[0]]} == {"ops-skill"}
 
 
 def test_codex_discoverer_returns_empty_skills_when_no_dirs(tmp_path, monkeypatch):
@@ -6581,7 +6602,7 @@ def test_codex_discoverer_discovers_codex_home_skills_default(tmp_path):
 
     keys = [k for k in skills_dirs if k.endswith("/.codex/skills")]
     assert len(keys) == 1
-    assert {n for n, _ in skills_dirs[keys[0]]} == {"home-skill"}
+    assert {skill.name for skill in skills_dirs[keys[0]]} == {"home-skill"}
 
 
 def test_codex_discoverer_discovers_codex_home_skills_under_relocation(tmp_path, monkeypatch):
@@ -6601,7 +6622,7 @@ def test_codex_discoverer_discovers_codex_home_skills_under_relocation(tmp_path,
 
     keys = [k for k in skills_dirs if k.endswith("/relocated-codex/skills")]
     assert len(keys) == 1
-    assert {n for n, _ in skills_dirs[keys[0]]} == {"legacy-skill"}
+    assert {skill.name for skill in skills_dirs[keys[0]]} == {"legacy-skill"}
 
 
 def test_codex_discoverer_discovers_system_embedded_skills(tmp_path):
@@ -6622,7 +6643,7 @@ def test_codex_discoverer_discovers_system_embedded_skills(tmp_path):
 
     keys = [k for k in skills_dirs if k.endswith("/.codex/skills/.system")]
     assert len(keys) == 1
-    assert {n for n, _ in skills_dirs[keys[0]]} == {"imagegen"}
+    assert {skill.name for skill in skills_dirs[keys[0]]} == {"imagegen"}
 
 
 def test_codex_discoverer_discovers_system_embedded_skills_under_relocation(tmp_path, monkeypatch):
@@ -6641,7 +6662,7 @@ def test_codex_discoverer_discovers_system_embedded_skills_under_relocation(tmp_
 
     keys = [k for k in skills_dirs if k.endswith("/relocated-codex/skills/.system")]
     assert len(keys) == 1
-    assert {n for n, _ in skills_dirs[keys[0]]} == {"imagegen"}
+    assert {skill.name for skill in skills_dirs[keys[0]]} == {"imagegen"}
 
 
 # --- CodexDiscoverer: full discover() + registry ---
@@ -6795,7 +6816,7 @@ def test_codex_discoverer_discovers_project_skills(tmp_path):
 
     keys = [k for k in skills_dirs if k.endswith("/repo/.agents/skills")]
     assert len(keys) == 1
-    assert {n for n, _ in skills_dirs[keys[0]]} == {"proj-skill"}
+    assert {skill.name for skill in skills_dirs[keys[0]]} == {"proj-skill"}
 
 
 def test_codex_discoverer_walks_project_ancestors_for_skills(tmp_path):
@@ -6820,7 +6841,7 @@ def test_codex_discoverer_walks_project_ancestors_for_skills(tmp_path):
 
     keys = [k for k in skills_dirs if k.endswith("/monorepo/.agents/skills")]
     assert len(keys) == 1
-    assert {n for n, _ in skills_dirs[keys[0]]} == {"root-skill"}
+    assert {skill.name for skill in skills_dirs[keys[0]]} == {"root-skill"}
 
 
 # --- CodexDiscoverer: profile + managed (admin) MCP sources ---
@@ -6916,7 +6937,7 @@ def test_codex_discoverer_discovers_plugin_skills(tmp_path, monkeypatch):
 
     keys = [k for k in skills_dirs if k.endswith("/latex/0.2.2/skills")]
     assert len(keys) == 1
-    assert {n for n, _ in skills_dirs[keys[0]]} == {"latex-compile"}
+    assert {skill.name for skill in skills_dirs[keys[0]]} == {"latex-compile"}
 
 
 def test_codex_discoverer_discovers_plugin_mcp_flat(tmp_path):
@@ -7127,10 +7148,10 @@ def test_codex_discoverer_honors_manifest_skills_override(tmp_path):
 
     extra_keys = [k for k in skills_dirs if k.endswith("/skill-plugin/1.0.0/extra-skills")]
     assert len(extra_keys) == 1
-    assert {n for n, _ in skills_dirs[extra_keys[0]]} == {"extra-skill"}
+    assert {skill.name for skill in skills_dirs[extra_keys[0]]} == {"extra-skill"}
     default_keys = [k for k in skills_dirs if k.endswith("/skill-plugin/1.0.0/skills")]
     assert len(default_keys) == 1
-    assert {n for n, _ in skills_dirs[default_keys[0]]} == {"default-skill"}
+    assert {skill.name for skill in skills_dirs[default_keys[0]]} == {"default-skill"}
 
 
 def test_codex_discoverer_rejects_invalid_skills_override_path(tmp_path):
@@ -7733,9 +7754,9 @@ def test_opencode_discoverer_parses_global_skills(tmp_path):
     assert dir_path.endswith("/.config/opencode/skills")
     skills = skills_dirs[dir_path]
     assert isinstance(skills, list)
-    name, server = skills[0]
-    assert name == "my-skill"
-    assert isinstance(server, SkillServer)
+    skill = skills[0]
+    assert skill.name == "my-skill"
+    assert isinstance(skill, DiscoveredSkill)
 
 
 def test_opencode_discoverer_skills_returns_empty_when_dir_missing(tmp_path):
@@ -8071,7 +8092,7 @@ def test_opencode_discoverer_discovers_project_skills_dir(tmp_path):
     assert len(matching) == 1
     skills = skills_dirs[matching[0]]
     assert isinstance(skills, list)
-    assert skills[0][0] == "proj-skill"
+    assert skills[0].name == "proj-skill"
 
 
 # --- OpenCodeDiscoverer: managed (system-wide) config ---
@@ -8175,7 +8196,7 @@ def test_opencode_discoverer_scans_singular_skill_global_dir(tmp_path):
     assert len(matching) == 1
     skills = skills_dirs[matching[0]]
     assert isinstance(skills, list)
-    assert skills[0][0] == "legacy-skill"
+    assert skills[0].name == "legacy-skill"
 
 
 def test_opencode_discoverer_scans_singular_skill_project_dir(tmp_path):
@@ -8218,7 +8239,7 @@ def test_opencode_discoverer_scans_global_claude_compat_skills(tmp_path):
     assert len(matching) == 1
     skills = skills_dirs[matching[0]]
     assert isinstance(skills, list)
-    assert skills[0][0] == "compat-skill"
+    assert skills[0].name == "compat-skill"
 
 
 def test_opencode_discoverer_scans_global_agents_compat_skills(tmp_path):
@@ -8300,7 +8321,7 @@ def test_opencode_discoverer_scans_opencode_config_dir_skills(tmp_path, monkeypa
     assert len(matching) == 1
     skills = skills_dirs[matching[0]]
     assert isinstance(skills, list)
-    assert skills[0][0] == "alt-skill"
+    assert skills[0].name == "alt-skill"
 
 
 def test_opencode_discoverer_ignores_opencode_config_dir_when_not_own_home(tmp_path, monkeypatch):
@@ -8343,7 +8364,7 @@ def test_opencode_discoverer_scans_dot_opencode_home_dir_skills(tmp_path):
     assert len(matching) == 1
     skills = skills_dirs[matching[0]]
     assert isinstance(skills, list)
-    assert skills[0][0] == "home-skill"
+    assert skills[0].name == "home-skill"
 
 
 def test_opencode_discoverer_scans_dot_opencode_home_dir_mcp(tmp_path):
@@ -8383,7 +8404,7 @@ def test_opencode_discoverer_scans_skills_paths_with_tilde_expansion(tmp_path):
     assert len(matching) == 1
     skills = skills_dirs[matching[0]]
     assert isinstance(skills, list)
-    assert skills[0][0] == "team-skill"
+    assert skills[0].name == "team-skill"
 
 
 def test_opencode_discoverer_scans_skills_paths_with_absolute_path(tmp_path):
@@ -8516,7 +8537,7 @@ def test_opencode_discoverer_scans_cached_url_skills(tmp_path):
     assert len(matching) == 1
     skills = skills_dirs[matching[0]]
     assert isinstance(skills, list)
-    assert skills[0][0] == "remote-skill"
+    assert skills[0].name == "remote-skill"
 
 
 def test_opencode_discoverer_scans_cached_url_skills_returns_empty_when_dir_absent(tmp_path):

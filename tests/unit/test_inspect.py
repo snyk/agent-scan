@@ -5,17 +5,28 @@ from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from httpx import HTTPStatusError, Request, Response
+from mcp.shared.auth import OAuthToken
+from mcp.types import Implementation, InitializeResult
 
-from agent_scan.inspect import get_mcp_config_per_client, inspect_client, inspected_client_to_scan_path_result
+from agent_scan.inspect import (
+    get_mcp_config_per_client,
+    inspect_client,
+)
 from agent_scan.mcp_client import scan_mcp_config_file
 from agent_scan.models import (
     CandidateClient,
     ClientToInspect,
+    CouldNotParseMCPConfig,
+    DiscoveredSkill,
+    InspectedPath,
+    InspectedServer,
+    InspectedSkill,
     RemoteServer,
     ScanError,
-    ScanPathResult,
-    ServerScanResult,
+    ServerSignature,
     StdioServer,
+    TokenAndClientInfo,
 )
 from agent_scan.pipelines import InspectArgs, inspect_pipeline
 from tests.unit._secret_fixtures import synthetic_secret
@@ -26,6 +37,168 @@ TEST_CANDIDATE_CLIENT = CandidateClient(
     mcp_config_paths=["tests/mcp_servers/.test-client/mcp.json"],
     skills_dir_paths=["tests/mcp_servers/.test-client/skills"],
 )
+
+
+@pytest.mark.asyncio
+async def test_inspect_client_rejects_symlink_before_reading_skill(tmp_path):
+    """A symlinked skill file must be rejected before its content is read."""
+    skill_dir = tmp_path / "skill"
+    skill_dir.mkdir()
+    outside_file = tmp_path / "outside.md"
+    outside_file.write_bytes(b"\xff\xfe")
+    (skill_dir / "SKILL.md").symlink_to(outside_file)
+    client = ClientToInspect(
+        name="cursor",
+        client_path="/proj",
+        mcp_configs={},
+        skills_dirs={str(skill_dir.parent): [DiscoveredSkill(name="skill", path=str(skill_dir))]},
+    )
+
+    result = await inspect_client(client, timeout=1, tokens=[], scan_skills=True)
+
+    assert len(result.skills) == 1
+    assert result.skills[0].files == []
+    assert result.skills[0].error is not None
+    assert result.skills[0].error.exception == "Skill directory must not contain symbolic links"
+
+
+@pytest.mark.asyncio
+async def test_inspect_client_records_stdio_server_without_handshake():
+    client = ClientToInspect(
+        name="cursor",
+        client_path="/proj",
+        mcp_configs={
+            "/proj/.mcp.json": [("sqlite", StdioServer(command="sqlite-mcp"))],
+        },
+        skills_dirs={},
+    )
+
+    result = await inspect_client(
+        client,
+        timeout=1,
+        tokens=[],
+        scan_skills=False,
+        do_stdio_handshake=False,
+    )
+
+    assert len(result.servers) == 1
+    assert result.servers[0].name == "sqlite"
+    assert result.servers[0].config_path == "/proj/.mcp.json"
+    assert result.servers[0].signature is None
+    assert result.servers[0].error is None
+
+
+@pytest.mark.asyncio
+async def test_inspect_client_attributes_empty_component_names_to_their_source():
+    client = ClientToInspect(
+        name="cursor",
+        client_path="/proj",
+        mcp_configs={
+            "/proj/.mcp.json": [("", StdioServer(command="sqlite-mcp"))],
+        },
+        skills_dirs={
+            "/proj/skills": [DiscoveredSkill(name="", path="/proj/skills/unnamed")],
+        },
+    )
+
+    with patch("agent_scan.inspect.collect_skill_files", return_value=[]):
+        result = await inspect_client(
+            client,
+            timeout=1,
+            tokens=[],
+            scan_skills=True,
+            do_stdio_handshake=False,
+        )
+
+    assert result.servers[0].name == "unnamed server (/proj/.mcp.json)"
+    assert result.skills[0].name == "unnamed skill (/proj/skills/unnamed)"
+
+
+@pytest.mark.asyncio
+async def test_inspect_client_uses_original_empty_server_name_for_oauth_token_lookup():
+    config = StdioServer(command="sqlite-mcp")
+    token = TokenAndClientInfo(
+        token=OAuthToken(access_token="test-token", token_type="Bearer"),
+        server_name="",
+        client_id="client-id",
+        token_url="https://example.test/token",
+        mcp_server_url="https://example.test/mcp",
+        updated_at=0,
+    )
+    signature = ServerSignature(
+        metadata=InitializeResult(
+            protocolVersion="2024-11-05",
+            capabilities={},
+            serverInfo=Implementation(name="server", version="1"),
+        )
+    )
+    client = ClientToInspect(
+        name="cursor",
+        client_path="/proj",
+        mcp_configs={"/proj/.mcp.json": [("", config)]},
+        skills_dirs={},
+    )
+
+    with patch("agent_scan.inspect.check_server", new_callable=AsyncMock, return_value=(signature, config)) as check:
+        result = await inspect_client(
+            client,
+            timeout=1,
+            tokens=[token],
+            scan_skills=False,
+            do_stdio_handshake=True,
+        )
+
+    assert check.await_args.args[3] == token
+    assert result.servers[0].name == "unnamed server (/proj/.mcp.json)"
+
+
+@pytest.mark.asyncio
+async def test_inspect_client_returns_server_signature():
+    remote = RemoteServer(url="https://example.test/mcp", type="http")
+    signature = ServerSignature(
+        metadata=InitializeResult(
+            protocolVersion="2024-11-05",
+            capabilities={},
+            serverInfo=Implementation(name="server", version="1"),
+        )
+    )
+    client = ClientToInspect(
+        name="cursor",
+        client_path="/proj",
+        mcp_configs={"/proj/.mcp.json": [("remote", remote)]},
+        skills_dirs={},
+    )
+
+    with patch("agent_scan.inspect.check_server", new_callable=AsyncMock, return_value=(signature, remote)):
+        result = await inspect_client(client, timeout=1, tokens=[], scan_skills=False)
+
+    assert len(result.servers) == 1
+    assert result.servers[0].signature == signature
+    assert result.servers[0].error is None
+
+
+@pytest.mark.asyncio
+async def test_inspect_client_converts_server_http_error():
+    request = Request("POST", "https://example.test/mcp")
+    status_error = HTTPStatusError(
+        "server error",
+        request=request,
+        response=Response(500, request=request),
+    )
+    client = ClientToInspect(
+        name="cursor",
+        client_path="/proj",
+        mcp_configs={"/proj/.mcp.json": [("remote", RemoteServer(url="https://example.test/mcp", type="http"))]},
+        skills_dirs={},
+    )
+
+    with patch("agent_scan.inspect.check_server", new_callable=AsyncMock, side_effect=status_error):
+        result = await inspect_client(client, timeout=1, tokens=[], scan_skills=False)
+
+    assert len(result.servers) == 1
+    assert result.servers[0].signature is None
+    assert result.servers[0].error is not None
+    assert result.servers[0].error.category == "server_http_error"
 
 
 @pytest.fixture
@@ -150,10 +323,8 @@ async def test_inspect_pipeline_reports_only_detected_usernames(home_dirs_with_a
         patch("agent_scan.pipelines.get_readable_home_directories", return_value=home_dirs),
         patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
         patch("agent_scan.pipelines.inspect_client", new_callable=AsyncMock) as mock_inspect,
-        patch("agent_scan.pipelines.inspected_client_to_scan_path_result") as mock_to_result,
     ):
-        mock_inspect.return_value = None
-        mock_to_result.return_value = None
+        mock_inspect.return_value = InspectedPath(path="/test")
 
         args = InspectArgs(timeout=10, tokens=[], paths=[])
         _, scanned_usernames = await inspect_pipeline(args)
@@ -218,10 +389,8 @@ async def test_inspect_pipeline_detected_usernames_are_sorted():
             patch("agent_scan.pipelines.get_readable_home_directories", return_value=home_dirs),
             patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
             patch("agent_scan.pipelines.inspect_client", new_callable=AsyncMock) as mock_inspect,
-            patch("agent_scan.pipelines.inspected_client_to_scan_path_result") as mock_to_result,
         ):
-            mock_inspect.return_value = None
-            mock_to_result.return_value = None
+            mock_inspect.return_value = InspectedPath(path="/test")
 
             args = InspectArgs(timeout=10, tokens=[], paths=[])
             _, scanned_usernames = await inspect_pipeline(args)
@@ -257,10 +426,8 @@ async def test_inspect_pipeline_single_user_detected_among_many():
             patch("agent_scan.pipelines.get_readable_home_directories", return_value=home_dirs),
             patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
             patch("agent_scan.pipelines.inspect_client", new_callable=AsyncMock) as mock_inspect,
-            patch("agent_scan.pipelines.inspected_client_to_scan_path_result") as mock_to_result,
         ):
-            mock_inspect.return_value = None
-            mock_to_result.return_value = None
+            mock_inspect.return_value = InspectedPath(path="/test")
 
             args = InspectArgs(timeout=10, tokens=[], paths=[])
             _, scanned_usernames = await inspect_pipeline(args)
@@ -303,10 +470,8 @@ async def test_inspect_pipeline_deduplicates_usernames_across_clients():
             patch("agent_scan.pipelines.get_readable_home_directories", return_value=home_dirs),
             patch("agent_scan.pipelines.get_well_known_clients", return_value=candidates),
             patch("agent_scan.pipelines.inspect_client", new_callable=AsyncMock) as mock_inspect,
-            patch("agent_scan.pipelines.inspected_client_to_scan_path_result") as mock_to_result,
         ):
-            mock_inspect.return_value = None
-            mock_to_result.return_value = None
+            mock_inspect.return_value = InspectedPath(path="/test")
 
             args = InspectArgs(timeout=10, tokens=[], paths=[])
             _, scanned_usernames = await inspect_pipeline(args)
@@ -351,10 +516,10 @@ async def test_inspect_pipeline_redacts_server_secrets_and_env():
     Redaction now happens inside inspect_pipeline itself, so every caller
     (both `scan` and `inspect`) gets sanitized results."""
     fake_api_key = synthetic_secret()
-    raw_result = ScanPathResult(
+    raw_result = InspectedPath(
         path="/some/path/mcp.json",
         servers=[
-            ServerScanResult(
+            InspectedServer(
                 name="stdio",
                 server=StdioServer(command="npx", args=["some-server"], env={"API_KEY": "shh"}),
                 error=ScanError(
@@ -373,8 +538,7 @@ async def test_inspect_pipeline_redacts_server_secrets_and_env():
             new_callable=AsyncMock,
             return_value=[ClientToInspect(name="test", client_path="/some/path", mcp_configs={}, skills_dirs={})],
         ),
-        patch("agent_scan.pipelines.inspect_client", new_callable=AsyncMock),
-        patch("agent_scan.pipelines.inspected_client_to_scan_path_result", return_value=raw_result),
+        patch("agent_scan.pipelines.inspect_client", new_callable=AsyncMock, return_value=raw_result),
     ):
         args = InspectArgs(timeout=10, tokens=[], paths=["/some/path/mcp.json"])
         results, _ = await inspect_pipeline(args)
@@ -423,10 +587,8 @@ async def test_inspect_pipeline_paths_mode_does_not_leak_all_usernames():
                 return_value=[ClientToInspect(name="test", client_path="/some/path", mcp_configs={}, skills_dirs={})],
             ),
             patch("agent_scan.pipelines.inspect_client", new_callable=AsyncMock) as mock_inspect,
-            patch("agent_scan.pipelines.inspected_client_to_scan_path_result") as mock_to_result,
         ):
-            mock_inspect.return_value = None
-            mock_to_result.return_value = None
+            mock_inspect.return_value = InspectedPath(path="/test")
 
             args = InspectArgs(timeout=10, tokens=[], paths=["/some/path/mcp.json"])
             _, scanned_usernames = await inspect_pipeline(args)
@@ -512,7 +674,7 @@ async def test_glob_discovers_plugin_mcp_configs():
         skills = cti.skills_dirs[skills_paths[0]]
         assert isinstance(skills, list)
         assert len(skills) == 1
-        assert skills[0][0] == "my-skill"
+        assert skills[0].name == "my-skill"
     finally:
         shutil.rmtree(tmp)
 
@@ -614,276 +776,29 @@ async def test_glob_respects_max_depth():
 
 
 @pytest.mark.asyncio
-async def test_inspect_pipeline_discovery_mode_without_all_users_falls_back_to_current_user():
-    """Without --paths and without --scan-all-users, when no agents are detected, only the current user should be reported."""
-    tmp = tempfile.mkdtemp()
-    try:
-        home_dirs = [
-            (Path(tmp) / "alice", "alice"),
-            (Path(tmp) / "bob", "bob"),
-        ]
-        for home, _ in home_dirs:
-            home.mkdir(parents=True, exist_ok=True)
-
-        candidate = CandidateClient(
-            name="nonexistent-client",
-            client_exists_paths=["~/.nonexistent-client"],
-            mcp_config_paths=[],
-            skills_dir_paths=[],
-        )
-
-        with (
-            patch("agent_scan.pipelines.get_readable_home_directories", return_value=home_dirs),
-            patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
-        ):
-            args = InspectArgs(timeout=10, tokens=[], paths=[], all_users=False)
-            _, scanned_usernames = await inspect_pipeline(args)
-
-        assert scanned_usernames == [getpass.getuser()]
-    finally:
-        shutil.rmtree(tmp)
-
-
-@pytest.mark.asyncio
-async def test_inspect_client_default_does_not_handshake_stdio_servers():
-    """The default behavior (no ``do_stdio_handshake`` kwarg) must NOT start
-    any stdio subprocess. This is the load-bearing safe-default property:
-    spawning subprocesses from a user config is the dangerous action, so
-    every caller must explicitly opt in.
-
-    A caller that forgets to forward ``do_stdio_handshake=True`` falls
-    through to this safe path: every stdio server is recorded on the
-    InspectedExtensions list with ``signature_or_error=None``, and
-    ``inspect_extension`` is only invoked for remote MCP servers (skills
-    do not flow through this code path). The test installs a side_effect
-    that raises if ``inspect_extension`` is ever called for a stdio
-    server — so any future refactor that flips the default fails loudly
-    here.
-
-    The downstream ``ServerScanResult`` exposes the skipped stdio server
-    with both ``signature`` and ``error`` set to ``None`` — the configured
-    entry is preserved without manufacturing an issue (the skip is the
-    documented behavior of this path, not a failure to report).
-    """
-    stdio_a = StdioServer(command="echo", args=["a"])
-    stdio_b = StdioServer(command="python", args=["-c", "print(1)"])
-    remote = RemoteServer(url="https://example.com/mcp", type="http")
-
+async def test_inspect_client_collects_skills_and_joins_config_errors(tmp_path):
+    skill_dir = tmp_path / "my-skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text("---\nname: my-skill\ndescription: test\n---\ndo things")
+    (skill_dir / "run.py").write_text("print('hi')")
     client = ClientToInspect(
-        name="test",
-        client_path="/some/path",
+        name="cursor",
+        client_path="/proj",
         mcp_configs={
-            "/cfg.json": [
-                ("stdio-a", stdio_a),
-                ("stdio-b", stdio_b),
-                ("remote", remote),
-            ]
+            "/proj/bad.json": CouldNotParseMCPConfig(message="bad config", traceback="tb"),
         },
-        skills_dirs={},
+        skills_dirs={"/proj/skills": [DiscoveredSkill(name="my-skill", path=str(skill_dir))]},
     )
 
-    with patch("agent_scan.inspect.inspect_extension", new_callable=AsyncMock) as mock_inspect_extension:
+    result = await inspect_client(client, timeout=1, tokens=[], scan_skills=True)
 
-        async def fake_inspect(name, server, *args, **kwargs):
-            from mcp.types import Implementation, InitializeResult
+    assert result.client == "cursor"
+    assert result.path == "/proj"
+    assert [s.name for s in result.skills] == ["my-skill"]
+    skill = result.skills[0]
+    assert isinstance(skill, InspectedSkill)
+    assert skill.installation_path == str(skill_dir)
+    assert {f.path for f in skill.files} == {"SKILL.md", "run.py"}
+    assert skill.error is None
 
-            from agent_scan.models import InspectedExtensions, ServerSignature
-
-            if isinstance(server, StdioServer):
-                raise AssertionError(
-                    f"inspect_extension must not be called for stdio server {name!r} on the default path"
-                )
-            return InspectedExtensions(
-                name=name,
-                config=server,
-                signature_or_error=ServerSignature(
-                    metadata=InitializeResult(
-                        protocolVersion="2024-11-05",
-                        capabilities={},
-                        serverInfo=Implementation(name="x", version="1"),
-                    ),
-                ),
-            )
-
-        mock_inspect_extension.side_effect = fake_inspect
-
-        # Intentionally omit ``do_stdio_handshake`` to verify the safe
-        # default kicks in.
-        result = await inspect_client(client, timeout=10, tokens=[], scan_skills=False)
-
-    extensions = result.extensions["/cfg.json"]
-    assert len(extensions) == 3
-
-    for name in ("stdio-a", "stdio-b"):
-        ext = next(e for e in extensions if e.name == name)
-        assert ext.signature_or_error is None
-
-    # Remote server still gets a handshake.
-    remote_call_names = [call.args[0] for call in mock_inspect_extension.call_args_list]
-    assert remote_call_names == ["remote"]
-
-    # ServerScanResult conversion preserves the server with no signature
-    # and no error for the default-skipped stdio entries.
-    scan_path_result = inspected_client_to_scan_path_result(result)
-    by_name = {s.name: s for s in scan_path_result.servers or []}
-    assert by_name["stdio-a"].signature is None
-    assert by_name["stdio-a"].error is None
-    assert by_name["stdio-b"].signature is None
-    assert by_name["stdio-b"].error is None
-    # The remote server still carries a signature.
-    assert by_name["remote"].signature is not None
-    assert by_name["remote"].error is None
-
-
-@pytest.mark.asyncio
-async def test_inspect_client_explicit_do_stdio_handshake_runs_stdio_servers():
-    """When the caller explicitly opts in via ``do_stdio_handshake=True``,
-    stdio servers flow through ``inspect_extension`` as expected. This
-    is the path taken by every command that wants real stdio handshakes
-    (interactive ``scan`` / ``inspect``, or ``--ci --dangerously-run-mcp-servers``
-    overriding the push-key skip)."""
-    stdio = StdioServer(command="echo", args=["hi"])
-
-    client = ClientToInspect(
-        name="test",
-        client_path="/some/path",
-        mcp_configs={"/cfg.json": [("stdio", stdio)]},
-        skills_dirs={},
-    )
-
-    with patch("agent_scan.inspect.inspect_extension", new_callable=AsyncMock) as mock_inspect_extension:
-        from mcp.types import Implementation, InitializeResult
-
-        from agent_scan.models import InspectedExtensions, ServerSignature
-
-        mock_inspect_extension.return_value = InspectedExtensions(
-            name="stdio",
-            config=stdio,
-            signature_or_error=ServerSignature(
-                metadata=InitializeResult(
-                    protocolVersion="2024-11-05",
-                    capabilities={},
-                    serverInfo=Implementation(name="x", version="1"),
-                ),
-            ),
-        )
-
-        await inspect_client(client, timeout=10, tokens=[], scan_skills=False, do_stdio_handshake=True)
-
-    mock_inspect_extension.assert_awaited_once()
-
-
-# --- config_path propagation tests ---
-
-
-def _signature() -> "object":
-    from mcp.types import Implementation, InitializeResult
-
-    from agent_scan.models import ServerSignature
-
-    return ServerSignature(
-        metadata=InitializeResult(
-            protocolVersion="2024-11-05",
-            capabilities={},
-            serverInfo=Implementation(name="x", version="1"),
-        ),
-    )
-
-
-def test_inspected_client_to_scan_path_result_sets_config_path_per_server():
-    """Every ServerScanResult must carry the config-file path it was
-    discovered in. The config path is the key of ``InspectedClient.extensions``;
-    the converter must propagate it onto each server across all three branches
-    (inspected signature, recorded-but-not-inspected ``None``, and error)."""
-    from agent_scan.models import InspectedClient, InspectedExtensions, ServerStartupError
-
-    cfg_path = "/home/u/.config/agent/.mcp.json"
-    ok = InspectedExtensions(name="ok", config=StdioServer(command="echo"), signature_or_error=_signature())
-    not_inspected = InspectedExtensions(name="skip", config=StdioServer(command="echo"), signature_or_error=None)
-    errored = InspectedExtensions(
-        name="boom",
-        config=RemoteServer(url="https://example.com/mcp", type="http"),
-        signature_or_error=ServerStartupError(message="boom"),
-    )
-
-    client = InspectedClient(
-        name="test",
-        client_path="/install/path",
-        extensions={cfg_path: [ok, not_inspected, errored]},
-    )
-
-    result = inspected_client_to_scan_path_result(client)
-
-    by_name = {s.name: s for s in result.servers or []}
-    assert by_name["ok"].config_path == cfg_path
-    assert by_name["skip"].config_path == cfg_path
-    assert by_name["boom"].config_path == cfg_path
-    # The top-level ScanPathResult.path stays the client install path, not the config file.
-    assert result.path == "/install/path"
-
-
-def test_inspected_client_to_scan_path_result_config_path_multiple_files():
-    """A single client flattens multiple config files into one ScanPathResult;
-    each server must retain the config path of the file it came from."""
-    from agent_scan.models import InspectedClient, InspectedExtensions
-
-    cfg_a = "/home/u/.cursor/mcp.json"
-    cfg_b = "/home/u/project/.mcp.json"
-    ext_a = InspectedExtensions(name="srv-a", config=StdioServer(command="a"), signature_or_error=_signature())
-    ext_b = InspectedExtensions(name="srv-b", config=StdioServer(command="b"), signature_or_error=_signature())
-
-    client = InspectedClient(
-        name="test",
-        client_path="/install/path",
-        extensions={cfg_a: [ext_a], cfg_b: [ext_b]},
-    )
-
-    result = inspected_client_to_scan_path_result(client)
-
-    by_name = {s.name: s for s in result.servers or []}
-    assert by_name["srv-a"].config_path == cfg_a
-    assert by_name["srv-b"].config_path == cfg_b
-
-
-def test_server_scan_result_clone_preserves_config_path():
-    """clone() must propagate config_path so the analysis-payload copy
-    (built via ScanPathResult.clone()/ServerScanResult.clone()) carries it too."""
-    from agent_scan.models import ServerScanResult
-
-    original = ServerScanResult(
-        name="srv",
-        config_path="/home/u/.mcp.json",
-        server=StdioServer(command="echo"),
-    )
-    cloned = original.clone()
-    assert cloned.config_path == "/home/u/.mcp.json"
-
-
-def test_config_path_survives_serialization_round_trip():
-    """config_path must serialize into the upload payload and round-trip back."""
-    from agent_scan.models import (
-        ScanPathResult,
-        ScanPathResultsCreate,
-        ScanUserInfo,
-        ServerScanResult,
-    )
-
-    payload = ScanPathResultsCreate(
-        scan_path_results=[
-            ScanPathResult(
-                client="test",
-                path="/install/path",
-                servers=[
-                    ServerScanResult(
-                        name="srv",
-                        config_path="/home/u/.mcp.json",
-                        server=StdioServer(command="echo"),
-                    )
-                ],
-            )
-        ],
-        scan_user_info=ScanUserInfo(),
-    )
-
-    restored = ScanPathResultsCreate.model_validate_json(payload.model_dump_json())
-    assert restored.scan_path_results[0].servers[0].config_path == "/home/u/.mcp.json"
+    assert result.error is not None and "bad config" in (result.error.message or "")

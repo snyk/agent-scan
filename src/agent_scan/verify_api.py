@@ -5,22 +5,58 @@ import logging
 import os
 import ssl
 import traceback
+from typing import Any
 
 import aiohttp
 import certifi
 import rich
+from mcp.types import Prompt, Resource, ResourceTemplate, Tool
 
-from agent_scan.models import (
-    ScalarToolLabels,
-    ScanError,
-    ScanPathResult,
-    ScanPathResultsCreate,
-    ScanUserInfo,
+from agent_scan.models.api.common import ScanUserInfo
+from agent_scan.models.api.v20260710 import (
+    McpEntitySummary,
+    McpServerRequest,
+    McpServerRiskResponse,
+    ScanPathResponse,
+    ScanRequest,
+    ScanResponse,
+    SkillFileSummary,
+    SkillRequest,
+    SkillRiskResponse,
 )
+from agent_scan.models.errors import ScanError
+from agent_scan.models.inspect import InspectedPath
+from agent_scan.models.mcp import Entity
 from agent_scan.utils import get_environment, get_relative_path
 from agent_scan.well_known_clients import get_client_from_path
 
 logger = logging.getLogger(__name__)
+
+
+def build_scan_request(
+    inspected_paths: list[InspectedPath],
+    scan_user_info: ScanUserInfo | None = None,
+    scan_metadata: dict[str, Any] | None = None,
+) -> ScanRequest:
+    """Convert inspection results into a v2026-07-10 scan request.
+
+    The versioned API models own the structural conversion from inspection-domain
+    models to wire models. This transport boundary additionally makes each top-level
+    path home-relative. Per-component ``config_path`` and ``installation_path``
+    remain absolute because the backend forwards them to Maverick as the asset
+    location.
+
+    ``analyze_machine`` sends this request directly to the v2026-07-10 API.
+    """
+    request = ScanRequest.from_inspected_paths(
+        inspected_paths,
+        scan_user_info=scan_user_info,
+        scan_metadata=scan_metadata,
+    )
+    for inspected_path, path_request in zip(inspected_paths, request.scan_path_requests, strict=True):
+        path_request.client = get_client_from_path(inspected_path.path) or path_request.client or inspected_path.path
+        path_request.path = get_relative_path(path_request.path)
+    return request
 
 
 class SnykTokenError(Exception):
@@ -65,7 +101,7 @@ async def _async_analysis_enabled(
 
 async def _submit_async_analysis(
     async_url: str,
-    payload: "ScanPathResultsCreate",
+    payload: ScanRequest,
     base_headers: dict[str, str],
     identifier: str | None,
     trace_configs: list | None,
@@ -94,6 +130,64 @@ async def _submit_async_analysis(
                     logger.warning("Async analysis returned status %s.", response.status)
     except (TimeoutError, aiohttp.ClientError) as e:
         logger.warning("Async analysis request failed: %s", e)
+
+
+def _entity_summary(entity: Entity) -> McpEntitySummary:
+    if isinstance(entity, Tool):
+        entity_type = "tool"
+    elif isinstance(entity, Prompt):
+        entity_type = "prompt"
+    elif isinstance(entity, Resource):
+        entity_type = "resource"
+    elif isinstance(entity, ResourceTemplate):
+        entity_type = "resource_template"
+    else:
+        raise ValueError(f"Unknown entity type: {type(entity)}")
+    return McpEntitySummary(name=entity.name, type=entity_type)
+
+
+def _skill_file_summary(path: str) -> SkillFileSummary:
+    lowered = path.lower()
+    if lowered.endswith(".md"):
+        file_type = "instruction"
+    elif lowered.rsplit(".", 1)[-1] in ("py", "js", "ts", "sh"):
+        file_type = "script"
+    else:
+        file_type = "asset"
+    return SkillFileSummary(name=path, type=file_type)
+
+
+def _accepted_server_response(server: McpServerRequest) -> McpServerRiskResponse:
+    return McpServerRiskResponse(
+        name=server.name,
+        entities=[_entity_summary(entity) for entity in server.signature.entities] if server.signature else [],
+        error=server.error.model_copy(deep=True) if server.error else None,
+    )
+
+
+def _accepted_skill_response(skill: SkillRequest) -> SkillRiskResponse:
+    return SkillRiskResponse(
+        name=skill.name,
+        files=[_skill_file_summary(file.path) for file in skill.files],
+        error=skill.error.model_copy(deep=True) if skill.error else None,
+    )
+
+
+def _accepted_async_response(request: ScanRequest) -> ScanResponse:
+    """Represent paths accepted for async analysis without fabricating risks."""
+
+    return ScanResponse(
+        scan_path_responses=[
+            ScanPathResponse(
+                client=path.client,
+                path=path.path,
+                server_risks=[_accepted_server_response(server) for server in path.servers],
+                skill_risks=[_accepted_skill_response(skill) for skill in path.skills],
+                error=path.error.model_copy(deep=True) if path.error else None,
+            )
+            for path in request.scan_path_requests
+        ]
+    )
 
 
 def get_hostname() -> str:
@@ -245,7 +339,7 @@ def _analysis_client_session(trace_configs: list | None, skip_ssl_verify: bool) 
 
 
 async def analyze_machine(
-    scan_paths: list[ScanPathResult],
+    inspected_paths: list[InspectedPath],
     analysis_url: str,
     identifier: str | None,
     additional_headers: dict | None = None,
@@ -257,12 +351,12 @@ async def analyze_machine(
     raise_on_error: bool = False,
     scan_context: dict | None = None,
     scanned_usernames: list[str] | None = None,
-) -> list[ScanPathResult]:
+) -> ScanResponse:
     """
     Analyze the scan paths with the analysis server.
 
     Args:
-        scan_paths: List of scan path results to analyze
+        inspected_paths: Local MCP server and skill inspection results to analyze
         analysis_url: URL of the analysis server
         identifier: Identifier for the user
         additional_headers: Additional headers to send to the analysis server
@@ -283,17 +377,8 @@ async def analyze_machine(
         anonymous_identifier=None,
     )
 
-    # Use relative paths in the analysis payload to strip the username from absolute paths,
-    # anonymizing the user. Clone to preserve the absolute paths for the control backend call.
-    analysis_path_results = []
-    for result in scan_paths:
-        result.client = get_client_from_path(result.path) or result.client or result.path
-        analysis_path_copy = result.clone()
-        analysis_path_copy.path = get_relative_path(result.path)
-        analysis_path_results.append(analysis_path_copy)
-
-    payload = ScanPathResultsCreate(
-        scan_path_results=analysis_path_results,
+    payload = build_scan_request(
+        inspected_paths,
         scan_user_info=user_info,
         scan_metadata=scan_context if scan_context else None,
     )
@@ -318,7 +403,7 @@ async def analyze_machine(
         if await _async_analysis_enabled(config_url, push_key, trace_configs, skip_ssl_verify):
             async_url = analysis_url.replace(_SYNC_ANALYSIS_PATH, _ASYNC_ANALYSIS_PATH)
             await _submit_async_analysis(async_url, payload, headers, identifier, trace_configs, skip_ssl_verify)
-            return scan_paths
+            return _accepted_async_response(payload)
     elif snyk_token:
         # CLI mode with SNYK_TOKEN environment variable for authentication
         analysis_url = analysis_url.replace(
@@ -349,23 +434,9 @@ async def analyze_machine(
                 ) as response:
                     response.raise_for_status()
                     if response.status == 200:
-                        response_data = ScanPathResultsCreate.model_validate_json(await response.text())
+                        response_data = ScanResponse.model_validate_json(await response.text())
                         logger.info("Successfully analyzed scan results.")
-                        for sent_scan_path_result, response_scan_path_result in zip(
-                            scan_paths, response_data.scan_path_results, strict=True
-                        ):
-                            sent_scan_path_result.issues = response_scan_path_result.issues
-                            sent_scan_path_result.labels = response_scan_path_result.labels
-                            for server_given, server_received in zip(
-                                sent_scan_path_result.servers or [],
-                                response_scan_path_result.servers or [],
-                                strict=True,
-                            ):
-                                if server_given.signature is None and server_received.signature is not None:
-                                    server_given.signature = server_received.signature
-                                    if server_given.error is not None:
-                                        server_given.error.is_failure = False
-                        return scan_paths  # Success - exit the function
+                        return response_data
 
         except TimeoutError as e:
             logger.warning(f"API timeout while scanning discovered servers (attempt {attempt + 1}/{max_retries}): {e}.")
@@ -384,29 +455,11 @@ async def analyze_machine(
                 error_text = f"Could not reach analysis server: {e.status} - {e.message}"
 
             logger.warning(error_text)
-            for scan_path in scan_paths:
-                if scan_path.servers is not None:
-                    for server in scan_path.servers:
-                        if server.error is None:
-                            server.error = ScanError(
-                                message=error_text,
-                                exception=e,
-                                traceback=traceback.format_exc(),
-                                is_failure=True,
-                                category="analysis_error",
-                            )
-                    scan_path.labels = [
-                        [
-                            ScalarToolLabels(is_public_sink=0, destructive=0, untrusted_content=0, private_data=0)
-                            for _ in s.entities
-                        ]
-                        for s in scan_path.servers
-                    ]
-            return scan_paths
+            return _analysis_error_response(payload, error_text, e)
 
         except RuntimeError as e:
             logger.warning(f"Network error while uploading (attempt {attempt + 1}/{max_retries}): {e}")
-            raise RuntimeError(error_text) from e
+            raise
 
         except Exception as e:
             logger.error(f"Unexpected error while uploading scan results (attempt {attempt + 1}/{max_retries}): {e}")
@@ -422,14 +475,32 @@ async def analyze_machine(
         raise RuntimeError(
             f"Tried calling verification api {max_retries} times. Could not reach analysis server. Last error: {error_text}"
         )
-    # failed even after all retries
-    for scan_path in scan_paths:
-        if scan_path.servers is not None and scan_path.error is None:
-            scan_path.error = ScanError(
-                message=f"Tried calling verification api {max_retries} times. Could not reach analysis server. Last error: {error_text}",
-                exception=None,
-                traceback=traceback.format_exc(),
-                is_failure=True,
-                category="analysis_error",
+    # Failed even after all retries.
+    return _analysis_error_response(
+        payload,
+        f"Tried calling verification api {max_retries} times. Could not reach analysis server. Last error: {error_text}",
+    )
+
+
+def _analysis_error_response(
+    request: ScanRequest,
+    message: str,
+    exception: Exception | None = None,
+) -> ScanResponse:
+    """Return one analysis failure response for every inspected path."""
+    return ScanResponse(
+        scan_path_responses=[
+            ScanPathResponse(
+                client=path_request.client,
+                path=path_request.path,
+                error=ScanError(
+                    message=message,
+                    exception=exception,
+                    traceback=traceback.format_exc(),
+                    is_failure=True,
+                    category="analysis_error",
+                ),
             )
-    return scan_paths
+            for path_request in request.scan_path_requests
+        ]
+    )

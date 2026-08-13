@@ -4,6 +4,128 @@ from pydantic import ValidationError
 from agent_scan.models import CommandParsingError, RemoteServer, StdioServer
 
 
+class TestInspectionResults:
+    def test_discovered_skill_keeps_name_and_path_together(self):
+        from agent_scan.models.skill import DiscoveredSkill
+
+        skill = DiscoveredSkill(name="git:commit", path="/project/.claude/commands/git/commit.md")
+
+        assert skill.name == "git:commit"
+        assert skill.path == "/project/.claude/commands/git/commit.md"
+        assert set(skill.model_dump()) == {"name", "path"}
+
+    def test_v20260710_wire_models_are_distinct_from_inspection_models(self):
+        from agent_scan.models.api.v20260710 import McpServerRequest, ScanPathRequest, SkillRequest
+        from agent_scan.models.inspect import InspectedPath, InspectedServer, InspectedSkill
+
+        assert McpServerRequest is not InspectedServer
+        assert SkillRequest is not InspectedSkill
+        assert ScanPathRequest is not InspectedPath
+
+    def test_contains_only_data_needed_by_inspect_and_analysis(self):
+        from agent_scan.models import (
+            InspectedPath,
+            InspectedServer,
+            InspectedSkill,
+            SkillFile,
+        )
+
+        inspected = InspectedPath(
+            client="cursor",
+            path="/Users/example/.cursor",
+            servers=[
+                InspectedServer(
+                    name="remote",
+                    config_path="/Users/example/.cursor/mcp.json",
+                    server=RemoteServer(url="https://mcp.example.com", type="http"),
+                )
+            ],
+            skills=[
+                InspectedSkill(
+                    name="review",
+                    installation_path="/Users/example/.cursor/skills/review",
+                    files=[SkillFile(path="SKILL.md", content="# Review")],
+                )
+            ],
+        )
+
+        assert set(inspected.model_dump()) == {"client", "path", "servers", "skills", "error"}
+        assert "issues" not in type(inspected).model_fields
+        assert "labels" not in type(inspected).model_fields
+        assert inspected.servers[0].config_path.endswith("mcp.json")
+        assert inspected.skills[0].files[0].path == "SKILL.md"
+
+    def test_v20260710_request_converts_inspection_results_at_boundary(self):
+        from agent_scan.models import SkillFile
+        from agent_scan.models.api.v20260710 import McpServerRequest, ScanPathRequest, ScanRequest, SkillRequest
+        from agent_scan.models.inspect import InspectedPath, InspectedServer, InspectedSkill
+
+        inspected = InspectedPath(
+            client="cursor",
+            path="~/.cursor",
+            servers=[
+                InspectedServer(
+                    name="remote",
+                    config_path="~/.cursor/mcp.json",
+                    server=RemoteServer(url="https://mcp.example.com", type="http"),
+                )
+            ],
+            skills=[
+                InspectedSkill(
+                    name="review",
+                    installation_path="~/.cursor/skills/review",
+                    files=[SkillFile(path="SKILL.md", content="# Review")],
+                )
+            ],
+        )
+
+        request = ScanRequest.from_inspected_paths([inspected])
+
+        assert type(request.scan_path_requests[0]) is ScanPathRequest
+        assert type(request.scan_path_requests[0].servers[0]) is McpServerRequest
+        assert type(request.scan_path_requests[0].skills[0]) is SkillRequest
+
+        assert request.model_dump() == {
+            "scan_path_requests": [
+                {
+                    "client": "cursor",
+                    "path": "~/.cursor",
+                    "servers": [
+                        {
+                            "name": "remote",
+                            "config_path": "~/.cursor/mcp.json",
+                            "server": {
+                                "url": "https://mcp.example.com",
+                                "type": "http",
+                                "headers": {},
+                            },
+                            "signature": None,
+                            "error": None,
+                        }
+                    ],
+                    "skills": [
+                        {
+                            "name": "review",
+                            "installation_path": "~/.cursor/skills/review",
+                            "files": [{"path": "SKILL.md", "content": "# Review"}],
+                            "error": None,
+                        }
+                    ],
+                    "error": None,
+                }
+            ],
+            "scan_user_info": None,
+            "scan_metadata": None,
+        }
+
+    def test_current_models_are_directly_importable(self):
+        from agent_scan.models.api.v20260710 import ScanResponse
+        from agent_scan.models.inspect import InspectedPath
+
+        assert InspectedPath(path="current").servers == []
+        assert ScanResponse(scan_path_responses=[]).scan_path_responses == []
+
+
 class TestRemoteServerUrlAlias:
     """Test that RemoteServer accepts both 'url' and 'serverUrl' field names."""
 
