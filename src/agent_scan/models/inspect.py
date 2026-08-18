@@ -50,7 +50,9 @@ class InspectedServer(BaseModel):
 class InspectedSkill(BaseModel):
     """The skill data needed by inspect output and backend analysis."""
 
-    name: str
+    name: str = Field(
+        description="Canonical directory-skill name from SKILL.md frontmatter, or the discovered command identifier."
+    )
     installation_path: str
     files: list[SkillFile] = Field(default_factory=list)
     error: ScanError | None = None
