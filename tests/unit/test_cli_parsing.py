@@ -209,6 +209,22 @@ class TestCLIArgumentParsing:
         assert control_servers[1].url == "https://server2.com"
         assert control_servers[1].identifier == "serial-123"
 
+    def test_equals_syntax_is_parsed(self):
+        """`--control-server=URL` (and the other block flags) must parse like the space form."""
+        argv = [
+            "scan",
+            "--control-server=https://server1.com?version=2",
+            "--control-server-H=Auth: token1",
+            "--control-identifier=user1@example.com",
+        ]
+
+        control_servers = parse_control_servers(argv)
+
+        assert len(control_servers) == 1
+        assert control_servers[0].url == "https://server1.com?version=2"  # '=' inside the URL is preserved
+        assert control_servers[0].identifier == "user1@example.com"
+        assert control_servers[0].headers == {"Auth": " token1"}
+
 
 class TestSkillsFlag:
     """--skills is on by default; --no-skills opts out; --skills is still accepted."""

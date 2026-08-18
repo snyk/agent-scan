@@ -247,6 +247,66 @@ The analysis result is the main version difference:
 | --- | --- | --- | --- |
 | `--show-full-discovery` | boolean | `false` | Expand human-readable `scan` output to list every MCP entity and skill file instead of the compact summary. |
 
+## Configuration file
+
+Load argument values from a YAML file instead of passing them all on the command line. Applies to `scan`, `inspect`, and `evo` (not `guard`). **Any** flag from the sections above — Shared options, MCP server options, and `scan` options — is settable.
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--config-file FILE` | string | — | Path to a YAML file supplying argument values. Errors (missing file, invalid YAML, non-mapping top level) exit with code **2**. |
+
+**Precedence.** Values resolve as `code defaults < config file < explicit CLI flags`. A flag you also pass on the command line always wins over the file; a flag you omit takes the file's value, or the built-in default if the file doesn't set it.
+
+**Keys.** Use the flag's long name with dashes or underscores — `server-timeout` and `server_timeout` are equivalent. Values are native YAML types (`true`/`false`, numbers, strings, lists), so `--suppress-mcpserver-io` becomes `suppress_mcpserver_io: true` and `--dangerously-run-mcp-servers` becomes `dangerously_run_mcp_servers: true`. Unknown keys are ignored with a warning on stderr.
+
+**Validation.** Values are checked the same way argparse checks CLI input: the flag's type converter is applied, `choices` are enforced, and boolean/scalar/list shapes must match (a boolean flag rejects non-boolean values, a list option rejects a mapping, etc.). String forms of booleans are normalized (`skip_ssl_verify: "false"` → `false`). An invalid type, value, or shape exits with code **2**.
+
+**Scalars vs. blocks/lists.** Scalar options (`server_timeout`, `analysis_url`, booleans, …) override field-by-field. Block/list options — the positional `files`, repeatable headers like `verification_H`, and the `control_servers` block — use **complete replacement**: if you pass *any* CLI flag for that structure, the file's entire array for it is discarded (no element-wise merge) and rebuilt from the CLI alone.
+
+**Control servers.** The `--control-server` / `--control-server-H` / `--control-identifier` block is expressed as a `control_servers` list; `headers` may be a mapping or a list of `Name: value` strings. Passing any one of those three flags on the CLI replaces the whole `control_servers` list from the file.
+
+```yaml
+# agent-scan.yaml
+json: true
+skills: true              # set false to skip skills (equivalent to --no-skills)
+scan_all_users: true
+
+# MCP server options are settable too
+server_timeout: 30
+suppress_mcpserver_io: true
+dangerously_run_mcp_servers: true
+
+verification_H:
+  - "X-Trace: abc123"
+files:
+  - ~/.cursor/mcp.json
+  - ~/.claude/skills
+control_servers:
+  - url: https://api.snyk.io/hidden/mcp-scan/push?version=2025-08-28
+    identifier: user@example.com
+    headers:
+      x-client-id: <push-key>
+```
+
+```bash
+# Use the file as-is
+snyk-agent-scan scan --config-file agent-scan.yaml
+
+# ...but override one scalar for this run (CLI wins)
+snyk-agent-scan scan --config-file agent-scan.yaml --server-timeout 5
+
+# Passing --control-server discards the file's control_servers list entirely
+snyk-agent-scan scan --config-file agent-scan.yaml \
+  --control-server https://other.example/push --control-identifier host-1
+```
+
+> Notes:
+> - `skills` is on by default. In YAML, set `skills: false` to disable skill scanning (equivalent to `--no-skills`); there is no separate `no_skills` toggle — the `skills` key is the single source of truth.
+> - `dangerously_run_mcp_servers: true` in the file has the same effect as the flag, including satisfying the `--ci` requirement that it be set — a config file can therefore enable stdio MCP server execution. This is intended, but review config files with that in mind.
+> - **On/off flags set to `true` in a file cannot be turned off on the command line.** Flags such as `json`, `scan_all_users`, and `dangerously_run_mcp_servers` are `store_true` and have no `--no-…` counterpart, so once a config file sets them to `true` there is no CLI flag to override them back to `false` for a single run — edit or omit the file instead. (`skills` is the exception: it has `--no-skills`.)
+
+---
+
 ## `inspect`
 
 `inspect` uses the shared discovery and MCP options but does not request security analysis. It prints the locally discovered servers, skills, tools, prompts, resources, and resource templates. Its behavior is shared across the documented versions except for the [historical bootstrap behavior](#historical-bootstrap-behavior) in v0.5.4–v0.5.13.
@@ -388,6 +448,10 @@ snyk-agent-scan --ci --dangerously-run-mcp-servers \
 snyk-agent-scan --ci --dangerously-run-mcp-servers \
   --ignore-risks dangerous_words,suspicious_download_url \
   --ignore-failure-codes X001
+
+# Load flags from a YAML config file (CLI flags still override it)
+snyk-agent-scan --config-file agent-scan.yaml
+snyk-agent-scan --config-file agent-scan.yaml --server-timeout 5
 
 # Enterprise upload with a push key
 snyk-agent-scan scan \

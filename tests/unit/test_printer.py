@@ -41,13 +41,13 @@ from agent_scan.printer import (
 @pytest.mark.parametrize(
     ("score", "color"),
     [
-        (100, "#e2d2f4"),
-        (299, "#e2d2f4"),
-        (300, "#cbabee"),
-        (599, "#cbabee"),
-        (600, "#9456d2"),
-        (999, "#9456d2"),
-        (1000, "#8446c4"),
+        (100, "#ECD9FF"),
+        (299, "#ECD9FF"),
+        (300, "#D7B1FF"),
+        (599, "#D7B1FF"),
+        (600, "#C794FF"),
+        (999, "#C794FF"),
+        (1000, "#B36DFF"),
     ],
 )
 def test_risk_score_color_matches_maverick_bands(score, color):
@@ -58,7 +58,7 @@ def test_scan_component_line_uses_highest_risk_score_color():
     result = _format_component_line("my-server", [300, 600, 100])
 
     assert result.plain == "my-server 3 risks"
-    assert any("#9456d2" in str(span.style) for span in result.spans)
+    assert any("#C794FF" in str(span.style) for span in result.spans)
     assert not any("green" in str(span.style) for span in result.spans)
 
 
@@ -93,7 +93,7 @@ def test_format_risk_uses_score_color_and_explicit_metadata_labels():
     assert "Affected tools: download, execute" in malicious.plain
     assert "Malicious URLs: https://malicious.example/payload" in malicious.plain
     assert "Unverifiable URLs: https://unknown.example/package" in unverifiable.plain
-    assert any("#9456d2" in str(span.style) for span in malicious.spans)
+    assert any("#C794FF" in str(span.style) for span in malicious.spans)
     assert not malicious.style
     for unstyled_text in (
         "Downloads executable content",
