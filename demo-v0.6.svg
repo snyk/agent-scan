@@ -8,9 +8,9 @@
     .bold { font-weight: 700; }
     .muted { fill: #9a9aa2; }
     .clean { fill: #28a745; }
-    .low { fill: #e2d2f4; }
-    .high { fill: #9456d2; }
-    .critical { fill: #8446c4; }
+    .low { fill: #ECD9FF; }
+    .high { fill: #C794FF; }
+    .critical { fill: #B36DFF; }
   </style>
 
   <rect class="terminal" width="1000" height="640" rx="12"/>

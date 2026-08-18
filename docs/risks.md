@@ -15,10 +15,10 @@ Scores range from 0 to 1000, where a higher score represents greater risk. Agent
 
 | Score | Level | CLI color |
 | --- | --- | --- |
-| 100 | Low | Neutral gray (`#55555d`) |
-| 300 | Medium | Light purple (`#cbabee`) |
-| 600 | High | Purple (`#9456d2`) |
-| 1000 | Critical | Deep purple (`#7535b6`) |
+| 100 | Low | Light purple (`#ECD9FF`) |
+| 300 | Medium | Medium purple (`#D7B1FF`) |
+| 600 | High | Purple (`#C794FF`) |
+| 1000 | Critical | Deep purple (`#B36DFF`) |
 
 The JSON schema accepts any integer from 0 through 1000 so that the scoring model can evolve. Use the risk indicator name, score, and evidence together when evaluating a result rather than treating the score as a category by itself.
 

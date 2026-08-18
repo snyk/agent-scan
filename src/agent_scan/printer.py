@@ -39,11 +39,12 @@ INSPECTED_COMPONENT_NAME_COLUMN_WIDTH = 14
 INSPECTION_ERROR_MESSAGE_FALLBACK = "could not complete inspection"
 SCAN_ERROR_MESSAGE_FALLBACK = "could not complete scan"
 
+# Color palette source: https://www.figma.com/design/ldezalbJY9Ml9bWU0eMqPz/Evo-GA?node-id=6429-3416&t=ttdZghmEDUgjxCjL-1
 RISK_SCORE_BANDS = (
-    (299, "#e2d2f4"),
-    (599, "#cbabee"),
-    (999, "#9456d2"),
-    (RISK_SCORE_MAX, "#8446c4"),
+    (299, "#ECD9FF"),
+    (599, "#D7B1FF"),
+    (999, "#C794FF"),
+    (RISK_SCORE_MAX, "#B36DFF"),
 )
 
 MCP_ENTITY_TYPE_ORDER = ("tool", "prompt", "resource", "resource_template")
