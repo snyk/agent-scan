@@ -84,41 +84,63 @@ def _force_analysis_api_version(analysis_url: str) -> str:
     return urlunsplit(parsed._replace(query=urlencode(query)))
 
 
+_RETRYABLE_TRANSPORT_EXCEPTIONS = (
+    TimeoutError,
+    aiohttp.ClientConnectionError,
+    aiohttp.ClientPayloadError,
+)
+
+_CONFIG_REQUEST_TIMEOUT = 5
+
+
 async def _async_analysis_enabled(
     config_url: str,
     push_key: str,
     trace_configs: list | None,
     skip_ssl_verify: bool,
+    max_retries: int = 2,
 ) -> bool:
     """Ask the backend whether this push-key's tenant routes to async analysis.
 
-    Returns False on any error or non-200 response so the caller uses the
-    synchronous path.
+    Returns False on any error, non-2xx, or after exhausting retries so the caller
+    falls back to the synchronous path. Transient failures (5xx, connection issues,
+    timeouts) are retried with a short timeout and exponential backoff; deterministic
+    4xx responses are not retried.
     """
-    try:
-        async with _analysis_client_session(trace_configs, skip_ssl_verify) as session:
-            async with session.get(
-                config_url,
-                headers={"X-Push-Key": push_key},
-                timeout=aiohttp.ClientTimeout(total=15),
-            ) as response:
-                if response.status != 200:
+    for attempt in range(max_retries):
+        try:
+            async with _analysis_client_session(trace_configs, skip_ssl_verify) as session:
+                async with session.get(
+                    config_url,
+                    headers={"X-Push-Key": push_key},
+                    timeout=aiohttp.ClientTimeout(total=_CONFIG_REQUEST_TIMEOUT),
+                ) as response:
+                    if response.status == 200:
+                        data = await response.json()
+                        return bool(data.get("async_analysis_enabled", False))
+                    if response.status < 500:
+                        logger.warning(
+                            "Agent Scan config request returned %s; using synchronous analysis.", response.status
+                        )
+                        return False
                     logger.warning(
-                        "Agent Scan config request returned %s; using synchronous analysis.", response.status
+                        "Agent Scan config request returned %s (attempt %d/%d).",
+                        response.status,
+                        attempt + 1,
+                        max_retries,
                     )
-                    return False
-                data = await response.json()
-                return bool(data.get("async_analysis_enabled", False))
-    except (TimeoutError, aiohttp.ClientError) as e:
-        logger.warning("Agent Scan config request failed (%s); using synchronous analysis.", e)
-        return False
+        except _RETRYABLE_TRANSPORT_EXCEPTIONS as e:
+            logger.warning("Agent Scan config request failed (attempt %d/%d): %s", attempt + 1, max_retries, e)
+        except aiohttp.ClientError as e:
+            # Non-transient transport error (e.g. malformed URL): retrying will not help.
+            logger.warning("Agent Scan config request failed (%s); using synchronous analysis.", e)
+            return False
 
+        if attempt < max_retries - 1:
+            await asyncio.sleep(2**attempt)  # 1s, 2s, ...
 
-_RETRYABLE_SUBMIT_EXCEPTIONS = (
-    TimeoutError,
-    aiohttp.ClientConnectionError,
-    aiohttp.ClientPayloadError,
-)
+    logger.warning("Agent Scan config request failed after %d attempt(s); using synchronous analysis.", max_retries)
+    return False
 
 
 async def _submit_async_analysis(
@@ -160,7 +182,7 @@ async def _submit_async_analysis(
                     if response.status < 500:
                         # Deterministic client error (e.g. 400/413/401/403): retrying
                         # the same body cannot succeed, so give up immediately.
-                        logger.warning("Async analysis returned status %s; not retrying.", response.status)
+                        logger.error("Async analysis returned status %s; not retrying.", response.status)
                         return
                     logger.warning(
                         "Async analysis returned status %s (attempt %d/%d).",
@@ -168,7 +190,7 @@ async def _submit_async_analysis(
                         attempt + 1,
                         max_retries,
                     )
-        except _RETRYABLE_SUBMIT_EXCEPTIONS as e:
+        except _RETRYABLE_TRANSPORT_EXCEPTIONS as e:
             logger.warning(
                 "Async analysis request failed (attempt %d/%d): %s",
                 attempt + 1,
@@ -177,14 +199,14 @@ async def _submit_async_analysis(
             )
         except aiohttp.ClientError as e:
             # Non-transient transport error (e.g. malformed URL): retrying will not help.
-            logger.warning("Async analysis request failed: %s", e)
+            logger.error("Async analysis request failed: %s", e)
             return
 
         if attempt < max_retries - 1:
             backoff_time = 2**attempt  # 1s, 2s, 4s
             await asyncio.sleep(backoff_time)
 
-    logger.warning("Async analysis submission failed after %d attempt(s).", max_retries)
+    logger.error("Async analysis submission failed after %d attempt(s).", max_retries)
 
 
 def _entity_summary(entity: Entity) -> McpEntitySummary:
