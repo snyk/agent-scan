@@ -40,12 +40,12 @@ TEST_CANDIDATE_CLIENT = CandidateClient(
 
 
 @pytest.mark.asyncio
-async def test_inspect_client_rejects_symlink_before_reading_skill(tmp_path):
-    """A symlinked skill file must be rejected before its content is read."""
+async def test_inspect_client_follows_symlinked_skill_md(tmp_path):
     skill_dir = tmp_path / "skill"
     skill_dir.mkdir()
     outside_file = tmp_path / "outside.md"
-    outside_file.write_bytes(b"\xff\xfe")
+    content = "---\nname: linked-skill\ndescription: linked skill\n---\n# Instructions"
+    outside_file.write_text(content)
     (skill_dir / "SKILL.md").symlink_to(outside_file)
     client = ClientToInspect(
         name="cursor",
@@ -57,9 +57,9 @@ async def test_inspect_client_rejects_symlink_before_reading_skill(tmp_path):
     result = await inspect_client(client, timeout=1, tokens=[], scan_skills=True)
 
     assert len(result.skills) == 1
-    assert result.skills[0].files == []
-    assert result.skills[0].error is not None
-    assert result.skills[0].error.exception == "Skill directory must not contain symbolic links"
+    assert result.skills[0].name == "linked-skill"
+    assert [(file.path, file.content) for file in result.skills[0].files] == [("SKILL.md", content)]
+    assert result.skills[0].error is None
 
 
 @pytest.mark.asyncio

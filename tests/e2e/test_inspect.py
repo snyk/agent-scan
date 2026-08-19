@@ -558,13 +558,13 @@ class TestInspectBehaviorContract:
         assert failed.returncode == 1
 
     @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
-    def test_symlinked_skill_file_is_reported_as_skill_error(self, agent_scan_cmd, tmp_path):
-        outside = tmp_path / "outside.txt"
-        outside.write_text("must not be collected")
-        skill = tmp_path / "skill"
-        skill.mkdir()
-        (skill / "SKILL.md").write_text("---\nname: safe-skill\ndescription: safe\n---\n# Safe instructions")
-        (skill / "outside.txt").symlink_to(outside)
+    def test_symlinked_skill_directory_is_inspected(self, agent_scan_cmd, tmp_path):
+        target = tmp_path / "skill-target"
+        target.mkdir()
+        (target / "SKILL.md").write_text("---\nname: linked-skill\ndescription: linked skill\n---\n# Instructions")
+        (target / "reference.md").write_text("# Reference")
+        skill = tmp_path / "skill-link"
+        skill.symlink_to(target, target_is_directory=True)
 
         result, output = inspect_json(
             agent_scan_cmd,
@@ -575,10 +575,12 @@ class TestInspectBehaviorContract:
 
         assert result.returncode == 0
         inspected_skill = only_result(output)["skills"][0]
-        assert inspected_skill["files"] == []
-        assert inspected_skill["error"]["category"] == "skill_scan_error"
-        assert "must not contain symbolic links" in inspected_skill["error"]["exception"]
-        assert "ValueError: Skill directory must not contain symbolic links" in inspected_skill["error"]["traceback"]
+        assert inspected_skill["name"] == "linked-skill"
+        assert {file["path"] for file in inspected_skill["files"]} == {
+            "SKILL.md",
+            "reference.md",
+        }
+        assert inspected_skill["error"] is None
 
     @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
     def test_multiple_paths_preserve_success_and_failure_results(self, agent_scan_cmd, tmp_path):

@@ -142,8 +142,6 @@ def collect_skill_files(skill_path: str) -> list[SkillFile]:
     expanded_path = os.path.expanduser(skill_path)
     if not os.path.exists(expanded_path):
         raise FileNotFoundError(f"Skill path does not exist: {skill_path}")
-    if os.path.islink(expanded_path):
-        raise ValueError("Skill path must not be a symbolic link")
 
     if os.path.isfile(expanded_path):
         return [
@@ -157,14 +155,10 @@ def collect_skill_files(skill_path: str) -> list[SkillFile]:
         raise ValueError(f"Skill path is not a file or directory: {skill_path}")
 
     files: list[SkillFile] = []
-    for root, dirs, filenames in os.walk(expanded_path):
+    for root, dirs, filenames in os.walk(expanded_path, followlinks=True):
         dirs.sort()  # deterministic traversal order across platforms
-        if any(os.path.islink(os.path.join(root, dirname)) for dirname in dirs):
-            raise ValueError("Skill directory must not contain symbolic links")
         for filename in sorted(filenames):
             full_path = os.path.join(root, filename)
-            if os.path.islink(full_path):
-                raise ValueError("Skill directory must not contain symbolic links")
             relative_path = os.path.relpath(full_path, expanded_path).replace(os.path.sep, "/")
             extension = filename.rsplit(".", 1)[-1].lower()
             files.append(
