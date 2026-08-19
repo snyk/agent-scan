@@ -4,6 +4,7 @@ import gzip
 import logging
 import os
 import ssl
+import sys
 import traceback
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -91,6 +92,16 @@ _RETRYABLE_TRANSPORT_EXCEPTIONS = (
 )
 
 _CONFIG_REQUEST_TIMEOUT = 5
+
+
+def _warn_async_results_not_shown() -> None:
+    """Notify push-key users that async scans return no local results and how to opt into them."""
+    rich.print(
+        "[yellow]Warning: This scan was submitted for asynchronous analysis, so results are processed on the "
+        "Snyk side and will not be shown here. Re-run with --show-analysis-results to run the analysis "
+        "synchronously and display results locally.[/yellow]",
+        file=sys.stderr,
+    )
 
 
 async def _async_analysis_enabled(
@@ -487,6 +498,7 @@ async def analyze_machine(
                 await _submit_async_analysis(
                     async_url, payload, headers, identifier, trace_configs, skip_ssl_verify, max_retries
                 )
+                _warn_async_results_not_shown()
                 return _accepted_async_response(payload)
     elif snyk_token:
         # CLI mode with SNYK_TOKEN environment variable for authentication
