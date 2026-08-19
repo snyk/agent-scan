@@ -12,6 +12,7 @@ from agent_scan.redact import (
     _is_uuid_like,
     redact_absolute_paths,
     redact_args,
+    redact_bearer_tokens,
     redact_data,
     redact_inspected_path,
     redact_push_keys,
@@ -1263,3 +1264,20 @@ class TestRedactPushKeysInData:
             in data["modified"]["PreToolUse"]["expected_value"][0]["hooks"][0]["command"]
         )
         assert data["session_id"] == "hooks-setup"
+
+
+class TestRedactBearerTokens:
+    def test_redacts_authorization_bearer(self):
+        text = "SENT: GET /mcp\nAuthorization: Bearer eyJhbGc.aBc-1_2+3/=="
+        out = redact_bearer_tokens(text)
+        assert "eyJhbGc.aBc-1_2+3/==" not in out
+        assert "Bearer **REDACTED**" in out
+
+    def test_redacts_lowercase_and_leaves_rest(self):
+        out = redact_bearer_tokens("prefix bearer TOKEN123 suffix")
+        assert out == "prefix Bearer **REDACTED** suffix"
+
+    def test_passthrough_when_no_token(self):
+        assert redact_bearer_tokens("no credentials here") == "no credentials here"
+        assert redact_bearer_tokens(None) is None
+        assert redact_bearer_tokens("") == ""
