@@ -19,6 +19,7 @@ from agent_scan.models import (
     ScanError,
     ServerHTTPError,
     ServerStartupError,
+    SkillFile,
     SkillScanError,
     StdioServer,
     TokenAndClientInfo,
@@ -27,7 +28,12 @@ from agent_scan.models import (
     UserDeclinedError,
 )
 from agent_scan.signed_binary import check_server_signature
-from agent_scan.skill_client import SkillInspectionError, collect_skill_files, inspect_skills_dir
+from agent_scan.skill_client import (
+    SkillInspectionError,
+    collect_skill_files,
+    inspect_skills_dir,
+    resolve_skill_name,
+)
 from agent_scan.traffic_capture import TrafficCapture
 from agent_scan.utils import get_relative_path
 from agent_scan.well_known_clients import expand_path
@@ -206,20 +212,12 @@ def find_relevant_token(tokens: list[TokenAndClientInfo], name: str) -> TokenAnd
 
 
 def _inspect_skill(skill: DiscoveredSkill) -> InspectedSkill:
+    files: list[SkillFile] = []
+    skill_name = skill.name
+    error: ScanError | None = None
     try:
-        files = collect_skill_files(skill.path, validate_skill_md_frontmatter=True)
-        error = None
-    except SkillInspectionError as inspection_error:
-        files = []
-        error = ScanError(
-            message="could not inspect skill",
-            exception=str(inspection_error),
-            traceback=traceback.format_exc(),
-            is_failure=True,
-            category="skill_scan_error",
-        )
+        files = collect_skill_files(skill.path)
     except Exception as collection_error:
-        files = []
         error = ScanError(
             message="could not collect skill files",
             exception=str(collection_error),
@@ -227,8 +225,28 @@ def _inspect_skill(skill: DiscoveredSkill) -> InspectedSkill:
             is_failure=True,
             category="skill_scan_error",
         )
+    else:
+        try:
+            skill_name = resolve_skill_name(skill)
+            error = None
+        except SkillInspectionError as inspection_error:
+            error = ScanError(
+                message="could not inspect skill",
+                exception=str(inspection_error),
+                traceback=traceback.format_exc(),
+                is_failure=True,
+                category="skill_scan_error",
+            )
+        except Exception as inspection_error:
+            error = ScanError(
+                message="could not inspect skill",
+                exception=str(inspection_error),
+                traceback=traceback.format_exc(),
+                is_failure=True,
+                category="skill_scan_error",
+            )
     return InspectedSkill(
-        name=_inspection_component_name(skill.name, "skill", skill.path),
+        name=_inspection_component_name(skill_name, "skill", skill.path),
         installation_path=skill.path,
         files=files,
         error=error,

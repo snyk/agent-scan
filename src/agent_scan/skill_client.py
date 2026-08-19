@@ -5,7 +5,7 @@ import os
 import yaml
 from yaml.error import YAMLError
 
-from agent_scan.models.skill import DiscoveredSkill, SkillFile
+from agent_scan.models.skill import DiscoveredSkill, SkillFile, SkillFrontmatter
 from agent_scan.redact import redact_text
 from agent_scan.utils import get_relative_path
 
@@ -33,14 +33,27 @@ def get_skill_md_path(path: str) -> str | None:
     return None
 
 
-def _validate_skill_md_frontmatter(content: str, skill_path: str) -> None:
-    """Validate the required identity fields in directory-skill frontmatter."""
-    content_chunks = content.split("---")
-    if len(content_chunks) <= 2:
+def _extract_leading_frontmatter_yaml(content: str) -> str | None:
+    """Return the leading YAML frontmatter block, excluding delimiters."""
+    lines = content.lstrip("\ufeff \t\r\n").splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None
+    closing_delimiter = next(
+        (index for index, line in enumerate(lines[1:], start=1) if line.strip() == "---"),
+        None,
+    )
+    if closing_delimiter is None:
+        return None
+    return "\n".join(lines[1:closing_delimiter]).strip()
+
+
+def parse_skill_frontmatter(content: str, skill_path: str) -> SkillFrontmatter:
+    """Parse and validate the required identity metadata in a SKILL.md file."""
+    yaml_content = _extract_leading_frontmatter_yaml(content)
+    if yaml_content is None:
         raise SkillInspectionError(
             f"Invalid SKILL.md file: {skill_path}. Could not find the YAML and the MD parts in the SKILL.md file."
         )
-    yaml_content = content_chunks[1].strip()
     try:
         yaml_data = yaml.safe_load(yaml_content)
     except YAMLError as e:
@@ -55,13 +68,34 @@ def _validate_skill_md_frontmatter(content: str, skill_path: str) -> None:
             raise SkillInspectionError(
                 f"Invalid SKILL.md file: {skill_path}. YAML frontmatter {field} must be a non-empty string."
             )
+    return SkillFrontmatter(
+        name=yaml_data["name"].strip(),
+        description=yaml_data["description"].strip(),
+    )
+
+
+def resolve_skill_name(skill: DiscoveredSkill) -> str:
+    """Resolve a directory skill's raw frontmatter name or preserve a command name."""
+    expanded_path = os.path.expanduser(skill.path)
+    if os.path.isfile(expanded_path):
+        return skill.name
+
+    skill_md_filename = get_skill_md_path(expanded_path)
+    if skill_md_filename is None:
+        raise SkillInspectionError(f"neither SKILL.md nor skill.md file found at path: {skill.path}")
+    skill_md_path = os.path.join(expanded_path, skill_md_filename)
+    try:
+        with open(skill_md_path, encoding="utf-8") as skill_md:
+            content = skill_md.read()
+    except UnicodeDecodeError as error:
+        raise SkillInspectionError(str(error)) from error
+    return parse_skill_frontmatter(content, skill.path).name
 
 
 def _read_skill_file_content(
     full_path: str,
     *,
     allow_binary: bool,
-    skill_path_for_frontmatter_validation: str | None = None,
 ) -> str:
     """Read one skill file's content for the v2026-07-10 request payload.
 
@@ -74,8 +108,6 @@ def _read_skill_file_content(
     try:
         with open(expanded, encoding="utf-8") as f:
             content = f.read()
-        if skill_path_for_frontmatter_validation is not None:
-            _validate_skill_md_frontmatter(content, skill_path_for_frontmatter_validation)
         return redact_text(content) or ""
     except UnicodeDecodeError as error:
         if not allow_binary:
@@ -88,7 +120,7 @@ def _read_skill_file_content(
         return f"{BINARY_FILE_DESCRIPTION_PREFIX}{hasher.hexdigest()}"
 
 
-def collect_skill_files(skill_path: str, *, validate_skill_md_frontmatter: bool = False) -> list[SkillFile]:
+def collect_skill_files(skill_path: str) -> list[SkillFile]:
     """Collect skill files as redacted ``SkillFile`` records for inspection and analysis.
 
     Traverses and reads every file within a skill target without constructing
@@ -125,7 +157,6 @@ def collect_skill_files(skill_path: str, *, validate_skill_md_frontmatter: bool 
         raise ValueError(f"Skill path is not a file or directory: {skill_path}")
 
     files: list[SkillFile] = []
-    found_skill_md = False
     for root, dirs, filenames in os.walk(expanded_path):
         dirs.sort()  # deterministic traversal order across platforms
         if any(os.path.islink(os.path.join(root, dirname)) for dirname in dirs):
@@ -136,22 +167,15 @@ def collect_skill_files(skill_path: str, *, validate_skill_md_frontmatter: bool 
                 raise ValueError("Skill directory must not contain symbolic links")
             relative_path = os.path.relpath(full_path, expanded_path).replace(os.path.sep, "/")
             extension = filename.rsplit(".", 1)[-1].lower()
-            is_skill_md = relative_path.lower() == "skill.md"
-            found_skill_md = found_skill_md or is_skill_md
             files.append(
                 SkillFile(
                     path=relative_path,
                     content=_read_skill_file_content(
                         full_path,
                         allow_binary=extension not in ("md", "py", "js", "ts", "sh"),
-                        skill_path_for_frontmatter_validation=(
-                            skill_path if validate_skill_md_frontmatter and is_skill_md else None
-                        ),
                     ),
                 )
             )
-    if validate_skill_md_frontmatter and not found_skill_md:
-        raise SkillInspectionError(f"neither SKILL.md nor skill.md file found at path: {skill_path}")
     return files
 
 

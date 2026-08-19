@@ -1465,6 +1465,27 @@ class TestBuildScanRequest:
         assert spr.skills[0].installation_path == "/tmp/project/.skills/my-skill"
         assert [f.path for f in spr.skills[0].files] == ["SKILL.md"]
 
+    def test_skill_request_preserves_inspected_skill_name(self):
+        inspected = InspectedPath(
+            client="cursor",
+            path="/tmp/project",
+            skills=[
+                InspectedSkill(
+                    name="canonical-inspected-name",
+                    installation_path="/tmp/project/.skills/dir-name",
+                    files=[
+                        SkillFile(
+                            path="SKILL.md",
+                            content="---\nname: stale-file-name\ndescription: d\n---\n# Body",
+                        )
+                    ],
+                ),
+            ],
+        )
+
+        req = build_scan_request([inspected])
+        assert req.scan_path_requests[0].skills[0].name == "canonical-inspected-name"
+
     def test_top_level_path_is_home_relativized(self):
         absolute_path = os.path.expanduser("~/project/.mcp.json")
         inspected = InspectedPath(client=None, path=absolute_path)

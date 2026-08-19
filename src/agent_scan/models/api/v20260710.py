@@ -69,7 +69,15 @@ class McpServerRequest(BaseModel):
 
 
 class SkillRequest(BaseModel):
-    name: str
+    name: str = Field(
+        description=(
+            "The unique name of the skill. For directory-based skills, this is the 'name' field "
+            "extracted from the YAML frontmatter of the SKILL.md file (falling back to the directory "
+            "name on disk if unavailable, e.g. on error). For single-file command-based skills, this "
+            "is the namespaced command identifier (e.g., 'git:commit' for "
+            "'~/.claude/commands/git/commit.md')."
+        )
+    )
     installation_path: str
     files: list[SkillFile] = Field(default_factory=list)
     error: ScanError | None = None
@@ -220,7 +228,15 @@ class SkillFileSummary(BaseModel):
 
 
 class SkillRiskResponse(BaseModel):
-    name: str
+    name: str = Field(
+        description=(
+            "The unique name of the skill. For directory-based skills, this is the 'name' field "
+            "extracted from the YAML frontmatter of the SKILL.md file (falling back to the directory "
+            "name on disk if unavailable, e.g. on error). For single-file command-based skills, this "
+            "is the namespaced command identifier (e.g., 'git:commit' for "
+            "'~/.claude/commands/git/commit.md')."
+        )
+    )
     files: list[SkillFileSummary] = Field(default_factory=list)
     risk_indexes: SkillRiskIndexes = Field(default_factory=SkillRiskIndexes)
     error: ScanError | None = None

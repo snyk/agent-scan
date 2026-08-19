@@ -103,6 +103,15 @@ The default analysis URL is the main version-dependent value:
 
 The URL version must match the request and response models used by the installed Agent Scan version.
 
+### Push key and machine identifier (v0.6 and later)
+
+| v0.6 flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--push-key KEY` | string | — | Push key used to authenticate with the analysis server. Replaces the soon-to-be-deprecated `--control-server-H "x-client-id: <push-key>"` pattern below and does not require a `--control-server` block. |
+| `--machine-id ID` | string | — | Non-anonymous identifier for this machine (for example, email, hostname, or serial number). Replaces the soon-to-be-deprecated `--control-identifier` below. |
+
+If both a new flag and its soon-to-be-deprecated equivalent are given, the new flag wins. Using `--control-server-H` for the `x-client-id` trick, or `--control-identifier` on a single `--control-server` block, emits a one-time deprecation warning pointing at `--push-key` / `--machine-id`.
+
 ### Control server (enterprise upload, on deprecation path)
 
 Upload analyzed results to one or more control servers, typically Snyk Evo. This upload mechanism is on a deprecation path and will be replaced.
@@ -136,7 +145,7 @@ The bootstrap implementation was removed in v0.5.14. In v0.5.14 and later—incl
 
 #### Push keys and stdio MCP servers (`scan` only)
 
-Enterprise uploads include an `x-client-id` push key in `--control-server-H`. Agent Scan treats this as an unattended run, so there is no terminal consent prompt.
+Enterprise uploads include a push key, either via `--push-key` (v0.6 and later) or the soon-to-be-deprecated `x-client-id` header in `--control-server-H`. Agent Scan treats this as an unattended run, so there is no terminal consent prompt.
 
 | `--dangerously-run-mcp-servers` | Consent prompts | Stdio MCP subprocesses |
 | --- | --- | --- |
@@ -281,6 +290,12 @@ verification_H:
 files:
   - ~/.cursor/mcp.json
   - ~/.claude/skills
+
+# Push key and machine identifier (v0.6 and later)
+push_key: <push-key>
+machine_id: user@example.com
+
+# Legacy control-server block (superseded by push_key/machine_id above)
 control_servers:
   - url: https://api.snyk.io/hidden/mcp-scan/push?version=2025-08-28
     identifier: user@example.com
@@ -301,6 +316,7 @@ snyk-agent-scan scan --config-file agent-scan.yaml \
 ```
 
 > Notes:
+> - `push_key` / `machine_id` are ordinary scalars in the precedence cascade (`code defaults < config file < explicit CLI flags`), but they resolve *against the soon-to-be-deprecated `--control-server-H` / `--control-identifier` flags* rather than against each other's own CLI flag. Concretely: if you pass the legacy `--control-server-H "x-client-id: ..."` / `--control-identifier` on the command line but the config file sets `push_key` / `machine_id`, the **file's value wins**, because only an *explicit* `--push-key` / `--machine-id` on the command line — not the legacy flags — is checked as an override. Passing `--push-key` / `--machine-id` explicitly on the command line still overrides the file as usual.
 > - `skills` is on by default. In YAML, set `skills: false` to disable skill scanning (equivalent to `--no-skills`); there is no separate `no_skills` toggle — the `skills` key is the single source of truth.
 > - `dangerously_run_mcp_servers: true` in the file has the same effect as the flag, including satisfying the `--ci` requirement that it be set — a config file can therefore enable stdio MCP server execution. This is intended, but review config files with that in mind.
 > - **On/off flags set to `true` in a file cannot be turned off on the command line.** Flags such as `json`, `scan_all_users`, and `dangerously_run_mcp_servers` are `store_true` and have no `--no-…` counterpart, so once a config file sets them to `true` there is no CLI flag to override them back to `false` for a single run — edit or omit the file instead. (`skills` is the exception: it has `--no-skills`.)
@@ -319,6 +335,8 @@ snyk-agent-scan scan --config-file agent-scan.yaml \
 2. Mint a short-lived push key (`x-client-id`).
 3. Run `scan` with the Snyk push endpoint configured automatically.
 4. Revoke the push key when finished.
+
+`evo` always authenticates with the push key it mints for that run. In v0.6 and later, an explicit `--push-key` on the command line is ignored — it never substitutes for the minted key.
 
 `--ci` is accepted for compatibility but does not change `evo` output or exit status. Shared argument validation still requires it to be paired with `--dangerously-run-mcp-servers`. Use `scan` when CI risk/failure evaluation is required.
 
@@ -368,7 +386,7 @@ snyk-agent-scan guard uninstall {claude,cursor,codex,all} [OPTIONS]
 
 | Variable | Used by | Description |
 | --- | --- | --- |
-| `SNYK_TOKEN` | Standalone CLI | Snyk API token for analysis (`Authorization: token …`). Required for `scan`/`evo` unless a push key is configured through `--control-server-H`. Obtain it from https://app.snyk.io/account. |
+| `SNYK_TOKEN` | Standalone CLI | Snyk API token for analysis (`Authorization: token …`). Required for `scan` unless a push key is configured through `--push-key` (v0.6 and later) or the soon-to-be-deprecated `--control-server-H`. Never required for `evo`, which always mints and uses its own push key. Obtain it from https://app.snyk.io/account. |
 | `SNYK_CLI_USE` | Binary invoked through Snyk CLI | Set to `true` by the extension so analysis uses the proxy-authenticated `/cli/analysis-machine` endpoint. |
 | `SNYK_API` | Standalone CLI | Override the Snyk API base URL for local development or custom regions. |
 | `SNYK_TENANT_ID` | Snyk CLI extension | Alternative to `--tenant-id` for the Go wrapper. |

@@ -25,6 +25,13 @@ class DiscoveredSkill(BaseModel):
     )
 
 
+class SkillFrontmatter(BaseModel):
+    """Validated identity metadata from a directory skill's SKILL.md file."""
+
+    name: str
+    description: str
+
+
 class SkillFile(BaseModel):
     """An individual file collected from a skill directory."""
 

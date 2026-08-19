@@ -11,13 +11,15 @@ from pathlib import Path
 import pytest
 import yaml
 
-from agent_scan.models.skill import DiscoveredSkill
+from agent_scan.models.skill import DiscoveredSkill, SkillFrontmatter
 from agent_scan.redact import redact_text
 from agent_scan.skill_client import (
     BINARY_FILE_DESCRIPTION_PREFIX,
     SkillInspectionError,
     collect_skill_files,
     inspect_commands_dir,
+    parse_skill_frontmatter,
+    resolve_skill_name,
 )
 from tests.unit._secret_fixtures import synthetic_secret
 
@@ -159,7 +161,7 @@ def test_collect_skill_files_redacts_secrets_from_every_text_file_kind(tmp_path)
     (skill / "run.py").write_text(f'API_KEY = "{_FAKE_SKILL_SECRET}"\n')
     (skill / "config.txt").write_text(f"api_key = {_FAKE_SKILL_SECRET}\n")
 
-    files = collect_skill_files(str(skill), validate_skill_md_frontmatter=True)
+    files = collect_skill_files(str(skill))
 
     assert {file.path for file in files} == {"SKILL.md", "reference.md", "run.py", "config.txt"}
     assert all(_FAKE_SKILL_SECRET not in file.content for file in files)
@@ -215,44 +217,46 @@ def test_collect_skill_files_rejects_symlinked_file_inside_skill(tmp_path):
         collect_skill_files(str(skill))
 
 
-def test_collect_skill_files_requires_skill_md_when_frontmatter_validation_is_enabled(tmp_path):
+def test_resolve_skill_name_requires_skill_md_for_directory_skill(tmp_path):
     skill = tmp_path / "skill"
     skill.mkdir()
     (skill / "reference.md").write_text("# Reference")
-
     with pytest.raises(SkillInspectionError, match=r"neither SKILL\.md nor skill\.md"):
-        collect_skill_files(str(skill), validate_skill_md_frontmatter=True)
+        resolve_skill_name(DiscoveredSkill(name="skill", path=str(skill)))
 
 
-def test_collect_skill_files_rejects_malformed_skill_md_frontmatter_yaml(tmp_path):
+def test_parse_skill_frontmatter_rejects_malformed_yaml(tmp_path):
     skill = tmp_path / "skill"
     skill.mkdir()
     (skill / "SKILL.md").write_text("---\nname: [unterminated\n---\n# Instructions\n")
+    skill_md = collect_skill_files(str(skill))[0]
 
     with pytest.raises(SkillInspectionError, match="invalid yaml"):
-        collect_skill_files(str(skill), validate_skill_md_frontmatter=True)
+        parse_skill_frontmatter(skill_md.content, str(skill))
 
 
 @pytest.mark.parametrize("frontmatter", ["[one, two]", "plain text", "42", "null"])
-def test_collect_skill_files_rejects_non_mapping_skill_md_frontmatter(tmp_path, frontmatter):
+def test_parse_skill_frontmatter_rejects_non_mapping_yaml(tmp_path, frontmatter):
     skill = tmp_path / "skill"
     skill.mkdir()
     (skill / "SKILL.md").write_text(f"---\n{frontmatter}\n---\n# Instructions\n")
+    skill_md = collect_skill_files(str(skill))[0]
 
     with pytest.raises(SkillInspectionError, match="frontmatter must be a mapping"):
-        collect_skill_files(str(skill), validate_skill_md_frontmatter=True)
+        parse_skill_frontmatter(skill_md.content, str(skill))
 
 
 @pytest.mark.parametrize("missing_field", ["name", "description"])
-def test_collect_skill_files_requires_skill_md_frontmatter_identity_fields(tmp_path, missing_field):
+def test_parse_skill_frontmatter_requires_identity_fields(tmp_path, missing_field):
     skill = tmp_path / "skill"
     skill.mkdir()
     frontmatter = {"name": "skill", "description": "Does useful work"}
     del frontmatter[missing_field]
     (skill / "SKILL.md").write_text(f"---\n{yaml.safe_dump(frontmatter)}---\n# Instructions\n")
+    skill_md = collect_skill_files(str(skill))[0]
 
     with pytest.raises(SkillInspectionError, match=rf"Missing {missing_field}"):
-        collect_skill_files(str(skill), validate_skill_md_frontmatter=True)
+        parse_skill_frontmatter(skill_md.content, str(skill))
 
 
 @pytest.mark.parametrize(
@@ -264,11 +268,73 @@ def test_collect_skill_files_requires_skill_md_frontmatter_identity_fields(tmp_p
         ("description", "   "),
     ],
 )
-def test_collect_skill_files_rejects_non_text_skill_md_frontmatter_identity_fields(tmp_path, field, value):
+def test_parse_skill_frontmatter_rejects_non_text_identity_fields(tmp_path, field, value):
     skill = tmp_path / "skill"
     skill.mkdir()
     frontmatter = {"name": "skill", "description": "Does useful work", field: value}
     (skill / "SKILL.md").write_text(f"---\n{yaml.safe_dump(frontmatter)}---\n# Instructions\n")
+    skill_md = collect_skill_files(str(skill))[0]
 
     with pytest.raises(SkillInspectionError, match=rf"{field}.*non-empty string"):
-        collect_skill_files(str(skill), validate_skill_md_frontmatter=True)
+        parse_skill_frontmatter(skill_md.content, str(skill))
+
+
+def test_parse_skill_frontmatter_returns_validated_metadata():
+    assert parse_skill_frontmatter(
+        "---\nname: '  my-skill  '\ndescription: '  Does useful work  '\n---\n# Content",
+        "/skills/my-skill",
+    ) == SkillFrontmatter(
+        name="my-skill",
+        description="Does useful work",
+    )
+
+
+def test_parse_skill_frontmatter_ignores_delimited_body_content():
+    content = "Intro text\n---\nname: not-frontmatter\ndescription: desc\n---\n# Content"
+
+    with pytest.raises(SkillInspectionError, match="Could not find the YAML"):
+        parse_skill_frontmatter(content, "/skills/example")
+
+
+def test_resolve_skill_name_uses_directory_skill_frontmatter(tmp_path):
+    skill_path = tmp_path / "directory-name"
+    skill_path.mkdir()
+    (skill_path / "SKILL.md").write_text("---\nname: authentic-skill\ndescription: desc\n---\n# Content")
+
+    assert resolve_skill_name(DiscoveredSkill(name="directory-name", path=str(skill_path))) == "authentic-skill"
+
+
+def test_resolve_skill_name_preserves_namespaced_command_name(tmp_path):
+    command_path = tmp_path / "commit.md"
+    command_path.write_text("---\nname: custom-git-commit\ndescription: desc\n---\n# Prompt")
+
+    assert resolve_skill_name(DiscoveredSkill(name="git:commit", path=str(command_path))) == "git:commit"
+
+
+def test_resolve_skill_name_reads_frontmatter_before_file_content_redaction(tmp_path):
+    skill_path = tmp_path / "directory-name"
+    skill_path.mkdir()
+    (skill_path / "SKILL.md").write_text(
+        f"---\nname: authentic-skill\ndescription: {_FAKE_SKILL_SECRET}\n---\n# Content"
+    )
+
+    files = collect_skill_files(str(skill_path))
+
+    assert "**REDACTED_SECRET_" in files[0].content
+    assert resolve_skill_name(DiscoveredSkill(name="directory-name", path=str(skill_path))) == "authentic-skill"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "# Prompt without frontmatter",
+        "---\n[invalid yaml\n---",
+        "---\ndescription: no name\n---",
+        "---\nname: 123\n---",
+    ],
+)
+def test_resolve_skill_name_preserves_command_name_regardless_of_frontmatter(tmp_path, content):
+    command_path = tmp_path / "commit.md"
+    command_path.write_text(content)
+
+    assert resolve_skill_name(DiscoveredSkill(name="git:commit", path=str(command_path))) == "git:commit"

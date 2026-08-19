@@ -7,6 +7,8 @@ import pytest
 
 from agent_scan.cli import (
     _coerce_config_value,
+    _effective_identifier,
+    _effective_push_key,
     apply_config_file,
     control_servers_from_config,
     explicitly_provided_dests,
@@ -227,6 +229,17 @@ class TestApplyConfigFileScalars:
         assert args.server_timeout == 15
         assert "not_a_real_flag" in capsys.readouterr().err
 
+    def test_null_yaml_value_keeps_code_default_not_stringified(self, tmp_path):
+        # A key with no value (``analysis_url:``) parses as YAML null. It must
+        # be treated like the key was omitted (code default kept), not run
+        # through str() into the literal string "None".
+        path = _write_yaml(tmp_path, "analysis_url:\nserver_timeout: 15\n")
+        argv = ["scan", "--config-file", path]
+        parser, args = _parse(argv)
+        apply_config_file(parser, args, argv)
+        assert args.analysis_url == "https://api.snyk.io/hidden/mcp-scan/analysis-machine?version=2026-07-10"
+        assert args.server_timeout == 15
+
 
 class TestApplyConfigFileControlServers:
     _YAML = (
@@ -245,6 +258,17 @@ class TestApplyConfigFileControlServers:
         assert args.control_servers == [
             ControlServer(url="https://yaml-server.com", headers={"Auth": "yaml-token"}, identifier="yaml-user")
         ]
+
+    def test_null_control_servers_key_is_ignored(self, tmp_path):
+        # ``control_servers:`` with no value parses as YAML null; it must be
+        # treated like the key was omitted rather than raising a "must be a
+        # list" error.
+        path = _write_yaml(tmp_path, "control_servers:\nserver_timeout: 15\n")
+        argv = ["scan", "--config-file", path]
+        parser, args = _parse(argv)
+        apply_config_file(parser, args, argv)
+        assert args.control_servers == []
+        assert args.server_timeout == 15
 
     def test_cli_control_server_replaces_yaml_completely(self, tmp_path):
         # Passing any control-server block flag wipes the YAML array entirely.
@@ -413,3 +437,157 @@ class TestApplyConfigFileFiles:
         parser, args = _parse(argv)
         apply_config_file(parser, args, argv)
         assert args.files == ["/cli/config.json"]
+
+
+class TestApplyConfigFilePushKeyAndMachineId:
+    """--push-key / --machine-id (v0.6+) are ordinary scalar options, so they
+    are settable from the config file through the same generic mechanism as
+    any other flag (see TestApplyConfigFileScalars)."""
+
+    def test_push_key_and_machine_id_loaded_from_yaml(self, tmp_path):
+        path = _write_yaml(tmp_path, "push_key: yaml-push-key\nmachine_id: yaml-machine-id\n")
+        argv = ["scan", "--config-file", path]
+        parser, args = _parse(argv)
+        apply_config_file(parser, args, argv)
+        assert args.push_key == "yaml-push-key"
+        assert args.machine_id == "yaml-machine-id"
+
+    def test_explicit_cli_push_key_overrides_yaml(self, tmp_path):
+        path = _write_yaml(tmp_path, "push_key: yaml-push-key\n")
+        argv = ["scan", "--config-file", path, "--push-key", "cli-push-key"]
+        parser, args = _parse(argv)
+        apply_config_file(parser, args, argv)
+        assert args.push_key == "cli-push-key"
+
+    def test_explicit_cli_machine_id_overrides_yaml(self, tmp_path):
+        path = _write_yaml(tmp_path, "machine_id: yaml-machine-id\n")
+        argv = ["scan", "--config-file", path, "--machine-id", "cli-machine-id"]
+        parser, args = _parse(argv)
+        apply_config_file(parser, args, argv)
+        assert args.machine_id == "cli-machine-id"
+
+    def test_numeric_push_key_coerced_to_string(self, tmp_path):
+        # A bare numeric YAML scalar must be normalized to str, matching what
+        # a real CLI invocation would receive (argv tokens are always strings).
+        path = _write_yaml(tmp_path, "push_key: 12345\n")
+        argv = ["scan", "--config-file", path]
+        parser, args = _parse(argv)
+        apply_config_file(parser, args, argv)
+        assert args.push_key == "12345"
+        assert isinstance(args.push_key, str)
+
+    def test_numeric_machine_id_coerced_to_string(self, tmp_path):
+        path = _write_yaml(tmp_path, "machine_id: 12345\n")
+        argv = ["scan", "--config-file", path]
+        parser, args = _parse(argv)
+        apply_config_file(parser, args, argv)
+        assert args.machine_id == "12345"
+        assert isinstance(args.machine_id, str)
+
+    def test_empty_string_push_key_from_yaml_preserved(self, tmp_path):
+        path = _write_yaml(tmp_path, 'push_key: ""\n')
+        argv = ["scan", "--config-file", path]
+        parser, args = _parse(argv)
+        apply_config_file(parser, args, argv)
+        assert args.push_key == ""
+
+    def test_null_push_key_and_machine_id_kept_as_none_not_stringified(self, tmp_path):
+        # A key written with no value (``push_key:``) parses as YAML null
+        # (Python None). It must be treated like the key was never in the
+        # file -- keeping the code default of None -- rather than being run
+        # through the str() type converter, which would otherwise produce
+        # the literal string "None".
+        path = _write_yaml(tmp_path, "push_key:\nmachine_id:\n")
+        argv = ["scan", "--config-file", path]
+        parser, args = _parse(argv)
+        apply_config_file(parser, args, argv)
+        assert args.push_key is None
+        assert args.machine_id is None
+
+
+class TestConfigFilePushKeyPrecedenceOverLegacyFlags:
+    """Unlike most flags, --push-key / --machine-id resolve against the
+    *deprecated* --control-server-H / --control-identifier flags, not
+    against their own CLI spelling (see cli._effective_push_key /
+    _effective_identifier). This means the usual "CLI beats config file"
+    rule does not hold across that old/new pair: a config-file push_key /
+    machine_id wins even when the legacy flags are passed explicitly on the
+    command line, because only an *explicit* --push-key / --machine-id (not
+    the legacy flags) counts as an override.
+    """
+
+    def test_config_push_key_wins_over_legacy_cli_flags(self, tmp_path):
+        path = _write_yaml(tmp_path, "push_key: config-push-key\n")
+        argv = [
+            "scan",
+            "--config-file",
+            path,
+            "--control-server",
+            "https://cli-server.com",
+            "--control-server-H",
+            "x-client-id: legacy-cli-key",
+            "--control-identifier",
+            "cli-user",
+        ]
+        parser, args = _parse(argv)
+        apply_config_file(parser, args, argv)
+        assert args.push_key == "config-push-key"
+        assert _effective_push_key(args) == "config-push-key"
+
+    def test_config_machine_id_wins_over_legacy_cli_flag(self, tmp_path):
+        path = _write_yaml(tmp_path, "machine_id: config-machine-id\n")
+        argv = [
+            "scan",
+            "--config-file",
+            path,
+            "--control-server",
+            "https://cli-server.com",
+            "--control-identifier",
+            "cli-user",
+        ]
+        parser, args = _parse(argv)
+        apply_config_file(parser, args, argv)
+        assert args.machine_id == "config-machine-id"
+        assert _effective_identifier(args) == "config-machine-id"
+
+    def test_explicit_cli_push_key_still_wins_over_legacy_flags_and_config(self, tmp_path):
+        # An *explicit* --push-key on the CLI is the one thing that legitimately
+        # overrides both the config file and the legacy flags.
+        path = _write_yaml(tmp_path, "push_key: config-push-key\n")
+        argv = [
+            "scan",
+            "--config-file",
+            path,
+            "--control-server",
+            "https://cli-server.com",
+            "--control-server-H",
+            "x-client-id: legacy-cli-key",
+            "--control-identifier",
+            "cli-user",
+            "--push-key",
+            "explicit-cli-push-key",
+        ]
+        parser, args = _parse(argv)
+        apply_config_file(parser, args, argv)
+        assert args.push_key == "explicit-cli-push-key"
+        assert _effective_push_key(args) == "explicit-cli-push-key"
+
+    def test_no_config_push_key_still_falls_back_to_legacy_cli_header(self, tmp_path):
+        # Sanity check: without a config-file push_key, legacy CLI flags
+        # still work as before.
+        path = _write_yaml(tmp_path, "server_timeout: 30\n")
+        argv = [
+            "scan",
+            "--config-file",
+            path,
+            "--control-server",
+            "https://cli-server.com",
+            "--control-server-H",
+            "x-client-id: legacy-cli-key",
+            "--control-identifier",
+            "cli-user",
+        ]
+        parser, args = _parse(argv)
+        apply_config_file(parser, args, argv)
+        assert args.push_key is None
+        assert _effective_push_key(args) == " legacy-cli-key"

@@ -131,6 +131,27 @@ class TestIsInteractiveRun:
         args = Namespace(command="scan")
         assert is_interactive_run(args) is True
 
+    def test_scan_with_push_key_flag_is_non_interactive(self):
+        """--push-key alone (no --control-server) must behave like the deprecated push-key header."""
+        args = _ns(command="scan", push_key="direct-push-key")
+        assert is_interactive_run(args) is False
+
+    def test_scan_without_push_key_flag_is_interactive(self):
+        """Missing --push-key attribute (e.g. inspect parser) falls through safely to True."""
+        assert is_interactive_run(_ns(command="scan")) is True
+
+    def test_evo_with_externally_supplied_push_key_before_minting_is_still_interactive(self):
+        """
+        Before evo() mints its own key, args.control_servers is still empty.
+        An externally-supplied --push-key must not flip is_interactive_run to
+        False here — evo always authenticates with its own minted key, so an
+        outside --push-key must not suppress the upfront tenant/token
+        prompts or the stdio-server stderr streaming default before minting
+        happens.
+        """
+        args = _ns(command="evo", control_servers=[], push_key="attacker-or-stale-key")
+        assert is_interactive_run(args) is True
+
 
 class TestIsInteractiveRunMatrix:
     """
@@ -414,6 +435,22 @@ class TestDecideHandshake:
         # evo is outside the allowlist → safe-default skip.
         assert decide_handshake(Namespace(command="evo")).do_stdio_handshake is False
 
+    # -- --push-key flag must behave like a control-server push-key header --
+
+    def test_scan_with_push_key_flag_skips_handshake_like_deprecated_header(self):
+        """--push-key alone (no --control-server) must match the
+        `x-client-id`-header behavior it replaces: no handshake, no consent."""
+        decision = decide_handshake(_ns(command="scan", push_key="direct-push-key"))
+        assert decision.do_stdio_handshake is False
+        assert decision.collect_consent is False
+
+    def test_scan_with_push_key_flag_and_dangerous_still_handshakes(self):
+        """--dangerously-run-mcp-servers overrides --push-key the same way it
+        overrides the deprecated header-derived push key."""
+        decision = decide_handshake(_ns(command="scan", push_key="direct-push-key", dangerously_run_mcp_servers=True))
+        assert decision.do_stdio_handshake is True
+        assert decision.collect_consent is False
+
 
 class TestEnforceConsentRequirements:
     def test_non_ci_run_is_not_gated(self):
@@ -603,6 +640,16 @@ class TestResolveServerIoDefault:
     def test_missing_attribute_is_treated_as_unset(self):
         """getattr default of None applies even when the attribute isn't on the namespace."""
         args = Namespace(command="scan", control_servers=[])
+        resolve_server_io_default(args)
+        assert args.suppress_mcpserver_io is False
+
+    def test_evo_with_push_key_before_minting_resolves_stream_stderr_default(self):
+        """
+        Same reasoning as ``test_evo_with_externally_supplied_push_key_before_minting_is_still_interactive``:
+        an externally-supplied --push-key must not affect the resolved
+        default before evo() has minted and injected its own key.
+        """
+        args = _ns(command="evo", control_servers=[], push_key="attacker-or-stale-key", suppress_mcpserver_io=None)
         resolve_server_io_default(args)
         assert args.suppress_mcpserver_io is False
 

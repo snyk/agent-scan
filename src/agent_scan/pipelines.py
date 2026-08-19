@@ -22,7 +22,7 @@ from agent_scan.models import (
     TokenAndClientInfo,
 )
 from agent_scan.redact import redact_inspected_path
-from agent_scan.utils import get_push_key, get_readable_home_directories
+from agent_scan.utils import get_readable_home_directories
 from agent_scan.verify_api import analyze_machine
 from agent_scan.well_known_clients import get_well_known_clients
 
@@ -48,6 +48,10 @@ class AnalyzeArgs(BaseModel):
 
 class PushArgs(BaseModel):
     control_servers: list[ControlServer]
+    # Already resolved by the caller (e.g. cli.py's _effective_push_key,
+    # which also enforces evo's mint-your-own-key rule). This pipeline does
+    # not derive it from control_servers headers itself.
+    push_key: str | None = None
     skip_ssl_verify: bool = False
     version: str | None = None
 
@@ -208,8 +212,8 @@ async def inspect_analyze_push_pipeline(
         identifier=analyze_args.identifier,
         additional_headers=analyze_args.additional_headers,
         verbose=verbose,
-        skip_pushing=bool(push_args.control_servers),
-        push_key=get_push_key(push_args.control_servers),
+        skip_pushing=bool(push_args.control_servers) or bool(push_args.push_key),
+        push_key=push_args.push_key,
         max_retries=analyze_args.max_retries,
         skip_ssl_verify=analyze_args.skip_ssl_verify,
         scan_context=scan_context,

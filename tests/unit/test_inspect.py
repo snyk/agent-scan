@@ -802,3 +802,50 @@ async def test_inspect_client_collects_skills_and_joins_config_errors(tmp_path):
     assert skill.error is None
 
     assert result.error is not None and "bad config" in (result.error.message or "")
+
+
+@pytest.mark.asyncio
+async def test_inspect_skill_prefers_frontmatter_name_over_directory_name(tmp_path):
+    skill_dir = tmp_path / "random-dir-name"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text("---\nname: authentic-skill-name\ndescription: test skill\n---\n# Body")
+    (skill_dir / "helper.py").write_text("print('test')")
+
+    client = ClientToInspect(
+        name="cursor",
+        client_path="/proj",
+        mcp_configs={},
+        skills_dirs={"/proj/skills": [DiscoveredSkill(name="random-dir-name", path=str(skill_dir))]},
+    )
+
+    result = await inspect_client(client, timeout=1, tokens=[], scan_skills=True)
+
+    assert len(result.skills) == 1
+    skill = result.skills[0]
+    assert skill.name == "authentic-skill-name"
+    assert skill.installation_path == str(skill_dir)
+    assert skill.error is None
+
+
+@pytest.mark.asyncio
+async def test_inspect_skill_falls_back_to_directory_name_on_frontmatter_error(tmp_path):
+    skill_dir = tmp_path / "failing-dir-name"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text("---\ninvalid: yaml [unterminated\n---\n# Body")
+    (skill_dir / "helper.py").write_text("print('still useful for diagnostics')")
+
+    client = ClientToInspect(
+        name="cursor",
+        client_path="/proj",
+        mcp_configs={},
+        skills_dirs={"/proj/skills": [DiscoveredSkill(name="failing-dir-name", path=str(skill_dir))]},
+    )
+
+    result = await inspect_client(client, timeout=1, tokens=[], scan_skills=True)
+
+    assert len(result.skills) == 1
+    skill = result.skills[0]
+    assert skill.name == "failing-dir-name"
+    assert {file.path for file in skill.files} == {"SKILL.md", "helper.py"}
+    assert skill.error is not None
+    assert skill.error.category == "skill_scan_error"

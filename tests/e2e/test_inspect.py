@@ -225,6 +225,17 @@ class TestInspect:
         assert test_skill["error"] is None
 
     @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
+    def test_inspect_skill_uses_frontmatter_name_in_json(self, agent_scan_cmd, tmp_path):
+        skill_dir = tmp_path / "directory-name"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("---\nname: frontmatter-name\ndescription: Test skill\n---\n# Instructions")
+
+        result, output = inspect_json(agent_scan_cmd, "--skills", str(skill_dir))
+
+        assert result.returncode == 0, result.stderr
+        assert only_result(output)["skills"][0]["name"] == "frontmatter-name"
+
+    @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
     @pytest.mark.parametrize(
         "skill_path",
         [

@@ -179,6 +179,38 @@ def parse_control_servers(argv) -> list[ControlServer]:
     return control_servers
 
 
+def _warn_deprecated_flag(flag_name: str, replacement: str) -> None:
+    rich.print(
+        f"[yellow]Warning: {flag_name} is deprecated and will be removed in a future release. "
+        f"Use {replacement} instead.[/yellow]",
+        file=sys.stderr,
+    )
+
+
+def warn_deprecated_control_flags(args) -> None:
+    """Warn once per invocation for each deprecated control-server flag used.
+
+    --control-server-H is a generic "additional header" flag, so it only
+    warns when it's actually carrying the x-client-id push-key trick, not
+    when it's used for an unrelated custom header. --control-identifier
+    warns on any use, even though --machine-id can only hold a single value
+    and can't represent the distinct identifiers a multi-control-server
+    setup requires — the warning still nudges toward the replacement for
+    the common single-server case.
+    """
+    raw_headers = getattr(args, "control_server_H", None)
+    if raw_headers:
+        try:
+            headers = parse_headers(raw_headers)
+        except ValueError:
+            headers = {}
+        if any("x-client-id" in header.lower() for header in headers):
+            _warn_deprecated_flag("--control-server-H", "--push-key")
+
+    if getattr(args, "control_identifier", None):
+        _warn_deprecated_flag("--control-identifier", "--machine-id")
+
+
 # Option strings that make up a single control-server block. Passing any of
 # them on the CLI triggers complete replacement of the config-file's
 # ``control_servers`` list (see apply_config_file).
@@ -299,17 +331,22 @@ def _convert_config_scalar(action: argparse.Action, raw_key: str, value: object)
     Apply the action's ``type`` converter to a single YAML scalar and enforce
     ``choices`` — the same validation argparse would run on a CLI token.
 
-    ``type`` converters (e.g. ``str2bool``, ``int``, ``float``) accept a string,
-    so we only invoke them when the YAML value is a string; a value already
-    parsed by YAML into the target native type (``server_timeout: 30``) is kept
-    as-is. Exits with code 2 on a failed conversion or an out-of-choices value.
+    ``type`` converters (e.g. ``str2bool``, ``int``, ``float``, ``str``) always
+    receive a string on the CLI (argv tokens are strings), so we stringify a
+    non-string YAML value (e.g. ``push_key: 12345``, ``server_timeout: 30``)
+    before converting, rather than only converting when YAML already handed us
+    a string. This is a generic, type-agnostic rule that applies to every
+    scalar flag: it normalizes a numeric YAML value into the flag's real type
+    (``str`` for a string flag, ``float`` for ``server_timeout``, etc.)
+    instead of silently keeping the mismatched native YAML type. Exits with
+    code 2 on a failed conversion or an out-of-choices value.
     """
     converted = value
     # argparse's ``type`` may be a registered type name (str) rather than a
     # callable; guard with callable() so we only invoke real converters.
-    if callable(action.type) and isinstance(value, str):
+    if callable(action.type):
         try:
-            converted = action.type(value)
+            converted = action.type(value) if isinstance(value, str) else action.type(str(value))
         except (ValueError, TypeError) as exc:
             _fail_config(f"Invalid config file: '{raw_key}' has an invalid value {value!r} ({exc}).")
     if action.choices is not None and converted not in action.choices:
@@ -389,7 +426,7 @@ def apply_config_file(parser: argparse.ArgumentParser, args: argparse.Namespace,
 
     # control_servers is assembled outside argparse (see parse_control_servers),
     # so it is handled here with complete-replacement semantics.
-    if "control_servers" in config and not any(dest in explicit for dest in _CONTROL_SERVER_DESTS):
+    if config.get("control_servers") is not None and not any(dest in explicit for dest in _CONTROL_SERVER_DESTS):
         args.control_servers = control_servers_from_config(config["control_servers"])
 
     # For every remaining key the rule is uniform: an explicit CLI flag wins,
@@ -414,6 +451,13 @@ def apply_config_file(parser: argparse.ArgumentParser, args: argparse.Namespace,
             continue
         if key in explicit:
             continue  # explicit CLI flag wins over the config file (whole value)
+        if value is None:
+            # A key written with no value (``push_key:``) parses as YAML/Python
+            # ``None``. Treat that the same as the key being absent entirely
+            # (keep the code default / CLI-derived value) rather than running
+            # it through the type converter, which would otherwise stringify
+            # it into the literal text "None".
+            continue
         # Validate/convert exactly as argparse would for the equivalent CLI flag
         # (type converters, choices, scalar-vs-list shape) before assigning.
         setattr(args, key, _coerce_config_value(dest_to_action[key], raw_key, value))
@@ -582,6 +626,20 @@ def add_control_server_arguments(parser):
             "Non-anonymous identifier for that control server (for example: email, hostname, serial number)."
         ),
     )
+    parser.add_argument(
+        "--push-key",
+        type=str,
+        default=None,
+        help="Push key used to authenticate with the analysis server.",
+        metavar="KEY",
+    )
+    parser.add_argument(
+        "--machine-id",
+        type=str,
+        default=None,
+        help="Non-anonymous identifier for this machine (for example: hostname, serial number). ",
+        metavar="ID",
+    )
 
 
 def add_scan_arguments(scan_parser):
@@ -633,6 +691,34 @@ def setup_scan_parser(scan_parser, add_files=True, add_ci_ignore_options=True, a
     add_scan_arguments(scan_parser)
 
 
+def _effective_push_key(args) -> str | None:
+    """Push key from --push-key, falling back to the deprecated --control-server-H
+    x-client-id header.
+
+    On evo, an externally-supplied --push-key is ignored: evo always
+    authenticates with the one-time key it mints and injects into
+    args.control_servers, so an outside value must never silently replace
+    it (both before minting, where it would wrongly suppress the upfront
+    tenant/token prompts, and after, where it would wrongly override the
+    minted key).
+    """
+    if getattr(args, "command", None) != "evo":
+        push_key = getattr(args, "push_key", None)
+        if push_key is not None:
+            return push_key
+    return get_push_key(getattr(args, "control_servers", []) or [])
+
+
+def _effective_identifier(args) -> str | None:
+    """Machine identifier from --machine-id, falling back to the deprecated
+    --control-identifier on the first control-server block."""
+    machine_id = getattr(args, "machine_id", None)
+    if machine_id is not None:
+        return machine_id
+    control_servers = getattr(args, "control_servers", None) or []
+    return next((s.identifier for s in control_servers), None)
+
+
 def is_interactive_run(args) -> bool:
     """
     True when the run is a manual, interactive invocation by a human who can
@@ -642,7 +728,7 @@ def is_interactive_run(args) -> bool:
     if command == "inspect":
         return True
     # If the scan is run with a push key, skip consent prompts.
-    has_push_key = bool(get_push_key(getattr(args, "control_servers", []) or []))
+    has_push_key = bool(_effective_push_key(args))
     return not has_push_key
 
 
@@ -683,7 +769,7 @@ def decide_handshake(args) -> HandshakeDecision:
     # inspect always qualifies.
     # scan / no-subcommand qualifies when there is no push key.
     is_attended_scan = command == "inspect" or (
-        (command is None or command == "scan") and not bool(get_push_key(getattr(args, "control_servers", []) or []))
+        (command is None or command == "scan") and not bool(_effective_push_key(args))
     )
     if is_attended_scan:
         return HandshakeDecision(do_stdio_handshake=True, collect_consent=True)
@@ -919,6 +1005,8 @@ def main():
     # sit between code defaults and explicit CLI flags in the precedence cascade.
     apply_config_file(parser, args, sys.argv[1:])
 
+    warn_deprecated_control_flags(args)
+
     # Resolve deferred defaults and enforce safety rules before dispatching.
     resolve_server_io_default(args)
     enforce_consent_requirements(args)
@@ -965,6 +1053,14 @@ async def evo(args):
     3. Revokes the client_id
     """
     from agent_scan.pushkeys import mint_push_key, revoke_push_key
+
+    if getattr(args, "push_key", None) is not None:
+        rich.print(
+            "[yellow]Note: evo always authenticates with a key it mints itself; "
+            "the --push-key you supplied will be ignored.[/yellow]",
+            file=sys.stderr,
+        )
+        args.push_key = None
 
     rich.print(
         "Go to https://app.snyk.io and select the tenant on the left nav bar. "
@@ -1073,8 +1169,12 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> ScanRespo
         skip_ssl_verify: bool = bool(hasattr(args, "skip_ssl_verify") and args.skip_ssl_verify)
 
         control_servers: list[ControlServer] = args.control_servers if hasattr(args, "control_servers") else []
-        # For the analysis backend, pick the first identifier from control_servers
-        identifier: str | None = next((s.identifier for s in control_servers), None)
+        # --machine-id / --push-key take precedence over the deprecated
+        # --control-identifier / --control-server-H equivalents. Resolved once
+        # here so every downstream consumer (PushArgs, the pipeline) sees the
+        # same already-resolved value instead of re-deriving it.
+        identifier: str | None = _effective_identifier(args)
+        push_key: str | None = _effective_push_key(args)
 
         analyze_args = AnalyzeArgs(
             analysis_url=args.analysis_url,
@@ -1086,6 +1186,7 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> ScanRespo
         )
         push_args = PushArgs(
             control_servers=control_servers,
+            push_key=push_key,
             skip_ssl_verify=skip_ssl_verify,
             version=version_info,
         )
