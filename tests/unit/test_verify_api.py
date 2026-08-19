@@ -665,6 +665,9 @@ class TestAnalyzeMachineAuthPrecedence:
             patch("agent_scan.verify_api.aiohttp.ClientSession") as mock_session_class,
             patch("agent_scan.verify_api.get_username", return_value="local-user"),
             patch("agent_scan.verify_api.get_hostname", return_value="test-host"),
+            # These tests pin sync-path auth/URL precedence; force the sync path so the
+            # config gate's own network call is not exercised here.
+            patch("agent_scan.verify_api._async_analysis_enabled", new_callable=AsyncMock, return_value=False),
             patch.dict(os.environ, env, clear=False),
         ):
             mock_session_class.return_value = self._make_mock_session()
