@@ -6,6 +6,9 @@ Code command files are flat ``*.md`` files, so they need their own scanner
 """
 
 import hashlib
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -249,6 +252,67 @@ def test_collect_skill_files_follows_symlinked_directory_inside_skill(tmp_path):
         "SKILL.md": "instructions",
         "references/reference.md": "linked reference",
     }
+
+
+def _collect_skill_files_in_subprocess(skill_path: Path) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from agent_scan.skill_client import collect_skill_files; import sys; collect_skill_files(sys.argv[1])",
+            str(skill_path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=2,
+        check=False,
+    )
+
+
+def test_collect_skill_files_rejects_symlink_cycle(tmp_path):
+    skill = tmp_path / "skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("instructions")
+    (skill / "loop").symlink_to(skill, target_is_directory=True)
+
+    result = _collect_skill_files_in_subprocess(skill)
+
+    assert result.returncode != 0
+    assert "symbolic link cycle" in result.stderr
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs are not available on this platform")
+def test_collect_skill_files_rejects_symlink_to_fifo(tmp_path):
+    fifo = tmp_path / "input"
+    os.mkfifo(fifo)
+    skill = tmp_path / "skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("instructions")
+    (skill / "input.txt").symlink_to(fifo)
+
+    result = _collect_skill_files_in_subprocess(skill)
+
+    assert result.returncode != 0
+    assert "not a regular file" in result.stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory permissions required")
+def test_collect_skill_files_propagates_directory_traversal_error(tmp_path):
+    skill = tmp_path / "skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("instructions")
+    unreadable = skill / "unreadable"
+    unreadable.mkdir()
+    unreadable.chmod(0)
+    if os.access(unreadable, os.R_OK):
+        unreadable.chmod(0o700)
+        pytest.skip("Current user can read mode-000 directories")
+
+    try:
+        with pytest.raises(PermissionError):
+            collect_skill_files(str(skill))
+    finally:
+        unreadable.chmod(0o700)
 
 
 def test_resolve_skill_name_requires_skill_md_for_directory_skill(tmp_path):

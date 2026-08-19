@@ -1,6 +1,8 @@
 import hashlib
 import logging
 import os
+import stat
+from collections.abc import Iterator
 
 import yaml
 from yaml.error import YAMLError
@@ -120,6 +122,35 @@ def _read_skill_file_content(
         return f"{BINARY_FILE_DESCRIPTION_PREFIX}{hasher.hexdigest()}"
 
 
+def _walk_skill_regular_files(skill_root: str) -> Iterator[tuple[str, str]]:
+    """Yield lexical relative paths and targets while safely following links."""
+    root_stat = os.stat(skill_root)
+    root_identity = (root_stat.st_dev, root_stat.st_ino)
+    pending = [(skill_root, frozenset({root_identity}))]
+
+    while pending:
+        directory, ancestor_identities = pending.pop()
+        with os.scandir(directory) as entries:
+            sorted_entries = sorted(entries, key=lambda entry: entry.name)
+
+        child_directories: list[tuple[str, frozenset[tuple[int, int]]]] = []
+        for entry in sorted_entries:
+            full_path = entry.path
+            relative_path = os.path.relpath(full_path, skill_root).replace(os.path.sep, "/")
+            target_stat = entry.stat(follow_symlinks=True)
+            if entry.is_dir(follow_symlinks=True):
+                identity = (target_stat.st_dev, target_stat.st_ino)
+                if identity in ancestor_identities:
+                    raise ValueError("Skill directory must not contain a symbolic link cycle")
+                child_directories.append((full_path, ancestor_identities | {identity}))
+            elif stat.S_ISREG(target_stat.st_mode):
+                yield relative_path, full_path
+            else:
+                raise ValueError(f"Skill file is not a regular file: {relative_path}")
+
+        pending.extend(reversed(child_directories))
+
+
 def collect_skill_files(skill_path: str) -> list[SkillFile]:
     """Collect skill files as redacted ``SkillFile`` records for inspection and analysis.
 
@@ -155,21 +186,17 @@ def collect_skill_files(skill_path: str) -> list[SkillFile]:
         raise ValueError(f"Skill path is not a file or directory: {skill_path}")
 
     files: list[SkillFile] = []
-    for root, dirs, filenames in os.walk(expanded_path, followlinks=True):
-        dirs.sort()  # deterministic traversal order across platforms
-        for filename in sorted(filenames):
-            full_path = os.path.join(root, filename)
-            relative_path = os.path.relpath(full_path, expanded_path).replace(os.path.sep, "/")
-            extension = filename.rsplit(".", 1)[-1].lower()
-            files.append(
-                SkillFile(
-                    path=relative_path,
-                    content=_read_skill_file_content(
-                        full_path,
-                        allow_binary=extension not in ("md", "py", "js", "ts", "sh"),
-                    ),
-                )
+    for relative_path, full_path in _walk_skill_regular_files(expanded_path):
+        extension = relative_path.rsplit(".", 1)[-1].lower()
+        files.append(
+            SkillFile(
+                path=relative_path,
+                content=_read_skill_file_content(
+                    full_path,
+                    allow_binary=extension not in ("md", "py", "js", "ts", "sh"),
+                ),
             )
+        )
     return files
 
 
