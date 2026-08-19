@@ -1,0 +1,4 @@
+^([a-zA-Z0-9-]+\.)*api\.snyk\.io$
+^([a-zA-Z0-9-]+\.)*registry\.npmjs\.org$
+^([a-zA-Z0-9-]+\.)*pypi\.org$
+^([a-zA-Z0-9-]+\.)*files\.pythonhosted\.org$
