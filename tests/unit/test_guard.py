@@ -252,6 +252,12 @@ class TestBuildHookCommand:
         cmd = _build_hook_command_powershell("pk", "https://api.snyk.io", Path("C:/x/hook.ps1"), "codex")
         assert "-MachineId" not in cmd
 
+    def test_machine_id_powershell_escapes_single_quotes(self):
+        cmd = _build_hook_command_powershell(
+            "pk", "https://api.snyk.io", Path("C:/x/hook.ps1"), "codex", machine_id="O'Brien-laptop"
+        )
+        assert "-MachineId 'O''Brien-laptop'" in cmd
+
     @pytest.mark.skipif(sys.platform != "win32", reason="powershell command format")
     def test_without_tenant_powershell(self):
         cmd = _build_hook_command("pk", "https://api.snyk.io", Path("/x/hook.ps1"), "claude-code")

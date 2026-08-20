@@ -1369,7 +1369,8 @@ def _build_hook_command_powershell(
 ) -> str:
     command = f"powershell -File '{script_path}' -Client {hook_client} -PushKey '{push_key}' -RemoteUrl '{url}'"
     if machine_id:
-        command += f" -MachineId '{machine_id}'"
+        escaped_machine_id = machine_id.replace("'", "''")
+        command += f" -MachineId '{escaped_machine_id}'"
     return command
 
 
