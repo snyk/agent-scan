@@ -12,6 +12,7 @@ sandbox), not the ``scan --json`` ``ScanResponse`` envelope.
 
 import json
 import subprocess
+import sys
 import uuid
 
 from agent_scan.sandbox_runner import PROXY_IMAGE, SANDBOX_IMAGE, run_sandboxed_scan
@@ -130,3 +131,32 @@ def test_scan_container_has_no_direct_network_egress_without_proxy(sandbox_image
         f"expected a DNS-resolution failure (the signature of an --internal network "
         f"with no egress route), got a different failure: {proc.stderr!r}"
     )
+
+
+@requires_docker
+def test_sandbox_scan_cli_end_to_end(sandbox_images, tmp_path):
+    (tmp_path / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"Math": {"command": "python3", "args": ["/scan-input/math_server.py"]}}})
+    )
+    math_server_src = (REPO_ROOT / "tests" / "mcp_servers" / "math_server.py").read_text()
+    (tmp_path / "math_server.py").write_text(math_server_src)
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "agent_scan.run",
+            "sandbox-scan",
+            "mcp.json",
+            "--input-dir",
+            str(tmp_path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    parsed = json.loads(proc.stdout)
+    server_result = parsed["/scan-config/mcp.generated.json"]["servers"][0]
+    assert server_result["name"] == "Math"

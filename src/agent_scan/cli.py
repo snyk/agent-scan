@@ -890,6 +890,23 @@ def enforce_consent_requirements(args) -> None:
         sys.exit(CLI_USAGE_ERROR_EXIT_CODE)
 
 
+def run_sandbox_scan_command(args) -> int:
+    from pathlib import Path
+
+    from agent_scan.sandbox_runner import DEFAULT_REPO_ROOT, build_images, run_sandboxed_scan
+
+    if args.build:
+        build_images(DEFAULT_REPO_ROOT)
+
+    input_dir = Path(args.input_dir).resolve() if args.input_dir else None
+    result = run_sandboxed_scan(args.target, input_dir=input_dir)
+    if result.stdout:
+        print(result.stdout)
+    if result.stderr:
+        print(result.stderr, file=sys.stderr)
+    return result.exit_code
+
+
 def main():
     ensure_unicode_console()
     # Create main parser with description
@@ -1066,6 +1083,37 @@ def main():
         help="Uninstall hooks from the managed (admin/MDM) config path instead of the user-level path",
     )
 
+    # SANDBOX-SCAN command
+    sandbox_scan_parser = subparsers.add_parser(
+        "sandbox-scan",
+        allow_abbrev=False,
+        help="Scan a server inside an isolated, network-restricted Docker sandbox",
+        description=(
+            "Run a scan inside an ephemeral Docker sandbox: a direct-scan target "
+            "(npm:/pypi:) or a client-mounted source tree plus its mcp.json, with "
+            "egress restricted to Snyk's API and the package registries needed to "
+            "resolve npm:/pypi: targets. Output is always JSON."
+        ),
+    )
+    sandbox_scan_parser.add_argument(
+        "target",
+        type=str,
+        help="A direct-scan target (npm:pkg@version, pypi:pkg@version) or a path relative to --input-dir",
+    )
+    sandbox_scan_parser.add_argument(
+        "--input-dir",
+        type=str,
+        default=None,
+        help="Host directory to mount read-only at /scan-input inside the sandbox",
+        metavar="DIR",
+    )
+    sandbox_scan_parser.add_argument(
+        "--build",
+        action="store_true",
+        default=False,
+        help="(Re)build the sandbox images before running",
+    )
+
     # Parse arguments (default to 'scan' if no command provided)
     if (len(sys.argv) == 1 or sys.argv[1] not in subparsers.choices) and (
         not (len(sys.argv) == 2 and sys.argv[1] == "--help")
@@ -1094,7 +1142,7 @@ def main():
     enforce_consent_requirements(args)
 
     # Display version banner
-    if not (hasattr(args, "json") and args.json):
+    if not (args.command == "sandbox-scan" or (hasattr(args, "json") and args.json)):
         rich.print(f"[bold blue]Snyk Agent Scan v{version_info}[/bold blue]\n")
 
     # Set up logging if verbose flag is enabled
@@ -1121,6 +1169,8 @@ def main():
         from agent_scan.guard import run_guard
 
         sys.exit(run_guard(args))
+    elif args.command == "sandbox-scan":
+        sys.exit(run_sandbox_scan_command(args))
 
     else:
         # This shouldn't happen due to argparse's handling
