@@ -313,12 +313,15 @@ def _run_discover(args) -> int:
         return 1
 
     project_folders = list(getattr(args, "project_folders", None) or [])
-    if getattr(args, "hook_with_cwd_payload_stdin", False):
+    project_folder_payload_key = getattr(args, "hook_project_folder_payload_key", None)
+    if not project_folder_payload_key and getattr(args, "hook_with_cwd_payload_stdin", False):
+        project_folder_payload_key = "cwd"
+    if project_folder_payload_key:
         try:
             hook_payload = json.loads(sys.stdin.read(1024 * 1024))
-            cwd = hook_payload.get("cwd") if isinstance(hook_payload, dict) else None
-            if isinstance(cwd, str) and cwd:
-                project_folders.append(cwd)
+            project_folder = hook_payload.get(project_folder_payload_key) if isinstance(hook_payload, dict) else None
+            if isinstance(project_folder, str) and project_folder:
+                project_folders.append(project_folder)
         except Exception:
             pass
 

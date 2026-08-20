@@ -1025,12 +1025,22 @@ def main():
         help="Additional project folder to include in MCP server discovery (repeatable)",
     )
     guard_discover_parser.add_argument(
+        "--hook-project-folder-payload-key",
+        type=str,
+        default=None,
+        metavar="KEY",
+        help=(
+            "Read the hook JSON payload from stdin and include the non-empty string at KEY as a project folder "
+            "(Claude Code uses cwd)"
+        ),
+    )
+    guard_discover_parser.add_argument(
         "--hook-with-cwd-payload-stdin",
         action="store_true",
         default=False,
         help=(
             "Read the Claude Code hook JSON payload from stdin and include its cwd as a project folder "
-            "(used by the SessionStart hook)"
+            "(deprecated compatibility alias for --hook-project-folder-payload-key cwd)"
         ),
     )
 

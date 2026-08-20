@@ -416,7 +416,7 @@ class TestDiscoveryHookScriptFiles:
 
         assert discover_script.read_text() == (
             '#!/usr/bin/env bash\nset -euo pipefail\nexec "${AGENT_SCAN_BIN:-snyk-agent-scan}" guard discover '
-            "--hook-with-cwd-payload-stdin\n"
+            "--hook-project-folder-payload-key cwd\n"
         )
         assert os.access(discover_script, os.X_OK)
 
@@ -2760,6 +2760,27 @@ class TestGuardDiscoverCli:
         assert args.project_folders == ["/repo/one", "/repo/two"]
         assert args.hook_with_cwd_payload_stdin is True
 
+    def test_parses_configurable_hook_project_folder_payload_key(self, monkeypatch):
+        from agent_scan import cli
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "agent-scan",
+                "guard",
+                "discover",
+                "--hook-project-folder-payload-key",
+                "workspaceRoot",
+            ],
+        )
+        with patch(f"{_G}.run_guard", return_value=0) as run:
+            with pytest.raises(SystemExit) as exc:
+                cli.main()
+
+        assert exc.value.code == 0
+        assert run.call_args.args[0].hook_project_folder_payload_key == "workspaceRoot"
+
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only Claude discovery hook")
 class TestRunDiscover:
@@ -2771,6 +2792,7 @@ class TestRunDiscover:
             "file": str(config),
             "project_folders": [],
             "hook_with_cwd_payload_stdin": False,
+            "hook_project_folder_payload_key": None,
         }
         values.update(overrides)
         return SimpleNamespace(**values)
@@ -2886,6 +2908,25 @@ class TestRunDiscover:
         assert result == 0
         stdin.read.assert_called_once_with(1024 * 1024)
         discover.assert_called_once_with(["/explicit/project", "/session/project"])
+
+    def test_hook_stdin_uses_configurable_project_folder_payload_key(self, tmp_path, monkeypatch):
+        config = tmp_path / "settings.json"
+        self._write_forwarder(config)
+        monkeypatch.setenv("PUSH_KEY", "env-pk")
+        stdin = MagicMock()
+        stdin.read.return_value = '{"cwd":"/wrong/project","workspaceRoot":"/session/project"}'
+        discover = MagicMock(return_value=[])
+        with (
+            patch.object(sys, "stdin", stdin),
+            patch(f"{_G}._discover_servers_payload", discover),
+            patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")),
+            patch(f"{_G}.rich"),
+        ):
+            result = guard_module.run_guard(self._args(config, hook_project_folder_payload_key="workspaceRoot"))
+
+        assert result == 0
+        stdin.read.assert_called_once_with(1024 * 1024)
+        discover.assert_called_once_with(["/session/project"])
 
     def test_malformed_hook_stdin_is_ignored(self, tmp_path, monkeypatch):
         config = tmp_path / "settings.json"
