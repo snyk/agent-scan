@@ -42,7 +42,7 @@ def test_run_sandboxed_scan_runs_container_with_generated_config_and_no_input_mo
     assert "--rm" in scan_run
     assert "/scan-config:ro" in " ".join(scan_run)
     assert "/scan-input:ro" not in " ".join(scan_run)
-    assert scan_run[-4:] == ["scan", "/scan-config/mcp.generated.json", "--dangerously-run-mcp-servers", "--json"]
+    assert scan_run[-4:] == ["inspect", "/scan-config/mcp.generated.json", "--dangerously-run-mcp-servers", "--json"]
 
 
 @patch("agent_scan.sandbox_runner.subprocess.run")

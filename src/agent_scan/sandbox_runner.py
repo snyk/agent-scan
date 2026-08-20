@@ -86,7 +86,7 @@ def run_sandboxed_scan(
             run_args += [
                 SANDBOX_IMAGE,
                 "snyk-agent-scan",
-                "scan",
+                "inspect",
                 "/scan-config/mcp.generated.json",
                 "--dangerously-run-mcp-servers",
                 "--json",
