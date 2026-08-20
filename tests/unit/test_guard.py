@@ -333,6 +333,13 @@ class TestAgentScanBin:
 
 
 class TestBuildDiscoverHookCommand:
+    @pytest.mark.parametrize(
+        "client, expected_key",
+        [("claude", "cwd"), ("cursor", "workspace_roots"), ("codex", "cwd")],
+    )
+    def test_agent_payload_keys_match_hook_schemas(self, client, expected_key):
+        assert guard_module._HOOK_PROJECT_FOLDER_PAYLOAD_KEYS[client] == expected_key
+
     def test_builds_quoted_environment_prefix_with_agent_scan_binary(self):
         with patch(f"{_G}._agent_scan_bin", return_value="/opt/Snyk's bin/snyk-agent-scan"):
             command = guard_module._build_discover_hook_command(
@@ -341,6 +348,7 @@ class TestBuildDiscoverHookCommand:
                 Path("/x/snyk-agent-guard-discover.sh"),
                 tenant_id="tenant",
                 machine_id="machine",
+                project_folder_payload_key="cwd",
             )
 
         assert "PUSH_KEY='pk'" in command
@@ -348,16 +356,20 @@ class TestBuildDiscoverHookCommand:
         assert "TENANT_ID='tenant'" in command
         assert "MACHINE_ID='machine'" in command
         assert "AGENT_SCAN_BIN='/opt/Snyk'\"'\"'s bin/snyk-agent-scan'" in command
-        assert command.endswith("bash '/x/snyk-agent-guard-discover.sh'")
+        assert command.endswith("bash '/x/snyk-agent-guard-discover.sh' --hook-project-folder-payload-key 'cwd'")
         assert _is_agent_scan_command(command)
 
     def test_omits_agent_scan_binary_when_unresolved(self):
         with patch(f"{_G}._agent_scan_bin", return_value=None):
             command = guard_module._build_discover_hook_command(
-                "pk", "https://api.snyk.io", Path("/x/snyk-agent-guard-discover.sh")
+                "pk",
+                "https://api.snyk.io",
+                Path("/x/snyk-agent-guard-discover.sh"),
+                project_folder_payload_key="workspace_roots",
             )
 
         assert "AGENT_SCAN_BIN" not in command
+        assert command.endswith("--hook-project-folder-payload-key 'workspace_roots'")
 
 
 class TestPrepareClaudeDiscoveryHook:
@@ -415,8 +427,7 @@ class TestDiscoveryHookScriptFiles:
         discover_script = main_script.with_name("snyk-agent-guard-discover.sh")
 
         assert discover_script.read_text() == (
-            '#!/usr/bin/env bash\nset -euo pipefail\nexec "${AGENT_SCAN_BIN:-snyk-agent-scan}" guard discover '
-            "--hook-project-folder-payload-key cwd\n"
+            '#!/usr/bin/env bash\nset -euo pipefail\nexec "${AGENT_SCAN_BIN:-snyk-agent-scan}" guard discover "$@"\n'
         )
         assert os.access(discover_script, os.X_OK)
 
@@ -2021,6 +2032,7 @@ class TestInstallHooksOrchestration:
         assert ctx["build_discover"].call_args.kwargs == {
             "tenant_id": "tid-1",
             "machine_id": "machine-42",
+            "project_folder_payload_key": "cwd",
         }
         assert ctx["prep_claude"].call_args.kwargs["discover_command"] == "discover-cmd"
 
@@ -2883,6 +2895,24 @@ class TestRunDiscover:
         assert result == 0
         stdin.read.assert_called_once_with(1024 * 1024)
         discover.assert_called_once_with(["/session/project"])
+
+    def test_hook_stdin_accepts_workspace_roots_list(self, tmp_path, monkeypatch):
+        config = tmp_path / "settings.json"
+        self._write_forwarder(config)
+        monkeypatch.setenv("PUSH_KEY", "env-pk")
+        stdin = MagicMock()
+        stdin.read.return_value = '{"workspace_roots":["/workspace/one","/workspace/two"]}'
+        discover = MagicMock(return_value=[])
+        with (
+            patch.object(sys, "stdin", stdin),
+            patch(f"{_G}._discover_servers_payload", discover),
+            patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")),
+            patch(f"{_G}.rich"),
+        ):
+            result = guard_module.run_guard(self._args(config, hook_project_folder_payload_key="workspace_roots"))
+
+        assert result == 0
+        discover.assert_called_once_with(["/workspace/one", "/workspace/two"])
 
     def test_malformed_hook_stdin_is_ignored(self, tmp_path, monkeypatch):
         config = tmp_path / "settings.json"

@@ -37,6 +37,11 @@ IS_WINDOWS = sys.platform == "win32"
 # ---------------------------------------------------------------------------
 
 ALL_CLIENTS = ["claude", "cursor", "codex"]
+_HOOK_PROJECT_FOLDER_PAYLOAD_KEYS = {
+    "claude": "cwd",
+    "cursor": "workspace_roots",
+    "codex": "cwd",
+}
 DEFAULT_REMOTE_URL = "https://api.snyk.io"
 _DETECTION_RE = re.compile(
     r"PUSH_KEY=.*snyk-agent-guard"
@@ -320,6 +325,8 @@ def _run_discover(args) -> int:
             project_folder = hook_payload.get(project_folder_payload_key) if isinstance(hook_payload, dict) else None
             if isinstance(project_folder, str) and project_folder:
                 project_folders.append(project_folder)
+            elif isinstance(project_folder, list):
+                project_folders.extend(folder for folder in project_folder if isinstance(folder, str) and folder)
         except Exception:
             pass
 
@@ -433,6 +440,7 @@ def _install_hooks(
             dest_path.with_name("snyk-agent-guard-discover.sh"),
             tenant_id=tenant_id,
             machine_id=machine_id,
+            project_folder_payload_key=_HOOK_PROJECT_FOLDER_PAYLOAD_KEYS[client],
         )
     prepared_config, prepared_content, hooks_diff, preserved = _prepare_client_config(
         client,
@@ -1471,6 +1479,7 @@ def _build_discover_hook_command(
     url: str,
     script_path: Path,
     *,
+    project_folder_payload_key: str,
     tenant_id: str = "",
     machine_id: str = "",
 ) -> str:
@@ -1486,6 +1495,7 @@ def _build_discover_hook_command(
     if agent_scan_bin is not None:
         parts.append(f"AGENT_SCAN_BIN={_shell_quote(agent_scan_bin)}")
     parts.append(f"bash {_shell_quote(script_path.as_posix())}")
+    parts.append(f"--hook-project-folder-payload-key {_shell_quote(project_folder_payload_key)}")
     return " ".join(parts)
 
 
