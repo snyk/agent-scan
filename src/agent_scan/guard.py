@@ -116,6 +116,8 @@ def run_guard(args) -> int:
         guard_command = getattr(args, "guard_command", None)
         if guard_command == "install":
             _run_install(args)
+        elif guard_command == "discover":
+            return _run_discover(args)
         elif guard_command == "uninstall":
             _run_uninstall(args)
         else:
@@ -293,7 +295,42 @@ def _run_install(args) -> None:
         _send_servers_discovered_event(push_key, url, *first_installed, machine_id)
 
 
-def _prepare_client_config(client: str, command: str, config_path: Path) -> tuple[dict | None, str | None, dict, int]:
+def _run_discover(args) -> int:
+    push_key = os.environ.get("PUSH_KEY", "")
+    if not push_key:
+        rich.print("[bold red]Error:[/bold red] PUSH_KEY is required to run guard discovery.")
+        return 1
+
+    url = getattr(args, "url", None) or os.environ.get("REMOTE_HOOKS_BASE_URL") or DEFAULT_REMOTE_URL
+    machine_id = (os.environ.get("MACHINE_ID", "") or "").strip()
+    config_path = Path(getattr(args, "file", None) or CLAUDE_SETTINGS_PATH)
+    script_path = config_path.parent / "hooks" / "snyk-agent-guard.sh"
+    if not script_path.exists():
+        rich.print(
+            f"[bold red]Error:[/bold red] Agent Guard forwarding script not found: {script_path}. "
+            "Run guard install claude first."
+        )
+        return 1
+
+    success = _send_servers_discovered_event(
+        push_key,
+        url,
+        "claude-code",
+        script_path,
+        machine_id,
+        event_name="SessionStartServerDiscovery",
+        session_marker="session-start-server-discovery",
+    )
+    return 0 if success else 1
+
+
+def _prepare_client_config(
+    client: str,
+    command: str,
+    config_path: Path,
+    *,
+    discover_command: str | None = None,
+) -> tuple[dict | None, str | None, dict, int]:
     """Dispatch to the client-specific config preparation function.
 
     Returns (prepared_config, prepared_content, hooks_diff, preserved).
@@ -302,7 +339,9 @@ def _prepare_client_config(client: str, command: str, config_path: Path) -> tupl
     prepared_config: dict | None = None
     preserved = 0
     if client == "claude":
-        prepared_config, hooks_diff, preserved = _prepare_claude_config(command, config_path)
+        prepared_config, hooks_diff, preserved = _prepare_claude_config(
+            command, config_path, discover_command=discover_command
+        )
     elif client == "cursor":
         prepared_config, hooks_diff, preserved = _prepare_cursor_config(command, config_path)
     elif client == "codex":
@@ -374,7 +413,21 @@ def _install_hooks(
         tenant_id=tenant_id,
         machine_id=machine_id,
     )
-    prepared_config, prepared_content, hooks_diff, preserved = _prepare_client_config(client, command, config_path)
+    discover_command = None
+    if client == "claude" and not IS_WINDOWS:
+        discover_command = _build_discover_hook_command(
+            push_key,
+            url,
+            dest_path.with_name("snyk-agent-guard-discover.sh"),
+            tenant_id=tenant_id,
+            machine_id=machine_id,
+        )
+    prepared_config, prepared_content, hooks_diff, preserved = _prepare_client_config(
+        client,
+        command,
+        config_path,
+        discover_command=discover_command,
+    )
 
     first_install = not script_existed
     config_changed = bool(hooks_diff["added"] or hooks_diff["modified"] or hooks_diff["removed"])
@@ -411,7 +464,12 @@ def _install_hooks(
     return dest_path
 
 
-def _prepare_claude_config(command: str, path: Path) -> tuple[dict, dict, int]:
+def _prepare_claude_config(
+    command: str,
+    path: Path,
+    *,
+    discover_command: str | None = None,
+) -> tuple[dict, dict, int]:
     """Build new Claude settings with hooks and compute diff, without writing.
 
     Returns (new_settings, hooks_diff, preserved_count).
@@ -433,6 +491,19 @@ def _prepare_claude_config(command: str, path: Path) -> tuple[dict, dict, int]:
         existing = list(filtered.get(event, []))
         existing.append(group)
         hooks[event] = existing
+
+    if discover_command:
+        hooks["SessionStart"].append(
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": discover_command,
+                        "async": True,
+                    }
+                ]
+            }
+        )
 
     for event, groups in filtered.items():
         if event not in hooks:
@@ -1089,6 +1160,9 @@ def _send_servers_discovered_event(
     hook_client: str,
     script_path: Path,
     machine_id: str,
+    *,
+    event_name: str = "serversDiscovered",
+    session_marker: str = "hooks-setup",
 ) -> bool:
     rich.print("[dim]Discovering MCP servers...[/dim]")
     try:
@@ -1098,13 +1172,13 @@ def _send_servers_discovered_event(
         return False
 
     payload_dict: dict = {
-        "hook_event_name": "serversDiscovered",
+        "hook_event_name": event_name,
         "servers": servers,
     }
     if hook_client == "claude-code" or hook_client == "codex":
-        payload_dict["session_id"] = "hooks-setup"
+        payload_dict["session_id"] = session_marker
     else:
-        payload_dict["conversation_id"] = "hooks-setup"
+        payload_dict["conversation_id"] = session_marker
     redact_push_keys_in_data(payload_dict)
     payload = json.dumps(payload_dict)
 
@@ -1358,6 +1432,45 @@ def _build_hook_command(
     return " ".join(parts)
 
 
+def _agent_scan_bin() -> str | None:
+    if "AGENT_SCAN_BIN" in os.environ:
+        return os.environ["AGENT_SCAN_BIN"]
+    if getattr(sys, "frozen", False):
+        return str(Path(sys.executable).resolve())
+
+    invoked_path = Path(sys.argv[0])
+    if invoked_path.name == "snyk-agent-scan" and invoked_path.is_file() and os.access(invoked_path, os.X_OK):
+        return str(invoked_path.resolve())
+
+    console_script = Path(sys.executable).parent / "snyk-agent-scan"
+    if console_script.is_file() and os.access(console_script, os.X_OK):
+        return str(console_script.resolve())
+    return None
+
+
+def _build_discover_hook_command(
+    push_key: str,
+    url: str,
+    script_path: Path,
+    *,
+    tenant_id: str = "",
+    machine_id: str = "",
+) -> str:
+    parts = [
+        f"PUSH_KEY={_shell_quote(push_key)}",
+        f"REMOTE_HOOKS_BASE_URL={_shell_quote(url)}",
+    ]
+    if tenant_id:
+        parts.append(f"TENANT_ID={_shell_quote(tenant_id)}")
+    if machine_id:
+        parts.append(f"MACHINE_ID={_shell_quote(machine_id)}")
+    agent_scan_bin = _agent_scan_bin()
+    if agent_scan_bin is not None:
+        parts.append(f"AGENT_SCAN_BIN={_shell_quote(agent_scan_bin)}")
+    parts.append(f"bash {_shell_quote(script_path.as_posix())}")
+    return " ".join(parts)
+
+
 def _build_hook_command_powershell(
     push_key: str,
     url: str,
@@ -1417,6 +1530,16 @@ def _copy_hook_script(config_path: Path) -> tuple[Path, bool, bool, str | None, 
     new_content = source.read_bytes().replace(b"__AGENT_SCAN_VERSION__", version_info.encode())
     new_checksum = hashlib.sha256(new_content).hexdigest()
 
+    if not IS_WINDOWS:
+        discover_name = "snyk-agent-guard-discover.sh"
+        discover_source = hook_pkg.joinpath(discover_name)
+        discover_dest = dest_dir / discover_name
+        discover_content = discover_source.read_bytes()
+        if not discover_dest.exists() or discover_dest.read_bytes() != discover_content:
+            discover_dest.write_bytes(discover_content)
+            rich.print(f"[green]\u2713[/green]  Copied hook script to [dim]{discover_dest}[/dim]")
+        discover_dest.chmod(discover_dest.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+
     if existed and current_checksum == new_checksum:
         return dest, existed, False, current_checksum, new_checksum
 
@@ -1428,11 +1551,19 @@ def _copy_hook_script(config_path: Path) -> tuple[Path, bool, bool, str | None, 
 
 def _remove_hook_script(client: str, config_path: Path) -> None:
     dest_dir = config_path.parent / "hooks"
-    script_name = "snyk-agent-guard.ps1" if IS_WINDOWS else "snyk-agent-guard.sh"
-    dest = dest_dir / script_name
-    if dest.exists():
-        dest.unlink()
-        rich.print(f"[green]\u2713[/green]  Removed hook script [dim]{dest}[/dim]")
+    script_names = (
+        ["snyk-agent-guard.ps1"]
+        if IS_WINDOWS
+        else [
+            "snyk-agent-guard.sh",
+            "snyk-agent-guard-discover.sh",
+        ]
+    )
+    for script_name in script_names:
+        dest = dest_dir / script_name
+        if dest.exists():
+            dest.unlink()
+            rich.print(f"[green]\u2713[/green]  Removed hook script [dim]{dest}[/dim]")
 
 
 def _backup_file(path: Path) -> None:

@@ -987,6 +987,27 @@ def main():
         help="Install hooks to the managed (admin/MDM) config path instead of the user-level path",
     )
 
+    guard_discover_parser = guard_subparsers.add_parser(
+        "discover",
+        allow_abbrev=False,
+        help=(
+            "Run MCP server discovery and send a SessionStartServerDiscovery event through the installed hooks "
+            "(used by the async Claude Code SessionStart hook)"
+        ),
+    )
+    guard_discover_parser.add_argument(
+        "--url",
+        type=str,
+        default=None,
+        help="Remote hooks base URL (default: REMOTE_HOOKS_BASE_URL or https://api.snyk.io)",
+    )
+    guard_discover_parser.add_argument(
+        "--file",
+        type=str,
+        default=None,
+        help="Override the Claude settings file path (default: ~/.claude/settings.json)",
+    )
+
     guard_uninstall_parser = guard_subparsers.add_parser(
         "uninstall",
         allow_abbrev=False,

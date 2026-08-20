@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -280,6 +281,184 @@ class TestBuildHookCommand:
         # tenant_id is only in bash commands, not powershell
         if sys.platform != "win32":
             assert _extract_env_from_cmd(cmd, "TENANT_ID") == "t-1"
+
+
+class TestAgentScanBin:
+    def test_environment_override_wins(self, monkeypatch):
+        monkeypatch.setenv("AGENT_SCAN_BIN", "custom agent scan")
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        monkeypatch.setattr(sys, "executable", "/ignored/frozen-binary")
+
+        assert guard_module._agent_scan_bin() == "custom agent scan"
+
+    def test_frozen_binary_uses_resolved_executable(self, tmp_path, monkeypatch):
+        executable = tmp_path / "dist" / "agent-scan"
+        monkeypatch.delenv("AGENT_SCAN_BIN", raising=False)
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        monkeypatch.setattr(sys, "executable", str(executable))
+
+        assert guard_module._agent_scan_bin() == str(executable.resolve())
+
+    def test_console_script_uses_resolved_argv_zero(self, tmp_path, monkeypatch):
+        executable = tmp_path / "snyk-agent-scan"
+        executable.write_text("#!/bin/sh\n")
+        executable.chmod(0o755)
+        monkeypatch.delenv("AGENT_SCAN_BIN", raising=False)
+        monkeypatch.setattr(sys, "frozen", False, raising=False)
+        monkeypatch.setattr(sys, "argv", [str(executable)])
+        monkeypatch.setattr(sys, "executable", str(tmp_path / "python"))
+
+        assert guard_module._agent_scan_bin() == str(executable.resolve())
+
+    def test_venv_console_script_sibling_is_used_for_dev_invocation(self, tmp_path, monkeypatch):
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        executable = bin_dir / "snyk-agent-scan"
+        executable.write_text("#!/bin/sh\n")
+        executable.chmod(0o755)
+        monkeypatch.delenv("AGENT_SCAN_BIN", raising=False)
+        monkeypatch.setattr(sys, "frozen", False, raising=False)
+        monkeypatch.setattr(sys, "argv", [str(tmp_path / "src" / "agent_scan" / "cli.py")])
+        monkeypatch.setattr(sys, "executable", str(bin_dir / "python"))
+
+        assert guard_module._agent_scan_bin() == str(executable.resolve())
+
+    def test_returns_none_when_no_executable_matches(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("AGENT_SCAN_BIN", raising=False)
+        monkeypatch.setattr(sys, "frozen", False, raising=False)
+        monkeypatch.setattr(sys, "argv", [str(tmp_path / "cli.py")])
+        monkeypatch.setattr(sys, "executable", str(tmp_path / "bin" / "python"))
+
+        assert guard_module._agent_scan_bin() is None
+
+
+class TestBuildDiscoverHookCommand:
+    def test_builds_quoted_environment_prefix_with_agent_scan_binary(self):
+        with patch(f"{_G}._agent_scan_bin", return_value="/opt/Snyk's bin/snyk-agent-scan"):
+            command = guard_module._build_discover_hook_command(
+                "pk",
+                "https://api.snyk.io",
+                Path("/x/snyk-agent-guard-discover.sh"),
+                tenant_id="tenant",
+                machine_id="machine",
+            )
+
+        assert "PUSH_KEY='pk'" in command
+        assert "REMOTE_HOOKS_BASE_URL='https://api.snyk.io'" in command
+        assert "TENANT_ID='tenant'" in command
+        assert "MACHINE_ID='machine'" in command
+        assert "AGENT_SCAN_BIN='/opt/Snyk'\"'\"'s bin/snyk-agent-scan'" in command
+        assert command.endswith("bash '/x/snyk-agent-guard-discover.sh'")
+        assert _is_agent_scan_command(command)
+
+    def test_omits_agent_scan_binary_when_unresolved(self):
+        with patch(f"{_G}._agent_scan_bin", return_value=None):
+            command = guard_module._build_discover_hook_command(
+                "pk", "https://api.snyk.io", Path("/x/snyk-agent-guard-discover.sh")
+            )
+
+        assert "AGENT_SCAN_BIN" not in command
+
+
+class TestPrepareClaudeDiscoveryHook:
+    discover_command = (
+        "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' bash '/x/snyk-agent-guard-discover.sh'"
+    )
+
+    def test_adds_separate_async_matcherless_session_start_group(self, tmp_path):
+        settings, _, _ = _prepare_claude_config(
+            AGENT_SCAN_CMD,
+            tmp_path / "settings.json",
+            discover_command=self.discover_command,
+        )
+
+        for event in CLAUDE_HOOK_EVENTS:
+            expected_count = 2 if event == "SessionStart" else 1
+            assert len(settings["hooks"][event]) == expected_count
+        assert settings["hooks"]["SessionStart"][1] == {
+            "hooks": [{"type": "command", "command": self.discover_command, "async": True}]
+        }
+
+    def test_none_preserves_current_hook_shape(self, tmp_path):
+        settings, _, _ = _prepare_claude_config(
+            AGENT_SCAN_CMD,
+            tmp_path / "settings.json",
+            discover_command=None,
+        )
+
+        assert all(len(settings["hooks"][event]) == 1 for event in CLAUDE_HOOK_EVENTS)
+
+    def test_reprepare_is_idempotent(self, tmp_path):
+        path = tmp_path / "settings.json"
+        settings, _, preserved = _prepare_claude_config(
+            AGENT_SCAN_CMD,
+            path,
+            discover_command=self.discover_command,
+        )
+        _write_claude_config(settings, path, preserved)
+
+        _, diff, _ = _prepare_claude_config(
+            AGENT_SCAN_CMD,
+            path,
+            discover_command=self.discover_command,
+        )
+
+        assert diff == {"added": {}, "modified": {}, "removed": {}}
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX discovery script")
+class TestDiscoveryHookScriptFiles:
+    def test_copy_writes_executable_discovery_script_next_to_forwarder(self, tmp_path):
+        config = tmp_path / "settings.json"
+
+        main_script, *_ = guard_module._copy_hook_script(config)
+        discover_script = main_script.with_name("snyk-agent-guard-discover.sh")
+
+        assert discover_script.read_text() == (
+            '#!/usr/bin/env bash\nset -euo pipefail\nexec "${AGENT_SCAN_BIN:-snyk-agent-scan}" guard discover\n'
+        )
+        assert os.access(discover_script, os.X_OK)
+
+    def test_copy_restores_missing_discovery_script_when_forwarder_is_current(self, tmp_path):
+        config = tmp_path / "settings.json"
+        main_script, *_ = guard_module._copy_hook_script(config)
+        discover_script = main_script.with_name("snyk-agent-guard-discover.sh")
+        discover_script.unlink()
+
+        guard_module._copy_hook_script(config)
+
+        assert discover_script.exists()
+
+    def test_remove_deletes_both_scripts(self, tmp_path):
+        config = tmp_path / "settings.json"
+        main_script, *_ = guard_module._copy_hook_script(config)
+        discover_script = main_script.with_name("snyk-agent-guard-discover.sh")
+        discover_script.write_text("discovery")
+
+        guard_module._remove_hook_script("claude", config)
+
+        assert not main_script.exists()
+        assert not discover_script.exists()
+
+    def test_full_claude_install_shape_then_uninstall_removes_entries_and_scripts(self, tmp_path):
+        config = tmp_path / "settings.json"
+        discover_command = (
+            "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' bash '/x/snyk-agent-guard-discover.sh'"
+        )
+        settings, _, preserved = _prepare_claude_config(
+            AGENT_SCAN_CMD,
+            config,
+            discover_command=discover_command,
+        )
+        _write_claude_config(settings, config, preserved)
+        main_script, *_ = guard_module._copy_hook_script(config)
+        discover_script = main_script.with_name("snyk-agent-guard-discover.sh")
+
+        _run_uninstall(SimpleNamespace(client="claude", file=str(config), managed=False))
+
+        assert "hooks" not in json.loads(config.read_text())
+        assert not main_script.exists()
+        assert not discover_script.exists()
 
 
 class TestParseCommandInfo:
@@ -1748,6 +1927,7 @@ class TestInstallHooksOrchestration:
         targets = {
             "copy": (f"{_G}._copy_hook_script", (dest, True, False, _CURRENT_CHECKSUM, _NEW_CHECKSUM)),
             "build": (f"{_G}._build_hook_command", "test-cmd"),
+            "build_discover": (f"{_G}._build_discover_hook_command", "discover-cmd"),
             "prep_claude": (f"{_G}._prepare_claude_config", (_PREPARED, _DIFF_REMOVED, 0)),
             "prep_cursor": (f"{_G}._prepare_cursor_config", (_PREPARED, _DIFF_REMOVED, 0)),
             "prep_codex": (f"{_G}._prepare_codex_config", (_PREPARED, _DIFF_REMOVED, 0)),
@@ -1814,6 +1994,28 @@ class TestInstallHooksOrchestration:
         self._call(tmp_path, machine_id="machine-42")
         assert ctx["build"].call_args.kwargs["machine_id"] == "machine-42"
         assert ctx["test_event"].call_args.kwargs["machine_id"] == "machine-42"
+
+    def test_claude_builds_and_prepares_async_discovery_hook(self, ctx, tmp_path):
+        self._call(tmp_path, client="claude", machine_id="machine-42")
+
+        ctx["build_discover"].assert_called_once()
+        assert ctx["build_discover"].call_args.kwargs == {
+            "tenant_id": "tid-1",
+            "machine_id": "machine-42",
+        }
+        assert ctx["prep_claude"].call_args.kwargs["discover_command"] == "discover-cmd"
+
+    def test_cursor_does_not_build_discovery_hook(self, ctx, tmp_path):
+        self._call(tmp_path, client="cursor", hook_client="cursor")
+
+        ctx["build_discover"].assert_not_called()
+
+    def test_windows_claude_does_not_build_discovery_hook(self, ctx, tmp_path):
+        with patch(f"{_G}.IS_WINDOWS", True):
+            self._call(tmp_path, client="claude")
+
+        ctx["build_discover"].assert_not_called()
+        assert ctx["prep_claude"].call_args.kwargs["discover_command"] is None
 
     def test_returns_installed_script_path(self, ctx, tmp_path):
         result = _install_hooks(
@@ -2408,6 +2610,32 @@ class TestSendServersDiscoveredEvent:
         assert ok is True
         assert captured["payload"]["servers"] == []
 
+    def test_event_name_and_session_marker_can_be_overridden(self):
+        captured = {}
+
+        def fake_run(cmd, *, input, **kwargs):
+            captured["payload"] = json.loads(input)
+            return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+        with (
+            patch(f"{_G}._discover_servers_payload", return_value=[]),
+            patch("subprocess.run", side_effect=fake_run),
+            patch(f"{_G}.rich"),
+        ):
+            ok = guard_module._send_servers_discovered_event(
+                "pk",
+                "https://api.snyk.io",
+                "claude-code",
+                Path("/hook.sh"),
+                "machine-42",
+                event_name="SessionStartServerDiscovery",
+                session_marker="session-start-server-discovery",
+            )
+
+        assert ok is True
+        assert captured["payload"]["hook_event_name"] == "SessionStartServerDiscovery"
+        assert captured["payload"]["session_id"] == "session-start-server-discovery"
+
     def test_nonzero_exit_warns_and_returns_false(self):
         completed = subprocess.CompletedProcess([], 2, stdout="", stderr="failed")
         with (
@@ -2453,6 +2681,104 @@ class TestGuardInstallMachineIdCli:
 
         assert exc.value.code == 0
         assert run.call_args.args[0].machine_id == "machine-42"
+
+
+class TestGuardDiscoverCli:
+    def test_parses_url_and_file(self, monkeypatch):
+        from agent_scan import cli
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["agent-scan", "guard", "discover", "--url", "https://hooks.example", "--file", "/tmp/settings.json"],
+        )
+        with patch(f"{_G}.run_guard", return_value=0) as run:
+            with pytest.raises(SystemExit) as exc:
+                cli.main()
+
+        assert exc.value.code == 0
+        args = run.call_args.args[0]
+        assert args.guard_command == "discover"
+        assert args.url == "https://hooks.example"
+        assert args.file == "/tmp/settings.json"
+
+
+class TestRunDiscover:
+    @staticmethod
+    def _args(config: Path, url=None):
+        return SimpleNamespace(guard_command="discover", url=url, file=str(config))
+
+    @staticmethod
+    def _write_forwarder(config: Path):
+        script = config.parent / "hooks" / "snyk-agent-guard.sh"
+        script.parent.mkdir(parents=True)
+        script.write_text("#!/bin/sh\n")
+        return script
+
+    def test_happy_path_sends_session_start_discovery_from_environment(self, tmp_path, monkeypatch):
+        config = tmp_path / "custom" / "settings.json"
+        script = self._write_forwarder(config)
+        captured = {}
+
+        def fake_run(cmd, *, input, **kwargs):
+            captured["cmd"] = cmd
+            captured["payload"] = json.loads(input)
+            captured["env"] = kwargs["env"]
+            return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+        monkeypatch.setenv("PUSH_KEY", "env-pk")
+        monkeypatch.setenv("REMOTE_HOOKS_BASE_URL", "https://env-hooks.example")
+        monkeypatch.setenv("MACHINE_ID", "env-machine")
+        with (
+            patch(f"{_G}._discover_servers_payload", return_value=[]),
+            patch("subprocess.run", side_effect=fake_run),
+            patch(f"{_G}.rich"),
+        ):
+            result = guard_module.run_guard(self._args(config))
+
+        assert result == 0
+        assert captured["cmd"] == ["bash", str(script), "--client", "claude-code"]
+        assert captured["payload"] == {
+            "hook_event_name": "SessionStartServerDiscovery",
+            "servers": [],
+            "session_id": "session-start-server-discovery",
+        }
+        assert captured["env"]["PUSH_KEY"] == "env-pk"
+        assert captured["env"]["REMOTE_HOOKS_BASE_URL"] == "https://env-hooks.example"
+        assert captured["env"]["MACHINE_ID"] == "env-machine"
+
+    def test_explicit_url_overrides_environment(self, tmp_path, monkeypatch):
+        config = tmp_path / "settings.json"
+        self._write_forwarder(config)
+        monkeypatch.setenv("PUSH_KEY", "env-pk")
+        monkeypatch.setenv("REMOTE_HOOKS_BASE_URL", "https://env-hooks.example")
+        with (
+            patch(f"{_G}._discover_servers_payload", return_value=[]),
+            patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")) as run,
+            patch(f"{_G}.rich"),
+        ):
+            result = guard_module.run_guard(self._args(config, url="https://flag-hooks.example"))
+
+        assert result == 0
+        assert run.call_args.kwargs["env"]["REMOTE_HOOKS_BASE_URL"] == "https://flag-hooks.example"
+
+    def test_missing_push_key_returns_one_without_invoking_script(self, tmp_path, monkeypatch):
+        config = tmp_path / "settings.json"
+        self._write_forwarder(config)
+        monkeypatch.delenv("PUSH_KEY", raising=False)
+        with patch("subprocess.run") as run:
+            result = guard_module.run_guard(self._args(config))
+
+        assert result == 1
+        run.assert_not_called()
+
+    def test_missing_forwarding_script_returns_one(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("PUSH_KEY", "env-pk")
+        with patch("subprocess.run") as run:
+            result = guard_module.run_guard(self._args(tmp_path / "settings.json"))
+
+        assert result == 1
+        run.assert_not_called()
 
 
 class TestRunInstallSendsServersDiscovered:
