@@ -2734,30 +2734,6 @@ class TestGuardDiscoverCli:
         assert args.url == "https://hooks.example"
         assert args.file == "/tmp/settings.json"
 
-    def test_parses_repeatable_project_folders(self, monkeypatch):
-        from agent_scan import cli
-
-        monkeypatch.setattr(
-            sys,
-            "argv",
-            [
-                "agent-scan",
-                "guard",
-                "discover",
-                "--project-folder",
-                "/repo/one",
-                "--project-folder",
-                "/repo/two",
-            ],
-        )
-        with patch(f"{_G}.run_guard", return_value=0) as run:
-            with pytest.raises(SystemExit) as exc:
-                cli.main()
-
-        assert exc.value.code == 0
-        args = run.call_args.args[0]
-        assert args.project_folders == ["/repo/one", "/repo/two"]
-
     def test_parses_configurable_hook_project_folder_payload_key(self, monkeypatch):
         from agent_scan import cli
 
@@ -2788,7 +2764,6 @@ class TestRunDiscover:
             "guard_command": "discover",
             "url": url,
             "file": str(config),
-            "project_folders": [],
             "hook_project_folder_payload_key": None,
         }
         values.update(overrides)
@@ -2866,21 +2841,6 @@ class TestRunDiscover:
         assert result == 1
         run.assert_not_called()
 
-    def test_forwards_explicit_project_folders_to_discovery(self, tmp_path, monkeypatch):
-        config = tmp_path / "settings.json"
-        self._write_forwarder(config)
-        monkeypatch.setenv("PUSH_KEY", "env-pk")
-        discover = MagicMock(return_value=[])
-        with (
-            patch(f"{_G}._discover_servers_payload", discover),
-            patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")),
-            patch(f"{_G}.rich"),
-        ):
-            result = guard_module.run_guard(self._args(config, project_folders=["/repo/one", "/repo/two"]))
-
-        assert result == 0
-        discover.assert_called_once_with(["/repo/one", "/repo/two"])
-
     def test_hook_stdin_appends_cwd_with_configured_key(self, tmp_path, monkeypatch):
         config = tmp_path / "settings.json"
         self._write_forwarder(config)
@@ -2897,14 +2857,13 @@ class TestRunDiscover:
             result = guard_module.run_guard(
                 self._args(
                     config,
-                    project_folders=["/explicit/project"],
                     hook_project_folder_payload_key="cwd",
                 )
             )
 
         assert result == 0
         stdin.read.assert_called_once_with(1024 * 1024)
-        discover.assert_called_once_with(["/explicit/project", "/session/project"])
+        discover.assert_called_once_with(["/session/project"])
 
     def test_hook_stdin_uses_configurable_project_folder_payload_key(self, tmp_path, monkeypatch):
         config = tmp_path / "settings.json"
@@ -2941,13 +2900,12 @@ class TestRunDiscover:
             result = guard_module.run_guard(
                 self._args(
                     config,
-                    project_folders=["/explicit/project"],
                     hook_project_folder_payload_key="cwd",
                 )
             )
 
         assert result == 0
-        discover.assert_called_once_with(["/explicit/project"])
+        discover.assert_called_once_with([])
 
     def test_stdin_is_never_read_without_hook_flag(self, tmp_path, monkeypatch):
         config = tmp_path / "settings.json"

@@ -14,7 +14,6 @@ import logging
 import os
 import sys
 from dataclasses import dataclass
-from pathlib import Path
 
 import psutil
 import rich
@@ -480,14 +479,6 @@ def apply_config_file(parser: argparse.ArgumentParser, args: argparse.Namespace,
 
 def add_common_arguments(parser):
     """Add arguments that are common to multiple commands."""
-    parser.add_argument(
-        "--project-folder",
-        action="append",
-        dest="project_folders",
-        default=[],
-        metavar="FOLDER",
-        help="Additional project folder to include in MCP server and skills discovery (repeatable)",
-    )
     parser.add_argument(
         "--storage-file",
         type=str,
@@ -1017,14 +1008,6 @@ def main():
         help="Override the Claude settings file path (default: ~/.claude/settings.json)",
     )
     guard_discover_parser.add_argument(
-        "--project-folder",
-        action="append",
-        dest="project_folders",
-        default=[],
-        metavar="FOLDER",
-        help="Additional project folder to include in MCP server discovery (repeatable)",
-    )
-    guard_discover_parser.add_argument(
         "--hook-project-folder-payload-key",
         type=str,
         default=None,
@@ -1203,9 +1186,6 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> ScanRespo
 
     server_timeout: int = args.server_timeout if hasattr(args, "server_timeout") else 10
     files: list[str] | None = args.files if hasattr(args, "files") else None
-    project_folders = [str(Path(path).expanduser()) for path in getattr(args, "project_folders", []) or []]
-    if files and project_folders:
-        rich.print("[yellow]Warning:[/yellow] --project-folder is ignored when explicit files are provided.")
     scan_skills: bool = hasattr(args, "skills") and args.skills
     tokens: list[TokenAndClientInfo] = []
     if hasattr(args, "mcp_oauth_tokens_path") and args.mcp_oauth_tokens_path:
@@ -1218,7 +1198,6 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> ScanRespo
         paths=files,
         all_users=scan_all_users,
         scan_skills=scan_skills,
-        project_folders=project_folders,
     )
 
     # Resolve the MCP server IO flag and the consent flag.

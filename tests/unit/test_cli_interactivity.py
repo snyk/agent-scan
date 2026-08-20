@@ -2,7 +2,6 @@
 str2bool, and the consent / stream_stderr wiring in run_scan."""
 
 from argparse import Namespace
-from pathlib import Path
 from typing import ClassVar
 from unittest.mock import AsyncMock, patch
 
@@ -1466,40 +1465,3 @@ class TestStdioHandshakeInvariants:
 
         mock_consent.assert_not_called()
         assert mock_pipeline.call_args.kwargs["do_stdio_handshake"] is True
-
-
-@pytest.mark.asyncio
-async def test_run_scan_expands_project_folder_user_home_before_discovery():
-    args = TestRunScanConsentAndStreamStderrWiring._scan_args(
-        project_folders=["~/repo"],
-        dangerously_run_mcp_servers=True,
-    )
-    discover = AsyncMock(return_value=([], [], []))
-
-    with (
-        patch("agent_scan.cli.discover_clients_to_inspect", discover),
-        patch("agent_scan.cli.inspect_analyze_push_pipeline", new_callable=AsyncMock, return_value=[]),
-    ):
-        await run_scan(args, mode="scan")
-
-    inspect_args = discover.await_args.args[0]
-    assert inspect_args.project_folders == [str(Path("~/repo").expanduser())]
-
-
-@pytest.mark.asyncio
-async def test_run_scan_warns_when_files_and_project_folders_are_combined(capsys):
-    args = TestRunScanConsentAndStreamStderrWiring._scan_args(
-        files=["/tmp/config.json"],
-        project_folders=["/tmp/repo"],
-        dangerously_run_mcp_servers=True,
-    )
-
-    with (
-        patch("agent_scan.cli.discover_clients_to_inspect", new_callable=AsyncMock, return_value=([], [], [])),
-        patch("agent_scan.cli.inspect_analyze_push_pipeline", new_callable=AsyncMock, return_value=[]),
-    ):
-        await run_scan(args, mode="scan")
-
-    output = capsys.readouterr().out
-    assert "--project-folder" in output
-    assert "ignored" in output.lower()

@@ -312,7 +312,7 @@ def _run_discover(args) -> int:
         )
         return 1
 
-    project_folders = list(getattr(args, "project_folders", None) or [])
+    project_folders: list[str] = []
     project_folder_payload_key = getattr(args, "hook_project_folder_payload_key", None)
     if project_folder_payload_key:
         try:
