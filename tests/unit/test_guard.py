@@ -1607,6 +1607,13 @@ class TestEnsureGuardEnabledForTenant:
 class TestRunInstallCallsEnsureGuardEnabled:
     """_run_install invokes _ensure_guard_enabled_for_tenant only in the interactive (mint) path."""
 
+    @pytest.fixture(autouse=True)
+    def _no_servers_discovered_event(self):
+        # _install_hooks is mocked below, so without this the real post-install
+        # send would run actual machine discovery and invoke the hook script.
+        with patch("agent_scan.guard._send_servers_discovered_event", return_value=True):
+            yield
+
     @patch("agent_scan.guard._install_hooks")
     @patch("agent_scan.guard.mint_push_key", return_value="minted-pk")
     @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
@@ -2222,6 +2229,18 @@ class TestServersDiscoveredPayload:
         result = guard_module._servers_discovered_entries([client])
 
         assert [server["name"] for server in result[0]["servers"]] == ["good"]
+
+    def test_client_with_only_error_configs_still_emits_entry(self):
+        client = self._client(
+            mcp_configs={
+                "/bad.json": CouldNotParseMCPConfig(message="bad", traceback=None),
+                "/missing.json": FileNotFoundConfig(message="missing", traceback=None),
+            }
+        )
+
+        result = guard_module._servers_discovered_entries([client])
+
+        assert [(entry["client"], entry["servers"]) for entry in result] == [("claude code", [])]
 
     def test_empty_input_returns_empty_list(self):
         assert guard_module._servers_discovered_entries([]) == []
@@ -3096,6 +3115,13 @@ class TestRunInstallAll:
         with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", fake_paths):
             yield
 
+    @pytest.fixture(autouse=True)
+    def _no_servers_discovered_event(self):
+        # _install_hooks is mocked below, so without this the real post-install
+        # send would run actual machine discovery and invoke the hook script.
+        with patch("agent_scan.guard._send_servers_discovered_event", return_value=True):
+            yield
+
     @patch("agent_scan.guard._install_hooks")
     @patch("agent_scan.guard.mint_push_key", return_value="minted-pk")
     @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
@@ -3280,6 +3306,13 @@ class TestIsClientInstalled:
 
 class TestRunInstallSkipsUninstalledClients:
     """_run_install should skip hook installation for agents not present on the machine."""
+
+    @pytest.fixture(autouse=True)
+    def _no_servers_discovered_event(self):
+        # _install_hooks is mocked below, so without this the real post-install
+        # send would run actual machine discovery and invoke the hook script.
+        with patch("agent_scan.guard._send_servers_discovered_event", return_value=True):
+            yield
 
     @staticmethod
     def _fake_paths(tmp_path, installed_clients):
