@@ -943,6 +943,18 @@ def main():
         help="Snyk tenant ID (required when minting a push key; not needed if PUSH_KEY is set)",
     )
     guard_install_parser.add_argument(
+        "--machine-id",
+        "--control-identifier",
+        dest="machine_id",
+        type=str,
+        default=None,
+        metavar="ID",
+        help=(
+            "Non-anonymous identifier for this machine, sent as the X-User identifier on hook events "
+            "(accepts --control-identifier for symmetry with scan)"
+        ),
+    )
+    guard_install_parser.add_argument(
         "--test",
         action="store_true",
         default=False,

@@ -13,6 +13,7 @@ import stat
 import sys
 from importlib import resources as importlib_resources
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 import rich
@@ -25,6 +26,9 @@ from agent_scan.pushkeys import (
     revoke_push_key,
 )
 from agent_scan.redact import redact_push_keys, redact_push_keys_in_data
+
+if TYPE_CHECKING:
+    from agent_scan.models import ClientToInspect
 
 IS_WINDOWS = sys.platform == "win32"
 
@@ -186,6 +190,7 @@ def _run_install(args) -> None:
     if not tenant_id:
         tenant_id = (os.environ.get("TENANT_ID", "") or "").strip()
     managed: bool = getattr(args, "managed", False)
+    machine_id = (getattr(args, "machine_id", None) or os.environ.get("MACHINE_ID", "") or "").strip()
 
     clients = ALL_CLIENTS if client == "all" else [client]
 
@@ -253,9 +258,10 @@ def _run_install(args) -> None:
     minted = not headless  # True if we minted the key in this run
 
     installed_any = False
+    first_installed: tuple[str, Path] | None = None
     try:
         for c in clients:
-            _install_hooks(
+            dest_path = _install_hooks(
                 c,
                 _hook_client_name(c),
                 push_key,
@@ -266,7 +272,10 @@ def _run_install(args) -> None:
                 minted,
                 tenant_id,
                 snyk_token,
+                machine_id,
             )
+            if first_installed is None:
+                first_installed = (_hook_client_name(c), dest_path)
             installed_any = True
     except BaseException:
         if minted:
@@ -279,6 +288,9 @@ def _run_install(args) -> None:
             else:
                 _revoke_after_failure(url, tenant_id, snyk_token, push_key)
         raise
+
+    if first_installed is not None:
+        _send_servers_discovered_event(push_key, url, *first_installed, machine_id)
 
 
 def _prepare_client_config(client: str, command: str, config_path: Path) -> tuple[dict | None, str | None, dict, int]:
@@ -346,14 +358,22 @@ def _install_hooks(
     minted: bool,
     tenant_id: str,
     snyk_token: str,
-) -> None:
+    machine_id: str,
+) -> Path:
     """Post-mint install steps.  Extracted so _run_install can revoke on failure."""
     existing_info = _detect_existing_install(client, config_path)
     old_push_key = existing_info.get("auth_value", "") if existing_info else ""
     push_key_changed = bool(old_push_key) and old_push_key != push_key
 
     dest_path, script_existed, script_updated, current_checksum, new_checksum = _copy_hook_script(config_path)
-    command = _build_hook_command(push_key, url, dest_path, hook_client, tenant_id=tenant_id)
+    command = _build_hook_command(
+        push_key,
+        url,
+        dest_path,
+        hook_client,
+        tenant_id=tenant_id,
+        machine_id=machine_id,
+    )
     prepared_config, prepared_content, hooks_diff, preserved = _prepare_client_config(client, command, config_path)
 
     first_install = not script_existed
@@ -370,6 +390,7 @@ def _install_hooks(
         push_key_changed=push_key_changed,
         current_checksum=current_checksum,
         new_checksum=new_checksum,
+        machine_id=machine_id,
     ):
         if not script_existed:
             dest_path.unlink(missing_ok=True)
@@ -387,6 +408,7 @@ def _install_hooks(
     rich.print(f"   Remote URL: [dim]{url}[/dim]")
     rich.print(f"   Push Key:   [yellow]{_mask_key(push_key)}[/yellow]")
     rich.print()
+    return dest_path
 
 
 def _prepare_claude_config(command: str, path: Path) -> tuple[dict, dict, int]:
@@ -929,8 +951,90 @@ def _detect_cursor_install(path: Path = CURSOR_HOOKS_PATH) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
-# Test event
+# Hook events
 # ---------------------------------------------------------------------------
+
+
+def _servers_discovered_entries(clients_to_inspect: list[ClientToInspect]) -> list[dict]:
+    from agent_scan.models import InspectedPath, InspectedServer
+    from agent_scan.models.api.v20260710 import ScanPathRequest
+
+    entries = []
+    for client in clients_to_inspect:
+        servers: list[InspectedServer] = []
+        for config_path, discovered in client.mcp_configs.items():
+            if not isinstance(discovered, list):
+                continue
+            servers.extend(
+                InspectedServer(name=name, config_path=config_path, server=server) for name, server in discovered
+            )
+        inspected_path = InspectedPath(client=client.name, path=client.client_path, servers=servers)
+        entries.append(ScanPathRequest.from_inspected(inspected_path).model_dump(mode="json"))
+    return entries
+
+
+def _discover_servers_payload() -> list[dict]:
+    import asyncio
+
+    from agent_scan import pipelines
+
+    # Discovery only parses config files; timeout is unused because no server is started.
+    inspect_args = pipelines.InspectArgs(timeout=0, tokens=[], paths=[])
+    clients_to_inspect, _, _ = asyncio.run(pipelines.discover_clients_to_inspect(inspect_args))
+    return _servers_discovered_entries(clients_to_inspect)
+
+
+def _invoke_hook_script(
+    script_path: Path,
+    hook_client: str,
+    push_key: str,
+    url: str,
+    payload: str,
+    machine_id: str = "",
+) -> tuple[bool, str]:
+    import subprocess
+
+    if IS_WINDOWS:
+        cmd = [
+            "powershell",
+            "-File",
+            str(script_path),
+            "-Client",
+            hook_client,
+            "-PushKey",
+            push_key,
+            "-RemoteUrl",
+            url,
+        ]
+        if machine_id:
+            cmd.extend(["-MachineId", machine_id])
+        env = None
+    else:
+        cmd = ["bash", str(script_path), "--client", hook_client]
+        env = {
+            **os.environ,
+            "PUSH_KEY": push_key,
+            "REMOTE_HOOKS_BASE_URL": url,
+        }
+        if machine_id:
+            env["MACHINE_ID"] = machine_id
+
+    try:
+        result = subprocess.run(
+            cmd,
+            input=payload,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            env=env,
+        )
+        if result.returncode == 0:
+            return True, ""
+        return False, result.stderr.strip() or f"exit code {result.returncode}"
+    except subprocess.TimeoutExpired:
+        return False, "timeout"
+    except Exception as e:
+        return False, str(e)
 
 
 def _send_test_event(
@@ -945,10 +1049,9 @@ def _send_test_event(
     push_key_changed: bool = False,
     current_checksum: str | None = None,
     new_checksum: str | None = None,
+    machine_id: str = "",
 ) -> bool:
     """Send a test hooksConfigured event by invoking the hook script. Returns True on success."""
-    import subprocess
-
     payload_dict: dict = {"hook_event_name": "hooksConfigured"}
     if hook_client == "claude-code" or hook_client == "codex":
         payload_dict["session_id"] = "hooks-setup"
@@ -972,48 +1075,47 @@ def _send_test_event(
     redact_push_keys_in_data(payload_dict)
     payload = json.dumps(payload_dict)
 
-    if IS_WINDOWS:
-        cmd = [
-            "powershell",
-            "-File",
-            str(script_path),
-            "-Client",
-            hook_client,
-            "-PushKey",
-            push_key,
-            "-RemoteUrl",
-            url,
-        ]
-        env = None  # inherit current env
-    else:
-        cmd = ["bash", str(script_path), "--client", hook_client]
-        env = {
-            **os.environ,
-            "PUSH_KEY": push_key,
-            "REMOTE_HOOKS_BASE_URL": url,
-        }
+    ok, detail = _invoke_hook_script(script_path, hook_client, push_key, url, payload, machine_id)
+    if ok:
+        rich.print("[green]\u2713[/green]  Test event sent  [green]\u2192 OK[/green]")
+        return True
+    rich.print(f"[red]\u2717[/red]  Test event failed: {detail}")
+    return False
 
+
+def _send_servers_discovered_event(
+    push_key: str,
+    url: str,
+    hook_client: str,
+    script_path: Path,
+    machine_id: str,
+) -> bool:
+    rich.print("[dim]Discovering MCP servers...[/dim]")
     try:
-        result = subprocess.run(
-            cmd,
-            input=payload,
-            capture_output=True,
-            text=True,
-            timeout=15,
-            env=env,
-        )
-        if result.returncode == 0:
-            rich.print("[green]\u2713[/green]  Test event sent  [green]\u2192 OK[/green]")
-            return True
-        stderr = result.stderr.strip()
-        rich.print(f"[red]\u2717[/red]  Test event failed: {stderr or f'exit code {result.returncode}'}")
-        return False
-    except subprocess.TimeoutExpired:
-        rich.print("[red]\u2717[/red]  Test event failed: timeout")
-        return False
+        servers = _discover_servers_payload()
     except Exception as e:
-        rich.print(f"[red]\u2717[/red]  Test event failed: {e}")
+        rich.print(f"[yellow]Warning:[/yellow] Could not discover MCP servers: {e}")
         return False
+
+    payload_dict: dict = {
+        "hook_event_name": "serversDiscovered",
+        "servers": servers,
+    }
+    if hook_client == "claude-code" or hook_client == "codex":
+        payload_dict["session_id"] = "hooks-setup"
+    else:
+        payload_dict["conversation_id"] = "hooks-setup"
+    redact_push_keys_in_data(payload_dict)
+    payload = json.dumps(payload_dict)
+
+    ok, detail = _invoke_hook_script(script_path, hook_client, push_key, url, payload, machine_id)
+    if ok:
+        server_count = sum(len(entry.get("servers", [])) for entry in servers)
+        noun = "server" if server_count == 1 else "servers"
+        rich.print(f"[green]\u2713[/green]  Discovered {server_count} MCP {noun}  [green]\u2192 OK[/green]")
+        return True
+    rich.print(f"[yellow]Warning:[/yellow] Could not send discovered MCP servers: {detail}")
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -1225,24 +1327,50 @@ def _revoke_after_failure(url: str, tenant_id: str, snyk_token: str, push_key: s
         rich.print(f"[yellow]Warning:[/yellow] Could not revoke push key: {e}")
 
 
-def _build_hook_command(push_key: str, url: str, script_path: Path, hook_client: str, *, tenant_id: str = "") -> str:
+def _build_hook_command(
+    push_key: str,
+    url: str,
+    script_path: Path,
+    hook_client: str,
+    *,
+    tenant_id: str = "",
+    machine_id: str = "",
+) -> str:
     if IS_WINDOWS:
-        return _build_hook_command_powershell(push_key, url, script_path, hook_client, tenant_id=tenant_id)
+        return _build_hook_command_powershell(
+            push_key,
+            url,
+            script_path,
+            hook_client,
+            tenant_id=tenant_id,
+            machine_id=machine_id,
+        )
     parts = [
         f"PUSH_KEY={_shell_quote(push_key)}",
         f"REMOTE_HOOKS_BASE_URL={_shell_quote(url)}",
     ]
     if tenant_id:
         parts.append(f"TENANT_ID={_shell_quote(tenant_id)}")
+    if machine_id:
+        parts.append(f"MACHINE_ID={_shell_quote(machine_id)}")
     parts.append(f"bash {_shell_quote(script_path.as_posix())}")
     parts.append(f"--client {hook_client}")
     return " ".join(parts)
 
 
 def _build_hook_command_powershell(
-    push_key: str, url: str, script_path: Path, hook_client: str, *, tenant_id: str = ""
+    push_key: str,
+    url: str,
+    script_path: Path,
+    hook_client: str,
+    *,
+    tenant_id: str = "",
+    machine_id: str = "",
 ) -> str:
-    return f"powershell -File '{script_path}' -Client {hook_client} -PushKey '{push_key}' -RemoteUrl '{url}'"
+    command = f"powershell -File '{script_path}' -Client {hook_client} -PushKey '{push_key}' -RemoteUrl '{url}'"
+    if machine_id:
+        command += f" -MachineId '{machine_id}'"
+    return command
 
 
 def _shell_quote(s: str) -> str:

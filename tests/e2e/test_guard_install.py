@@ -1,10 +1,12 @@
 """E2E test for guard install — ensures the bundled hook scripts are accessible."""
 
+import base64
 import json
 import os
 import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from typing import ClassVar
 
 import pytest
 
@@ -12,9 +14,17 @@ import pytest
 class _FakeHookServer(BaseHTTPRequestHandler):
     """Accepts any POST and returns 200 — enough for the test-event handshake."""
 
+    requests: ClassVar[list[dict]] = []
+
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
-        self.rfile.read(length)
+        body = self.rfile.read(length).decode()
+        _FakeHookServer.requests.append(
+            {
+                "body": json.loads(base64.b64decode(body.removeprefix("base64:"))),
+                "headers": dict(self.headers),
+            }
+        )
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -30,6 +40,7 @@ def fake_hook_server():
     port = server.server_address[1]
     t = threading.Thread(target=server.serve_forever, daemon=True)
     t.start()
+    _FakeHookServer.requests = []
     yield f"http://127.0.0.1:{port}"
     server.shutdown()
 
@@ -54,10 +65,12 @@ class TestGuardInstallE2E:
                 str(config_file),
                 "--url",
                 fake_hook_server,
+                "--machine-id",
+                "e2e-machine-id",
             ],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=60,
             env={**os.environ, "PUSH_KEY": "test-pk-e2e"},
         )
         assert result.returncode == 0, f"guard install failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
@@ -68,6 +81,14 @@ class TestGuardInstallE2E:
         # Should have entries for standard Claude hook events
         assert "PreToolUse" in settings["hooks"]
         assert "Stop" in settings["hooks"]
+        assert [request["body"]["hook_event_name"] for request in _FakeHookServer.requests] == [
+            "hooksConfigured",
+            "serversDiscovered",
+        ]
+        discovered = _FakeHookServer.requests[1]
+        assert discovered["body"]["session_id"] == "hooks-setup"
+        assert isinstance(discovered["body"]["servers"], list)
+        assert json.loads(discovered["headers"]["X-User"])["identifier"] == "e2e-machine-id"
 
     @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
     def test_guard_install_cursor(self, agent_scan_cmd, tmp_path, fake_hook_server):
@@ -85,7 +106,7 @@ class TestGuardInstallE2E:
             ],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=60,
             env={**os.environ, "PUSH_KEY": "test-pk-e2e"},
         )
         assert result.returncode == 0, f"guard install failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"

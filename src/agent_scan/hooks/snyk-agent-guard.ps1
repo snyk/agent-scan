@@ -18,7 +18,10 @@ param(
     [string]$PushKey,
 
     [Parameter(Mandatory=$false)]
-    [string]$RemoteUrl
+    [string]$RemoteUrl,
+
+    [Parameter(Mandatory=$false)]
+    [string]$MachineId
 )
 
 $ErrorActionPreference = "Stop"
@@ -45,6 +48,8 @@ if (-not $RemoteUrl) {
     Write-Error "REMOTE_HOOKS_BASE_URL is required (pass -RemoteUrl or set env var)"
     exit 1
 }
+
+if (-not $MachineId) { $MachineId = $env:MACHINE_ID }
 
 switch ($Client) {
     "claude-code" {
@@ -88,8 +93,9 @@ function JsonEscape($s) {
     return $s
 }
 
+$identifier = if ($MachineId) { $MachineId } else { $hostname }
 $xUser = '{{"hostname":"{0}","username":"{1}","identifier":"{2}"}}' -f `
-    (JsonEscape $hostname), (JsonEscape $username), (JsonEscape $hostname)
+    (JsonEscape $hostname), (JsonEscape $username), (JsonEscape $identifier)
 
 # Execute request
 try {

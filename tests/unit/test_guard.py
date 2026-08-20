@@ -11,10 +11,11 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import agent_scan.guard as guard_module
 from agent_scan.guard import (
     _PERMISSION_DENIED,
     ALL_CLIENTS,
@@ -63,6 +64,9 @@ from agent_scan.guard import (
     _write_codex_managed_config,
     _write_cursor_config,
 )
+from agent_scan.models import ClientToInspect, InspectedPath, InspectedServer, RemoteServer, StdioServer
+from agent_scan.models.api.v20260710 import ScanPathRequest
+from agent_scan.models.errors import CouldNotParseMCPConfig, FileNotFoundConfig
 from agent_scan.pushkeys import GuardEnabledAccessDeniedError
 
 # ---------------------------------------------------------------------------
@@ -227,6 +231,26 @@ class TestBuildHookCommand:
     def test_with_tenant_bash(self):
         cmd = _build_hook_command("pk", "https://api.snyk.io", Path("/x/hook.sh"), "cursor", tenant_id="tid")
         assert "TENANT_ID='tid'" in cmd
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="bash command format")
+    def test_with_machine_id_bash(self):
+        cmd = _build_hook_command("pk", "https://api.snyk.io", Path("/x/hook.sh"), "cursor", machine_id="machine-42")
+        assert "MACHINE_ID='machine-42'" in cmd
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="bash command format")
+    def test_without_machine_id_bash(self):
+        cmd = _build_hook_command("pk", "https://api.snyk.io", Path("/x/hook.sh"), "cursor")
+        assert "MACHINE_ID" not in cmd
+
+    def test_with_machine_id_powershell(self):
+        cmd = _build_hook_command_powershell(
+            "pk", "https://api.snyk.io", Path("C:/x/hook.ps1"), "codex", machine_id="machine-42"
+        )
+        assert "-MachineId 'machine-42'" in cmd
+
+    def test_without_machine_id_powershell(self):
+        cmd = _build_hook_command_powershell("pk", "https://api.snyk.io", Path("C:/x/hook.ps1"), "codex")
+        assert "-MachineId" not in cmd
 
     @pytest.mark.skipif(sys.platform != "win32", reason="powershell command format")
     def test_without_tenant_powershell(self):
@@ -1218,6 +1242,44 @@ class TestBashHookScript:
         assert result.returncode == 0, result.stderr
         assert "/hidden/agent-monitor/hooks/codex" in _HookHandler.last_request["path"]
 
+    def test_machine_id_sets_x_user_identifier(self, hook_server):
+        script = _get_script_path("snyk-agent-guard.sh")
+        result = subprocess.run(
+            ["bash", str(script), "--client", "claude-code"],
+            input='{"hook_event_name":"test","session_id":"s1"}',
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={
+                "PATH": "/usr/bin:/bin:/usr/local/bin",
+                "PUSH_KEY": "test-pk",
+                "REMOTE_HOOKS_BASE_URL": hook_server,
+                "MACHINE_ID": "machine-42",
+            },
+        )
+        assert result.returncode == 0, result.stderr
+        x_user = json.loads(_HookHandler.last_request["headers"]["X-User"])
+        assert x_user["identifier"] == "machine-42"
+
+    def test_x_user_identifier_falls_back_to_hostname(self, hook_server):
+        script = _get_script_path("snyk-agent-guard.sh")
+        result = subprocess.run(
+            ["bash", str(script), "--client", "claude-code"],
+            input='{"hook_event_name":"test","session_id":"s1"}',
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={
+                "PATH": "/usr/bin:/bin:/usr/local/bin",
+                "PUSH_KEY": "test-pk",
+                "REMOTE_HOOKS_BASE_URL": hook_server,
+                "HOSTNAME": "fallback-host",
+            },
+        )
+        assert result.returncode == 0, result.stderr
+        x_user = json.loads(_HookHandler.last_request["headers"]["X-User"])
+        assert x_user["identifier"] == "fallback-host"
+
     def test_missing_push_key_fails(self, hook_server):
         script = _get_script_path("snyk-agent-guard.sh")
         result = subprocess.run(
@@ -1316,6 +1378,57 @@ class TestPowerShellHookScript:
         )
         assert result.returncode == 0, result.stderr
         assert "/hidden/agent-monitor/hooks/cursor" in _HookHandler.last_request["path"]
+
+    def test_machine_id_sets_x_user_identifier(self, hook_server):
+        script = _get_script_path("snyk-agent-guard.ps1")
+        result = subprocess.run(
+            [
+                self._ps_cmd(),
+                "-File",
+                str(script),
+                "-Client",
+                "claude-code",
+                "-PushKey",
+                "test-pk",
+                "-RemoteUrl",
+                hook_server,
+                "-MachineId",
+                "machine-42",
+            ],
+            input='{"hook_event_name":"test","session_id":"s1"}',
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert result.returncode == 0, result.stderr
+        x_user = json.loads(_HookHandler.last_request["headers"]["X-User"])
+        assert x_user["identifier"] == "machine-42"
+
+    def test_x_user_identifier_falls_back_to_hostname(self, hook_server):
+        script = _get_script_path("snyk-agent-guard.ps1")
+        env = dict(__import__("os").environ)
+        env.pop("MACHINE_ID", None)
+        result = subprocess.run(
+            [
+                self._ps_cmd(),
+                "-File",
+                str(script),
+                "-Client",
+                "claude-code",
+                "-PushKey",
+                "test-pk",
+                "-RemoteUrl",
+                hook_server,
+            ],
+            input='{"hook_event_name":"test","session_id":"s1"}',
+            capture_output=True,
+            text=True,
+            timeout=15,
+            env=env,
+        )
+        assert result.returncode == 0, result.stderr
+        x_user = json.loads(_HookHandler.last_request["headers"]["X-User"])
+        assert x_user["identifier"] == x_user["hostname"]
 
     def test_missing_push_key_fails(self, hook_server):
         script = _get_script_path("snyk-agent-guard.ps1")
@@ -1549,7 +1662,7 @@ class TestRunInstallCallsEnsureGuardEnabled:
         mock_install.assert_called_once()
         call_args = mock_install.call_args
         assert "test" not in (call_args.kwargs or {})
-        assert len(call_args.args) == 10, "args.test must not be forwarded to _install_hooks"
+        assert len(call_args.args) == 11, "args.test must not be forwarded to _install_hooks"
 
     @patch("agent_scan.guard._install_hooks")
     @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
@@ -1646,7 +1759,15 @@ class TestInstallHooksOrchestration:
         for p in active.values():
             p.stop()
 
-    def _call(self, tmp_path, client="claude", hook_client="claude-code", minted=False, config_exists=False):
+    def _call(
+        self,
+        tmp_path,
+        client="claude",
+        hook_client="claude-code",
+        minted=False,
+        config_exists=False,
+        machine_id="",
+    ):
         config = tmp_path / "config.json"
         if config_exists:
             config.write_text("{}")
@@ -1661,6 +1782,7 @@ class TestInstallHooksOrchestration:
             minted,
             "tid-1",
             "snyk-tok",
+            machine_id,
         )
         return config
 
@@ -1674,6 +1796,27 @@ class TestInstallHooksOrchestration:
     def test_copy_hook_script_called_with_config_path_only(self, ctx, tmp_path):
         config = self._call(tmp_path, client="claude", config_exists=True)
         ctx["copy"].assert_called_once_with(config)
+
+    def test_machine_id_forwarded_to_command_and_test_event(self, ctx, tmp_path):
+        self._call(tmp_path, machine_id="machine-42")
+        assert ctx["build"].call_args.kwargs["machine_id"] == "machine-42"
+        assert ctx["test_event"].call_args.kwargs["machine_id"] == "machine-42"
+
+    def test_returns_installed_script_path(self, ctx, tmp_path):
+        result = _install_hooks(
+            "claude",
+            "claude-code",
+            "pk-test",
+            "https://api.snyk.io",
+            tmp_path / "config.json",
+            "user",
+            "Claude Code",
+            False,
+            "tid-1",
+            "snyk-tok",
+            "",
+        )
+        assert result == ctx["dest"]
 
     # ---------------------------------------------------------------
     # Client routing: each client calls its own prepare + write
@@ -1774,6 +1917,7 @@ class TestInstallHooksOrchestration:
             push_key_changed=False,
             current_checksum=None,
             new_checksum=_NEW_CHECKSUM,
+            machine_id="",
         )
 
     def test_test_event_receives_empty_diff(self, ctx, tmp_path):
@@ -1791,6 +1935,7 @@ class TestInstallHooksOrchestration:
             push_key_changed=False,
             current_checksum=None,
             new_checksum=_NEW_CHECKSUM,
+            machine_id="",
         )
 
     def test_test_event_not_first_install(self, ctx, tmp_path):
@@ -1807,6 +1952,7 @@ class TestInstallHooksOrchestration:
             push_key_changed=False,
             current_checksum=_CURRENT_CHECKSUM,
             new_checksum=_NEW_CHECKSUM,
+            machine_id="",
         )
 
     def test_test_event_push_key_changed(self, ctx, tmp_path):
@@ -1824,6 +1970,7 @@ class TestInstallHooksOrchestration:
             push_key_changed=True,
             current_checksum=None,
             new_checksum=_NEW_CHECKSUM,
+            machine_id="",
         )
 
     def test_test_event_push_key_unchanged(self, ctx, tmp_path):
@@ -1841,6 +1988,7 @@ class TestInstallHooksOrchestration:
             push_key_changed=False,
             current_checksum=None,
             new_checksum=_NEW_CHECKSUM,
+            machine_id="",
         )
 
     # ---------------------------------------------------------------
@@ -2015,6 +2163,416 @@ class TestSendTestEventHooksScript:
     def test_no_checksums_omits_hooks_script(self):
         payload = self._capture_payload(first_install=True)
         assert "hooks_script" not in payload
+
+
+class TestServersDiscoveredPayload:
+    @staticmethod
+    def _client(*, mcp_configs, name="claude code", path="/Users/me/.claude"):
+        return ClientToInspect(name=name, client_path=path, mcp_configs=mcp_configs, skills_dirs={})
+
+    def test_builds_one_entry_per_client_and_merges_config_paths(self):
+        stdio = StdioServer(
+            command="npx",
+            args=["-y", "@mcp/github"],
+            env={"GITHUB_TOKEN": "secret-token"},
+            binary_identifier="pkg:npm/%40mcp/github@1.0.0",
+        )
+        remote = RemoteServer(
+            url="https://mcp.example.com/mcp?token=remote-secret",
+            type="http",
+            headers={"Authorization": "Bearer remote-secret"},
+        )
+        clients = [
+            self._client(
+                mcp_configs={
+                    "/Users/me/.claude.json": [("github", stdio)],
+                    "/Users/me/project/.mcp.json": [("remote", remote)],
+                }
+            ),
+            self._client(mcp_configs={}, name="cursor", path="/Users/me/.cursor"),
+        ]
+
+        result = guard_module._servers_discovered_entries(clients)
+
+        assert [(entry["client"], entry["path"]) for entry in result] == [
+            ("claude code", "/Users/me/.claude"),
+            ("cursor", "/Users/me/.cursor"),
+        ]
+        assert [(server["name"], server["config_path"]) for server in result[0]["servers"]] == [
+            ("github", "/Users/me/.claude.json"),
+            ("remote", "/Users/me/project/.mcp.json"),
+        ]
+        assert result[1]["servers"] == []
+
+    def test_skips_config_discovery_errors(self):
+        client = self._client(
+            mcp_configs={
+                "/bad.json": CouldNotParseMCPConfig(message="bad", traceback=None),
+                "/missing.json": FileNotFoundConfig(message="missing", traceback=None),
+                "/good.json": [("good", StdioServer(command="good"))],
+            }
+        )
+
+        result = guard_module._servers_discovered_entries([client])
+
+        assert [server["name"] for server in result[0]["servers"]] == ["good"]
+
+    def test_empty_input_returns_empty_list(self):
+        assert guard_module._servers_discovered_entries([]) == []
+
+    def test_matches_scan_path_request_wire_shape(self):
+        server = StdioServer(command="npx", args=["--mode", "read-only"], binary_identifier="binary-id")
+        client = self._client(mcp_configs={"/config.json": [("github", server)]})
+        inspected = InspectedPath(
+            client=client.name,
+            path=client.client_path,
+            servers=[InspectedServer(name="github", config_path="/config.json", server=server)],
+        )
+
+        result = guard_module._servers_discovered_entries([client])
+
+        expected = ScanPathRequest.from_inspected(inspected).model_dump(mode="json")
+        assert result == [expected]
+        assert set(result[0]) == {"client", "path", "servers", "skills", "error"}
+        assert set(result[0]["servers"][0]) == {"name", "config_path", "server", "signature", "error"}
+        assert result[0]["servers"][0]["server"] == {
+            "command": "npx",
+            "args": ["--mode", "read-only"],
+            "type": "stdio",
+            "env": None,
+            "binary_identifier": "binary-id",
+        }
+
+    def test_redacts_stdio_env_without_mutating_discovery_result(self):
+        server = StdioServer(command="npx", env={"TOKEN": "raw-secret"})
+        client = self._client(mcp_configs={"/config.json": [("github", server)]})
+
+        result = guard_module._servers_discovered_entries([client])
+
+        assert result[0]["servers"][0]["server"]["env"] == {"TOKEN": "**REDACTED**"}
+        assert "raw-secret" not in json.dumps(result)
+        assert server.env == {"TOKEN": "raw-secret"}
+
+    def test_redacts_remote_headers_and_url_query(self):
+        server = RemoteServer(
+            url="https://mcp.example.com/mcp?token=raw-secret",
+            headers={"Authorization": "Bearer raw-secret"},
+        )
+        client = self._client(mcp_configs={"/config.json": [("remote", server)]})
+
+        result = guard_module._servers_discovered_entries([client])
+
+        dumped = json.dumps(result)
+        wire_server = result[0]["servers"][0]["server"]
+        assert wire_server["headers"] == {"Authorization": "**REDACTED**"}
+        assert "token=%2A%2AREDACTED%2A%2A" in wire_server["url"]
+        assert "raw-secret" not in dumped
+
+
+class TestDiscoverServersPayload:
+    def test_uses_current_user_server_only_discovery(self):
+        clients = [ClientToInspect(name="cursor", client_path="/cursor", mcp_configs={}, skills_dirs={})]
+        discover = AsyncMock(return_value=(clients, [], ["me"]))
+
+        with patch("agent_scan.pipelines.discover_clients_to_inspect", discover):
+            result = guard_module._discover_servers_payload()
+
+        args = discover.await_args.args[0]
+        assert args.timeout == 0
+        assert args.tokens == []
+        assert args.paths == []
+        assert args.all_users is False
+        assert args.scan_skills is False
+        assert result == guard_module._servers_discovered_entries(clients)
+
+
+class TestInvokeHookScript:
+    def test_posix_invocation_sets_machine_id(self, monkeypatch):
+        monkeypatch.delenv("MACHINE_ID", raising=False)
+        completed = subprocess.CompletedProcess([], 0, stdout="ok", stderr="")
+        with patch(f"{_G}.IS_WINDOWS", False), patch("subprocess.run", return_value=completed) as run:
+            result = guard_module._invoke_hook_script(
+                Path("/hook.sh"), "claude-code", "pk", "https://api.snyk.io", "{}", "machine-42"
+            )
+
+        assert result == (True, "")
+        assert run.call_args.args[0] == ["bash", "/hook.sh", "--client", "claude-code"]
+        assert run.call_args.kwargs["env"]["MACHINE_ID"] == "machine-42"
+        assert run.call_args.kwargs["input"] == "{}"
+
+    def test_posix_invocation_omits_machine_id_when_unset(self, monkeypatch):
+        monkeypatch.delenv("MACHINE_ID", raising=False)
+        completed = subprocess.CompletedProcess([], 0, stdout="ok", stderr="")
+        with patch(f"{_G}.IS_WINDOWS", False), patch("subprocess.run", return_value=completed) as run:
+            result = guard_module._invoke_hook_script(Path("/hook.sh"), "cursor", "pk", "https://api.snyk.io", "{}")
+
+        assert result == (True, "")
+        assert "MACHINE_ID" not in run.call_args.kwargs["env"]
+
+    @pytest.mark.parametrize("machine_id, expected_tail", [("", []), ("machine-42", ["-MachineId", "machine-42"])])
+    def test_windows_invocation_machine_id_shape(self, machine_id, expected_tail):
+        completed = subprocess.CompletedProcess([], 0, stdout="ok", stderr="")
+        with patch(f"{_G}.IS_WINDOWS", True), patch("subprocess.run", return_value=completed) as run:
+            result = guard_module._invoke_hook_script(
+                Path("C:/hook.ps1"), "codex", "pk", "https://api.snyk.io", "{}", machine_id
+            )
+
+        assert result == (True, "")
+        assert run.call_args.args[0] == [
+            "powershell",
+            "-File",
+            "C:/hook.ps1",
+            "-Client",
+            "codex",
+            "-PushKey",
+            "pk",
+            "-RemoteUrl",
+            "https://api.snyk.io",
+            *expected_tail,
+        ]
+        assert run.call_args.kwargs["env"] is None
+
+    def test_nonzero_exit_returns_stderr(self):
+        completed = subprocess.CompletedProcess([], 7, stdout="", stderr="bad request\n")
+        with patch(f"{_G}.IS_WINDOWS", False), patch("subprocess.run", return_value=completed):
+            result = guard_module._invoke_hook_script(Path("/hook.sh"), "cursor", "pk", "url", "{}")
+        assert result == (False, "bad request")
+
+
+class TestSendServersDiscoveredEvent:
+    @staticmethod
+    def _capture(hook_client="claude-code", entries=None, machine_id="machine-42"):
+        captured = {}
+
+        def fake_run(cmd, *, input, **kwargs):
+            captured["cmd"] = cmd
+            captured["payload"] = json.loads(input)
+            captured["env"] = kwargs["env"]
+            return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+        with (
+            patch(f"{_G}._discover_servers_payload", return_value=[] if entries is None else entries),
+            patch("subprocess.run", side_effect=fake_run),
+            patch(f"{_G}.rich"),
+        ):
+            ok = guard_module._send_servers_discovered_event(
+                "pk-test", "https://api.snyk.io", hook_client, Path("/hook.sh"), machine_id
+            )
+        return ok, captured
+
+    @pytest.mark.parametrize(
+        "hook_client, id_key",
+        [("claude-code", "session_id"), ("codex", "session_id"), ("cursor", "conversation_id")],
+    )
+    def test_payload_contract_for_client(self, hook_client, id_key):
+        push_key = "12345678-1234-1234-1234-123456789abc"
+        entries = [{"command": f"PUSH_KEY='{push_key}'", "servers": []}]
+        ok, captured = self._capture(hook_client=hook_client, entries=entries)
+
+        assert ok is True
+        payload = captured["payload"]
+        assert payload["hook_event_name"] == "serversDiscovered"
+        assert payload[id_key] == "hooks-setup"
+        assert ({"session_id", "conversation_id"} - {id_key}).isdisjoint(payload)
+        assert payload["servers"][0]["command"] == "PUSH_KEY='**REDACTED**'"
+        assert push_key not in json.dumps(payload)
+        assert captured["env"]["MACHINE_ID"] == "machine-42"
+
+    def test_empty_discovery_is_still_sent(self):
+        ok, captured = self._capture(entries=[])
+        assert ok is True
+        assert captured["payload"]["servers"] == []
+
+    def test_nonzero_exit_warns_and_returns_false(self):
+        completed = subprocess.CompletedProcess([], 2, stdout="", stderr="failed")
+        with (
+            patch(f"{_G}._discover_servers_payload", return_value=[]),
+            patch("subprocess.run", return_value=completed),
+            patch(f"{_G}.rich") as rich_mock,
+        ):
+            result = guard_module._send_servers_discovered_event("pk", "url", "cursor", Path("/hook.sh"), "")
+        assert result is False
+        assert "failed" in rich_mock.print.call_args.args[0]
+
+    def test_timeout_warns_and_returns_false(self):
+        with (
+            patch(f"{_G}._discover_servers_payload", return_value=[]),
+            patch("subprocess.run", side_effect=subprocess.TimeoutExpired("bash", 15)),
+            patch(f"{_G}.rich") as rich_mock,
+        ):
+            result = guard_module._send_servers_discovered_event("pk", "url", "cursor", Path("/hook.sh"), "")
+        assert result is False
+        assert "timeout" in rich_mock.print.call_args.args[0]
+
+    def test_discovery_exception_does_not_invoke_script(self):
+        with (
+            patch(f"{_G}._discover_servers_payload", side_effect=RuntimeError("discovery failed")),
+            patch("subprocess.run") as run,
+            patch(f"{_G}.rich") as rich_mock,
+        ):
+            result = guard_module._send_servers_discovered_event("pk", "url", "cursor", Path("/hook.sh"), "")
+        assert result is False
+        run.assert_not_called()
+        assert "discovery failed" in rich_mock.print.call_args.args[0]
+
+
+class TestGuardInstallMachineIdCli:
+    @pytest.mark.parametrize("flag", ["--machine-id", "--control-identifier"])
+    def test_guard_install_accepts_machine_id_aliases(self, flag, monkeypatch):
+        from agent_scan import cli
+
+        monkeypatch.setattr(sys, "argv", ["agent-scan", "guard", "install", "claude", flag, "machine-42"])
+        with patch(f"{_G}.run_guard", return_value=0) as run:
+            with pytest.raises(SystemExit) as exc:
+                cli.main()
+
+        assert exc.value.code == 0
+        assert run.call_args.args[0].machine_id == "machine-42"
+
+
+class TestRunInstallSendsServersDiscovered:
+    @staticmethod
+    def _args(tmp_path, *, client="claude", file_override=True, managed=False, machine_id=None):
+        return SimpleNamespace(
+            client=client,
+            url="https://api.snyk.io",
+            tenant_id="tid-1",
+            file=str(tmp_path / "config.json") if file_override else None,
+            managed=managed,
+            machine_id=machine_id,
+        )
+
+    @staticmethod
+    def _fake_paths(tmp_path, installed):
+        paths = {}
+        for client in ALL_CLIENTS:
+            path = tmp_path / client
+            if client in installed:
+                path.mkdir(exist_ok=True)
+            paths[client] = path
+        return paths
+
+    def test_single_client_sends_once_using_installed_script(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("PUSH_KEY", "headless-pk")
+        script = Path("/installed/claude/hook.sh")
+        with (
+            patch(f"{_G}._install_hooks", return_value=script) as install,
+            patch(f"{_G}._send_servers_discovered_event", return_value=True) as send,
+        ):
+            _run_install(self._args(tmp_path, machine_id="machine-42"))
+
+        assert install.call_args.args[-1] == "machine-42"
+        send.assert_called_once_with("headless-pk", "https://api.snyk.io", "claude-code", script, "machine-42")
+
+    def test_cursor_install_uses_cursor_endpoint(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("PUSH_KEY", "headless-pk")
+        script = Path("/installed/cursor/hook.sh")
+        with (
+            patch(f"{_G}._install_hooks", return_value=script),
+            patch(f"{_G}._send_servers_discovered_event", return_value=True) as send,
+        ):
+            _run_install(self._args(tmp_path, client="cursor"))
+
+        assert send.call_args.args[2:4] == ("cursor", script)
+
+    def test_install_all_sends_once_after_all_installs(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("PUSH_KEY", "headless-pk")
+        scripts = [Path(f"/installed/{client}/hook.sh") for client in ALL_CLIENTS]
+        order = []
+
+        def install(*args):
+            order.append(f"install:{args[0]}")
+            return scripts[len(order) - 1]
+
+        def send(*args):
+            order.append("send")
+            return True
+
+        with (
+            patch(f"{_G}._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, ALL_CLIENTS)),
+            patch(f"{_G}._install_hooks", side_effect=install) as install_mock,
+            patch(f"{_G}._send_servers_discovered_event", side_effect=send) as send_mock,
+        ):
+            _run_install(self._args(tmp_path, client="all", file_override=False))
+
+        assert install_mock.call_count == 3
+        assert send_mock.call_count == 1
+        assert send_mock.call_args.args[2:4] == ("claude-code", scripts[0])
+        assert order == ["install:claude", "install:cursor", "install:codex", "send"]
+
+    def test_nothing_installed_does_not_send(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("PUSH_KEY", "headless-pk")
+        with (
+            patch(f"{_G}._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, [])),
+            patch(f"{_G}._install_hooks") as install,
+            patch(f"{_G}._send_servers_discovered_event") as send,
+        ):
+            _run_install(self._args(tmp_path, file_override=False))
+
+        install.assert_not_called()
+        send.assert_not_called()
+
+    def test_install_failure_revokes_minted_key_and_does_not_send(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("PUSH_KEY", raising=False)
+        monkeypatch.setenv("SNYK_TOKEN", "token")
+        with (
+            patch(f"{_G}.fetch_guard_enabled", return_value=True),
+            patch(f"{_G}.mint_push_key", return_value="minted-pk"),
+            patch(f"{_G}._install_hooks", side_effect=RuntimeError("install failed")),
+            patch(f"{_G}._revoke_after_failure") as revoke,
+            patch(f"{_G}._send_servers_discovered_event") as send,
+        ):
+            with pytest.raises(RuntimeError, match="install failed"):
+                _run_install(self._args(tmp_path))
+
+        revoke.assert_called_once_with("https://api.snyk.io", "tid-1", "token", "minted-pk")
+        send.assert_not_called()
+
+    def test_send_failure_keeps_success_exit_and_does_not_revoke(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("PUSH_KEY", "headless-pk")
+        args = self._args(tmp_path)
+        args.guard_command = "install"
+        with (
+            patch(f"{_G}._install_hooks", return_value=Path("/installed/hook.sh")),
+            patch(f"{_G}._send_servers_discovered_event", return_value=False),
+            patch(f"{_G}._revoke_after_failure") as revoke,
+        ):
+            result = guard_module.run_guard(args)
+
+        assert result == 0
+        revoke.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "arg_machine_id, env_machine_id, expected",
+        [("args-id", "env-id", "args-id"), (None, "env-id", "env-id"), (None, None, "")],
+    )
+    def test_machine_id_precedence_reaches_install_and_send(
+        self, tmp_path, monkeypatch, arg_machine_id, env_machine_id, expected
+    ):
+        monkeypatch.setenv("PUSH_KEY", "headless-pk")
+        if env_machine_id is None:
+            monkeypatch.delenv("MACHINE_ID", raising=False)
+        else:
+            monkeypatch.setenv("MACHINE_ID", env_machine_id)
+        with (
+            patch(f"{_G}._install_hooks", return_value=Path("/installed/hook.sh")) as install,
+            patch(f"{_G}._send_servers_discovered_event", return_value=True) as send,
+        ):
+            _run_install(self._args(tmp_path, machine_id=arg_machine_id))
+
+        assert install.call_args.args[-1] == expected
+        assert send.call_args.args[-1] == expected
+
+    def test_managed_install_sends(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("PUSH_KEY", "headless-pk")
+        with (
+            patch(f"{_G}._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, ["claude"])),
+            patch(f"{_G}._install_hooks", return_value=Path("/managed/hook.sh")),
+            patch(f"{_G}._send_servers_discovered_event", return_value=True) as send,
+        ):
+            _run_install(self._args(tmp_path, file_override=False, managed=True))
+
+        send.assert_called_once()
 
 
 # ===================================================================

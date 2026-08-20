@@ -129,7 +129,7 @@ hook_main() {
   x_user="$(printf '{%s:%s,%s:%s,%s:%s}' \
     "\"hostname\"" "$(json_quote "$hostname")" \
     "\"username\"" "$(json_quote "$username")" \
-    "\"identifier\"" "$(json_quote "$hostname")")"
+    "\"identifier\"" "$(json_quote "${MACHINE_ID:-$hostname}")")"
 
   # Execute request
   local resp body http_code marker
