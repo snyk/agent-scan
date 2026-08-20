@@ -613,7 +613,7 @@ class OpenCodeDiscoverer(AgentDiscoverer):
         # opencode's instance dirs (the db ``worktree`` leaves); computed once so
         # the relative-entry resolution below doesn't re-read the SQLite db per
         # candidate config file.
-        worktrees = self._discover_project_folders()
+        worktrees = self._all_project_folders()
         for config_path in self._iter_candidate_config_files():
             data = self._load_json_file(config_path)
             if not isinstance(data, dict):

@@ -3,7 +3,7 @@ import logging
 import os
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from agent_scan.agents import find_discoverers
 from agent_scan.direct_scanner import direct_scan_to_server_config, is_direct_scan
@@ -35,6 +35,7 @@ class InspectArgs(BaseModel):
     paths: list[str]
     all_users: bool = False
     scan_skills: bool = False
+    project_folders: list[str] = Field(default_factory=list)
 
 
 class AnalyzeArgs(BaseModel):
@@ -85,6 +86,18 @@ async def discover_clients_to_inspect(
                     )
                 )
     else:
+        project_folders: list[Path] = []
+        seen_project_folders: set[Path] = set()
+        for raw_path in inspect_args.project_folders:
+            project_path = Path(raw_path).expanduser().resolve()
+            if project_path in seen_project_folders:
+                continue
+            seen_project_folders.add(project_path)
+            if not project_path.exists():
+                logger.warning("Skipping non-existent project folder: %s", project_path)
+                continue
+            project_folders.append(project_path)
+
         # Phase A — legacy path. Runs for EVERY well-known client including Claude Code.
         for client in get_well_known_clients():
             ctis = await get_mcp_config_per_client(client, home_dirs_with_users)
@@ -95,7 +108,7 @@ async def discover_clients_to_inspect(
 
         # Phase B — ABC path. Runs sequentially after Phase A and merges into its output.
         for home_directory, username in home_dirs_with_users:
-            for discoverer in find_discoverers(home_directory):
+            for discoverer in find_discoverers(home_directory, project_folders=project_folders):
                 try:
                     cti = discoverer.discover()
                 except Exception:

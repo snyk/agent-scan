@@ -312,6 +312,16 @@ def _run_discover(args) -> int:
         )
         return 1
 
+    project_folders = list(getattr(args, "project_folders", None) or [])
+    if getattr(args, "hook_with_cwd_payload_stdin", False):
+        try:
+            hook_payload = json.loads(sys.stdin.read(1024 * 1024))
+            cwd = hook_payload.get("cwd") if isinstance(hook_payload, dict) else None
+            if isinstance(cwd, str) and cwd:
+                project_folders.append(cwd)
+        except Exception:
+            pass
+
     success = _send_servers_discovered_event(
         push_key,
         url,
@@ -320,6 +330,7 @@ def _run_discover(args) -> int:
         machine_id,
         event_name="SessionStartServerDiscovery",
         session_marker="session-start-server-discovery",
+        project_folders=project_folders,
     )
     return 0 if success else 1
 
@@ -1044,13 +1055,18 @@ def _servers_discovered_entries(clients_to_inspect: list[ClientToInspect]) -> li
     return entries
 
 
-def _discover_servers_payload() -> list[dict]:
+def _discover_servers_payload(project_folders: list[str] | None = None) -> list[dict]:
     import asyncio
 
     from agent_scan import pipelines
 
     # Discovery only parses config files; timeout is unused because no server is started.
-    inspect_args = pipelines.InspectArgs(timeout=0, tokens=[], paths=[])
+    inspect_args = pipelines.InspectArgs(
+        timeout=0,
+        tokens=[],
+        paths=[],
+        project_folders=project_folders or [],
+    )
     clients_to_inspect, _, _ = asyncio.run(pipelines.discover_clients_to_inspect(inspect_args))
     return _servers_discovered_entries(clients_to_inspect)
 
@@ -1163,10 +1179,11 @@ def _send_servers_discovered_event(
     *,
     event_name: str = "serversDiscovered",
     session_marker: str = "hooks-setup",
+    project_folders: list[str] | None = None,
 ) -> bool:
     rich.print("[dim]Discovering MCP servers...[/dim]")
     try:
-        servers = _discover_servers_payload()
+        servers = _discover_servers_payload(project_folders)
     except Exception as e:
         rich.print(f"[yellow]Warning:[/yellow] Could not discover MCP servers: {e}")
         return False

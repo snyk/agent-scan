@@ -145,12 +145,13 @@ class AgentDiscoverer(ABC):
 
     name: str = ""
 
-    def __init__(self, home_directory: Path | None) -> None:
+    def __init__(self, home_directory: Path | None, project_folders: list[Path] | None = None) -> None:
         # ``None`` is the own-home sentinel; normalize to ``Path.home()`` so the
         # stored home is always concrete. ``expand_path`` treats ``None`` as
         # "unknown home — don't expand", which would leave a ``~``-prefixed literal
         # (e.g. ``~/.claude``) on an own-home scan whose relocating env var is unset.
         self.home_directory = home_directory if home_directory is not None else Path.home()
+        self.extra_project_folders = list(project_folders or [])
         # Lazily-populated cache for _project_paths_with_ancestors. A discoverer
         # serves a single scan (see find_discoverers), so the project list is
         # stable for its lifetime and the discovery methods that consult it need
@@ -454,6 +455,10 @@ class AgentDiscoverer(ABC):
         """
         return []
 
+    def _all_project_folders(self) -> list[Path]:
+        """Agent-recorded project roots followed by explicitly supplied roots."""
+        return list(dict.fromkeys([*self._discover_project_folders(), *self.extra_project_folders]))
+
     def _project_paths_with_ancestors(self) -> list[Path]:
         """Project roots plus every ancestor up to filesystem root, deduplicated.
 
@@ -467,7 +472,7 @@ class AgentDiscoverer(ABC):
             return self._project_paths_cache
         seen: set[Path] = set()
         result: list[Path] = []
-        for project_path in self._discover_project_folders():
+        for project_path in self._all_project_folders():
             cur = project_path
             while True:
                 if cur not in seen:

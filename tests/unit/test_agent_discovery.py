@@ -8845,3 +8845,191 @@ def test_opencode_discoverer_client_exists_tolerates_oserror_on_candidate(tmp_pa
 
     assert result is not None
     assert result.endswith("/.opencode")
+
+
+# --- Explicit project-folder injection ---
+
+
+def test_all_project_folders_puts_agent_roots_before_explicit_roots(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    recorded = tmp_path / "recorded"
+    explicit = tmp_path / "explicit"
+    (tmp_path / ".claude.json").write_text(f'{{"projects": {{"{recorded.as_posix()}": {{}}}}}}')
+
+    discoverer = ClaudeCodeDiscoverer(tmp_path, [explicit])
+
+    assert discoverer._all_project_folders() == [recorded, explicit]
+
+
+def test_explicit_project_folders_gain_ancestors_and_dedup_recorded_roots(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    project = tmp_path / "monorepo" / "package"
+    (tmp_path / ".claude.json").write_text(f'{{"projects": {{"{project.as_posix()}": {{}}}}}}')
+
+    paths = ClaudeCodeDiscoverer(tmp_path, [project])._project_paths_with_ancestors()
+
+    assert paths.count(project) == 1
+    assert project.parent in paths
+    assert tmp_path in paths
+
+
+def test_claude_code_discovers_servers_and_skills_from_explicit_project_without_state_entry(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    (tmp_path / ".claude").mkdir()
+    project = tmp_path / "checkout"
+    project.mkdir()
+    (project / ".mcp.json").write_text('{"mcpServers":{"explicit-claude":{"command":"echo"}}}')
+    _write_skill(project / ".claude" / "skills", "claude-project-skill")
+    _write_skill(project / ".agents" / "skills", "shared-project-skill")
+
+    discoverer = ClaudeCodeDiscoverer(tmp_path, [project])
+    servers = discoverer.discover_mcp_servers()
+    skills = discoverer.discover_skills()
+
+    assert "explicit-claude" in {
+        name for entries in servers.values() if isinstance(entries, list) for name, _ in entries
+    }
+    assert (project / ".claude" / "skills").as_posix() in skills
+    assert (project / ".agents" / "skills").as_posix() in skills
+
+
+def test_codex_discovers_servers_and_skills_from_explicit_project(tmp_path):
+    from agent_scan.agents import CodexDiscoverer
+
+    (tmp_path / ".codex").mkdir()
+    project = tmp_path / "checkout"
+    (project / ".codex").mkdir(parents=True)
+    (project / ".codex" / "config.toml").write_text('[mcp_servers.explicit_codex]\ncommand = "echo"\n')
+    _write_skill(project / ".agents" / "skills", "codex-project-skill")
+
+    discoverer = CodexDiscoverer(tmp_path, [project])
+    servers = discoverer.discover_mcp_servers()
+    skills = discoverer.discover_skills()
+
+    assert "explicit_codex" in {
+        name for entries in servers.values() if isinstance(entries, list) for name, _ in entries
+    }
+    assert (project / ".agents" / "skills").as_posix() in skills
+
+
+def test_cursor_discovers_servers_and_skills_from_explicit_project_without_workspace_state(tmp_path):
+    from agent_scan.agents import CursorDiscoverer
+
+    (tmp_path / ".cursor").mkdir()
+    project = tmp_path / "checkout"
+    (project / ".cursor").mkdir(parents=True)
+    (project / ".cursor" / "mcp.json").write_text('{"mcpServers":{"explicit-cursor":{"command":"echo"}}}')
+    _write_skill(project / ".cursor" / "skills", "cursor-project-skill")
+
+    discoverer = CursorDiscoverer(tmp_path, [project])
+    servers = discoverer.discover_mcp_servers()
+    skills = discoverer.discover_skills()
+
+    assert "explicit-cursor" in {
+        name for entries in servers.values() if isinstance(entries, list) for name, _ in entries
+    }
+    assert (project / ".cursor" / "skills").as_posix() in skills
+
+
+def test_opencode_relative_skills_path_anchors_at_explicit_project_root(tmp_path):
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    project = tmp_path / "checkout"
+    project.mkdir()
+    (project / "opencode.json").write_text('{"skills":{"paths":["team-skills"]}}')
+    _write_skill(project / "team-skills", "relative-project-skill")
+
+    skills = OpenCodeDiscoverer(tmp_path, [project]).discover_skills()
+
+    assert (project / "team-skills").as_posix() in skills
+
+
+def test_find_discoverers_threads_explicit_project_folders(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer, find_discoverers
+
+    (tmp_path / ".claude").mkdir()
+    project = tmp_path / "checkout"
+
+    found = find_discoverers(tmp_path, project_folders=[project])
+
+    claude = next(discoverer for discoverer in found if isinstance(discoverer, ClaudeCodeDiscoverer))
+    assert claude.extra_project_folders == [project]
+
+
+@pytest.mark.asyncio
+async def test_pipeline_merges_explicit_project_servers_and_skills_into_installed_client(tmp_path):
+    from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
+
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    project = tmp_path / "checkout"
+    project.mkdir()
+    (project / ".mcp.json").write_text('{"mcpServers":{"pipeline-project":{"command":"echo"}}}')
+    _write_skill(project / ".claude" / "skills", "pipeline-project-skill")
+
+    with (
+        patch("agent_scan.pipelines.get_readable_home_directories", return_value=[(home, "alice")]),
+        patch("agent_scan.pipelines.get_well_known_clients", return_value=[]),
+    ):
+        clients, _, _ = await discover_clients_to_inspect(
+            InspectArgs(timeout=0, tokens=[], paths=[], scan_skills=True, project_folders=[str(project)])
+        )
+
+    claude = next(client for client in clients if client.name == "claude code")
+    assert "pipeline-project" in {
+        name for entries in claude.mcp_configs.values() if isinstance(entries, list) for name, _ in entries
+    }
+    assert (project / ".claude" / "skills").as_posix() in claude.skills_dirs
+
+
+@pytest.mark.asyncio
+async def test_pipeline_skips_missing_explicit_project_folder_with_warning(tmp_path, caplog):
+    from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
+
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    missing = tmp_path / "missing"
+
+    with (
+        patch("agent_scan.pipelines.get_readable_home_directories", return_value=[(home, "alice")]),
+        patch("agent_scan.pipelines.get_well_known_clients", return_value=[]),
+        caplog.at_level("WARNING", logger="agent_scan.pipelines"),
+    ):
+        await discover_clients_to_inspect(InspectArgs(timeout=0, tokens=[], paths=[], project_folders=[str(missing)]))
+
+    assert str(missing) in caplog.text
+    assert "Skipping" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_pipeline_explicit_paths_ignore_project_folders(tmp_path):
+    from unittest.mock import AsyncMock
+
+    from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
+
+    explicit_config = tmp_path / "config.json"
+    project = tmp_path / "checkout"
+    project.mkdir()
+    from_path = AsyncMock(return_value=[])
+
+    inspect_args = InspectArgs(
+        timeout=0,
+        tokens=[],
+        paths=[str(explicit_config)],
+        project_folders=[str(project)],
+    )
+    assert inspect_args.project_folders == [str(project)]
+
+    with (
+        patch("agent_scan.pipelines.get_readable_home_directories", return_value=[]),
+        patch("agent_scan.pipelines.client_to_inspect_from_path", from_path),
+        patch("agent_scan.pipelines.find_discoverers") as find,
+    ):
+        await discover_clients_to_inspect(inspect_args)
+
+    from_path.assert_awaited_once()
+    find.assert_not_called()

@@ -1,11 +1,37 @@
 """Tests for CLI argument parsing, especially multiple control servers."""
 
+import argparse
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from agent_scan.cli import MissingIdentifierError, parse_control_servers, warn_deprecated_control_flags
+from agent_scan.cli import (
+    MissingIdentifierError,
+    add_common_arguments,
+    parse_control_servers,
+    setup_scan_parser,
+    warn_deprecated_control_flags,
+)
 from agent_scan.models import ControlServer, InspectedPath
+
+
+def test_scan_project_folder_is_repeatable():
+    parser = argparse.ArgumentParser()
+    setup_scan_parser(parser)
+
+    args = parser.parse_args(["--project-folder", "/repo/one", "--project-folder", "/repo/two"])
+
+    assert args.project_folders == ["/repo/one", "/repo/two"]
+
+
+def test_inspect_project_folder_is_repeatable():
+    parser = argparse.ArgumentParser()
+    add_common_arguments(parser)
+    parser.add_argument("files", nargs="*", default=[])
+
+    args = parser.parse_args(["--project-folder", "/repo/one", "--project-folder", "/repo/two"])
+
+    assert args.project_folders == ["/repo/one", "/repo/two"]
 
 
 class TestControlServerParsing:

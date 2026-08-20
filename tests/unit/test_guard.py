@@ -415,7 +415,8 @@ class TestDiscoveryHookScriptFiles:
         discover_script = main_script.with_name("snyk-agent-guard-discover.sh")
 
         assert discover_script.read_text() == (
-            '#!/usr/bin/env bash\nset -euo pipefail\nexec "${AGENT_SCAN_BIN:-snyk-agent-scan}" guard discover\n'
+            '#!/usr/bin/env bash\nset -euo pipefail\nexec "${AGENT_SCAN_BIN:-snyk-agent-scan}" guard discover '
+            "--hook-with-cwd-payload-stdin\n"
         )
         assert os.access(discover_script, os.X_OK)
 
@@ -2530,6 +2531,16 @@ class TestDiscoverServersPayload:
         assert args.scan_skills is False
         assert result == guard_module._servers_discovered_entries(clients)
 
+    def test_threads_explicit_project_folders_to_inspect_args(self):
+        discover = AsyncMock(return_value=([], [], []))
+
+        with patch("agent_scan.pipelines.discover_clients_to_inspect", discover):
+            result = guard_module._discover_servers_payload(["/repo/one", "/repo/two"])
+
+        args = discover.await_args.args[0]
+        assert args.project_folders == ["/repo/one", "/repo/two"]
+        assert result == []
+
 
 class TestInvokeHookScript:
     def test_posix_invocation_sets_machine_id(self, monkeypatch):
@@ -2723,12 +2734,46 @@ class TestGuardDiscoverCli:
         assert args.url == "https://hooks.example"
         assert args.file == "/tmp/settings.json"
 
+    def test_parses_repeatable_project_folders_and_hook_stdin_flag(self, monkeypatch):
+        from agent_scan import cli
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "agent-scan",
+                "guard",
+                "discover",
+                "--project-folder",
+                "/repo/one",
+                "--project-folder",
+                "/repo/two",
+                "--hook-with-cwd-payload-stdin",
+            ],
+        )
+        with patch(f"{_G}.run_guard", return_value=0) as run:
+            with pytest.raises(SystemExit) as exc:
+                cli.main()
+
+        assert exc.value.code == 0
+        args = run.call_args.args[0]
+        assert args.project_folders == ["/repo/one", "/repo/two"]
+        assert args.hook_with_cwd_payload_stdin is True
+
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only Claude discovery hook")
 class TestRunDiscover:
     @staticmethod
-    def _args(config: Path, url=None):
-        return SimpleNamespace(guard_command="discover", url=url, file=str(config))
+    def _args(config: Path, url=None, **overrides):
+        values = {
+            "guard_command": "discover",
+            "url": url,
+            "file": str(config),
+            "project_folders": [],
+            "hook_with_cwd_payload_stdin": False,
+        }
+        values.update(overrides)
+        return SimpleNamespace(**values)
 
     @staticmethod
     def _write_forwarder(config: Path):
@@ -2801,6 +2846,83 @@ class TestRunDiscover:
 
         assert result == 1
         run.assert_not_called()
+
+    def test_forwards_explicit_project_folders_to_discovery(self, tmp_path, monkeypatch):
+        config = tmp_path / "settings.json"
+        self._write_forwarder(config)
+        monkeypatch.setenv("PUSH_KEY", "env-pk")
+        discover = MagicMock(return_value=[])
+        with (
+            patch(f"{_G}._discover_servers_payload", discover),
+            patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")),
+            patch(f"{_G}.rich"),
+        ):
+            result = guard_module.run_guard(self._args(config, project_folders=["/repo/one", "/repo/two"]))
+
+        assert result == 0
+        discover.assert_called_once_with(["/repo/one", "/repo/two"])
+
+    def test_hook_stdin_appends_nonempty_cwd(self, tmp_path, monkeypatch):
+        config = tmp_path / "settings.json"
+        self._write_forwarder(config)
+        monkeypatch.setenv("PUSH_KEY", "env-pk")
+        stdin = MagicMock()
+        stdin.read.return_value = '{"cwd":"/session/project","session_id":"session"}'
+        discover = MagicMock(return_value=[])
+        with (
+            patch.object(sys, "stdin", stdin),
+            patch(f"{_G}._discover_servers_payload", discover),
+            patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")),
+            patch(f"{_G}.rich"),
+        ):
+            result = guard_module.run_guard(
+                self._args(
+                    config,
+                    project_folders=["/explicit/project"],
+                    hook_with_cwd_payload_stdin=True,
+                )
+            )
+
+        assert result == 0
+        stdin.read.assert_called_once_with(1024 * 1024)
+        discover.assert_called_once_with(["/explicit/project", "/session/project"])
+
+    def test_malformed_hook_stdin_is_ignored(self, tmp_path, monkeypatch):
+        config = tmp_path / "settings.json"
+        self._write_forwarder(config)
+        monkeypatch.setenv("PUSH_KEY", "env-pk")
+        stdin = MagicMock()
+        stdin.read.return_value = "not-json"
+        discover = MagicMock(return_value=[])
+        with (
+            patch.object(sys, "stdin", stdin),
+            patch(f"{_G}._discover_servers_payload", discover),
+            patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")),
+            patch(f"{_G}.rich"),
+        ):
+            result = guard_module.run_guard(
+                self._args(config, project_folders=["/explicit/project"], hook_with_cwd_payload_stdin=True)
+            )
+
+        assert result == 0
+        discover.assert_called_once_with(["/explicit/project"])
+
+    def test_stdin_is_never_read_without_hook_flag(self, tmp_path, monkeypatch):
+        config = tmp_path / "settings.json"
+        self._write_forwarder(config)
+        monkeypatch.setenv("PUSH_KEY", "env-pk")
+        stdin = MagicMock()
+        stdin.read.side_effect = AssertionError("stdin must not be read")
+        with (
+            patch.object(sys, "stdin", stdin),
+            patch(f"{_G}._discover_servers_payload", return_value=[]),
+            patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")),
+            patch(f"{_G}.rich"),
+        ):
+            result = guard_module.run_guard(self._args(config))
+
+        assert result == 0
+        stdin.read.assert_not_called()
 
 
 class TestRunInstallSendsServersDiscovered:

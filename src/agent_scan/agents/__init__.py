@@ -37,7 +37,7 @@ DISCOVERERS: dict[str, type[AgentDiscoverer]] = {
 }
 
 
-def find_discoverers(home_directory: Path | None) -> list[AgentDiscoverer]:
+def find_discoverers(home_directory: Path | None, project_folders: list[Path] | None = None) -> list[AgentDiscoverer]:
     """Construct one instance per registered discoverer with the given home, and
     return only those whose ``client_exists()`` confirms the agent is installed.
     Each returned instance is home-bound; the caller just runs
@@ -48,7 +48,7 @@ def find_discoverers(home_directory: Path | None) -> list[AgentDiscoverer]:
     """
     found: list[AgentDiscoverer] = []
     for cls in DISCOVERERS.values():
-        discoverer = cls(home_directory)
+        discoverer = cls(home_directory, project_folders)
         try:
             exists = discoverer.client_exists() is not None
         except Exception:
