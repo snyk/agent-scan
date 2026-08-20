@@ -92,6 +92,22 @@ class TestExplicitlyProvidedDests:
         assert "skills" in explicitly_provided_dests(parser, ["scan", "--no-skills"])
         assert "skills" in explicitly_provided_dests(parser, ["scan", "--skills"])
 
+    def test_uses_destination_from_active_subparser_when_option_aliases_collide(self):
+        parser = _build_parser()
+        subparsers = next(action for action in parser._actions if isinstance(action, argparse._SubParsersAction))
+        guard_parser = subparsers.add_parser("guard", allow_abbrev=False)
+        guard_subparsers = guard_parser.add_subparsers(dest="guard_command")
+        guard_install_parser = guard_subparsers.add_parser("install", allow_abbrev=False)
+        guard_install_parser.add_argument("--machine-id", "--control-identifier", dest="machine_id", default=None)
+
+        provided = explicitly_provided_dests(
+            parser,
+            ["scan", "--control-server", "https://example.com", "--control-identifier", "legacy-id"],
+        )
+
+        assert "control_identifier" in provided
+        assert "machine_id" not in provided
+
 
 class TestAbbreviationDisabled:
     """main() sets allow_abbrev=False so prefix abbreviations are rejected, which

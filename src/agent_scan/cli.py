@@ -227,6 +227,20 @@ def _iter_all_actions(parser: argparse.ArgumentParser):
             yield action
 
 
+def _iter_active_actions(parser: argparse.ArgumentParser, argv: list[str]):
+    """Yield actions from the root parser and the subparser path selected by ``argv``."""
+    for action in parser._actions:
+        if not isinstance(action, argparse._SubParsersAction):
+            yield action
+            continue
+
+        for index, token in enumerate(argv):
+            subparser = action.choices.get(token)
+            if subparser is not None:
+                yield from _iter_active_actions(subparser, argv[index + 1 :])
+                break
+
+
 def explicitly_provided_dests(parser: argparse.ArgumentParser, argv: list[str]) -> set[str]:
     """
     Return the set of argument ``dest`` names the user passed explicitly on the
@@ -239,7 +253,7 @@ def explicitly_provided_dests(parser: argparse.ArgumentParser, argv: list[str]) 
     BooleanOptionalAction (``--skills`` / ``--no-skills`` both map to ``skills``).
     """
     option_to_dest: dict[str, str] = {}
-    for action in _iter_all_actions(parser):
+    for action in _iter_active_actions(parser, argv):
         for option in action.option_strings:
             option_to_dest[option] = action.dest
 
