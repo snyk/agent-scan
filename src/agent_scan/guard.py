@@ -314,8 +314,6 @@ def _run_discover(args) -> int:
 
     project_folders = list(getattr(args, "project_folders", None) or [])
     project_folder_payload_key = getattr(args, "hook_project_folder_payload_key", None)
-    if not project_folder_payload_key and getattr(args, "hook_with_cwd_payload_stdin", False):
-        project_folder_payload_key = "cwd"
     if project_folder_payload_key:
         try:
             hook_payload = json.loads(sys.stdin.read(1024 * 1024))

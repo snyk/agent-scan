@@ -2734,7 +2734,7 @@ class TestGuardDiscoverCli:
         assert args.url == "https://hooks.example"
         assert args.file == "/tmp/settings.json"
 
-    def test_parses_repeatable_project_folders_and_hook_stdin_flag(self, monkeypatch):
+    def test_parses_repeatable_project_folders(self, monkeypatch):
         from agent_scan import cli
 
         monkeypatch.setattr(
@@ -2748,7 +2748,6 @@ class TestGuardDiscoverCli:
                 "/repo/one",
                 "--project-folder",
                 "/repo/two",
-                "--hook-with-cwd-payload-stdin",
             ],
         )
         with patch(f"{_G}.run_guard", return_value=0) as run:
@@ -2758,7 +2757,6 @@ class TestGuardDiscoverCli:
         assert exc.value.code == 0
         args = run.call_args.args[0]
         assert args.project_folders == ["/repo/one", "/repo/two"]
-        assert args.hook_with_cwd_payload_stdin is True
 
     def test_parses_configurable_hook_project_folder_payload_key(self, monkeypatch):
         from agent_scan import cli
@@ -2791,7 +2789,6 @@ class TestRunDiscover:
             "url": url,
             "file": str(config),
             "project_folders": [],
-            "hook_with_cwd_payload_stdin": False,
             "hook_project_folder_payload_key": None,
         }
         values.update(overrides)
@@ -2884,7 +2881,7 @@ class TestRunDiscover:
         assert result == 0
         discover.assert_called_once_with(["/repo/one", "/repo/two"])
 
-    def test_hook_stdin_appends_nonempty_cwd(self, tmp_path, monkeypatch):
+    def test_hook_stdin_appends_cwd_with_configured_key(self, tmp_path, monkeypatch):
         config = tmp_path / "settings.json"
         self._write_forwarder(config)
         monkeypatch.setenv("PUSH_KEY", "env-pk")
@@ -2901,7 +2898,7 @@ class TestRunDiscover:
                 self._args(
                     config,
                     project_folders=["/explicit/project"],
-                    hook_with_cwd_payload_stdin=True,
+                    hook_project_folder_payload_key="cwd",
                 )
             )
 
@@ -2942,7 +2939,11 @@ class TestRunDiscover:
             patch(f"{_G}.rich"),
         ):
             result = guard_module.run_guard(
-                self._args(config, project_folders=["/explicit/project"], hook_with_cwd_payload_stdin=True)
+                self._args(
+                    config,
+                    project_folders=["/explicit/project"],
+                    hook_project_folder_payload_key="cwd",
+                )
             )
 
         assert result == 0

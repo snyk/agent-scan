@@ -1034,16 +1034,6 @@ def main():
             "(Claude Code uses cwd)"
         ),
     )
-    guard_discover_parser.add_argument(
-        "--hook-with-cwd-payload-stdin",
-        action="store_true",
-        default=False,
-        help=(
-            "Read the Claude Code hook JSON payload from stdin and include its cwd as a project folder "
-            "(deprecated compatibility alias for --hook-project-folder-payload-key cwd)"
-        ),
-    )
-
     guard_uninstall_parser = guard_subparsers.add_parser(
         "uninstall",
         allow_abbrev=False,
