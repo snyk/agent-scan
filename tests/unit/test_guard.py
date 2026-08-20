@@ -429,6 +429,23 @@ class TestDiscoveryHookScriptFiles:
 
         assert discover_script.exists()
 
+    def test_copy_reports_update_when_only_discovery_script_changed(self, tmp_path):
+        config = tmp_path / "settings.json"
+        main_script, *_ = guard_module._copy_hook_script(config)
+        main_script.with_name("snyk-agent-guard-discover.sh").unlink()
+
+        _, _, was_updated, *_ = guard_module._copy_hook_script(config)
+
+        assert was_updated is True
+
+    def test_copy_reports_no_update_when_both_scripts_are_current(self, tmp_path):
+        config = tmp_path / "settings.json"
+        guard_module._copy_hook_script(config)
+
+        _, _, was_updated, *_ = guard_module._copy_hook_script(config)
+
+        assert was_updated is False
+
     def test_remove_deletes_both_scripts(self, tmp_path):
         config = tmp_path / "settings.json"
         main_script, *_ = guard_module._copy_hook_script(config)

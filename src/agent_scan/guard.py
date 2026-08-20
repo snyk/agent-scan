@@ -1507,10 +1507,12 @@ def _compact_events(events: list[str]) -> str:
 
 
 def _copy_hook_script(config_path: Path) -> tuple[Path, bool, bool, str | None, str]:
-    """Copy bundled hook script to a hooks/ dir next to the config file.
+    """Copy bundled hook scripts to a hooks/ dir next to the config file.
 
     Returns (path, already_existed, was_updated, current_checksum, new_checksum).
-    current_checksum is None when the script did not exist before.
+    All values describe the forwarding script, except ``was_updated``, which is
+    True when either the forwarding or the discovery script was written.
+    current_checksum is None when the forwarding script did not exist before.
     """
     dest_dir = config_path.parent / "hooks"
 
@@ -1530,6 +1532,7 @@ def _copy_hook_script(config_path: Path) -> tuple[Path, bool, bool, str | None, 
     new_content = source.read_bytes().replace(b"__AGENT_SCAN_VERSION__", version_info.encode())
     new_checksum = hashlib.sha256(new_content).hexdigest()
 
+    discover_updated = False
     if not IS_WINDOWS:
         discover_name = "snyk-agent-guard-discover.sh"
         discover_source = hook_pkg.joinpath(discover_name)
@@ -1538,10 +1541,11 @@ def _copy_hook_script(config_path: Path) -> tuple[Path, bool, bool, str | None, 
         if not discover_dest.exists() or discover_dest.read_bytes() != discover_content:
             discover_dest.write_bytes(discover_content)
             rich.print(f"[green]\u2713[/green]  Copied hook script to [dim]{discover_dest}[/dim]")
+            discover_updated = True
         discover_dest.chmod(discover_dest.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
     if existed and current_checksum == new_checksum:
-        return dest, existed, False, current_checksum, new_checksum
+        return dest, existed, discover_updated, current_checksum, new_checksum
 
     dest.write_bytes(new_content)
     dest.chmod(dest.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
