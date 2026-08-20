@@ -81,12 +81,13 @@ class TestGuardInstallE2E:
         # Should have entries for standard Claude hook events
         assert "PreToolUse" in settings["hooks"]
         assert "Stop" in settings["hooks"]
-        discovery_groups = [
-            group for group in settings["hooks"]["SessionStart"] if group.get("hooks", [{}])[0].get("async") is True
-        ]
-        assert len(discovery_groups) == 1
-        assert "matcher" not in discovery_groups[0]
-        assert "snyk-agent-guard-discover.sh" in discovery_groups[0]["hooks"][0]["command"]
+        if os.name != "nt":
+            discovery_groups = [
+                group for group in settings["hooks"]["SessionStart"] if group.get("hooks", [{}])[0].get("async") is True
+            ]
+            assert len(discovery_groups) == 1
+            assert "matcher" not in discovery_groups[0]
+            assert "snyk-agent-guard-discover.sh" in discovery_groups[0]["hooks"][0]["command"]
         assert [request["body"]["hook_event_name"] for request in _FakeHookServer.requests] == [
             "hooksConfigured",
             "serversDiscovered",
@@ -96,25 +97,26 @@ class TestGuardInstallE2E:
         assert isinstance(discovered["body"]["servers"], list)
         assert json.loads(discovered["headers"]["X-User"])["identifier"] == "e2e-machine-id"
 
-        discover_result = subprocess.run(
-            [*agent_scan_cmd, "guard", "discover", "--file", str(config_file)],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            env={
-                **os.environ,
-                "PUSH_KEY": "test-pk-e2e",
-                "REMOTE_HOOKS_BASE_URL": fake_hook_server,
-                "MACHINE_ID": "e2e-machine-id",
-            },
-        )
-        assert discover_result.returncode == 0, (
-            f"guard discover failed:\nstdout: {discover_result.stdout}\nstderr: {discover_result.stderr}"
-        )
-        session_discovery = _FakeHookServer.requests[-1]
-        assert session_discovery["body"]["hook_event_name"] == "SessionStartServerDiscovery"
-        assert session_discovery["body"]["session_id"] == "session-start-server-discovery"
-        assert isinstance(session_discovery["body"]["servers"], list)
+        if os.name != "nt":
+            discover_result = subprocess.run(
+                [*agent_scan_cmd, "guard", "discover", "--file", str(config_file)],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                env={
+                    **os.environ,
+                    "PUSH_KEY": "test-pk-e2e",
+                    "REMOTE_HOOKS_BASE_URL": fake_hook_server,
+                    "MACHINE_ID": "e2e-machine-id",
+                },
+            )
+            assert discover_result.returncode == 0, (
+                f"guard discover failed:\nstdout: {discover_result.stdout}\nstderr: {discover_result.stderr}"
+            )
+            session_discovery = _FakeHookServer.requests[-1]
+            assert session_discovery["body"]["hook_event_name"] == "SessionStartServerDiscovery"
+            assert session_discovery["body"]["session_id"] == "session-start-server-discovery"
+            assert isinstance(session_discovery["body"]["servers"], list)
 
     @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
     def test_guard_install_cursor(self, agent_scan_cmd, tmp_path, fake_hook_server):

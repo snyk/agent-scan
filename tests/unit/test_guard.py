@@ -10,7 +10,7 @@ import subprocess
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -1996,7 +1996,8 @@ class TestInstallHooksOrchestration:
         assert ctx["test_event"].call_args.kwargs["machine_id"] == "machine-42"
 
     def test_claude_builds_and_prepares_async_discovery_hook(self, ctx, tmp_path):
-        self._call(tmp_path, client="claude", machine_id="machine-42")
+        with patch(f"{_G}.IS_WINDOWS", False):
+            self._call(tmp_path, client="claude", machine_id="machine-42")
 
         ctx["build_discover"].assert_called_once()
         assert ctx["build_discover"].call_args.kwargs == {
@@ -2519,7 +2520,7 @@ class TestInvokeHookScript:
         completed = subprocess.CompletedProcess([], 0, stdout="ok", stderr="")
         with patch(f"{_G}.IS_WINDOWS", False), patch("subprocess.run", return_value=completed) as run:
             result = guard_module._invoke_hook_script(
-                Path("/hook.sh"), "claude-code", "pk", "https://api.snyk.io", "{}", "machine-42"
+                PurePosixPath("/hook.sh"), "claude-code", "pk", "https://api.snyk.io", "{}", "machine-42"
             )
 
         assert result == (True, "")
@@ -2531,7 +2532,9 @@ class TestInvokeHookScript:
         monkeypatch.delenv("MACHINE_ID", raising=False)
         completed = subprocess.CompletedProcess([], 0, stdout="ok", stderr="")
         with patch(f"{_G}.IS_WINDOWS", False), patch("subprocess.run", return_value=completed) as run:
-            result = guard_module._invoke_hook_script(Path("/hook.sh"), "cursor", "pk", "https://api.snyk.io", "{}")
+            result = guard_module._invoke_hook_script(
+                PurePosixPath("/hook.sh"), "cursor", "pk", "https://api.snyk.io", "{}"
+            )
 
         assert result == (True, "")
         assert "MACHINE_ID" not in run.call_args.kwargs["env"]
@@ -2548,7 +2551,7 @@ class TestInvokeHookScript:
         assert run.call_args.args[0] == [
             "powershell",
             "-File",
-            "C:/hook.ps1",
+            str(Path("C:/hook.ps1")),
             "-Client",
             "codex",
             "-PushKey",
@@ -2578,6 +2581,7 @@ class TestSendServersDiscoveredEvent:
             return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
 
         with (
+            patch(f"{_G}.IS_WINDOWS", False),
             patch(f"{_G}._discover_servers_payload", return_value=[] if entries is None else entries),
             patch("subprocess.run", side_effect=fake_run),
             patch(f"{_G}.rich"),
@@ -2703,6 +2707,7 @@ class TestGuardDiscoverCli:
         assert args.file == "/tmp/settings.json"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only Claude discovery hook")
 class TestRunDiscover:
     @staticmethod
     def _args(config: Path, url=None):
