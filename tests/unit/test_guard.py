@@ -710,6 +710,7 @@ class TestConfigPath:
     )
     def test_honors_client_environment_directory(self, client, env_var, filename, tmp_path, monkeypatch):
         configured = tmp_path / f"custom-{client}"
+        monkeypatch.setenv("HOME", str(tmp_path / "default-home"))
         monkeypatch.setenv(env_var, str(configured))
         assert _config_path(client) == configured / filename
 
@@ -736,10 +737,31 @@ class TestConfigPath:
     def test_environment_changes_after_import_are_honored(self, tmp_path, monkeypatch):
         first = tmp_path / "first"
         second = tmp_path / "second"
+        monkeypatch.setenv("HOME", str(tmp_path / "default-home"))
         monkeypatch.setenv("CODEX_HOME", str(first))
         assert _config_path("codex") == first / "hooks.json"
         monkeypatch.setenv("CODEX_HOME", str(second))
         assert _config_path("codex") == second / "hooks.json"
+
+    @pytest.mark.parametrize(
+        ("client", "env_var", "default_dir", "filename"),
+        [
+            ("claude", "CLAUDE_CONFIG_DIR", ".claude", "settings.json"),
+            ("codex", "CODEX_HOME", ".codex", "hooks.json"),
+        ],
+    )
+    def test_installed_default_directory_takes_precedence_over_environment_override(
+        self, client, env_var, default_dir, filename, tmp_path, monkeypatch
+    ):
+        home = tmp_path / "home"
+        default = home / default_dir
+        default.mkdir(parents=True)
+        configured = tmp_path / f"custom-{client}"
+        configured.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv(env_var, str(configured))
+
+        assert _config_path(client) == default / filename
 
     def test_claude_managed(self, tmp_path, monkeypatch):
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "ignored"))
@@ -763,9 +785,81 @@ class TestConfigPath:
 
 
 class TestResolvedUserPaths:
+    @pytest.mark.parametrize(
+        ("client", "hook_client", "env_var", "filename"),
+        [
+            ("claude", "claude-code", "CLAUDE_CONFIG_DIR", "settings.json"),
+            ("codex", "codex", "CODEX_HOME", "hooks.json"),
+        ],
+    )
+    def test_override_install_sends_hooks_configured_from_overridden_location(
+        self, client, hook_client, env_var, filename, tmp_path, monkeypatch
+    ):
+        home = tmp_path / "home"
+        configured = tmp_path / f"custom-{client}"
+        configured.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv(env_var, str(configured))
+        monkeypatch.setenv("PUSH_KEY", "headless-pk")
+        monkeypatch.delenv("TENANT_ID", raising=False)
+
+        with patch("agent_scan.guard._send_test_event", return_value=True) as send_event:
+            _run_install(
+                SimpleNamespace(
+                    client=client,
+                    url="https://api.snyk.io",
+                    tenant_id="",
+                    file=None,
+                    managed=False,
+                )
+            )
+
+        assert (configured / filename).is_file()
+        assert send_event.call_count == 1
+        assert send_event.call_args.args[2] == hook_client
+        assert send_event.call_args.args[3].parent == configured / "hooks"
+        assert any(send_event.call_args.kwargs["hooks_diff"].values())
+
+    @pytest.mark.parametrize(
+        ("client", "env_var", "default_dir", "filename"),
+        [
+            ("claude", "CLAUDE_CONFIG_DIR", ".claude", "settings.json"),
+            ("codex", "CODEX_HOME", ".codex", "hooks.json"),
+        ],
+    )
+    def test_existing_default_location_cannot_be_bypassed_by_environment_override(
+        self, client, env_var, default_dir, filename, tmp_path, monkeypatch
+    ):
+        home = tmp_path / "home"
+        default = home / default_dir
+        configured = tmp_path / f"custom-{client}"
+        default.mkdir(parents=True)
+        configured.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv(env_var, str(configured))
+        monkeypatch.setenv("PUSH_KEY", "headless-pk")
+        monkeypatch.delenv("TENANT_ID", raising=False)
+
+        with patch("agent_scan.guard._send_test_event", return_value=True) as send_event:
+            _run_install(
+                SimpleNamespace(
+                    client=client,
+                    url="https://api.snyk.io",
+                    tenant_id="",
+                    file=None,
+                    managed=False,
+                )
+            )
+
+        assert (default / filename).is_file()
+        assert not (configured / filename).exists()
+        assert send_event.call_count == 1
+        assert send_event.call_args.args[3].parent == default / "hooks"
+
     def test_install_uses_resolved_config_and_hook_directory(self, tmp_path, monkeypatch):
         codex_home = tmp_path / "custom-codex"
         codex_home.mkdir()
+        monkeypatch.setenv("HOME", str(tmp_path / "default-home"))
         config_path = codex_home / "hooks.json"
         _write(
             config_path,
@@ -800,6 +894,7 @@ class TestResolvedUserPaths:
 
     def test_uninstall_uses_resolved_config_and_preserves_unrelated_data(self, tmp_path, monkeypatch):
         claude_home = tmp_path / "custom-claude"
+        monkeypatch.setenv("HOME", str(tmp_path / "default-home"))
         config_path = claude_home / "settings.json"
         _write(config_path, {"unrelated": {"preserved": True}})
         _setup_claude_hooks(AGENT_SCAN_CMD, config_path)
@@ -818,6 +913,7 @@ class TestResolvedUserPaths:
 
     def test_default_detector_uses_runtime_resolved_path(self, tmp_path, monkeypatch):
         codex_home = tmp_path / "custom-codex"
+        monkeypatch.setenv("HOME", str(tmp_path / "default-home"))
         config_path = codex_home / "hooks.json"
         _setup_codex_hooks(CODEX_AGENT_SCAN_CMD, config_path)
         monkeypatch.setenv("CODEX_HOME", str(codex_home))
@@ -1645,6 +1741,7 @@ class TestRunInstallCallsEnsureGuardEnabled:
     ):
         claude_home = tmp_path / "custom-claude"
         claude_home.mkdir()
+        monkeypatch.setenv("HOME", str(tmp_path / "default-home"))
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
         monkeypatch.delenv("PUSH_KEY", raising=False)
         monkeypatch.setenv("SNYK_TOKEN", "snyk-from-env")

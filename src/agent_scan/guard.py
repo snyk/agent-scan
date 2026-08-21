@@ -46,6 +46,8 @@ _CLIENT_CONFIG_FILENAMES = {
     "cursor": "hooks.json",
     "codex": "hooks.json",
 }
+_CLIENT_DEFAULT_DIRNAMES = {"claude": ".claude", "cursor": ".cursor", "codex": ".codex"}
+_CLIENT_HOME_ENV_VARS = {"claude": "CLAUDE_CONFIG_DIR", "codex": "CODEX_HOME"}
 
 # Managed (MDM / admin-deployed) config paths — OS-specific
 # Codex managed hooks use a requirements.toml file at a system location
@@ -1176,7 +1178,7 @@ def _is_client_installed(client: str) -> bool:
     """Check whether the agent is installed on this machine by looking for its config directory."""
     if client not in _CLIENT_CONFIG_FILENAMES:
         return True
-    path = resolve_user_client_dir(client)
+    path = _guard_user_client_dir(client)
     try:
         return path.is_dir()
     except PermissionError:
@@ -1202,7 +1204,18 @@ def _config_path(client: str, override: str | None = None, managed: bool = False
         if client == "cursor":
             return CURSOR_MANAGED_HOOKS_PATH
         return CODEX_MANAGED_HOOKS_PATH
-    return resolve_user_client_dir(client) / _CLIENT_CONFIG_FILENAMES[client]
+    return _guard_user_client_dir(client) / _CLIENT_CONFIG_FILENAMES[client]
+
+
+def _guard_user_client_dir(client: str) -> Path:
+    """Resolve the user config directory without allowing an env override to hide an installed default."""
+    configured = resolve_user_client_dir(client)
+    env_var = _CLIENT_HOME_ENV_VARS.get(client)
+    if env_var and os.environ.get(env_var):
+        default = Path.home() / _CLIENT_DEFAULT_DIRNAMES[client]
+        if configured != default and default.is_dir():
+            return default
+    return configured
 
 
 def _preflight_writable(config_path: Path) -> None:
