@@ -1,0 +1,41 @@
+#
+# Session-start discovery trampoline for Snyk Agent Guard (Windows).
+# Sets the environment expected by `guard discover` and forwards the hook
+# payload from stdin. Parameters mirror snyk-agent-guard.ps1.
+#
+param(
+    [Parameter(Mandatory=$true)]
+    [ValidateSet("claude-code","cursor","codex")]
+    [string]$Client,
+
+    [Parameter(Mandatory=$false)]
+    [string]$PushKey,
+
+    [Parameter(Mandatory=$false)]
+    [string]$RemoteUrl,
+
+    [Parameter(Mandatory=$false)]
+    [string]$MachineId,
+
+    [Parameter(Mandatory=$false)]
+    [string]$ConfigFile,
+
+    [Parameter(Mandatory=$false)]
+    [string]$AgentScanBin
+)
+
+$ErrorActionPreference = "Stop"
+
+if ($PushKey)   { $env:PUSH_KEY = $PushKey }
+if ($RemoteUrl) { $env:REMOTE_HOOKS_BASE_URL = $RemoteUrl }
+if ($MachineId) { $env:MACHINE_ID = $MachineId }
+
+$bin = if ($AgentScanBin) { $AgentScanBin } elseif ($env:AGENT_SCAN_BIN) { $env:AGENT_SCAN_BIN } else { "snyk-agent-scan" }
+
+$arguments = @("guard", "discover", "--client", $Client)
+if ($ConfigFile) { $arguments += @("--file", $ConfigFile) }
+
+$reader = New-Object System.IO.StreamReader([Console]::OpenStandardInput(), [System.Text.Encoding]::UTF8, $true)
+$payload = $reader.ReadToEnd()
+$payload | & $bin @arguments
+exit $LASTEXITCODE

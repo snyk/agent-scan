@@ -992,7 +992,7 @@ def main():
         allow_abbrev=False,
         help=(
             "Run MCP server discovery and send a SessionStartServerDiscovery event through the installed hooks "
-            "(used by the async Claude Code SessionStart hook)"
+            "(used by the async session-start hooks that guard install configures)"
         ),
     )
     guard_discover_parser.add_argument(
@@ -1005,7 +1005,9 @@ def main():
         "--file",
         type=str,
         default=None,
-        help="Override the Claude settings file path (default: ~/.claude/settings.json)",
+        help=(
+            "Override the hook config file path used to locate the forwarding script (default: ~/.claude/settings.json)"
+        ),
     )
     guard_discover_parser.add_argument(
         "--client",

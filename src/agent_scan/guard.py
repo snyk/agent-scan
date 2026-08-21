@@ -309,11 +309,12 @@ def _run_discover(args) -> int:
     url = getattr(args, "url", None) or os.environ.get("REMOTE_HOOKS_BASE_URL") or DEFAULT_REMOTE_URL
     machine_id = (os.environ.get("MACHINE_ID", "") or "").strip()
     config_path = Path(getattr(args, "file", None) or CLAUDE_SETTINGS_PATH)
-    script_path = config_path.parent / "hooks" / "snyk-agent-guard.sh"
+    script_name = "snyk-agent-guard.ps1" if IS_WINDOWS else "snyk-agent-guard.sh"
+    script_path = config_path.parent / "hooks" / script_name
     if not script_path.exists():
         rich.print(
             f"[bold red]Error:[/bold red] Agent Guard forwarding script not found: {script_path}. "
-            "Run guard install claude first."
+            "Run guard install first."
         )
         return 1
 
@@ -363,12 +364,16 @@ def _prepare_client_config(
             command, config_path, discover_command=discover_command
         )
     elif client == "cursor":
-        prepared_config, hooks_diff, preserved = _prepare_cursor_config(command, config_path)
+        prepared_config, hooks_diff, preserved = _prepare_cursor_config(
+            command, config_path, discover_command=discover_command
+        )
     elif client == "codex":
         if _is_codex_requirements_toml(config_path):
             prepared_content, hooks_diff = _prepare_codex_managed_config(command, config_path)
         else:
-            prepared_config, hooks_diff, preserved = _prepare_codex_config(command, config_path)
+            prepared_config, hooks_diff, preserved = _prepare_codex_config(
+                command, config_path, discover_command=discover_command
+            )
     else:
         raise ValueError(f"Unknown client: {client}")
     return prepared_config, prepared_content, hooks_diff, preserved
@@ -434,14 +439,18 @@ def _install_hooks(
         machine_id=machine_id,
     )
     discover_command = None
-    if client == "claude" and not IS_WINDOWS:
+    if not _is_codex_requirements_toml(config_path):
+        discover_script = dest_path.with_name(
+            "snyk-agent-guard-discover.ps1" if IS_WINDOWS else "snyk-agent-guard-discover.sh"
+        )
         discover_command = _build_discover_hook_command(
             push_key,
             url,
-            dest_path.with_name("snyk-agent-guard-discover.sh"),
+            discover_script,
             tenant_id=tenant_id,
             machine_id=machine_id,
             hook_client=hook_client,
+            config_path=config_path,
         )
     prepared_config, prepared_content, hooks_diff, preserved = _prepare_client_config(
         client,
@@ -514,17 +523,14 @@ def _prepare_claude_config(
         hooks[event] = existing
 
     if discover_command:
-        hooks["SessionStart"].append(
-            {
-                "hooks": [
-                    {
-                        "type": "command",
-                        "command": discover_command,
-                        "async": True,
-                    }
-                ]
-            }
-        )
+        discover_entry: dict = {
+            "type": "command",
+            "command": discover_command,
+            "async": True,
+        }
+        if IS_WINDOWS:
+            discover_entry["shell"] = "powershell"
+        hooks["SessionStart"].append({"hooks": [discover_entry]})
 
     for event, groups in filtered.items():
         if event not in hooks:
@@ -544,7 +550,12 @@ def _write_claude_config(settings: dict, path: Path, preserved: int) -> bool:
     return True
 
 
-def _prepare_cursor_config(command: str, path: Path) -> tuple[dict, dict, int]:
+def _prepare_cursor_config(
+    command: str,
+    path: Path,
+    *,
+    discover_command: str | None = None,
+) -> tuple[dict, dict, int]:
     """Build new Cursor config with hooks and compute diff, without writing.
 
     Returns (new_data, hooks_diff, preserved_count).
@@ -562,6 +573,9 @@ def _prepare_cursor_config(command: str, path: Path) -> tuple[dict, dict, int]:
         existing = list(filtered.get(event, []))
         existing.append({"command": command})
         hooks[event] = existing
+
+    if discover_command:
+        hooks["sessionStart"].append({"command": discover_command})
 
     for event, entries in filtered.items():
         if event not in hooks:
@@ -581,7 +595,12 @@ def _write_cursor_config(data: dict, path: Path, preserved: int) -> bool:
     return True
 
 
-def _prepare_codex_config(command: str, path: Path) -> tuple[dict, dict, int]:
+def _prepare_codex_config(
+    command: str,
+    path: Path,
+    *,
+    discover_command: str | None = None,
+) -> tuple[dict, dict, int]:
     """Build new Codex config with hooks and compute diff, without writing.
 
     Returns (new_data, hooks_diff, preserved_count).
@@ -599,6 +618,9 @@ def _prepare_codex_config(command: str, path: Path) -> tuple[dict, dict, int]:
         existing = list(filtered.get(event, []))
         existing.append({"hooks": [entry]})
         hooks[event] = existing
+
+    if discover_command:
+        hooks["SessionStart"].append({"hooks": [{"type": "command", "command": discover_command, "async": True}]})
 
     for event, groups in filtered.items():
         if event not in hooks:
@@ -1479,11 +1501,22 @@ def _build_discover_hook_command(
     push_key: str,
     url: str,
     script_path: Path,
-    *,
     hook_client: str,
+    *,
+    config_path: Path,
     tenant_id: str = "",
     machine_id: str = "",
 ) -> str:
+    if IS_WINDOWS:
+        return _build_discover_hook_command_powershell(
+            push_key,
+            url,
+            script_path,
+            hook_client,
+            config_path=config_path,
+            tenant_id=tenant_id,
+            machine_id=machine_id,
+        )
     parts = [
         f"PUSH_KEY={_shell_quote(push_key)}",
         f"REMOTE_HOOKS_BASE_URL={_shell_quote(url)}",
@@ -1497,7 +1530,29 @@ def _build_discover_hook_command(
         parts.append(f"AGENT_SCAN_BIN={_shell_quote(agent_scan_bin)}")
     parts.append(f"bash {_shell_quote(script_path.as_posix())}")
     parts.append(f"--client {_shell_quote(hook_client)}")
+    parts.append(f"--file {_shell_quote(config_path.as_posix())}")
     return " ".join(parts)
+
+
+def _build_discover_hook_command_powershell(
+    push_key: str,
+    url: str,
+    script_path: Path,
+    hook_client: str,
+    *,
+    config_path: Path,
+    tenant_id: str = "",
+    machine_id: str = "",
+) -> str:
+    command = f"powershell -File '{script_path}' -Client {hook_client} -PushKey '{push_key}' -RemoteUrl '{url}'"
+    if machine_id:
+        escaped_machine_id = machine_id.replace("'", "''")
+        command += f" -MachineId '{escaped_machine_id}'"
+    command += f" -ConfigFile '{config_path}'"
+    agent_scan_bin = _agent_scan_bin()
+    if agent_scan_bin is not None:
+        command += f" -AgentScanBin '{agent_scan_bin}'"
+    return command
 
 
 def _build_hook_command_powershell(
@@ -1561,16 +1616,16 @@ def _copy_hook_script(config_path: Path) -> tuple[Path, bool, bool, str | None, 
     new_content = source.read_bytes().replace(b"__AGENT_SCAN_VERSION__", version_info.encode())
     new_checksum = hashlib.sha256(new_content).hexdigest()
 
+    discover_name = "snyk-agent-guard-discover.ps1" if IS_WINDOWS else "snyk-agent-guard-discover.sh"
+    discover_source = hook_pkg.joinpath(discover_name)
+    discover_dest = dest_dir / discover_name
+    discover_content = discover_source.read_bytes()
     discover_updated = False
+    if not discover_dest.exists() or discover_dest.read_bytes() != discover_content:
+        discover_dest.write_bytes(discover_content)
+        rich.print(f"[green]\u2713[/green]  Copied hook script to [dim]{discover_dest}[/dim]")
+        discover_updated = True
     if not IS_WINDOWS:
-        discover_name = "snyk-agent-guard-discover.sh"
-        discover_source = hook_pkg.joinpath(discover_name)
-        discover_dest = dest_dir / discover_name
-        discover_content = discover_source.read_bytes()
-        if not discover_dest.exists() or discover_dest.read_bytes() != discover_content:
-            discover_dest.write_bytes(discover_content)
-            rich.print(f"[green]\u2713[/green]  Copied hook script to [dim]{discover_dest}[/dim]")
-            discover_updated = True
         discover_dest.chmod(discover_dest.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
     if existed and current_checksum == new_checksum:
@@ -1585,7 +1640,7 @@ def _copy_hook_script(config_path: Path) -> tuple[Path, bool, bool, str | None, 
 def _remove_hook_script(client: str, config_path: Path) -> None:
     dest_dir = config_path.parent / "hooks"
     script_names = (
-        ["snyk-agent-guard.ps1"]
+        ["snyk-agent-guard.ps1", "snyk-agent-guard-discover.ps1"]
         if IS_WINDOWS
         else [
             "snyk-agent-guard.sh",

@@ -340,15 +340,18 @@ class TestBuildDiscoverHookCommand:
     def test_client_payload_fields_match_hook_schemas(self, client, expected_field):
         assert guard_module._HOOK_CLIENT_PROJECT_FOLDER_FIELDS[client] == expected_field
 
-    def test_builds_quoted_environment_prefix_with_agent_scan_binary(self):
+    @pytest.mark.parametrize("client", ["claude-code", "cursor", "codex"])
+    def test_builds_quoted_environment_prefix_with_agent_scan_binary(self, client):
+        config_path = Path("/x/config with spaces/settings.json")
         with patch(f"{_G}._agent_scan_bin", return_value="/opt/Snyk's bin/snyk-agent-scan"):
             command = guard_module._build_discover_hook_command(
                 "pk",
                 "https://api.snyk.io",
                 Path("/x/snyk-agent-guard-discover.sh"),
+                client,
+                config_path=config_path,
                 tenant_id="tenant",
                 machine_id="machine",
-                hook_client="claude-code",
             )
 
         assert "PUSH_KEY='pk'" in command
@@ -356,7 +359,9 @@ class TestBuildDiscoverHookCommand:
         assert "TENANT_ID='tenant'" in command
         assert "MACHINE_ID='machine'" in command
         assert "AGENT_SCAN_BIN='/opt/Snyk'\"'\"'s bin/snyk-agent-scan'" in command
-        assert command.endswith("bash '/x/snyk-agent-guard-discover.sh' --client 'claude-code'")
+        assert command.endswith(
+            f"bash '/x/snyk-agent-guard-discover.sh' --client '{client}' --file '/x/config with spaces/settings.json'"
+        )
         assert _is_agent_scan_command(command)
 
     def test_omits_agent_scan_binary_when_unresolved(self):
@@ -365,11 +370,35 @@ class TestBuildDiscoverHookCommand:
                 "pk",
                 "https://api.snyk.io",
                 Path("/x/snyk-agent-guard-discover.sh"),
-                hook_client="cursor",
+                "cursor",
+                config_path=Path("/x/hooks.json"),
             )
 
         assert "AGENT_SCAN_BIN" not in command
-        assert command.endswith("--client 'cursor'")
+        assert command.endswith("--client 'cursor' --file '/x/hooks.json'")
+
+    @pytest.mark.parametrize("client", ["claude-code", "cursor", "codex"])
+    def test_builds_powershell_command_for_each_client(self, client):
+        with (
+            patch(f"{_G}.IS_WINDOWS", True),
+            patch(f"{_G}._agent_scan_bin", return_value=r"C:\Program Files\Snyk\snyk-agent-scan.exe"),
+        ):
+            command = guard_module._build_discover_hook_command(
+                "pk",
+                "https://api.snyk.io",
+                Path(r"C:\hooks\snyk-agent-guard-discover.ps1"),
+                client,
+                config_path=Path(r"C:\config path\hooks.json"),
+                tenant_id="ignored",
+                machine_id="machine's-id",
+            )
+
+        assert command == (
+            rf"powershell -File 'C:\hooks\snyk-agent-guard-discover.ps1' -Client {client} "
+            "-PushKey 'pk' -RemoteUrl 'https://api.snyk.io' -MachineId 'machine''s-id' "
+            r"-ConfigFile 'C:\config path\hooks.json' "
+            r"-AgentScanBin 'C:\Program Files\Snyk\snyk-agent-scan.exe'"
+        )
 
 
 class TestPrepareClaudeDiscoveryHook:
@@ -400,6 +429,25 @@ class TestPrepareClaudeDiscoveryHook:
 
         assert all(len(settings["hooks"][event]) == 1 for event in CLAUDE_HOOK_EVENTS)
 
+    def test_windows_discovery_entry_uses_powershell_shell(self, tmp_path):
+        with patch(f"{_G}.IS_WINDOWS", True):
+            settings, _, _ = _prepare_claude_config(
+                AGENT_SCAN_CMD,
+                tmp_path / "settings.json",
+                discover_command=self.discover_command,
+            )
+
+        assert settings["hooks"]["SessionStart"][1] == {
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": self.discover_command,
+                    "async": True,
+                    "shell": "powershell",
+                }
+            ]
+        }
+
     def test_reprepare_is_idempotent(self, tmp_path):
         path = tmp_path / "settings.json"
         settings, _, preserved = _prepare_claude_config(
@@ -416,6 +464,120 @@ class TestPrepareClaudeDiscoveryHook:
         )
 
         assert diff == {"added": {}, "modified": {}, "removed": {}}
+
+
+class TestPrepareCursorDiscoveryHook:
+    discover_command = (
+        "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' bash '/x/snyk-agent-guard-discover.sh'"
+    )
+
+    def test_adds_flat_session_start_entry(self, tmp_path):
+        data, _, _ = _prepare_cursor_config(
+            AGENT_SCAN_CMD,
+            tmp_path / "hooks.json",
+            discover_command=self.discover_command,
+        )
+
+        assert data["hooks"]["sessionStart"][1] == {"command": self.discover_command}
+
+    def test_none_preserves_current_hook_shape(self, tmp_path):
+        data, _, _ = _prepare_cursor_config(
+            AGENT_SCAN_CMD,
+            tmp_path / "hooks.json",
+            discover_command=None,
+        )
+
+        assert all(len(data["hooks"][event]) == 1 for event in CURSOR_HOOK_EVENTS)
+
+    def test_reprepare_is_idempotent(self, tmp_path):
+        path = tmp_path / "hooks.json"
+        data, _, preserved = _prepare_cursor_config(
+            AGENT_SCAN_CMD,
+            path,
+            discover_command=self.discover_command,
+        )
+        _write_cursor_config(data, path, preserved)
+
+        _, diff, _ = _prepare_cursor_config(
+            AGENT_SCAN_CMD,
+            path,
+            discover_command=self.discover_command,
+        )
+
+        assert diff == {"added": {}, "modified": {}, "removed": {}}
+
+    def test_uninstall_removes_discovery_entry(self, tmp_path):
+        path = tmp_path / "hooks.json"
+        data, _, preserved = _prepare_cursor_config(
+            AGENT_SCAN_CMD,
+            path,
+            discover_command=self.discover_command,
+        )
+        _write_cursor_config(data, path, preserved)
+
+        _uninstall_cursor(path)
+
+        assert not any(
+            self.discover_command == entry.get("command")
+            for entries in json.loads(path.read_text())["hooks"].values()
+            for entry in entries
+        )
+
+
+class TestPrepareCodexDiscoveryHook:
+    discover_command = (
+        "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' bash '/x/snyk-agent-guard-discover.sh'"
+    )
+
+    def test_adds_async_matcherless_session_start_group(self, tmp_path):
+        data, _, _ = _prepare_codex_config(
+            AGENT_SCAN_CMD,
+            tmp_path / "hooks.json",
+            discover_command=self.discover_command,
+        )
+
+        assert data["hooks"]["SessionStart"][1] == {
+            "hooks": [{"type": "command", "command": self.discover_command, "async": True}]
+        }
+
+    def test_none_preserves_current_hook_shape(self, tmp_path):
+        data, _, _ = _prepare_codex_config(
+            AGENT_SCAN_CMD,
+            tmp_path / "hooks.json",
+            discover_command=None,
+        )
+
+        assert all(len(data["hooks"][event]) == 1 for event in CODEX_HOOK_EVENTS)
+
+    def test_reprepare_is_idempotent(self, tmp_path):
+        path = tmp_path / "hooks.json"
+        data, _, preserved = _prepare_codex_config(
+            AGENT_SCAN_CMD,
+            path,
+            discover_command=self.discover_command,
+        )
+        _write_codex_config(data, path, preserved)
+
+        _, diff, _ = _prepare_codex_config(
+            AGENT_SCAN_CMD,
+            path,
+            discover_command=self.discover_command,
+        )
+
+        assert diff == {"added": {}, "modified": {}, "removed": {}}
+
+    def test_uninstall_removes_discovery_entry(self, tmp_path):
+        path = tmp_path / "hooks.json"
+        data, _, preserved = _prepare_codex_config(
+            AGENT_SCAN_CMD,
+            path,
+            discover_command=self.discover_command,
+        )
+        _write_codex_config(data, path, preserved)
+
+        _uninstall_codex(path)
+
+        assert "hooks" not in json.loads(path.read_text())
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX discovery script")
@@ -486,6 +648,43 @@ class TestDiscoveryHookScriptFiles:
         _run_uninstall(SimpleNamespace(client="claude", file=str(config), managed=False))
 
         assert "hooks" not in json.loads(config.read_text())
+        assert not main_script.exists()
+        assert not discover_script.exists()
+
+
+class TestWindowsDiscoveryHookScriptFiles:
+    def test_copy_writes_discovery_script_next_to_forwarder(self, tmp_path):
+        config = tmp_path / "settings.json"
+
+        with patch(f"{_G}.IS_WINDOWS", True):
+            main_script, *_ = guard_module._copy_hook_script(config)
+
+        discover_script = main_script.with_name("snyk-agent-guard-discover.ps1")
+        assert (
+            discover_script.read_bytes()
+            == (Path(guard_module.__file__).parent / "hooks" / "snyk-agent-guard-discover.ps1").read_bytes()
+        )
+
+    def test_copy_restores_missing_script_and_reports_update(self, tmp_path):
+        config = tmp_path / "settings.json"
+        with patch(f"{_G}.IS_WINDOWS", True):
+            main_script, *_ = guard_module._copy_hook_script(config)
+            discover_script = main_script.with_name("snyk-agent-guard-discover.ps1")
+            discover_script.unlink()
+
+            _, _, was_updated, *_ = guard_module._copy_hook_script(config)
+
+        assert discover_script.exists()
+        assert was_updated is True
+
+    def test_remove_deletes_both_scripts(self, tmp_path):
+        config = tmp_path / "settings.json"
+        with patch(f"{_G}.IS_WINDOWS", True):
+            main_script, *_ = guard_module._copy_hook_script(config)
+            discover_script = main_script.with_name("snyk-agent-guard-discover.ps1")
+
+            guard_module._remove_hook_script("claude", config)
+
         assert not main_script.exists()
         assert not discover_script.exists()
 
@@ -2033,20 +2232,38 @@ class TestInstallHooksOrchestration:
             "tenant_id": "tid-1",
             "machine_id": "machine-42",
             "hook_client": "claude-code",
+            "config_path": tmp_path / "config.json",
         }
         assert ctx["prep_claude"].call_args.kwargs["discover_command"] == "discover-cmd"
 
-    def test_cursor_does_not_build_discovery_hook(self, ctx, tmp_path):
-        self._call(tmp_path, client="cursor", hook_client="cursor")
+    def test_cursor_builds_discovery_hook(self, ctx, tmp_path):
+        config = self._call(tmp_path, client="cursor", hook_client="cursor")
 
-        ctx["build_discover"].assert_not_called()
+        ctx["build_discover"].assert_called_once()
+        assert ctx["build_discover"].call_args.kwargs["config_path"] == config
+        assert ctx["prep_cursor"].call_args.kwargs["discover_command"] == "discover-cmd"
 
-    def test_windows_claude_does_not_build_discovery_hook(self, ctx, tmp_path):
+    def test_windows_builds_discovery_hook(self, ctx, tmp_path):
         with patch(f"{_G}.IS_WINDOWS", True):
             self._call(tmp_path, client="claude")
 
+        ctx["build_discover"].assert_called_once()
+        ctx["dest"].with_name.assert_called_once_with("snyk-agent-guard-discover.ps1")
+        assert ctx["prep_claude"].call_args.kwargs["discover_command"] == "discover-cmd"
+
+    def test_codex_json_builds_discovery_hook(self, ctx, tmp_path):
+        config = self._call(tmp_path, client="codex", hook_client="codex")
+
+        ctx["build_discover"].assert_called_once()
+        assert ctx["build_discover"].call_args.kwargs["config_path"] == config
+        assert ctx["prep_codex"].call_args.kwargs["discover_command"] == "discover-cmd"
+
+    def test_codex_managed_does_not_build_discovery_hook(self, ctx, tmp_path):
+        ctx["is_toml"].return_value = True
+
+        self._call(tmp_path, client="codex", hook_client="codex")
+
         ctx["build_discover"].assert_not_called()
-        assert ctx["prep_claude"].call_args.kwargs["discover_command"] is None
 
     def test_returns_installed_script_path(self, ctx, tmp_path):
         result = _install_hooks(
@@ -2769,8 +2986,12 @@ class TestGuardDiscoverCli:
         assert run.call_args.args[0].client == agent
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only Claude discovery hook")
 class TestRunDiscover:
+    @pytest.fixture(autouse=True)
+    def _posix_mode(self):
+        with patch(f"{_G}.IS_WINDOWS", False):
+            yield
+
     @staticmethod
     def _args(config: Path, url=None, **overrides):
         values = {
@@ -2960,6 +3181,37 @@ class TestRunDiscover:
 
         assert result == 0
         stdin.read.assert_not_called()
+
+    def test_windows_resolves_powershell_forwarder(self, tmp_path, monkeypatch):
+        config = tmp_path / "hooks.json"
+        script = config.parent / "hooks" / "snyk-agent-guard.ps1"
+        script.parent.mkdir(parents=True)
+        script.write_text("# forwarder\n")
+        monkeypatch.setenv("PUSH_KEY", "env-pk")
+        monkeypatch.setenv("REMOTE_HOOKS_BASE_URL", "https://env-hooks.example")
+        monkeypatch.setenv("MACHINE_ID", "env-machine")
+        with (
+            patch(f"{_G}.IS_WINDOWS", True),
+            patch(f"{_G}._discover_servers_payload", return_value=[]),
+            patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")) as run,
+            patch(f"{_G}.rich"),
+        ):
+            result = guard_module.run_guard(self._args(config, client="codex"))
+
+        assert result == 0
+        assert run.call_args.args[0] == [
+            "powershell",
+            "-File",
+            str(script),
+            "-Client",
+            "codex",
+            "-PushKey",
+            "env-pk",
+            "-RemoteUrl",
+            "https://env-hooks.example",
+            "-MachineId",
+            "env-machine",
+        ]
 
 
 class TestRunInstallSendsServersDiscovered:
