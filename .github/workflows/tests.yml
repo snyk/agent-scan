@@ -62,3 +62,16 @@ jobs:
           name: agent-scan-${{ matrix.os }}.whl
           path: dist/*.whl
           if-no-files-found: error
+  sandbox-tests:
+    runs-on: ubuntu-latest
+    env:
+      AGENT_SCAN_ENVIRONMENT: ci
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the latest version of uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+      - name: Run sandbox tests
+        run: uv run --frozen make test tests/e2e/test_sandbox_images.py tests/e2e/test_sandbox_scan.py ARGS="-v"
