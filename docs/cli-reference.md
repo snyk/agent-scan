@@ -47,6 +47,7 @@ Unless noted, flags apply to the standalone CLI. When no subcommand is given, `s
 | `help` | Print top-level help |
 | `evo` | Interactive flow: mint a push key, scan, upload to Snyk Evo, and revoke the key |
 | `guard` | Install, uninstall, or show the status of Agent Guard hooks |
+| `sandbox-scan` | Inspect a server inside an isolated Docker sandbox (discovery only, no vulnerability analysis yet) |
 
 ### Positional arguments
 
@@ -426,6 +427,35 @@ snyk-agent-scan guard uninstall {claude,cursor,codex,all} [OPTIONS]
 | `TENANT_ID` | Tenant UUID alternative to `--tenant-id` |
 | `SNYK_TOKEN` | Required to mint/revoke push keys and verify that Guard is enabled for the tenant |
 
+## `sandbox-scan`
+
+```bash
+snyk-agent-scan sandbox-scan TARGET [OPTIONS]
+```
+
+Inspects an MCP server inside an ephemeral, network-restricted Docker sandbox,
+for servers you don't want to execute directly on your own machine. **This
+reports tool/prompt/resource discovery only for now — no vulnerability
+findings**: the sandboxed invocation runs `inspect` internally, not `scan`.
+See [Sandboxed scanning](sandboxed-scanning.md) for the full write-up,
+including what targets are and aren't supported yet.
+
+| Argument/Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `TARGET` | string | — | A direct-scan target (`npm:pkg@version`, `pypi:pkg@version`) or a path relative to `--input-dir`. |
+| `--input-dir DIR` | string | — | Host directory to mount read-only at `/scan-input` inside the sandbox. Required when `TARGET` is not a direct-scan target. |
+| `--build` | boolean | `false` | (Re)build the sandbox images before running. Requires a source checkout of `agent-scan` — not supported yet from a pip install or the packaged binary. |
+
+```bash
+# A registry-resolved package
+snyk-agent-scan sandbox-scan npm:some-mcp-server@1.2.3 --build
+
+# Your own server source
+snyk-agent-scan sandbox-scan mcp.json --input-dir ./my-server --build
+```
+
+Output is always JSON; there is no rich-text mode for `sandbox-scan`.
+
 ## Environment variables
 
 | Variable | Used by | Description |
@@ -562,4 +592,5 @@ snyk-agent-scan guard uninstall all
 - [Risk reference](risks.md) — v0.6+ security risk indicators and scores
 - [Failure codes](failure-codes.md) — operational discovery, inspection, and analysis failures
 - [JSON output](json-output.md) — versioned programmatic output schemas
+- [Sandboxed scanning](sandboxed-scanning.md) — `sandbox-scan`'s Docker isolation model and current limitations
 - [Developer guide — entrypoints](https://github.com/snyk/agent-scan-dev-guide/blob/main/agent-scan-entrypoints-and-release.md) — standalone, Snyk CLI, and MDM paths

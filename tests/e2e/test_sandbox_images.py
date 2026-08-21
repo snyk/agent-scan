@@ -5,10 +5,15 @@ import subprocess
 import threading
 import urllib.error
 import urllib.request
+import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
+
+import pytest
 
 from agent_scan.sandbox_runner import PROXY_IMAGE, PROXY_PORT, SANDBOX_IMAGE
 from tests.e2e.conftest import requires_docker
+
+pytestmark = pytest.mark.sandbox
 
 
 @requires_docker
@@ -62,6 +67,10 @@ def test_proxy_allows_allowlisted_host_and_blocks_others(sandbox_images):
     allowed_port = allowed_server.server_address[1]
     denied_port = denied_server.server_address[1]
 
+    # Suffixed with a random ID so two concurrent test runs (or a leftover container
+    # from a crashed prior run) on the same host don't collide on a fixed name.
+    container_name = f"agent-scan-sandbox-proxy-test-{uuid.uuid4().hex[:8]}"
+
     subprocess.run(
         [
             "docker",
@@ -69,7 +78,7 @@ def test_proxy_allows_allowlisted_host_and_blocks_others(sandbox_images):
             "-d",
             "--rm",
             "--name",
-            "agent-scan-sandbox-proxy-test",
+            container_name,
             "-p",
             "127.0.0.1::8888",
             "--add-host",
@@ -84,7 +93,7 @@ def test_proxy_allows_allowlisted_host_and_blocks_others(sandbox_images):
     )
     try:
         port_out = subprocess.run(
-            ["docker", "port", "agent-scan-sandbox-proxy-test", str(PROXY_PORT)],
+            ["docker", "port", container_name, str(PROXY_PORT)],
             capture_output=True,
             text=True,
             check=True,
@@ -108,6 +117,6 @@ def test_proxy_allows_allowlisted_host_and_blocks_others(sandbox_images):
         assert _connect_status(host_port, f"registry.npmjs.org:{allowed_port}") == 200
         assert _connect_status(host_port, f"denied.test:{denied_port}") == 403
     finally:
-        subprocess.run(["docker", "rm", "-f", "agent-scan-sandbox-proxy-test"], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", container_name], capture_output=True)
         allowed_server.shutdown()
         denied_server.shutdown()

@@ -30,7 +30,10 @@ coverage:
 
 ci:
 	$(MAKE) binary
-	AGENT_SCAN_ENVIRONMENT=ci uv run --extra test -m pytest -vv --runner=binary $(PYTEST_PATH_ARGS) $(ARGS)
+	# Exclude the Docker-gated "sandbox" marker: those tests run in the dedicated
+	# sandbox-tests CI job instead, since the main test matrix includes Windows,
+	# where the Docker daemon exists but can't build a Linux-based image.
+	AGENT_SCAN_ENVIRONMENT=ci uv run --extra test -m pytest -vv --runner=binary -m "not sandbox" $(PYTEST_PATH_ARGS) $(ARGS)
 
 pre-commit:
 	uv sync

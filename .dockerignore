@@ -1,0 +1,30 @@
+# Build context for sandbox/Dockerfile and sandbox/proxy/Dockerfile is the repo
+# root (needed so the sandbox image can COPY pyproject.toml/uv.lock/README.md/src
+# from there). Exclude everything that isn't needed inside either image to keep
+# the context small -- without this it's ~116MB, dominated by .venv/, .git/, and
+# local tooling working directories.
+
+.git/
+.venv/
+.claude/
+.superpowers/
+
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+htmlcov/
+.coverage
+dist/
+build/
+*.egg-info/
+
+.worktrees/
+
+# IDE/OS cruft
+.DS_Store
+.idea/
+.vscode/

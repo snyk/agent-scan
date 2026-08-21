@@ -79,6 +79,9 @@ addopts = [
     "--cov-report=term-missing",
     "--cov-report=html",
 ]
+markers = [
+    "sandbox: Docker-gated execution-sandbox tests, run only in the dedicated CI job",
+]
 
 
 [tool.ruff]

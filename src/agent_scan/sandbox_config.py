@@ -34,7 +34,10 @@ def _inject_proxy_env(server: StdioServer, proxy_url: str, no_proxy: str) -> Std
         "https_proxy": proxy_url,
         "no_proxy": no_proxy,
     }
-    merged_env = {**proxy_vars, **(server.env or {})}
+    # The injected proxy vars must win on collision: a client-supplied ``env`` that
+    # sets its own HTTP_PROXY/HTTPS_PROXY/NO_PROXY (accidentally or maliciously)
+    # must not be able to override the containment control by being spread last.
+    merged_env = {**(server.env or {}), **proxy_vars}
     return server.model_copy(update={"env": merged_env})
 
 
@@ -52,6 +55,11 @@ def build_sandbox_config(
     client-supplied config file.
     """
     if is_direct_scan(target):
+        if target.startswith(("oci:", "nuget:", "mcpb:")):
+            raise ValueError(
+                "oci:/nuget:/mcpb: targets aren't supported by sandbox-scan yet "
+                "(oci: needs nested Docker, nuget:/mcpb: aren't implemented, in this phase)"
+            )
         name, server = direct_scan_to_server_config(target)
         if isinstance(server, StdioServer):
             server = _inject_proxy_env(server, proxy_url, no_proxy)
@@ -61,7 +69,15 @@ def build_sandbox_config(
         raise ValueError("input_dir is required when target is not a direct-scan prefix (npm:/pypi:)")
 
     config_path = input_dir / target
-    config = json.loads(config_path.read_text())
+    resolved_config_path = config_path.resolve()
+    resolved_input_dir = input_dir.resolve()
+    if not resolved_config_path.is_relative_to(resolved_input_dir):
+        raise ValueError(f"target must resolve to a path inside input_dir, got {resolved_config_path}")
+
+    try:
+        config = json.loads(resolved_config_path.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        raise ValueError(f"could not read config at {resolved_config_path}: {e}") from e
     servers = config.get("mcpServers", {})
     for name, raw in servers.items():
         if "command" in raw:

@@ -20,3 +20,4 @@ This is the documentation for [Agent Scan](https://github.com/snyk/agent-scan). 
 - **[JSON output](json-output.md#agent-scan-v06-and-later)** — The `2026-07-10` response schema and programmatic parsing.
 - **[Risk reference](risks.md)** — Security risk indicators, scores, and evidence fields for MCP servers and skills.
 - **[Failure codes](failure-codes.md)** — Operational discovery, inspection, and analysis failures.
+- **[Sandboxed scanning](sandboxed-scanning.md)** — Running `sandbox-scan` inside an isolated Docker sandbox, and its current limitations.

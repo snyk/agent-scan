@@ -1,8 +1,11 @@
 import contextlib
 import json
+import subprocess
 from unittest.mock import MagicMock, patch
 
-from agent_scan.sandbox_runner import PROXY_IMAGE, SANDBOX_IMAGE, run_sandboxed_scan
+import pytest
+
+from agent_scan.sandbox_runner import PROXY_IMAGE, SANDBOX_IMAGE, build_images, run_sandboxed_scan
 
 
 def _fake_completed_process(returncode=0, stdout="", stderr=""):
@@ -104,3 +107,40 @@ def test_run_sandboxed_scan_handles_non_json_stdout(mock_run):
     assert result.exit_code == 1
     assert result.results is None
     assert result.stdout == "not json"
+
+
+def test_build_images_outside_source_checkout_raises_clear_error(tmp_path):
+    with pytest.raises(RuntimeError, match="requires a source checkout of agent-scan"):
+        build_images(tmp_path)
+
+
+@patch("agent_scan.sandbox_runner.subprocess.run")
+def test_build_images_surfaces_docker_stderr_on_failure(mock_run, tmp_path):
+    (tmp_path / "sandbox").mkdir()
+    (tmp_path / "sandbox" / "Dockerfile").write_text("FROM scratch\n")
+    mock_run.side_effect = subprocess.CalledProcessError(
+        returncode=1, cmd=["docker", "build"], output="", stderr="no space left on device"
+    )
+
+    with pytest.raises(RuntimeError, match="no space left on device"):
+        build_images(tmp_path)
+
+
+@patch("agent_scan.sandbox_runner.subprocess.run")
+def test_run_sandboxed_scan_surfaces_docker_stderr_on_setup_failure(mock_run):
+    mock_run.side_effect = subprocess.CalledProcessError(
+        returncode=1, cmd=["docker", "network", "create"], output="", stderr="network already exists"
+    )
+
+    with pytest.raises(RuntimeError, match="network already exists"):
+        run_sandboxed_scan("npm:some-mcp-server@1.0.0")
+
+
+@patch("agent_scan.sandbox_runner.subprocess.run")
+def test_run_sandboxed_scan_passes_timeout_to_scan_container(mock_run):
+    mock_run.return_value = _fake_completed_process(stdout=json.dumps({"ok": True}))
+
+    run_sandboxed_scan("npm:some-mcp-server@1.0.0")
+
+    scan_call = next(call for call in mock_run.call_args_list if SANDBOX_IMAGE in call.args[0])
+    assert scan_call.kwargs.get("timeout") == 300

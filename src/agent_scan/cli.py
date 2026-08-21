@@ -895,11 +895,27 @@ def run_sandbox_scan_command(args) -> int:
 
     from agent_scan.sandbox_runner import DEFAULT_REPO_ROOT, build_images, run_sandboxed_scan
 
-    if args.build:
-        build_images(DEFAULT_REPO_ROOT)
+    print(
+        "Note: sandbox-scan reports discovery only (no vulnerability findings) in this release.",
+        file=sys.stderr,
+    )
 
     input_dir = Path(args.input_dir).resolve() if args.input_dir else None
-    result = run_sandboxed_scan(args.target, input_dir=input_dir)
+    if input_dir is not None and not input_dir.is_dir():
+        rich.print(f"[bold red]error[/bold red]: --input-dir {input_dir} is not a directory", file=sys.stderr)
+        return CLI_USAGE_ERROR_EXIT_CODE
+
+    try:
+        if args.build:
+            build_images(DEFAULT_REPO_ROOT)
+        result = run_sandboxed_scan(args.target, input_dir=input_dir)
+    except RuntimeError as e:
+        # build_images()/run_sandboxed_scan() wrap subprocess.CalledProcessError into a
+        # RuntimeError that includes Docker's own stderr -- surface it as-is rather than
+        # letting a bare traceback hide the actual Docker failure.
+        rich.print(f"[bold red]sandbox-scan failed[/bold red]: {e}", file=sys.stderr)
+        return CLI_USAGE_ERROR_EXIT_CODE
+
     if result.stdout:
         print(result.stdout)
     if result.stderr:
@@ -1087,12 +1103,14 @@ def main():
     sandbox_scan_parser = subparsers.add_parser(
         "sandbox-scan",
         allow_abbrev=False,
-        help="Scan a server inside an isolated, network-restricted Docker sandbox",
+        help="Inspect a server (tools/prompts/resources only, no vulnerability analysis yet) inside an isolated Docker sandbox",
         description=(
-            "Run a scan inside an ephemeral Docker sandbox: a direct-scan target "
-            "(npm:/pypi:) or a client-mounted source tree plus its mcp.json, with "
-            "egress restricted to Snyk's API and the package registries needed to "
-            "resolve npm:/pypi: targets. Output is always JSON."
+            "Run tool/prompt/resource discovery inside an ephemeral Docker sandbox: a "
+            "direct-scan target (npm:/pypi:) or a client-mounted source tree plus its "
+            "mcp.json, with egress restricted to Snyk's API and the package registries "
+            "needed to resolve npm:/pypi: targets. This reports tool/prompt/resource "
+            "discovery only for now -- no vulnerability findings. See "
+            "docs/sandboxed-scanning.md. Output is always JSON."
         ),
     )
     sandbox_scan_parser.add_argument(

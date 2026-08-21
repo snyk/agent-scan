@@ -18,8 +18,10 @@ Real vulnerability findings for sandboxed scans are a planned follow-on.
   same resolution `snyk-agent-scan scan npm:...` already does, run inside the
   sandbox instead of on the host.
 - **Your own source**: a directory containing your server's code plus an
-  `mcp.json` describing how to launch it (the same `command`/`args`/`cwd`/`env`
-  shape any MCP config file uses).
+  `mcp.json` describing how to launch it (the same `command`/`args`/`env`
+  shape any MCP config file uses). There is no `cwd` support: `StdioServer`
+  has no `cwd` field, so launch commands must reference paths under
+  `/scan-input` directly (absolute paths), not relative ones.
 
 ## What it doesn't cover (yet)
 
@@ -44,7 +46,9 @@ snyk-agent-scan sandbox-scan mcp.json --input-dir ./my-server --build
 
 `--input-dir` is mounted read-only at `/scan-input` inside the sandbox; `TARGET`
 is a path relative to it. `--build` (re)builds the sandbox images first — omit
-it on repeat runs once they're built.
+it on repeat runs once they're built. `--build` requires a source checkout of
+`agent-scan` (it builds from `sandbox/Dockerfile` in this repo) — it isn't
+supported yet from a pip install or the packaged binary.
 
 Output is JSON, keyed by the literal in-container path
 `/scan-config/mcp.generated.json` (not a real path on your machine) — the same

@@ -15,8 +15,12 @@ import subprocess
 import sys
 import uuid
 
+import pytest
+
 from agent_scan.sandbox_runner import PROXY_IMAGE, SANDBOX_IMAGE, run_sandboxed_scan
 from tests.e2e.conftest import REPO_ROOT, requires_docker
+
+pytestmark = pytest.mark.sandbox
 
 CONFIG_MOUNT_PATH = "/scan-config/mcp.generated.json"
 
@@ -102,6 +106,28 @@ def test_scan_container_has_no_direct_network_egress_without_proxy(sandbox_image
         )
         subprocess.run(["docker", "network", "connect", network, proxy_name], check=True, capture_output=True)
 
+        # Probe both a DNS-based fetch (proves DNS is blocked) and a raw socket
+        # connection to a hardcoded IP literal (proves IP-level connectivity is
+        # ALSO blocked, not just DNS resolution). A malicious server could hardcode
+        # an IP to bypass DNS entirely, so DNS failure alone doesn't prove
+        # containment -- both must fail for the ``--internal`` network property to
+        # actually hold.
+        probe_script = (
+            "import socket, sys, urllib.request\n"
+            "dns_error = None\n"
+            "ip_error = None\n"
+            "try:\n"
+            "    urllib.request.urlopen('http://example.com', timeout=5)\n"
+            "except Exception as e:\n"
+            "    dns_error = repr(e)\n"
+            "try:\n"
+            "    socket.create_connection(('1.1.1.1', 443), timeout=5)\n"
+            "except Exception as e:\n"
+            "    ip_error = repr(e)\n"
+            "print('DNS_ERROR=' + str(dns_error))\n"
+            "print('IP_ERROR=' + str(ip_error))\n"
+            "sys.exit(0 if (dns_error and ip_error) else 1)\n"
+        )
         proc = subprocess.run(
             [
                 "docker",
@@ -113,7 +139,7 @@ def test_scan_container_has_no_direct_network_egress_without_proxy(sandbox_image
                 "python3",
                 SANDBOX_IMAGE,
                 "-c",
-                "import urllib.request; urllib.request.urlopen('http://example.com', timeout=5)",
+                probe_script,
             ],
             capture_output=True,
             text=True,
@@ -123,13 +149,18 @@ def test_scan_container_has_no_direct_network_egress_without_proxy(sandbox_image
         subprocess.run(["docker", "rm", "-f", proxy_name], capture_output=True)
         subprocess.run(["docker", "network", "rm", network], capture_output=True)
 
-    assert proc.returncode != 0, (
-        f"expected the unproxied fetch to fail because the internal network has no "
-        f"direct route out, but it succeeded. stdout: {proc.stdout!r}"
+    assert proc.returncode == 0, (
+        f"expected both the unproxied DNS-based fetch and the raw IP-literal connection "
+        f"to fail because the internal network has no direct route out, but at least one "
+        f"succeeded. stdout: {proc.stdout!r}, stderr: {proc.stderr!r}"
     )
-    assert "Temporary failure in name resolution" in proc.stderr, (
+    assert "Temporary failure in name resolution" in proc.stdout, (
         f"expected a DNS-resolution failure (the signature of an --internal network "
-        f"with no egress route), got a different failure: {proc.stderr!r}"
+        f"with no egress route), got: {proc.stdout!r}"
+    )
+    assert "DNS_ERROR=None" not in proc.stdout, f"expected the DNS-based fetch to fail: {proc.stdout!r}"
+    assert "IP_ERROR=None" not in proc.stdout, (
+        f"expected the raw IP-literal connection to also fail (not just DNS), got: {proc.stdout!r}"
     )
 
 

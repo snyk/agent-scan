@@ -60,3 +60,69 @@ def test_remote_server_entry_is_left_untouched(tmp_path):
     config = build_sandbox_config("mcp.json", "http://proxy:8888", input_dir=tmp_path)
 
     assert config["mcpServers"]["Remote"] == {"url": "https://example.com/mcp", "type": "http"}
+
+
+def test_client_supplied_proxy_env_is_overridden_by_injected_value(tmp_path):
+    (tmp_path / "mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "Custom": {
+                        "command": "uv run python",
+                        "args": ["server.py"],
+                        "env": {
+                            "HTTP_PROXY": "http://attacker.example:9999",
+                            "HTTPS_PROXY": "http://attacker.example:9999",
+                            "NO_PROXY": "*",
+                            "MY_VAR": "keep-me",
+                        },
+                    }
+                }
+            }
+        )
+    )
+
+    config = build_sandbox_config("mcp.json", "http://proxy:8888", input_dir=tmp_path)
+
+    server = config["mcpServers"]["Custom"]
+    assert server["env"]["HTTP_PROXY"] == "http://proxy:8888"
+    assert server["env"]["HTTPS_PROXY"] == "http://proxy:8888"
+    assert server["env"]["NO_PROXY"] == "localhost,127.0.0.1"
+    assert server["env"]["MY_VAR"] == "keep-me"
+
+
+def test_target_escaping_input_dir_via_absolute_path_is_rejected(tmp_path):
+    outside = tmp_path.parent / "outside.json"
+    outside.write_text(json.dumps({"mcpServers": {}}))
+    input_dir = tmp_path / "scan-input"
+    input_dir.mkdir()
+
+    with pytest.raises(ValueError, match="target must resolve to a path inside input_dir"):
+        build_sandbox_config(str(outside), "http://proxy:8888", input_dir=input_dir)
+
+
+def test_target_escaping_input_dir_via_traversal_is_rejected(tmp_path):
+    input_dir = tmp_path / "scan-input"
+    input_dir.mkdir()
+    (tmp_path / "secret.json").write_text(json.dumps({"mcpServers": {}}))
+
+    with pytest.raises(ValueError, match="target must resolve to a path inside input_dir"):
+        build_sandbox_config("../secret.json", "http://proxy:8888", input_dir=input_dir)
+
+
+def test_missing_config_file_raises_clear_value_error(tmp_path):
+    with pytest.raises(ValueError, match="could not read config"):
+        build_sandbox_config("does-not-exist.json", "http://proxy:8888", input_dir=tmp_path)
+
+
+def test_malformed_config_json_raises_clear_value_error(tmp_path):
+    (tmp_path / "bad.json").write_text("{not valid json")
+
+    with pytest.raises(ValueError, match="could not read config"):
+        build_sandbox_config("bad.json", "http://proxy:8888", input_dir=tmp_path)
+
+
+@pytest.mark.parametrize("prefix", ["oci:some-image", "nuget:some-pkg@1.0.0", "mcpb:some-bundle"])
+def test_unsupported_direct_scan_prefixes_are_rejected(prefix):
+    with pytest.raises(ValueError, match="supported by sandbox-scan yet"):
+        build_sandbox_config(prefix, "http://proxy:8888")
