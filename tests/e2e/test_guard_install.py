@@ -156,7 +156,7 @@ class TestGuardInstallE2E:
 
         discover_result = subprocess.run(
             [*agent_scan_cmd, "guard", "discover", "--client", "cursor", "--file", str(config_file)],
-            input=json.dumps({"workspace_roots": [str(tmp_path)]}),
+            input=json.dumps({"workspace_roots": [str(tmp_path)], "conversation_id": "e2e-conversation"}),
             capture_output=True,
             text=True,
             timeout=60,
@@ -167,7 +167,7 @@ class TestGuardInstallE2E:
         )
         session_discovery = _FakeHookServer.requests[-1]
         assert session_discovery["body"]["hook_event_name"] == "SessionStartServerDiscovery"
-        assert session_discovery["body"]["conversation_id"] == "session-start-server-discovery"
+        assert session_discovery["body"]["conversation_id"] == "e2e-conversation"
         assert "session_id" not in session_discovery["body"]
         assert isinstance(session_discovery["body"]["servers"], list)
 
@@ -220,5 +220,5 @@ class TestGuardInstallE2E:
         )
         session_discovery = _FakeHookServer.requests[-1]
         assert session_discovery["body"]["hook_event_name"] == "SessionStartServerDiscovery"
-        assert session_discovery["body"]["session_id"] == "session-start-server-discovery"
+        assert session_discovery["body"]["session_id"] == "e2e"
         assert isinstance(session_discovery["body"]["servers"], list)

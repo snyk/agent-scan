@@ -42,6 +42,11 @@ _HOOK_CLIENT_PROJECT_FOLDER_FIELDS = {
     "cursor": "workspace_roots",
     "codex": "cwd",
 }
+_HOOK_CLIENT_SESSION_FIELDS = {
+    "claude-code": "session_id",
+    "cursor": "conversation_id",
+    "codex": "session_id",
+}
 DEFAULT_REMOTE_URL = "https://api.snyk.io"
 _DETECTION_RE = re.compile(
     r"PUSH_KEY=.*snyk-agent-guard"
@@ -319,16 +324,29 @@ def _run_discover(args) -> int:
         return 1
 
     project_folders: list[str] = []
+    session_id = ""
     hook_client = getattr(args, "client", None)
     project_folder_payload_field = _HOOK_CLIENT_PROJECT_FOLDER_FIELDS.get(hook_client) if hook_client else None
-    if project_folder_payload_field:
+    session_payload_field = _HOOK_CLIENT_SESSION_FIELDS.get(hook_client) if hook_client else None
+    if project_folder_payload_field or session_payload_field:
         try:
             hook_payload = json.loads(sys.stdin.read(1024 * 1024))
-            project_folder = hook_payload.get(project_folder_payload_field) if isinstance(hook_payload, dict) else None
+            project_folder = (
+                hook_payload.get(project_folder_payload_field)
+                if isinstance(hook_payload, dict) and project_folder_payload_field
+                else None
+            )
             if isinstance(project_folder, str) and project_folder:
                 project_folders.append(project_folder)
             elif isinstance(project_folder, list):
                 project_folders.extend(folder for folder in project_folder if isinstance(folder, str) and folder)
+            raw_session_id = (
+                hook_payload.get(session_payload_field)
+                if isinstance(hook_payload, dict) and session_payload_field
+                else None
+            )
+            if isinstance(raw_session_id, str) and raw_session_id:
+                session_id = raw_session_id
         except Exception:
             pass
 
@@ -339,7 +357,7 @@ def _run_discover(args) -> int:
         script_path,
         machine_id,
         event_name="SessionStartServerDiscovery",
-        session_marker="session-start-server-discovery",
+        session_marker=session_id or "session-start-server-discovery",
         project_folders=project_folders,
     )
     return 0 if success else 1

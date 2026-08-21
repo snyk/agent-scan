@@ -3086,7 +3086,7 @@ class TestRunDiscover:
         with (
             patch.object(sys, "stdin", stdin),
             patch(f"{_G}._discover_servers_payload", discover),
-            patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")),
+            patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")) as run,
             patch(f"{_G}.rich"),
         ):
             result = guard_module.run_guard(
@@ -3099,18 +3099,21 @@ class TestRunDiscover:
         assert result == 0
         stdin.read.assert_called_once_with(1024 * 1024)
         discover.assert_called_once_with(["/session/project"])
+        assert json.loads(run.call_args.kwargs["input"])["session_id"] == "session"
 
     def test_hook_stdin_reads_cwd_for_codex(self, tmp_path, monkeypatch):
         config = tmp_path / "settings.json"
         self._write_forwarder(config)
         monkeypatch.setenv("PUSH_KEY", "env-pk")
         stdin = MagicMock()
-        stdin.read.return_value = '{"cwd":"/session/project","workspace_roots":["/wrong/project"]}'
+        stdin.read.return_value = (
+            '{"cwd":"/session/project","workspace_roots":["/wrong/project"],"session_id":"session"}'
+        )
         discover = MagicMock(return_value=[])
         with (
             patch.object(sys, "stdin", stdin),
             patch(f"{_G}._discover_servers_payload", discover),
-            patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")),
+            patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")) as run,
             patch(f"{_G}.rich"),
         ):
             result = guard_module.run_guard(self._args(config, client="codex"))
@@ -3118,13 +3121,16 @@ class TestRunDiscover:
         assert result == 0
         stdin.read.assert_called_once_with(1024 * 1024)
         discover.assert_called_once_with(["/session/project"])
+        assert json.loads(run.call_args.kwargs["input"])["session_id"] == "session"
 
     def test_hook_stdin_accepts_workspace_roots_list(self, tmp_path, monkeypatch):
         config = tmp_path / "settings.json"
         self._write_forwarder(config)
         monkeypatch.setenv("PUSH_KEY", "env-pk")
         stdin = MagicMock()
-        stdin.read.return_value = '{"workspace_roots":["/workspace/one","/workspace/two"]}'
+        stdin.read.return_value = (
+            '{"workspace_roots":["/workspace/one","/workspace/two"],"conversation_id":"conversation"}'
+        )
         discover = MagicMock(return_value=[])
         with (
             patch.object(sys, "stdin", stdin),
@@ -3142,6 +3148,7 @@ class TestRunDiscover:
             "--client",
             "cursor",
         ]
+        assert json.loads(run.call_args.kwargs["input"])["conversation_id"] == "conversation"
 
     def test_malformed_hook_stdin_is_ignored(self, tmp_path, monkeypatch):
         config = tmp_path / "settings.json"
@@ -3153,7 +3160,7 @@ class TestRunDiscover:
         with (
             patch.object(sys, "stdin", stdin),
             patch(f"{_G}._discover_servers_payload", discover),
-            patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")),
+            patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")) as run,
             patch(f"{_G}.rich"),
         ):
             result = guard_module.run_guard(
@@ -3165,6 +3172,52 @@ class TestRunDiscover:
 
         assert result == 0
         discover.assert_called_once_with([])
+        assert json.loads(run.call_args.kwargs["input"])["session_id"] == "session-start-server-discovery"
+
+    @pytest.mark.parametrize(
+        "client,session_field,event_session_field",
+        [
+            ("claude-code", "session_id", "session_id"),
+            ("cursor", "conversation_id", "conversation_id"),
+            ("codex", "session_id", "session_id"),
+        ],
+    )
+    @pytest.mark.parametrize(
+        "session_value,expected_marker",
+        [
+            ("real-session", "real-session"),
+            (None, "session-start-server-discovery"),
+            ("", "session-start-server-discovery"),
+            (123, "session-start-server-discovery"),
+        ],
+    )
+    def test_hook_stdin_forwards_valid_session_marker_or_falls_back(
+        self,
+        tmp_path,
+        monkeypatch,
+        client,
+        session_field,
+        event_session_field,
+        session_value,
+        expected_marker,
+    ):
+        config = tmp_path / "settings.json"
+        self._write_forwarder(config)
+        monkeypatch.setenv("PUSH_KEY", "env-pk")
+        hook_payload = {} if session_value is None else {session_field: session_value}
+        stdin = MagicMock()
+        stdin.read.return_value = json.dumps(hook_payload)
+        with (
+            patch.object(sys, "stdin", stdin),
+            patch(f"{_G}._discover_servers_payload", return_value=[]),
+            patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")) as run,
+            patch(f"{_G}.rich"),
+        ):
+            result = guard_module.run_guard(self._args(config, client=client))
+
+        assert result == 0
+        event_payload = json.loads(run.call_args.kwargs["input"])
+        assert event_payload[event_session_field] == expected_marker
 
     def test_stdin_is_never_read_without_client(self, tmp_path, monkeypatch):
         config = tmp_path / "settings.json"
