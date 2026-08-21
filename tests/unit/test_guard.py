@@ -334,11 +334,11 @@ class TestAgentScanBin:
 
 class TestBuildDiscoverHookCommand:
     @pytest.mark.parametrize(
-        "client, expected_key",
-        [("claude", "cwd"), ("cursor", "workspace_roots"), ("codex", "cwd")],
+        "agent, expected_field",
+        [("claude-code", "cwd"), ("cursor", "workspace_roots"), ("codex", "cwd")],
     )
-    def test_agent_payload_keys_match_hook_schemas(self, client, expected_key):
-        assert guard_module._HOOK_PROJECT_FOLDER_PAYLOAD_KEYS[client] == expected_key
+    def test_agent_payload_fields_match_hook_schemas(self, agent, expected_field):
+        assert guard_module._HOOK_AGENT_PROJECT_FOLDER_FIELDS[agent] == expected_field
 
     def test_builds_quoted_environment_prefix_with_agent_scan_binary(self):
         with patch(f"{_G}._agent_scan_bin", return_value="/opt/Snyk's bin/snyk-agent-scan"):
@@ -348,7 +348,7 @@ class TestBuildDiscoverHookCommand:
                 Path("/x/snyk-agent-guard-discover.sh"),
                 tenant_id="tenant",
                 machine_id="machine",
-                project_folder_payload_key="cwd",
+                hook_agent="claude-code",
             )
 
         assert "PUSH_KEY='pk'" in command
@@ -356,7 +356,7 @@ class TestBuildDiscoverHookCommand:
         assert "TENANT_ID='tenant'" in command
         assert "MACHINE_ID='machine'" in command
         assert "AGENT_SCAN_BIN='/opt/Snyk'\"'\"'s bin/snyk-agent-scan'" in command
-        assert command.endswith("bash '/x/snyk-agent-guard-discover.sh' --hook-project-folder-payload-key 'cwd'")
+        assert command.endswith("bash '/x/snyk-agent-guard-discover.sh' --hook-agent 'claude-code'")
         assert _is_agent_scan_command(command)
 
     def test_omits_agent_scan_binary_when_unresolved(self):
@@ -365,11 +365,11 @@ class TestBuildDiscoverHookCommand:
                 "pk",
                 "https://api.snyk.io",
                 Path("/x/snyk-agent-guard-discover.sh"),
-                project_folder_payload_key="workspace_roots",
+                hook_agent="cursor",
             )
 
         assert "AGENT_SCAN_BIN" not in command
-        assert command.endswith("--hook-project-folder-payload-key 'workspace_roots'")
+        assert command.endswith("--hook-agent 'cursor'")
 
 
 class TestPrepareClaudeDiscoveryHook:
@@ -2032,7 +2032,7 @@ class TestInstallHooksOrchestration:
         assert ctx["build_discover"].call_args.kwargs == {
             "tenant_id": "tid-1",
             "machine_id": "machine-42",
-            "project_folder_payload_key": "cwd",
+            "hook_agent": "claude-code",
         }
         assert ctx["prep_claude"].call_args.kwargs["discover_command"] == "discover-cmd"
 
@@ -2746,7 +2746,8 @@ class TestGuardDiscoverCli:
         assert args.url == "https://hooks.example"
         assert args.file == "/tmp/settings.json"
 
-    def test_parses_configurable_hook_project_folder_payload_key(self, monkeypatch):
+    @pytest.mark.parametrize("agent", ["claude-code", "cursor", "codex"])
+    def test_parses_hook_agent(self, agent, monkeypatch):
         from agent_scan import cli
 
         monkeypatch.setattr(
@@ -2756,8 +2757,8 @@ class TestGuardDiscoverCli:
                 "agent-scan",
                 "guard",
                 "discover",
-                "--hook-project-folder-payload-key",
-                "workspaceRoot",
+                "--hook-agent",
+                agent,
             ],
         )
         with patch(f"{_G}.run_guard", return_value=0) as run:
@@ -2765,7 +2766,7 @@ class TestGuardDiscoverCli:
                 cli.main()
 
         assert exc.value.code == 0
-        assert run.call_args.args[0].hook_project_folder_payload_key == "workspaceRoot"
+        assert run.call_args.args[0].hook_agent == agent
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only Claude discovery hook")
@@ -2776,7 +2777,7 @@ class TestRunDiscover:
             "guard_command": "discover",
             "url": url,
             "file": str(config),
-            "hook_project_folder_payload_key": None,
+            "hook_agent": None,
         }
         values.update(overrides)
         return SimpleNamespace(**values)
@@ -2853,7 +2854,7 @@ class TestRunDiscover:
         assert result == 1
         run.assert_not_called()
 
-    def test_hook_stdin_appends_cwd_with_configured_key(self, tmp_path, monkeypatch):
+    def test_hook_stdin_reads_cwd_for_claude_code(self, tmp_path, monkeypatch):
         config = tmp_path / "settings.json"
         self._write_forwarder(config)
         monkeypatch.setenv("PUSH_KEY", "env-pk")
@@ -2869,7 +2870,7 @@ class TestRunDiscover:
             result = guard_module.run_guard(
                 self._args(
                     config,
-                    hook_project_folder_payload_key="cwd",
+                    hook_agent="claude-code",
                 )
             )
 
@@ -2877,12 +2878,12 @@ class TestRunDiscover:
         stdin.read.assert_called_once_with(1024 * 1024)
         discover.assert_called_once_with(["/session/project"])
 
-    def test_hook_stdin_uses_configurable_project_folder_payload_key(self, tmp_path, monkeypatch):
+    def test_hook_stdin_reads_cwd_for_codex(self, tmp_path, monkeypatch):
         config = tmp_path / "settings.json"
         self._write_forwarder(config)
         monkeypatch.setenv("PUSH_KEY", "env-pk")
         stdin = MagicMock()
-        stdin.read.return_value = '{"cwd":"/wrong/project","workspaceRoot":"/session/project"}'
+        stdin.read.return_value = '{"cwd":"/session/project","workspace_roots":["/wrong/project"]}'
         discover = MagicMock(return_value=[])
         with (
             patch.object(sys, "stdin", stdin),
@@ -2890,7 +2891,7 @@ class TestRunDiscover:
             patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")),
             patch(f"{_G}.rich"),
         ):
-            result = guard_module.run_guard(self._args(config, hook_project_folder_payload_key="workspaceRoot"))
+            result = guard_module.run_guard(self._args(config, hook_agent="codex"))
 
         assert result == 0
         stdin.read.assert_called_once_with(1024 * 1024)
@@ -2909,7 +2910,7 @@ class TestRunDiscover:
             patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")),
             patch(f"{_G}.rich"),
         ):
-            result = guard_module.run_guard(self._args(config, hook_project_folder_payload_key="workspace_roots"))
+            result = guard_module.run_guard(self._args(config, hook_agent="cursor"))
 
         assert result == 0
         discover.assert_called_once_with(["/workspace/one", "/workspace/two"])
@@ -2930,14 +2931,14 @@ class TestRunDiscover:
             result = guard_module.run_guard(
                 self._args(
                     config,
-                    hook_project_folder_payload_key="cwd",
+                    hook_agent="claude-code",
                 )
             )
 
         assert result == 0
         discover.assert_called_once_with([])
 
-    def test_stdin_is_never_read_without_hook_flag(self, tmp_path, monkeypatch):
+    def test_stdin_is_never_read_without_hook_agent(self, tmp_path, monkeypatch):
         config = tmp_path / "settings.json"
         self._write_forwarder(config)
         monkeypatch.setenv("PUSH_KEY", "env-pk")

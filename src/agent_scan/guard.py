@@ -37,8 +37,8 @@ IS_WINDOWS = sys.platform == "win32"
 # ---------------------------------------------------------------------------
 
 ALL_CLIENTS = ["claude", "cursor", "codex"]
-_HOOK_PROJECT_FOLDER_PAYLOAD_KEYS = {
-    "claude": "cwd",
+_HOOK_AGENT_PROJECT_FOLDER_FIELDS = {
+    "claude-code": "cwd",
     "cursor": "workspace_roots",
     "codex": "cwd",
 }
@@ -318,11 +318,12 @@ def _run_discover(args) -> int:
         return 1
 
     project_folders: list[str] = []
-    project_folder_payload_key = getattr(args, "hook_project_folder_payload_key", None)
-    if project_folder_payload_key:
+    hook_agent = getattr(args, "hook_agent", None)
+    project_folder_payload_field = _HOOK_AGENT_PROJECT_FOLDER_FIELDS.get(hook_agent) if hook_agent else None
+    if project_folder_payload_field:
         try:
             hook_payload = json.loads(sys.stdin.read(1024 * 1024))
-            project_folder = hook_payload.get(project_folder_payload_key) if isinstance(hook_payload, dict) else None
+            project_folder = hook_payload.get(project_folder_payload_field) if isinstance(hook_payload, dict) else None
             if isinstance(project_folder, str) and project_folder:
                 project_folders.append(project_folder)
             elif isinstance(project_folder, list):
@@ -440,7 +441,7 @@ def _install_hooks(
             dest_path.with_name("snyk-agent-guard-discover.sh"),
             tenant_id=tenant_id,
             machine_id=machine_id,
-            project_folder_payload_key=_HOOK_PROJECT_FOLDER_PAYLOAD_KEYS[client],
+            hook_agent=hook_client,
         )
     prepared_config, prepared_content, hooks_diff, preserved = _prepare_client_config(
         client,
@@ -1479,7 +1480,7 @@ def _build_discover_hook_command(
     url: str,
     script_path: Path,
     *,
-    project_folder_payload_key: str,
+    hook_agent: str,
     tenant_id: str = "",
     machine_id: str = "",
 ) -> str:
@@ -1495,7 +1496,7 @@ def _build_discover_hook_command(
     if agent_scan_bin is not None:
         parts.append(f"AGENT_SCAN_BIN={_shell_quote(agent_scan_bin)}")
     parts.append(f"bash {_shell_quote(script_path.as_posix())}")
-    parts.append(f"--hook-project-folder-payload-key {_shell_quote(project_folder_payload_key)}")
+    parts.append(f"--hook-agent {_shell_quote(hook_agent)}")
     return " ".join(parts)
 
 
