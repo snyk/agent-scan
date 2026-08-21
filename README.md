@@ -425,6 +425,7 @@ If you want to include Agent Scan results in your own project or registry, pleas
 
 - [Documentation index](docs/README.md) — Versioned documentation for both CLI lines.
 - [CLI reference](docs/cli-reference.md) — v0.5.x and v0.6-and-later commands, flags, options, and environment variables.
+- [Sandboxed scanning](docs/sandboxed-scanning.md) — Running scans inside an isolated, network-restricted Docker sandbox.
 - [Scanning](docs/scanning.md) — v0.5.x and v0.6-and-later scanning behavior and examples.
 - [JSON output](docs/json-output.md) — The v0.5.x path-keyed output and the v0.6 response schema.
 - [Issue Codes](docs/issue-codes.md) — v0.5.x `E*` and `W*` security finding reference.
