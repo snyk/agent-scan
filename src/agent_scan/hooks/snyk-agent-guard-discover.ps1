@@ -37,5 +37,5 @@ if ($ConfigFile) { $arguments += @("--file", $ConfigFile) }
 
 $reader = New-Object System.IO.StreamReader([Console]::OpenStandardInput(), [System.Text.Encoding]::UTF8, $true)
 $payload = $reader.ReadToEnd()
-$payload | & $bin @arguments
+$payload | & $bin @arguments *> $null
 exit $LASTEXITCODE

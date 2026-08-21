@@ -589,7 +589,8 @@ class TestDiscoveryHookScriptFiles:
         discover_script = main_script.with_name("snyk-agent-guard-discover.sh")
 
         assert discover_script.read_text() == (
-            '#!/usr/bin/env bash\nset -euo pipefail\nexec "${AGENT_SCAN_BIN:-snyk-agent-scan}" guard discover "$@"\n'
+            "#!/usr/bin/env bash\nset -euo pipefail\n"
+            'exec "${AGENT_SCAN_BIN:-snyk-agent-scan}" guard discover "$@" >/dev/null 2>&1\n'
         )
         assert os.access(discover_script, os.X_OK)
 
