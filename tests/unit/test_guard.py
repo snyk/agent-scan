@@ -334,11 +334,11 @@ class TestAgentScanBin:
 
 class TestBuildDiscoverHookCommand:
     @pytest.mark.parametrize(
-        "agent, expected_field",
+        "client, expected_field",
         [("claude-code", "cwd"), ("cursor", "workspace_roots"), ("codex", "cwd")],
     )
-    def test_agent_payload_fields_match_hook_schemas(self, agent, expected_field):
-        assert guard_module._HOOK_AGENT_PROJECT_FOLDER_FIELDS[agent] == expected_field
+    def test_client_payload_fields_match_hook_schemas(self, client, expected_field):
+        assert guard_module._HOOK_CLIENT_PROJECT_FOLDER_FIELDS[client] == expected_field
 
     def test_builds_quoted_environment_prefix_with_agent_scan_binary(self):
         with patch(f"{_G}._agent_scan_bin", return_value="/opt/Snyk's bin/snyk-agent-scan"):
@@ -348,7 +348,7 @@ class TestBuildDiscoverHookCommand:
                 Path("/x/snyk-agent-guard-discover.sh"),
                 tenant_id="tenant",
                 machine_id="machine",
-                hook_agent="claude-code",
+                hook_client="claude-code",
             )
 
         assert "PUSH_KEY='pk'" in command
@@ -356,7 +356,7 @@ class TestBuildDiscoverHookCommand:
         assert "TENANT_ID='tenant'" in command
         assert "MACHINE_ID='machine'" in command
         assert "AGENT_SCAN_BIN='/opt/Snyk'\"'\"'s bin/snyk-agent-scan'" in command
-        assert command.endswith("bash '/x/snyk-agent-guard-discover.sh' --hook-agent 'claude-code'")
+        assert command.endswith("bash '/x/snyk-agent-guard-discover.sh' --client 'claude-code'")
         assert _is_agent_scan_command(command)
 
     def test_omits_agent_scan_binary_when_unresolved(self):
@@ -365,11 +365,11 @@ class TestBuildDiscoverHookCommand:
                 "pk",
                 "https://api.snyk.io",
                 Path("/x/snyk-agent-guard-discover.sh"),
-                hook_agent="cursor",
+                hook_client="cursor",
             )
 
         assert "AGENT_SCAN_BIN" not in command
-        assert command.endswith("--hook-agent 'cursor'")
+        assert command.endswith("--client 'cursor'")
 
 
 class TestPrepareClaudeDiscoveryHook:
@@ -2032,7 +2032,7 @@ class TestInstallHooksOrchestration:
         assert ctx["build_discover"].call_args.kwargs == {
             "tenant_id": "tid-1",
             "machine_id": "machine-42",
-            "hook_agent": "claude-code",
+            "hook_client": "claude-code",
         }
         assert ctx["prep_claude"].call_args.kwargs["discover_command"] == "discover-cmd"
 
@@ -2747,7 +2747,7 @@ class TestGuardDiscoverCli:
         assert args.file == "/tmp/settings.json"
 
     @pytest.mark.parametrize("agent", ["claude-code", "cursor", "codex"])
-    def test_parses_hook_agent(self, agent, monkeypatch):
+    def test_parses_discovery_client(self, agent, monkeypatch):
         from agent_scan import cli
 
         monkeypatch.setattr(
@@ -2757,7 +2757,7 @@ class TestGuardDiscoverCli:
                 "agent-scan",
                 "guard",
                 "discover",
-                "--hook-agent",
+                "--client",
                 agent,
             ],
         )
@@ -2766,7 +2766,7 @@ class TestGuardDiscoverCli:
                 cli.main()
 
         assert exc.value.code == 0
-        assert run.call_args.args[0].hook_agent == agent
+        assert run.call_args.args[0].client == agent
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX-only Claude discovery hook")
@@ -2777,7 +2777,7 @@ class TestRunDiscover:
             "guard_command": "discover",
             "url": url,
             "file": str(config),
-            "hook_agent": None,
+            "client": None,
         }
         values.update(overrides)
         return SimpleNamespace(**values)
@@ -2870,7 +2870,7 @@ class TestRunDiscover:
             result = guard_module.run_guard(
                 self._args(
                     config,
-                    hook_agent="claude-code",
+                    client="claude-code",
                 )
             )
 
@@ -2891,7 +2891,7 @@ class TestRunDiscover:
             patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")),
             patch(f"{_G}.rich"),
         ):
-            result = guard_module.run_guard(self._args(config, hook_agent="codex"))
+            result = guard_module.run_guard(self._args(config, client="codex"))
 
         assert result == 0
         stdin.read.assert_called_once_with(1024 * 1024)
@@ -2907,13 +2907,19 @@ class TestRunDiscover:
         with (
             patch.object(sys, "stdin", stdin),
             patch(f"{_G}._discover_servers_payload", discover),
-            patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")),
+            patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")) as run,
             patch(f"{_G}.rich"),
         ):
-            result = guard_module.run_guard(self._args(config, hook_agent="cursor"))
+            result = guard_module.run_guard(self._args(config, client="cursor"))
 
         assert result == 0
         discover.assert_called_once_with(["/workspace/one", "/workspace/two"])
+        assert run.call_args.args[0] == [
+            "bash",
+            str(config.parent / "hooks" / "snyk-agent-guard.sh"),
+            "--client",
+            "cursor",
+        ]
 
     def test_malformed_hook_stdin_is_ignored(self, tmp_path, monkeypatch):
         config = tmp_path / "settings.json"
@@ -2931,14 +2937,14 @@ class TestRunDiscover:
             result = guard_module.run_guard(
                 self._args(
                     config,
-                    hook_agent="claude-code",
+                    client="claude-code",
                 )
             )
 
         assert result == 0
         discover.assert_called_once_with([])
 
-    def test_stdin_is_never_read_without_hook_agent(self, tmp_path, monkeypatch):
+    def test_stdin_is_never_read_without_client(self, tmp_path, monkeypatch):
         config = tmp_path / "settings.json"
         self._write_forwarder(config)
         monkeypatch.setenv("PUSH_KEY", "env-pk")

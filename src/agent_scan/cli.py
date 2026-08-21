@@ -1008,11 +1008,11 @@ def main():
         help="Override the Claude settings file path (default: ~/.claude/settings.json)",
     )
     guard_discover_parser.add_argument(
-        "--hook-agent",
+        "--client",
         type=str,
         choices=["claude-code", "cursor", "codex"],
         default=None,
-        metavar="AGENT",
+        metavar="CLIENT",
         help=("Read the selected agent's hook JSON payload from stdin and include its project folders in discovery"),
     )
     guard_uninstall_parser = guard_subparsers.add_parser(
