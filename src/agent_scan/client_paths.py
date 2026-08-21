@@ -23,6 +23,10 @@ def user_client_dir_override(client: str) -> Path | None:
     value = os.environ.get(env_var)
     if not value:
         return None
+    if value == "~":
+        return Path(os.environ.get("HOME") or Path.home())
+    if value.startswith(("~/", "~\\")) and os.environ.get("HOME"):
+        return Path(os.environ["HOME"]) / value[2:]
     return Path(value).expanduser()
 
 

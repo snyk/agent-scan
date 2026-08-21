@@ -96,6 +96,12 @@ def _write(path: Path, data) -> None:
     path.write_text(json.dumps(data, indent=2) + "\n")
 
 
+def _set_test_home(monkeypatch, path: Path) -> None:
+    monkeypatch.setenv("HOME", str(path))
+    monkeypatch.setenv("USERPROFILE", str(path))
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: path))
+
+
 def _setup_claude_hooks(cmd: str, path: Path) -> None:
     settings, _, preserved = _prepare_claude_config(cmd, path)
     _write_claude_config(settings, path, preserved)
@@ -710,7 +716,7 @@ class TestConfigPath:
     )
     def test_honors_client_environment_directory(self, client, env_var, filename, tmp_path, monkeypatch):
         configured = tmp_path / f"custom-{client}"
-        monkeypatch.setenv("HOME", str(tmp_path / "default-home"))
+        _set_test_home(monkeypatch, tmp_path / "default-home")
         monkeypatch.setenv(env_var, str(configured))
         assert _config_path(client) == configured / filename
 
@@ -730,14 +736,14 @@ class TestConfigPath:
         [("claude", "CLAUDE_CONFIG_DIR", "settings.json"), ("codex", "CODEX_HOME", "hooks.json")],
     )
     def test_environment_directory_expands_tilde(self, client, env_var, filename, tmp_path, monkeypatch):
-        monkeypatch.setenv("HOME", str(tmp_path))
+        _set_test_home(monkeypatch, tmp_path)
         monkeypatch.setenv(env_var, f"~/custom-{client}")
         assert _config_path(client) == tmp_path / f"custom-{client}" / filename
 
     def test_environment_changes_after_import_are_honored(self, tmp_path, monkeypatch):
         first = tmp_path / "first"
         second = tmp_path / "second"
-        monkeypatch.setenv("HOME", str(tmp_path / "default-home"))
+        _set_test_home(monkeypatch, tmp_path / "default-home")
         monkeypatch.setenv("CODEX_HOME", str(first))
         assert _config_path("codex") == first / "hooks.json"
         monkeypatch.setenv("CODEX_HOME", str(second))
@@ -758,7 +764,7 @@ class TestConfigPath:
         default.mkdir(parents=True)
         configured = tmp_path / f"custom-{client}"
         configured.mkdir()
-        monkeypatch.setenv("HOME", str(home))
+        _set_test_home(monkeypatch, home)
         monkeypatch.setenv(env_var, str(configured))
 
         assert _config_path(client) == default / filename
@@ -798,7 +804,7 @@ class TestResolvedUserPaths:
         home = tmp_path / "home"
         configured = tmp_path / f"custom-{client}"
         configured.mkdir()
-        monkeypatch.setenv("HOME", str(home))
+        _set_test_home(monkeypatch, home)
         monkeypatch.setenv(env_var, str(configured))
         monkeypatch.setenv("PUSH_KEY", "headless-pk")
         monkeypatch.delenv("TENANT_ID", raising=False)
@@ -835,7 +841,7 @@ class TestResolvedUserPaths:
         configured = tmp_path / f"custom-{client}"
         default.mkdir(parents=True)
         configured.mkdir()
-        monkeypatch.setenv("HOME", str(home))
+        _set_test_home(monkeypatch, home)
         monkeypatch.setenv(env_var, str(configured))
         monkeypatch.setenv("PUSH_KEY", "headless-pk")
         monkeypatch.delenv("TENANT_ID", raising=False)
@@ -859,7 +865,7 @@ class TestResolvedUserPaths:
     def test_install_uses_resolved_config_and_hook_directory(self, tmp_path, monkeypatch):
         codex_home = tmp_path / "custom-codex"
         codex_home.mkdir()
-        monkeypatch.setenv("HOME", str(tmp_path / "default-home"))
+        _set_test_home(monkeypatch, tmp_path / "default-home")
         config_path = codex_home / "hooks.json"
         _write(
             config_path,
@@ -894,7 +900,7 @@ class TestResolvedUserPaths:
 
     def test_uninstall_uses_resolved_config_and_preserves_unrelated_data(self, tmp_path, monkeypatch):
         claude_home = tmp_path / "custom-claude"
-        monkeypatch.setenv("HOME", str(tmp_path / "default-home"))
+        _set_test_home(monkeypatch, tmp_path / "default-home")
         config_path = claude_home / "settings.json"
         _write(config_path, {"unrelated": {"preserved": True}})
         _setup_claude_hooks(AGENT_SCAN_CMD, config_path)
@@ -913,7 +919,7 @@ class TestResolvedUserPaths:
 
     def test_default_detector_uses_runtime_resolved_path(self, tmp_path, monkeypatch):
         codex_home = tmp_path / "custom-codex"
-        monkeypatch.setenv("HOME", str(tmp_path / "default-home"))
+        _set_test_home(monkeypatch, tmp_path / "default-home")
         config_path = codex_home / "hooks.json"
         _setup_codex_hooks(CODEX_AGENT_SCAN_CMD, config_path)
         monkeypatch.setenv("CODEX_HOME", str(codex_home))
@@ -930,7 +936,7 @@ class TestResolvedUserPaths:
         codex_home = tmp_path / "custom-codex"
         _setup_claude_hooks(AGENT_SCAN_CMD, claude_home / "settings.json")
         _setup_codex_hooks(CODEX_AGENT_SCAN_CMD, codex_home / "hooks.json")
-        monkeypatch.setenv("HOME", str(tmp_path / "default-home"))
+        _set_test_home(monkeypatch, tmp_path / "default-home")
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
         monkeypatch.setenv("CODEX_HOME", str(codex_home))
         monkeypatch.setattr(guard_module, "CLAUDE_MANAGED_SETTINGS_PATH", tmp_path / "managed-claude.json")
@@ -1741,7 +1747,7 @@ class TestRunInstallCallsEnsureGuardEnabled:
     ):
         claude_home = tmp_path / "custom-claude"
         claude_home.mkdir()
-        monkeypatch.setenv("HOME", str(tmp_path / "default-home"))
+        _set_test_home(monkeypatch, tmp_path / "default-home")
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
         monkeypatch.delenv("PUSH_KEY", raising=False)
         monkeypatch.setenv("SNYK_TOKEN", "snyk-from-env")
