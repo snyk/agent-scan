@@ -391,7 +391,6 @@ class TestBuildDiscoverHookCommand:
 
     @pytest.mark.parametrize("client", ["claude-code", "cursor", "codex"])
     def test_builds_quoted_environment_prefix_with_agent_scan_binary(self, client):
-        config_path = Path("/x/config with spaces/settings.json")
         with (
             patch(f"{_G}.IS_WINDOWS", False),
             patch(f"{_G}._agent_scan_bin", return_value="/opt/Snyk's bin/snyk-agent-scan"),
@@ -401,7 +400,6 @@ class TestBuildDiscoverHookCommand:
                 "https://api.snyk.io",
                 Path("/x/snyk-agent-guard-discover.sh"),
                 client,
-                config_path=config_path,
                 tenant_id="tenant",
                 machine_id="machine",
             )
@@ -411,9 +409,7 @@ class TestBuildDiscoverHookCommand:
         assert "TENANT_ID='tenant'" in command
         assert "MACHINE_ID='machine'" in command
         assert "AGENT_SCAN_BIN='/opt/Snyk'\"'\"'s bin/snyk-agent-scan'" in command
-        assert command.endswith(
-            f"bash '/x/snyk-agent-guard-discover.sh' --client '{client}' --file '/x/config with spaces/settings.json'"
-        )
+        assert command.endswith(f"bash '/x/snyk-agent-guard-discover.sh' --client '{client}'")
         assert _is_agent_scan_command(command)
 
     def test_omits_agent_scan_binary_when_unresolved(self):
@@ -426,11 +422,10 @@ class TestBuildDiscoverHookCommand:
                 "https://api.snyk.io",
                 Path("/x/snyk-agent-guard-discover.sh"),
                 "cursor",
-                config_path=Path("/x/hooks.json"),
             )
 
         assert "AGENT_SCAN_BIN" not in command
-        assert command.endswith("--client 'cursor' --file '/x/hooks.json'")
+        assert command.endswith("--client 'cursor'")
 
     @pytest.mark.parametrize("client", ["claude-code", "cursor", "codex"])
     def test_builds_powershell_command_for_each_client(self, client):
@@ -443,7 +438,6 @@ class TestBuildDiscoverHookCommand:
                 "https://api.snyk.io",
                 Path(r"C:\hooks\snyk-agent-guard-discover.ps1"),
                 client,
-                config_path=Path(r"C:\config path\hooks.json"),
                 tenant_id="ignored",
                 machine_id="machine's-id",
             )
@@ -451,7 +445,6 @@ class TestBuildDiscoverHookCommand:
         assert command == (
             rf"powershell -File 'C:\hooks\snyk-agent-guard-discover.ps1' -Client {client} "
             "-PushKey 'pk' -RemoteUrl 'https://api.snyk.io' -MachineId 'machine''s-id' "
-            r"-ConfigFile 'C:\config path\hooks.json' "
             r"-AgentScanBin 'C:\Program Files\Snyk\snyk-agent-scan.exe'"
         )
 
@@ -465,11 +458,9 @@ class TestBuildDiscoverHookCommand:
                 "https://api.snyk.io",
                 Path(r"C:\Users\O'Brien\discover.ps1"),
                 "claude-code",
-                config_path=Path(r"C:\Users\O'Brien\.claude\settings.json"),
             )
 
         assert r"-File 'C:\Users\O''Brien\discover.ps1'" in command
-        assert r"-ConfigFile 'C:\Users\O''Brien\.claude\settings.json'" in command
         assert r"-AgentScanBin 'C:\Users\O''Brien\snyk-agent-scan.exe'" in command
 
 
@@ -2412,15 +2403,14 @@ class TestInstallHooksOrchestration:
             "tenant_id": "tid-1",
             "machine_id": "machine-42",
             "hook_client": "claude-code",
-            "config_path": tmp_path / "config.json",
         }
         assert ctx["prep_claude"].call_args.kwargs["discover_command"] == "discover-cmd"
 
     def test_cursor_builds_discovery_hook(self, ctx, tmp_path):
-        config = self._call(tmp_path, client="cursor", hook_client="cursor")
+        self._call(tmp_path, client="cursor", hook_client="cursor")
 
         ctx["build_discover"].assert_called_once()
-        assert ctx["build_discover"].call_args.kwargs["config_path"] == config
+        assert ctx["build_discover"].call_args.kwargs["hook_client"] == "cursor"
         assert ctx["prep_cursor"].call_args.kwargs["discover_command"] == "discover-cmd"
 
     def test_windows_builds_discovery_hook(self, ctx, tmp_path):
@@ -2432,10 +2422,10 @@ class TestInstallHooksOrchestration:
         assert ctx["prep_claude"].call_args.kwargs["discover_command"] == "discover-cmd"
 
     def test_codex_json_builds_discovery_hook(self, ctx, tmp_path):
-        config = self._call(tmp_path, client="codex", hook_client="codex")
+        self._call(tmp_path, client="codex", hook_client="codex")
 
         ctx["build_discover"].assert_called_once()
-        assert ctx["build_discover"].call_args.kwargs["config_path"] == config
+        assert ctx["build_discover"].call_args.kwargs["hook_client"] == "codex"
         assert ctx["prep_codex"].call_args.kwargs["discover_command"] == "discover-cmd"
 
     def test_codex_managed_does_not_build_discovery_hook(self, ctx, tmp_path):
@@ -3158,21 +3148,22 @@ class TestSendServersDiscoveredEvent:
     def _capture(hook_client="claude-code", entries=None, machine_id="machine-42"):
         captured = {}
 
-        def fake_run(cmd, *, input, **kwargs):
-            captured["cmd"] = cmd
-            captured["payload"] = json.loads(input)
-            captured["env"] = kwargs["env"]
-            return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+        def fake_send(url, client, push_key, payload, identifier):
+            captured.update(
+                url=url,
+                client=client,
+                push_key=push_key,
+                payload=json.loads(payload),
+                machine_id=identifier,
+            )
+            return True, ""
 
         with (
-            patch(f"{_G}.IS_WINDOWS", False),
             patch(f"{_G}._discover_servers_payload", return_value=[] if entries is None else entries),
-            patch("subprocess.run", side_effect=fake_run),
+            patch(f"{_G}.send_hook_event", side_effect=fake_send),
             patch(f"{_G}.rich"),
         ):
-            ok = guard_module._send_servers_discovered_event(
-                "pk-test", "https://api.snyk.io", hook_client, Path("/hook.sh"), machine_id
-            )
+            ok = guard_module._send_servers_discovered_event("pk-test", "https://api.snyk.io", hook_client, machine_id)
         return ok, captured
 
     @pytest.mark.parametrize(
@@ -3193,7 +3184,10 @@ class TestSendServersDiscoveredEvent:
         assert isinstance(payload["discovery_duration_ms"], int)
         assert payload["discovery_duration_ms"] >= 0
         assert push_key not in json.dumps(payload)
-        assert captured["env"]["MACHINE_ID"] == "machine-42"
+        assert captured["url"] == "https://api.snyk.io"
+        assert captured["client"] == hook_client
+        assert captured["push_key"] == "pk-test"
+        assert captured["machine_id"] == "machine-42"
 
     def test_empty_discovery_is_still_sent(self):
         ok, captured = self._capture(entries=[])
@@ -3203,20 +3197,19 @@ class TestSendServersDiscoveredEvent:
     def test_event_name_and_session_marker_can_be_overridden(self):
         captured = {}
 
-        def fake_run(cmd, *, input, **kwargs):
-            captured["payload"] = json.loads(input)
-            return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+        def fake_send(_url, _client, _push_key, payload, _machine_id):
+            captured["payload"] = json.loads(payload)
+            return True, ""
 
         with (
             patch(f"{_G}._discover_servers_payload", return_value=[]),
-            patch("subprocess.run", side_effect=fake_run),
+            patch(f"{_G}.send_hook_event", side_effect=fake_send),
             patch(f"{_G}.rich"),
         ):
             ok = guard_module._send_servers_discovered_event(
                 "pk",
                 "https://api.snyk.io",
                 "claude-code",
-                Path("/hook.sh"),
                 "machine-42",
                 event_name="SessionStartServerDiscovery",
                 session_marker="session-start-server-discovery",
@@ -3229,58 +3222,46 @@ class TestSendServersDiscoveredEvent:
     def test_payload_includes_discovery_duration_ms_from_monotonic_clock(self):
         captured = {}
 
-        def fake_run(cmd, *, input, **kwargs):
-            captured["payload"] = json.loads(input)
-            return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+        def fake_send(_url, _client, _push_key, payload, _machine_id):
+            captured["payload"] = json.loads(payload)
+            return True, ""
 
         with (
-            patch(f"{_G}.IS_WINDOWS", False),
             patch(f"{_G}._discover_servers_payload", return_value=[]),
-            patch("subprocess.run", side_effect=fake_run),
+            patch(f"{_G}.send_hook_event", side_effect=fake_send),
             patch("time.monotonic", side_effect=[100.0, 100.25]),
             patch(f"{_G}.rich"),
         ):
             ok = guard_module._send_servers_discovered_event(
-                "pk-test", "https://api.snyk.io", "claude-code", Path("/hook.sh"), "machine-42"
+                "pk-test", "https://api.snyk.io", "claude-code", "machine-42"
             )
 
         assert ok is True
         assert captured["payload"]["discovery_duration_ms"] == 250
         assert isinstance(captured["payload"]["discovery_duration_ms"], int)
 
-    def test_nonzero_exit_warns_and_returns_false(self):
-        completed = subprocess.CompletedProcess([], 2, stdout="", stderr="failed")
+    def test_send_failure_warns_and_returns_false(self):
         with (
             patch(f"{_G}._discover_servers_payload", return_value=[]),
-            patch("subprocess.run", return_value=completed),
+            patch(f"{_G}.send_hook_event", return_value=(False, "HTTP 500")),
             patch(f"{_G}.rich") as rich_mock,
         ):
-            result = guard_module._send_servers_discovered_event("pk", "url", "cursor", Path("/hook.sh"), "")
+            result = guard_module._send_servers_discovered_event("pk", "url", "cursor", "")
         assert result is False
-        assert "failed" in rich_mock.print.call_args.args[0]
+        assert "HTTP 500" in rich_mock.print.call_args.args[0]
 
-    def test_timeout_warns_and_returns_false(self):
-        with (
-            patch(f"{_G}._discover_servers_payload", return_value=[]),
-            patch("subprocess.run", side_effect=subprocess.TimeoutExpired("bash", 15)),
-            patch(f"{_G}.rich") as rich_mock,
-        ):
-            result = guard_module._send_servers_discovered_event("pk", "url", "cursor", Path("/hook.sh"), "")
-        assert result is False
-        assert "timeout" in rich_mock.print.call_args.args[0]
-
-    def test_discovery_exception_does_not_invoke_script(self):
+    def test_discovery_exception_does_not_send(self):
         with (
             patch(f"{_G}._discover_servers_payload", side_effect=RuntimeError("discovery failed")),
-            patch("subprocess.run") as run,
+            patch(f"{_G}.send_hook_event") as send,
             patch(f"{_G}.rich") as rich_mock,
         ):
-            result = guard_module._send_servers_discovered_event("pk", "url", "cursor", Path("/hook.sh"), "")
+            result = guard_module._send_servers_discovered_event("pk", "url", "cursor", "")
         assert result is False
-        run.assert_not_called()
+        send.assert_not_called()
         assert "discovery failed" in rich_mock.print.call_args.args[0]
 
-    def test_discovery_timeout_warns_without_invoking_script(self):
+    def test_discovery_timeout_warns_without_sending(self):
         import asyncio
         import time as test_time
 
@@ -3291,16 +3272,16 @@ class TestSendServersDiscoveredEvent:
         with (
             patch("agent_scan.pipelines.discover_clients_to_inspect", side_effect=slow_discovery),
             patch(f"{_G}._discovery_timeout_seconds", return_value=0.01),
-            patch("subprocess.run") as run,
+            patch(f"{_G}.send_hook_event") as send,
             patch(f"{_G}.rich") as rich_mock,
         ):
             started = test_time.monotonic()
-            result = guard_module._send_servers_discovered_event("pk", "url", "cursor", Path("/hook.sh"), "")
+            result = guard_module._send_servers_discovered_event("pk", "url", "cursor", "")
             elapsed = test_time.monotonic() - started
 
         assert result is False
         assert elapsed < 0.2
-        run.assert_not_called()
+        send.assert_not_called()
         assert "timed out" in rich_mock.print.call_args.args[0]
 
 
@@ -3319,13 +3300,13 @@ class TestGuardInstallMachineIdCli:
 
 
 class TestGuardDiscoverCli:
-    def test_parses_url_and_file(self, monkeypatch):
+    def test_parses_url(self, monkeypatch):
         from agent_scan import cli
 
         monkeypatch.setattr(
             sys,
             "argv",
-            ["agent-scan", "guard", "discover", "--url", "https://hooks.example", "--file", "/tmp/settings.json"],
+            ["agent-scan", "guard", "discover", "--url", "https://hooks.example"],
         )
         with patch(f"{_G}.run_guard", return_value=0) as run:
             with pytest.raises(SystemExit) as exc:
@@ -3335,7 +3316,16 @@ class TestGuardDiscoverCli:
         args = run.call_args.args[0]
         assert args.guard_command == "discover"
         assert args.url == "https://hooks.example"
-        assert args.file == "/tmp/settings.json"
+        assert not hasattr(args, "file")
+
+    def test_rejects_removed_file_option(self, monkeypatch):
+        from agent_scan import cli
+
+        monkeypatch.setattr(sys, "argv", ["agent-scan", "guard", "discover", "--file", "/tmp/settings.json"])
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+
+        assert exc.value.code == 2
 
     @pytest.mark.parametrize("agent", ["claude-code", "cursor", "codex"])
     def test_parses_discovery_client(self, agent, monkeypatch):
@@ -3371,42 +3361,36 @@ class TestRunDiscover:
         values = {
             "guard_command": "discover",
             "url": url,
-            "file": str(config),
             "client": None,
         }
         values.update(overrides)
         return SimpleNamespace(**values)
 
-    @staticmethod
-    def _write_forwarder(config: Path):
-        script = config.parent / "hooks" / "snyk-agent-guard.sh"
-        script.parent.mkdir(parents=True)
-        script.write_text("#!/bin/sh\n")
-        return script
-
     def test_happy_path_sends_session_start_discovery_from_environment(self, tmp_path, monkeypatch):
         config = tmp_path / "custom" / "settings.json"
-        script = self._write_forwarder(config)
         captured = {}
 
-        def fake_run(cmd, *, input, **kwargs):
-            captured["cmd"] = cmd
-            captured["payload"] = json.loads(input)
-            captured["env"] = kwargs["env"]
-            return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+        def fake_send(url, client, push_key, payload, machine_id):
+            captured.update(
+                url=url,
+                client=client,
+                push_key=push_key,
+                payload=json.loads(payload),
+                machine_id=machine_id,
+            )
+            return True, ""
 
         monkeypatch.setenv("PUSH_KEY", "env-pk")
         monkeypatch.setenv("REMOTE_HOOKS_BASE_URL", "https://env-hooks.example")
         monkeypatch.setenv("MACHINE_ID", "env-machine")
         with (
             patch(f"{_G}._discover_servers_payload", return_value=[]),
-            patch("subprocess.run", side_effect=fake_run),
+            patch(f"{_G}.send_hook_event", side_effect=fake_send),
             patch(f"{_G}.rich"),
         ):
             result = guard_module.run_guard(self._args(config))
 
         assert result == 0
-        assert captured["cmd"] == ["bash", str(script), "--client", "claude-code"]
         duration = captured["payload"].pop("discovery_duration_ms")
         assert isinstance(duration, int)
         assert duration >= 0
@@ -3415,46 +3399,48 @@ class TestRunDiscover:
             "servers": [],
             "session_id": "session-start-server-discovery",
         }
-        assert captured["env"]["PUSH_KEY"] == "env-pk"
-        assert captured["env"]["REMOTE_HOOKS_BASE_URL"] == "https://env-hooks.example"
-        assert captured["env"]["MACHINE_ID"] == "env-machine"
+        assert captured["url"] == "https://env-hooks.example"
+        assert captured["client"] == "claude-code"
+        assert captured["push_key"] == "env-pk"
+        assert captured["machine_id"] == "env-machine"
 
     def test_explicit_url_overrides_environment(self, tmp_path, monkeypatch):
         config = tmp_path / "settings.json"
-        self._write_forwarder(config)
         monkeypatch.setenv("PUSH_KEY", "env-pk")
         monkeypatch.setenv("REMOTE_HOOKS_BASE_URL", "https://env-hooks.example")
         with (
             patch(f"{_G}._discover_servers_payload", return_value=[]),
-            patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")) as run,
+            patch(f"{_G}.send_hook_event", return_value=(True, "")) as send,
             patch(f"{_G}.rich"),
         ):
             result = guard_module.run_guard(self._args(config, url="https://flag-hooks.example"))
 
         assert result == 0
-        assert run.call_args.kwargs["env"]["REMOTE_HOOKS_BASE_URL"] == "https://flag-hooks.example"
+        assert send.call_args.args[0] == "https://flag-hooks.example"
 
     def test_missing_push_key_returns_one_without_invoking_script(self, tmp_path, monkeypatch):
         config = tmp_path / "settings.json"
-        self._write_forwarder(config)
         monkeypatch.delenv("PUSH_KEY", raising=False)
-        with patch("subprocess.run") as run:
+        with patch(f"{_G}.send_hook_event") as send:
             result = guard_module.run_guard(self._args(config))
 
         assert result == 1
-        run.assert_not_called()
+        send.assert_not_called()
 
-    def test_missing_forwarding_script_returns_one(self, tmp_path, monkeypatch):
+    def test_no_forwarding_script_is_needed(self, tmp_path, monkeypatch):
         monkeypatch.setenv("PUSH_KEY", "env-pk")
-        with patch("subprocess.run") as run:
+        with (
+            patch(f"{_G}._discover_servers_payload", return_value=[]),
+            patch(f"{_G}.send_hook_event", return_value=(True, "")) as send,
+            patch(f"{_G}.rich"),
+        ):
             result = guard_module.run_guard(self._args(tmp_path / "settings.json"))
 
-        assert result == 1
-        run.assert_not_called()
+        assert result == 0
+        send.assert_called_once()
 
     def test_hook_stdin_reads_cwd_for_claude_code(self, tmp_path, monkeypatch):
         config = tmp_path / "settings.json"
-        self._write_forwarder(config)
         monkeypatch.setenv("PUSH_KEY", "env-pk")
         stdin = MagicMock()
         stdin.isatty.return_value = False
@@ -3463,7 +3449,7 @@ class TestRunDiscover:
         with (
             patch.object(sys, "stdin", stdin),
             patch(f"{_G}._discover_servers_payload", discover),
-            patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")) as run,
+            patch(f"{_G}.send_hook_event", return_value=(True, "")) as send,
             patch(f"{_G}.rich"),
         ):
             result = guard_module.run_guard(
@@ -3476,11 +3462,10 @@ class TestRunDiscover:
         assert result == 0
         stdin.read.assert_called_once_with(1024 * 1024)
         discover.assert_called_once_with(["/session/project"])
-        assert json.loads(run.call_args.kwargs["input"])["session_id"] == "session"
+        assert json.loads(send.call_args.args[3])["session_id"] == "session"
 
     def test_hook_stdin_reads_cwd_for_codex(self, tmp_path, monkeypatch):
         config = tmp_path / "settings.json"
-        self._write_forwarder(config)
         monkeypatch.setenv("PUSH_KEY", "env-pk")
         stdin = MagicMock()
         stdin.isatty.return_value = False
@@ -3491,7 +3476,7 @@ class TestRunDiscover:
         with (
             patch.object(sys, "stdin", stdin),
             patch(f"{_G}._discover_servers_payload", discover),
-            patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")) as run,
+            patch(f"{_G}.send_hook_event", return_value=(True, "")) as send,
             patch(f"{_G}.rich"),
         ):
             result = guard_module.run_guard(self._args(config, client="codex"))
@@ -3499,11 +3484,10 @@ class TestRunDiscover:
         assert result == 0
         stdin.read.assert_called_once_with(1024 * 1024)
         discover.assert_called_once_with(["/session/project"])
-        assert json.loads(run.call_args.kwargs["input"])["session_id"] == "session"
+        assert json.loads(send.call_args.args[3])["session_id"] == "session"
 
     def test_hook_stdin_accepts_workspace_roots_list(self, tmp_path, monkeypatch):
         config = tmp_path / "settings.json"
-        self._write_forwarder(config)
         monkeypatch.setenv("PUSH_KEY", "env-pk")
         stdin = MagicMock()
         stdin.isatty.return_value = False
@@ -3514,24 +3498,18 @@ class TestRunDiscover:
         with (
             patch.object(sys, "stdin", stdin),
             patch(f"{_G}._discover_servers_payload", discover),
-            patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")) as run,
+            patch(f"{_G}.send_hook_event", return_value=(True, "")) as send,
             patch(f"{_G}.rich"),
         ):
             result = guard_module.run_guard(self._args(config, client="cursor"))
 
         assert result == 0
         discover.assert_called_once_with(["/workspace/one", "/workspace/two"])
-        assert run.call_args.args[0] == [
-            "bash",
-            str(config.parent / "hooks" / "snyk-agent-guard.sh"),
-            "--client",
-            "cursor",
-        ]
-        assert json.loads(run.call_args.kwargs["input"])["conversation_id"] == "conversation"
+        assert send.call_args.args[:3] == ("https://api.snyk.io", "cursor", "env-pk")
+        assert json.loads(send.call_args.args[3])["conversation_id"] == "conversation"
 
     def test_malformed_hook_stdin_is_ignored(self, tmp_path, monkeypatch):
         config = tmp_path / "settings.json"
-        self._write_forwarder(config)
         monkeypatch.setenv("PUSH_KEY", "env-pk")
         stdin = MagicMock()
         stdin.isatty.return_value = False
@@ -3540,7 +3518,7 @@ class TestRunDiscover:
         with (
             patch.object(sys, "stdin", stdin),
             patch(f"{_G}._discover_servers_payload", discover),
-            patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")) as run,
+            patch(f"{_G}.send_hook_event", return_value=(True, "")) as send,
             patch(f"{_G}.rich"),
         ):
             result = guard_module.run_guard(
@@ -3552,11 +3530,10 @@ class TestRunDiscover:
 
         assert result == 0
         discover.assert_called_once_with([])
-        assert json.loads(run.call_args.kwargs["input"])["session_id"] == "session-start-server-discovery"
+        assert json.loads(send.call_args.args[3])["session_id"] == "session-start-server-discovery"
 
     def test_tty_stdin_is_not_read(self, tmp_path, monkeypatch):
         config = tmp_path / "settings.json"
-        self._write_forwarder(config)
         monkeypatch.setenv("PUSH_KEY", "env-pk")
         stdin = MagicMock()
         stdin.isatty.return_value = True
@@ -3566,7 +3543,7 @@ class TestRunDiscover:
         with (
             patch.object(sys, "stdin", stdin),
             patch(f"{_G}._discover_servers_payload", discover),
-            patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")),
+            patch(f"{_G}.send_hook_event", return_value=(True, "")),
             patch(f"{_G}.rich"),
         ):
             result = guard_module.run_guard(self._args(config, client="claude-code"))
@@ -3579,7 +3556,6 @@ class TestRunDiscover:
         import time as test_time
 
         config = tmp_path / "settings.json"
-        self._write_forwarder(config)
         monkeypatch.setenv("PUSH_KEY", "env-pk")
         release_read = threading.Event()
         stdin = MagicMock()
@@ -3591,7 +3567,7 @@ class TestRunDiscover:
                 patch.object(sys, "stdin", stdin),
                 patch(f"{_G}._STDIN_READ_TIMEOUT_SECONDS", 0.01),
                 patch(f"{_G}._discover_servers_payload", return_value=[]),
-                patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")),
+                patch(f"{_G}.send_hook_event", return_value=(True, "")),
                 patch(f"{_G}.rich"),
             ):
                 started = test_time.monotonic()
@@ -3631,7 +3607,6 @@ class TestRunDiscover:
         expected_marker,
     ):
         config = tmp_path / "settings.json"
-        self._write_forwarder(config)
         monkeypatch.setenv("PUSH_KEY", "env-pk")
         hook_payload = {} if session_value is None else {session_field: session_value}
         stdin = MagicMock()
@@ -3640,18 +3615,17 @@ class TestRunDiscover:
         with (
             patch.object(sys, "stdin", stdin),
             patch(f"{_G}._discover_servers_payload", return_value=[]),
-            patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")) as run,
+            patch(f"{_G}.send_hook_event", return_value=(True, "")) as send,
             patch(f"{_G}.rich"),
         ):
             result = guard_module.run_guard(self._args(config, client=client))
 
         assert result == 0
-        event_payload = json.loads(run.call_args.kwargs["input"])
+        event_payload = json.loads(send.call_args.args[3])
         assert event_payload[event_session_field] == expected_marker
 
     def test_stdin_is_never_read_without_client(self, tmp_path, monkeypatch):
         config = tmp_path / "settings.json"
-        self._write_forwarder(config)
         monkeypatch.setenv("PUSH_KEY", "env-pk")
         stdin = MagicMock()
         stdin.isatty.return_value = False
@@ -3659,7 +3633,7 @@ class TestRunDiscover:
         with (
             patch.object(sys, "stdin", stdin),
             patch(f"{_G}._discover_servers_payload", return_value=[]),
-            patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")),
+            patch(f"{_G}.send_hook_event", return_value=(True, "")),
             patch(f"{_G}.rich"),
         ):
             result = guard_module.run_guard(self._args(config))
@@ -3667,36 +3641,22 @@ class TestRunDiscover:
         assert result == 0
         stdin.read.assert_not_called()
 
-    def test_windows_resolves_powershell_forwarder(self, tmp_path, monkeypatch):
+    def test_windows_uses_direct_sender(self, tmp_path, monkeypatch):
         config = tmp_path / "hooks.json"
-        script = config.parent / "hooks" / "snyk-agent-guard.ps1"
-        script.parent.mkdir(parents=True)
-        script.write_text("# forwarder\n")
         monkeypatch.setenv("PUSH_KEY", "env-pk")
         monkeypatch.setenv("REMOTE_HOOKS_BASE_URL", "https://env-hooks.example")
         monkeypatch.setenv("MACHINE_ID", "env-machine")
         with (
             patch(f"{_G}.IS_WINDOWS", True),
             patch(f"{_G}._discover_servers_payload", return_value=[]),
-            patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")) as run,
+            patch(f"{_G}.send_hook_event", return_value=(True, "")) as send,
             patch(f"{_G}.rich"),
         ):
             result = guard_module.run_guard(self._args(config, client="codex"))
 
         assert result == 0
-        assert run.call_args.args[0] == [
-            "powershell",
-            "-File",
-            str(script),
-            "-Client",
-            "codex",
-            "-PushKey",
-            "env-pk",
-            "-RemoteUrl",
-            "https://env-hooks.example",
-            "-MachineId",
-            "env-machine",
-        ]
+        assert send.call_args.args[:3] == ("https://env-hooks.example", "codex", "env-pk")
+        assert send.call_args.args[4] == "env-machine"
 
 
 class TestRunInstallSendsServersDiscovered:
@@ -3721,7 +3681,7 @@ class TestRunInstallSendsServersDiscovered:
             paths[client] = path
         return paths
 
-    def test_single_client_sends_once_using_installed_script(self, tmp_path, monkeypatch):
+    def test_single_client_sends_once_directly(self, tmp_path, monkeypatch):
         monkeypatch.setenv("PUSH_KEY", "headless-pk")
         script = Path("/installed/claude/hook.sh")
         with (
@@ -3731,7 +3691,7 @@ class TestRunInstallSendsServersDiscovered:
             _run_install(self._args(tmp_path, machine_id="machine-42"))
 
         assert install.call_args.args[-1] == "machine-42"
-        send.assert_called_once_with("headless-pk", "https://api.snyk.io", "claude-code", script, "machine-42")
+        send.assert_called_once_with("headless-pk", "https://api.snyk.io", "claude-code", "machine-42")
 
     def test_cursor_install_uses_cursor_endpoint(self, tmp_path, monkeypatch):
         monkeypatch.setenv("PUSH_KEY", "headless-pk")
@@ -3742,7 +3702,7 @@ class TestRunInstallSendsServersDiscovered:
         ):
             _run_install(self._args(tmp_path, client="cursor"))
 
-        assert send.call_args.args[2:4] == ("cursor", script)
+        assert send.call_args.args[2] == "cursor"
 
     def test_install_all_sends_once_after_all_installs(self, tmp_path, monkeypatch):
         monkeypatch.setenv("PUSH_KEY", "headless-pk")
@@ -3766,7 +3726,7 @@ class TestRunInstallSendsServersDiscovered:
 
         assert install_mock.call_count == 3
         assert send_mock.call_count == 1
-        assert send_mock.call_args.args[2:4] == ("claude-code", scripts[0])
+        assert send_mock.call_args.args[2] == "claude-code"
         assert order == ["install:claude", "install:cursor", "install:codex", "send"]
 
     def test_nothing_installed_does_not_send(self, tmp_path, monkeypatch):

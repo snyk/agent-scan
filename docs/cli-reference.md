@@ -372,12 +372,12 @@ Installation also configures a fire-and-forget session-start hook that reports d
 snyk-agent-scan guard discover [OPTIONS]
 ```
 
-This internal command is invoked by the SessionStart hook configured by `guard install`; it is not normally run by hand.
+This internal command is invoked by the SessionStart hook configured by `guard install`. It discovers MCP servers locally
+and sends the resulting event directly to Agent Monitor; it is not normally run by hand.
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
 | `--url URL` | string | `https://api.snyk.io` | Remote hook base URL for the Snyk API environment. |
-| `--file PATH` | string | — | Override the client configuration path used to locate the forwarding script. |
 | `--client {claude-code,cursor,codex}` | string | — | Hook client whose payload and endpoint conventions should be used. |
 
 ### `guard uninstall`

@@ -19,6 +19,7 @@ from urllib.parse import urlparse
 
 import rich
 
+from agent_scan.hook_events import send_hook_event
 from agent_scan.pushkeys import (
     GuardEnabledAccessDeniedError,
     _is_localhost,
@@ -276,10 +277,10 @@ def _run_install(args) -> None:
     minted = not headless  # True if we minted the key in this run
 
     installed_any = False
-    first_installed: tuple[str, Path] | None = None
+    first_installed_client: str | None = None
     try:
         for c in clients:
-            dest_path = _install_hooks(
+            _install_hooks(
                 c,
                 _hook_client_name(c),
                 push_key,
@@ -292,8 +293,8 @@ def _run_install(args) -> None:
                 snyk_token,
                 machine_id,
             )
-            if first_installed is None:
-                first_installed = (_hook_client_name(c), dest_path)
+            if first_installed_client is None:
+                first_installed_client = _hook_client_name(c)
             installed_any = True
     except BaseException:
         if minted:
@@ -307,8 +308,8 @@ def _run_install(args) -> None:
                 _revoke_after_failure(url, tenant_id, snyk_token, push_key)
         raise
 
-    if first_installed is not None:
-        _send_servers_discovered_event(push_key, url, *first_installed, machine_id)
+    if first_installed_client is not None:
+        _send_servers_discovered_event(push_key, url, first_installed_client, machine_id)
 
 
 def _run_with_timeout(func: Callable[[], _T], timeout: float) -> _T:
@@ -366,15 +367,6 @@ def _run_discover(args) -> int:
 
     url = getattr(args, "url", None) or os.environ.get("REMOTE_HOOKS_BASE_URL") or DEFAULT_REMOTE_URL
     machine_id = (os.environ.get("MACHINE_ID", "") or "").strip()
-    config_path = Path(getattr(args, "file", None) or CLAUDE_SETTINGS_PATH)
-    script_name = "snyk-agent-guard.ps1" if IS_WINDOWS else "snyk-agent-guard.sh"
-    script_path = config_path.parent / "hooks" / script_name
-    if not script_path.exists():
-        rich.print(
-            f"[bold red]Error:[/bold red] Agent Guard forwarding script not found: {script_path}. "
-            "Run guard install first."
-        )
-        return 1
 
     project_folders: list[str] = []
     session_id = ""
@@ -407,7 +399,6 @@ def _run_discover(args) -> int:
         push_key,
         url,
         hook_client or "claude-code",
-        script_path,
         machine_id,
         event_name="SessionStartServerDiscovery",
         session_marker=session_id or "session-start-server-discovery",
@@ -531,7 +522,6 @@ def _install_hooks(
             tenant_id=tenant_id,
             machine_id=machine_id,
             hook_client=hook_client,
-            config_path=config_path,
         )
     prepared_config, prepared_content, hooks_diff, preserved = _prepare_client_config(
         client,
@@ -1323,7 +1313,6 @@ def _send_servers_discovered_event(
     push_key: str,
     url: str,
     hook_client: str,
-    script_path: Path,
     machine_id: str,
     *,
     event_name: str = "serversDiscovered",
@@ -1351,7 +1340,7 @@ def _send_servers_discovered_event(
     redact_push_keys_in_data(payload_dict)
     payload = json.dumps(payload_dict)
 
-    ok, detail = _invoke_hook_script(script_path, hook_client, push_key, url, payload, machine_id)
+    ok, detail = send_hook_event(url, hook_client, push_key, payload, machine_id)
     if ok:
         server_count = sum(len(entry.get("servers", [])) for entry in servers)
         noun = "server" if server_count == 1 else "servers"
@@ -1625,7 +1614,6 @@ def _build_discover_hook_command(
     script_path: Path,
     hook_client: str,
     *,
-    config_path: Path,
     tenant_id: str = "",
     machine_id: str = "",
 ) -> str:
@@ -1635,7 +1623,6 @@ def _build_discover_hook_command(
             url,
             script_path,
             hook_client,
-            config_path=config_path,
             tenant_id=tenant_id,
             machine_id=machine_id,
         )
@@ -1652,7 +1639,6 @@ def _build_discover_hook_command(
         parts.append(f"AGENT_SCAN_BIN={_shell_quote(agent_scan_bin)}")
     parts.append(f"bash {_shell_quote(script_path.as_posix())}")
     parts.append(f"--client {_shell_quote(hook_client)}")
-    parts.append(f"--file {_shell_quote(config_path.as_posix())}")
     return " ".join(parts)
 
 
@@ -1662,7 +1648,6 @@ def _build_discover_hook_command_powershell(
     script_path: Path,
     hook_client: str,
     *,
-    config_path: Path,
     tenant_id: str = "",
     machine_id: str = "",
 ) -> str:
@@ -1672,7 +1657,6 @@ def _build_discover_hook_command_powershell(
     )
     if machine_id:
         command += f" -MachineId {_ps_quote(machine_id)}"
-    command += f" -ConfigFile {_ps_quote(str(config_path))}"
     agent_scan_bin = _agent_scan_bin()
     if agent_scan_bin is not None:
         command += f" -AgentScanBin {_ps_quote(agent_scan_bin)}"

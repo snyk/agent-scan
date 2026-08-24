@@ -18,9 +18,6 @@ param(
     [string]$MachineId,
 
     [Parameter(Mandatory=$false)]
-    [string]$ConfigFile,
-
-    [Parameter(Mandatory=$false)]
     [string]$AgentScanBin
 )
 
@@ -34,7 +31,6 @@ $bin = if ($AgentScanBin) { $AgentScanBin } elseif ($env:AGENT_SCAN_BIN) { $env:
 if (-not (Get-Command $bin -ErrorAction SilentlyContinue)) { $bin = "snyk-agent-scan" }
 
 $arguments = @("guard", "discover", "--client", $Client)
-if ($ConfigFile) { $arguments += @("--file", $ConfigFile) }
 
 $reader = New-Object System.IO.StreamReader([Console]::OpenStandardInput(), [System.Text.Encoding]::UTF8, $true)
 $payload = $reader.ReadToEnd()
