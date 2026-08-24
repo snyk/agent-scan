@@ -1,0 +1,33 @@
+name: Rust local inspector
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  local-inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
+      - name: Install Python test dependencies
+        run: uv sync --frozen --extra test
+      - name: Validate Rust formatting, tests, and lints
+        run: |
+          cargo fmt --check
+          cargo test --locked
+          cargo clippy --locked -- -D warnings
+      - name: Build and run executable compatibility checks
+        run: |
+          cargo build --release --locked
+          AGENT_SCAN_RUST_BINARY="$PWD/target/release/snyk-agent-scan-rust" \
+            uv run --frozen --extra test pytest tests/rust/test_local_inspect_equivalence.py -q --no-cov
