@@ -335,11 +335,16 @@ def _run_with_timeout(func: Callable[[], _T], timeout: float) -> _T:
 
 
 def _discovery_timeout_seconds() -> float:
+    import math
+    import threading
+
     try:
         value = float(os.environ.get("AGENT_SCAN_DISCOVERY_TIMEOUT_SECONDS", ""))
     except ValueError:
         return _DEFAULT_DISCOVERY_TIMEOUT_SECONDS
-    return value if value > 0 else _DEFAULT_DISCOVERY_TIMEOUT_SECONDS
+    if not math.isfinite(value) or not 0 < value <= threading.TIMEOUT_MAX:
+        return _DEFAULT_DISCOVERY_TIMEOUT_SECONDS
+    return value
 
 
 def _read_hook_payload() -> str:
