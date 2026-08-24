@@ -1016,7 +1016,7 @@ def main():
         "discover",
         allow_abbrev=False,
         help=(
-            "Run MCP server discovery and send a SessionStartServerDiscovery event through the installed hooks "
+            "Run MCP server discovery and send a SessionStartServerDiscovery event directly to Agent Monitor "
             "(used by the async session-start hooks that guard install configures)"
         ),
     )
@@ -1025,14 +1025,6 @@ def main():
         type=str,
         default=None,
         help="Remote hooks base URL (default: REMOTE_HOOKS_BASE_URL or https://api.snyk.io)",
-    )
-    guard_discover_parser.add_argument(
-        "--file",
-        type=str,
-        default=None,
-        help=(
-            "Override the hook config file path used to locate the forwarding script (default: ~/.claude/settings.json)"
-        ),
     )
     guard_discover_parser.add_argument(
         "--client",

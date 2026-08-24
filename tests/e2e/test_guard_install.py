@@ -89,8 +89,8 @@ class TestGuardInstallE2E:
         discover_command = discovery_groups[0]["hooks"][0]["command"]
         discover_script = "snyk-agent-guard-discover.ps1" if os.name == "nt" else "snyk-agent-guard-discover.sh"
         assert discover_script in discover_command
-        assert str(config_file) in discover_command
-        assert ("-ConfigFile" if os.name == "nt" else "--file") in discover_command
+        assert str(config_file) not in discover_command
+        assert ("-ConfigFile" if os.name == "nt" else "--file") not in discover_command
         assert [request["body"]["hook_event_name"] for request in _FakeHookServer.requests] == [
             "hooksConfigured",
             "serversDiscovered",
@@ -103,7 +103,7 @@ class TestGuardInstallE2E:
         assert json.loads(discovered["headers"]["X-User"])["identifier"] == "e2e-machine-id"
 
         discover_result = subprocess.run(
-            [*agent_scan_cmd, "guard", "discover", "--file", str(config_file)],
+            [*agent_scan_cmd, "guard", "discover"],
             capture_output=True,
             text=True,
             timeout=60,
@@ -156,10 +156,10 @@ class TestGuardInstallE2E:
         ]
         assert len(discovery_entries) == 1
         assert set(discovery_entries[0]) == {"command"}
-        assert str(config_file) in discovery_entries[0]["command"]
+        assert str(config_file) not in discovery_entries[0]["command"]
 
         discover_result = subprocess.run(
-            [*agent_scan_cmd, "guard", "discover", "--client", "cursor", "--file", str(config_file)],
+            [*agent_scan_cmd, "guard", "discover", "--client", "cursor"],
             input=json.dumps({"workspace_roots": [str(tmp_path)], "conversation_id": "e2e-conversation"}),
             capture_output=True,
             text=True,
@@ -211,10 +211,10 @@ class TestGuardInstallE2E:
         assert len(discovery_groups) == 1
         assert "matcher" not in discovery_groups[0]
         assert discovery_groups[0]["hooks"][0]["async"] is True
-        assert str(config_file) in discovery_groups[0]["hooks"][0]["command"]
+        assert str(config_file) not in discovery_groups[0]["hooks"][0]["command"]
 
         discover_result = subprocess.run(
-            [*agent_scan_cmd, "guard", "discover", "--client", "codex", "--file", str(config_file)],
+            [*agent_scan_cmd, "guard", "discover", "--client", "codex"],
             input=json.dumps({"cwd": str(tmp_path), "session_id": "e2e"}),
             capture_output=True,
             text=True,
