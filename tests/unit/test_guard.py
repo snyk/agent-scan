@@ -1620,6 +1620,34 @@ class TestBashHookScript:
         decoded = base64.b64decode(req["body"].removeprefix("base64:"))
         assert json.loads(decoded) == json.loads(payload)
 
+    def test_posts_large_payload_without_exec_argument_limit(self, hook_server):
+        script = _get_script_path("snyk-agent-guard.sh")
+        payload = json.dumps(
+            {
+                "hook_event_name": "serversDiscovered",
+                "session_id": "s1",
+                "servers": ["x" * (1024 * 1024)],
+            }
+        )
+        result = subprocess.run(
+            ["bash", str(script), "--client", "claude-code"],
+            input=payload,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={
+                "PATH": "/usr/bin:/bin:/usr/local/bin",
+                "PUSH_KEY": "test-pk-large-payload",
+                "REMOTE_HOOKS_BASE_URL": hook_server,
+            },
+        )
+
+        assert result.returncode == 0, result.stderr
+        req = _HookHandler.last_request
+        assert req is not None
+        decoded = base64.b64decode(req["body"].removeprefix("base64:"))
+        assert json.loads(decoded) == json.loads(payload)
+
     def test_cursor_endpoint(self, hook_server):
         script = _get_script_path("snyk-agent-guard.sh")
         payload = '{"hook_event_name":"test","conversation_id":"c1"}'
@@ -2502,6 +2530,34 @@ class TestInstallHooksOrchestration:
         with pytest.raises(SystemExit):
             self._call(tmp_path)
         ctx["dest"].unlink.assert_called_once_with(missing_ok=True)
+
+    def test_test_event_failure_cleans_new_discovery_script(self, ctx, tmp_path):
+        discover_script = tmp_path / "hooks" / "snyk-agent-guard-discover.sh"
+
+        def copy_scripts(_config_path):
+            discover_script.parent.mkdir(parents=True)
+            discover_script.write_text("#!/bin/sh\n")
+            return ctx["dest"], False, True, None, _NEW_CHECKSUM
+
+        ctx["copy"].side_effect = copy_scripts
+        ctx["test_event"].return_value = False
+
+        with pytest.raises(SystemExit):
+            self._call(tmp_path)
+
+        assert not discover_script.exists()
+
+    def test_test_event_failure_keeps_existing_discovery_script(self, ctx, tmp_path):
+        discover_script = tmp_path / "hooks" / "snyk-agent-guard-discover.sh"
+        discover_script.parent.mkdir(parents=True)
+        discover_script.write_text("existing\n")
+        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM)
+        ctx["test_event"].return_value = False
+
+        with pytest.raises(SystemExit):
+            self._call(tmp_path)
+
+        assert discover_script.read_text() == "existing\n"
 
     def test_test_event_failure_keeps_existing_script(self, ctx, tmp_path):
         ctx["copy"].return_value = (ctx["dest"], True, False, _CURRENT_CHECKSUM, _NEW_CHECKSUM)

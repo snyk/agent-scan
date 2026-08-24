@@ -448,6 +448,9 @@ def _install_hooks(
     old_push_key = existing_info.get("auth_value", "") if existing_info else ""
     push_key_changed = bool(old_push_key) and old_push_key != push_key
 
+    discover_script_name = "snyk-agent-guard-discover.ps1" if IS_WINDOWS else "snyk-agent-guard-discover.sh"
+    discover_script_path = config_path.parent / "hooks" / discover_script_name
+    discover_script_existed = discover_script_path.exists()
     dest_path, script_existed, script_updated, current_checksum, new_checksum = _copy_hook_script(config_path)
     command = _build_hook_command(
         push_key,
@@ -459,13 +462,11 @@ def _install_hooks(
     )
     discover_command = None
     if not _is_codex_requirements_toml(config_path):
-        discover_script = dest_path.with_name(
-            "snyk-agent-guard-discover.ps1" if IS_WINDOWS else "snyk-agent-guard-discover.sh"
-        )
+        installed_discover_script_path = dest_path.with_name(discover_script_name)
         discover_command = _build_discover_hook_command(
             push_key,
             url,
-            discover_script,
+            installed_discover_script_path,
             tenant_id=tenant_id,
             machine_id=machine_id,
             hook_client=hook_client,
@@ -496,6 +497,8 @@ def _install_hooks(
     ):
         if not script_existed:
             dest_path.unlink(missing_ok=True)
+        if not discover_script_existed:
+            discover_script_path.unlink(missing_ok=True)
         rich.print("[bold red]Aborting install \u2014 test event failed.[/bold red]")
         raise SystemExit(1)
 

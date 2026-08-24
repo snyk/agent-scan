@@ -144,10 +144,10 @@ hook_main() {
     -H "X-User: ${x_user}"
     -H "Content-Type: text/plain"
     -H "X-Client-Id: ${pushkey}"
-    --data-binary "${encoded_body}"
+    --data-binary @-
   )
 
-  resp="$(curl "${curl_args[@]}" -w $'\n'"${marker}%{http_code}")" || die "Request failed"
+  resp="$(printf '%s' "$encoded_body" | curl "${curl_args[@]}" -w $'\n'"${marker}%{http_code}")" || die "Request failed"
   http_code="${resp##*$'\n'"${marker}"}"
   body="${resp%$'\n'"${marker}"*}"
 
