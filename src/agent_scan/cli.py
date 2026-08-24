@@ -890,6 +890,21 @@ def enforce_consent_requirements(args) -> None:
         sys.exit(CLI_USAGE_ERROR_EXIT_CODE)
 
 
+def _parse_sandbox_env_args(env_args: list[str] | None) -> dict[str, str]:
+    """Parse repeated ``--env KEY=VALUE`` values into a dict.
+
+    Raises ``ValueError`` with a clear message on a malformed entry (no ``=``,
+    or an empty key) rather than silently dropping or misparsing it.
+    """
+    parsed: dict[str, str] = {}
+    for entry in env_args or []:
+        key, sep, value = entry.partition("=")
+        if not sep or not key:
+            raise ValueError(f"--env value {entry!r} must be in KEY=VALUE form")
+        parsed[key] = value
+    return parsed
+
+
 def run_sandbox_scan_command(args) -> int:
     from pathlib import Path
 
@@ -906,12 +921,19 @@ def run_sandbox_scan_command(args) -> int:
         return CLI_USAGE_ERROR_EXIT_CODE
 
     try:
+        extra_env = _parse_sandbox_env_args(args.env)
+    except ValueError as e:
+        rich.print(f"[bold red]error[/bold red]: {e}", file=sys.stderr)
+        return CLI_USAGE_ERROR_EXIT_CODE
+
+    try:
         if args.build:
             build_images(DEFAULT_REPO_ROOT)
         result = run_sandboxed_scan(
             args.target,
             input_dir=input_dir,
             extra_args=["--server-timeout", str(args.server_timeout)],
+            extra_env=extra_env,
         )
     except RuntimeError as e:
         # build_images()/run_sandboxed_scan() wrap subprocess.CalledProcessError into a
@@ -1145,6 +1167,18 @@ def main():
             "npm:/pypi: target is a cold install that can take longer than a typical run)"
         ),
         metavar="SECONDS",
+    )
+    sandbox_scan_parser.add_argument(
+        "--env",
+        action="append",
+        default=None,
+        metavar="KEY=VALUE",
+        help=(
+            "Environment variable to pass to the scanned server (repeatable). Works for "
+            "direct-scan (npm:/pypi:) targets, which otherwise have no way to receive "
+            "credentials, as well as mounted mcp.json targets. Injected proxy env vars "
+            "always win on collision, regardless of --env."
+        ),
     )
 
     # Parse arguments (default to 'scan' if no command provided)

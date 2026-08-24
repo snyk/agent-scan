@@ -126,3 +126,60 @@ def test_malformed_config_json_raises_clear_value_error(tmp_path):
 def test_unsupported_direct_scan_prefixes_are_rejected(prefix):
     with pytest.raises(ValueError, match="supported by sandbox-scan yet"):
         build_sandbox_config(prefix, "http://proxy:8888")
+
+
+def test_extra_env_is_merged_into_direct_scan_target():
+    config = build_sandbox_config(
+        "npm:some-mcp-server@1.2.3",
+        "http://proxy:8888",
+        extra_env={"API_TOKEN": "secret-value"},
+    )
+
+    server = config["mcpServers"]["some-mcp-server"]
+    assert server["env"]["API_TOKEN"] == "secret-value"
+    assert server["env"]["HTTP_PROXY"] == "http://proxy:8888"
+
+
+def test_extra_env_is_merged_into_client_config_file(tmp_path):
+    (tmp_path / "mcp.json").write_text(
+        json.dumps({"mcpServers": {"Custom": {"command": "python3", "args": ["server.py"]}}})
+    )
+
+    config = build_sandbox_config(
+        "mcp.json", "http://proxy:8888", input_dir=tmp_path, extra_env={"API_TOKEN": "secret-value"}
+    )
+
+    server = config["mcpServers"]["Custom"]
+    assert server["env"]["API_TOKEN"] == "secret-value"
+
+
+def test_extra_env_overrides_client_configs_own_env(tmp_path):
+    (tmp_path / "mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "Custom": {
+                        "command": "python3",
+                        "args": ["server.py"],
+                        "env": {"API_TOKEN": "stale-value-from-config-file"},
+                    }
+                }
+            }
+        )
+    )
+
+    config = build_sandbox_config(
+        "mcp.json", "http://proxy:8888", input_dir=tmp_path, extra_env={"API_TOKEN": "fresh-value-from-cli"}
+    )
+
+    assert config["mcpServers"]["Custom"]["env"]["API_TOKEN"] == "fresh-value-from-cli"
+
+
+def test_extra_env_cannot_override_injected_proxy_vars():
+    config = build_sandbox_config(
+        "npm:some-mcp-server@1.2.3",
+        "http://proxy:8888",
+        extra_env={"HTTP_PROXY": "http://attacker.example:9999"},
+    )
+
+    assert config["mcpServers"]["some-mcp-server"]["env"]["HTTP_PROXY"] == "http://proxy:8888"

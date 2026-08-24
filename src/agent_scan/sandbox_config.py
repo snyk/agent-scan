@@ -25,7 +25,9 @@ if TYPE_CHECKING:
 DEFAULT_NO_PROXY = "localhost,127.0.0.1"
 
 
-def _inject_proxy_env(server: StdioServer, proxy_url: str, no_proxy: str) -> StdioServer:
+def _inject_proxy_env(
+    server: StdioServer, proxy_url: str, no_proxy: str, extra_env: dict[str, str] | None = None
+) -> StdioServer:
     proxy_vars = {
         "HTTP_PROXY": proxy_url,
         "HTTPS_PROXY": proxy_url,
@@ -34,10 +36,12 @@ def _inject_proxy_env(server: StdioServer, proxy_url: str, no_proxy: str) -> Std
         "https_proxy": proxy_url,
         "no_proxy": no_proxy,
     }
-    # The injected proxy vars must win on collision: a client-supplied ``env`` that
-    # sets its own HTTP_PROXY/HTTPS_PROXY/NO_PROXY (accidentally or maliciously)
-    # must not be able to override the containment control by being spread last.
-    merged_env = {**(server.env or {}), **proxy_vars}
+    # Precedence, lowest to highest: the server's own config env, then the operator's
+    # --env overrides, then the injected proxy vars. The proxy vars must win on
+    # collision -- a client-supplied env (or an operator's own --env) that sets its
+    # own HTTP_PROXY/HTTPS_PROXY/NO_PROXY (accidentally or maliciously) must not be
+    # able to override the containment control by being spread last.
+    merged_env = {**(server.env or {}), **(extra_env or {}), **proxy_vars}
     return server.model_copy(update={"env": merged_env})
 
 
@@ -47,12 +51,16 @@ def build_sandbox_config(
     *,
     input_dir: Path | None = None,
     no_proxy: str = DEFAULT_NO_PROXY,
+    extra_env: dict[str, str] | None = None,
 ) -> dict:
     """Return an ``{"mcpServers": {...}}`` dict ready to write into the sandbox mount.
 
     ``target`` is either a direct-scan prefixed string (``npm:...``,
     ``pypi:...``) or a path relative to ``input_dir`` pointing at the
-    client-supplied config file.
+    client-supplied config file. ``extra_env`` (from ``sandbox-scan --env``)
+    is merged into every stdio server's env for either target type -- direct-scan
+    targets otherwise have no way to receive credentials a real server might need
+    (e.g. an API token), since ``direct_scan_to_server_config()`` never sets ``env``.
     """
     if is_direct_scan(target):
         if target.startswith(("oci:", "nuget:", "mcpb:")):
@@ -62,7 +70,7 @@ def build_sandbox_config(
             )
         name, server = direct_scan_to_server_config(target)
         if isinstance(server, StdioServer):
-            server = _inject_proxy_env(server, proxy_url, no_proxy)
+            server = _inject_proxy_env(server, proxy_url, no_proxy, extra_env)
         return {"mcpServers": {name: server.model_dump(exclude_none=True)}}
 
     if input_dir is None:
@@ -82,5 +90,5 @@ def build_sandbox_config(
     for name, raw in servers.items():
         if "command" in raw:
             stdio = StdioServer.model_validate(raw)
-            servers[name] = _inject_proxy_env(stdio, proxy_url, no_proxy).model_dump(exclude_none=True)
+            servers[name] = _inject_proxy_env(stdio, proxy_url, no_proxy, extra_env).model_dump(exclude_none=True)
     return config

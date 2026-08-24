@@ -445,10 +445,15 @@ including what targets are and aren't supported yet.
 | `TARGET` | string | — | A direct-scan target (`npm:pkg@version`, `pypi:pkg@version`) or a path relative to `--input-dir`. |
 | `--input-dir DIR` | string | — | Host directory to mount read-only at `/scan-input` inside the sandbox. Required when `TARGET` is not a direct-scan target. |
 | `--build` | boolean | `false` | (Re)build the sandbox images before running. Requires a source checkout of `agent-scan` — not supported yet from a pip install or the packaged binary. |
+| `--server-timeout SECONDS` | float | `60` | Seconds to wait for the sandboxed server's handshake. Higher than the normal 10s default: the sandbox has no persistent npm/pip cache, so every `npm:`/`pypi:` target is a cold install. |
+| `--env KEY=VALUE` | string, repeatable | — | Environment variable to pass to the scanned server — works for direct-scan targets too, which otherwise have no way to receive credentials. Injected proxy env vars always win on collision. |
 
 ```bash
 # A registry-resolved package
 snyk-agent-scan sandbox-scan npm:some-mcp-server@1.2.3 --build
+
+# A package that needs credentials
+snyk-agent-scan sandbox-scan npm:some-mcp-server@1.2.3 --env API_TOKEN=secret
 
 # Your own server source
 snyk-agent-scan sandbox-scan mcp.json --input-dir ./my-server --build

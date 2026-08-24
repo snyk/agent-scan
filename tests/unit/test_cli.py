@@ -5,7 +5,13 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from agent_scan.cli import _handle_ci_exit, _should_show_analysis_results, print_scan_inspect, setup_scan_parser
+from agent_scan.cli import (
+    _handle_ci_exit,
+    _parse_sandbox_env_args,
+    _should_show_analysis_results,
+    print_scan_inspect,
+    setup_scan_parser,
+)
 from agent_scan.models import InspectedPath, ScanError
 from agent_scan.models.api.v20260710 import (
     McpServerRiskIndexes,
@@ -522,3 +528,27 @@ def test_scan_ci_message_reports_the_actual_failure_reasons(response, expected_r
     message = capsys.readouterr().err
     assert expected_reason in message
     assert unexpected_reason not in message
+
+
+class TestParseSandboxEnvArgs:
+    """Tests for sandbox-scan's --env KEY=VALUE parsing."""
+
+    def test_none_returns_empty_dict(self):
+        assert _parse_sandbox_env_args(None) == {}
+
+    def test_single_entry(self):
+        assert _parse_sandbox_env_args(["API_TOKEN=secret"]) == {"API_TOKEN": "secret"}
+
+    def test_multiple_entries(self):
+        assert _parse_sandbox_env_args(["A=1", "B=2"]) == {"A": "1", "B": "2"}
+
+    def test_value_may_contain_equals_signs(self):
+        assert _parse_sandbox_env_args(["JWT=header.payload=x.sig=y"]) == {"JWT": "header.payload=x.sig=y"}
+
+    def test_value_may_be_empty(self):
+        assert _parse_sandbox_env_args(["EMPTY="]) == {"EMPTY": ""}
+
+    @pytest.mark.parametrize("entry", ["no-equals-sign", "=no-key"])
+    def test_malformed_entry_raises_clear_error(self, entry):
+        with pytest.raises(ValueError, match="KEY=VALUE"):
+            _parse_sandbox_env_args([entry])

@@ -144,3 +144,24 @@ def test_run_sandboxed_scan_passes_timeout_to_scan_container(mock_run):
 
     scan_call = next(call for call in mock_run.call_args_list if SANDBOX_IMAGE in call.args[0])
     assert scan_call.kwargs.get("timeout") == 300
+
+
+@patch("agent_scan.sandbox_runner.subprocess.run")
+def test_run_sandboxed_scan_writes_extra_env_into_generated_config(mock_run):
+    captured_config = {}
+
+    def side_effect(args, **kwargs):
+        if SANDBOX_IMAGE in args:
+            mount_arg = next(a for a in args if a.endswith(":/scan-config:ro"))
+            scratch_dir = mount_arg.split(":/scan-config:ro")[0]
+            config_path = f"{scratch_dir}/mcp.generated.json"
+            with open(config_path) as f:
+                captured_config.update(json.load(f))
+        return _fake_completed_process(stdout=json.dumps({"ok": True}))
+
+    mock_run.side_effect = side_effect
+
+    run_sandboxed_scan("npm:some-mcp-server@1.0.0", extra_env={"API_TOKEN": "secret-value"})
+
+    server_env = captured_config["mcpServers"]["some-mcp-server"]["env"]
+    assert server_env["API_TOKEN"] == "secret-value"

@@ -63,20 +63,24 @@ def run_sandboxed_scan(
     target: str,
     input_dir: Path | None = None,
     extra_args: list[str] | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> SandboxScanResult:
     """Resolve ``target`` and scan it inside the two-container sandbox.
 
     ``target`` is either a direct-scan prefixed string (``npm:...``,
     ``pypi:...``) or a path relative to ``input_dir`` pointing at the
-    client-supplied config file. Both containers and the per-scan network
-    are torn down unconditionally, whether or not the scan succeeds.
+    client-supplied config file. ``extra_env`` is merged into the scanned
+    server's own env (e.g. credentials it needs), not the sandbox container's
+    environment -- see ``build_sandbox_config``. Both containers and the
+    per-scan network are torn down unconditionally, whether or not the scan
+    succeeds.
     """
     run_id = uuid.uuid4().hex[:8]
     network = f"agent-scan-sandbox-net-{run_id}"
     proxy_name = f"agent-scan-sandbox-proxy-{run_id}"
     proxy_url = f"http://{proxy_name}:{PROXY_PORT}"
 
-    config = build_sandbox_config(target, proxy_url, input_dir=input_dir)
+    config = build_sandbox_config(target, proxy_url, input_dir=input_dir, extra_env=extra_env)
 
     _run_checked(["docker", "network", "create", network, "--internal"])
     try:

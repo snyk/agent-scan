@@ -40,6 +40,13 @@ Real vulnerability findings for sandboxed scans are a planned follow-on.
 # A registry-resolved package
 snyk-agent-scan sandbox-scan npm:some-mcp-server@1.2.3 --build
 
+# A package that needs credentials -- --env works for direct-scan targets too
+snyk-agent-scan sandbox-scan npm:some-mcp-server@1.2.3 \
+  --env API_TOKEN=your-token
+
+# A cold npm/pypi install that needs longer than the default handshake wait
+snyk-agent-scan sandbox-scan npm:some-mcp-server@1.2.3 --server-timeout 120
+
 # Your own server source
 snyk-agent-scan sandbox-scan mcp.json --input-dir ./my-server --build
 ```
@@ -49,6 +56,18 @@ is a path relative to it. `--build` (re)builds the sandbox images first — omit
 it on repeat runs once they're built. `--build` requires a source checkout of
 `agent-scan` (it builds from `sandbox/Dockerfile` in this repo) — it isn't
 supported yet from a pip install or the packaged binary.
+
+`--env KEY=VALUE` (repeatable) passes environment variables to the scanned
+server — the only way to give a direct-scan (`npm:`/`pypi:`) target any
+credentials it needs, since it has no `mcp.json` of its own to hold an `env`
+block. Injected proxy env vars always win on collision, regardless of `--env`
+or anything a mounted `mcp.json` sets.
+
+`--server-timeout SECONDS` (default `60`, vs. the normal `10`) controls how
+long to wait for the sandboxed server's handshake. The sandbox has no
+persistent npm/pip cache, so every `npm:`/`pypi:` target is a cold install —
+a package with real dependencies can easily take longer than 10 seconds to
+download and start.
 
 Output is JSON, keyed by the literal in-container path
 `/scan-config/mcp.generated.json` (not a real path on your machine) — the same
