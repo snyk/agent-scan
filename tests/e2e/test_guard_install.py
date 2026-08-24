@@ -98,6 +98,8 @@ class TestGuardInstallE2E:
         discovered = _FakeHookServer.requests[1]
         assert discovered["body"]["session_id"] == "hooks-setup"
         assert isinstance(discovered["body"]["servers"], list)
+        assert isinstance(discovered["body"]["discovery_duration_ms"], int)
+        assert discovered["body"]["discovery_duration_ms"] >= 0
         assert json.loads(discovered["headers"]["X-User"])["identifier"] == "e2e-machine-id"
 
         discover_result = subprocess.run(
@@ -119,6 +121,8 @@ class TestGuardInstallE2E:
         assert session_discovery["body"]["hook_event_name"] == "SessionStartServerDiscovery"
         assert session_discovery["body"]["session_id"] == "session-start-server-discovery"
         assert isinstance(session_discovery["body"]["servers"], list)
+        assert isinstance(session_discovery["body"]["discovery_duration_ms"], int)
+        assert session_discovery["body"]["discovery_duration_ms"] >= 0
 
     @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
     def test_guard_install_cursor(self, agent_scan_cmd, tmp_path, fake_hook_server):
@@ -170,6 +174,8 @@ class TestGuardInstallE2E:
         assert session_discovery["body"]["conversation_id"] == "e2e-conversation"
         assert "session_id" not in session_discovery["body"]
         assert isinstance(session_discovery["body"]["servers"], list)
+        assert isinstance(session_discovery["body"]["discovery_duration_ms"], int)
+        assert session_discovery["body"]["discovery_duration_ms"] >= 0
 
     @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
     def test_guard_install_codex(self, agent_scan_cmd, tmp_path, fake_hook_server):
@@ -222,3 +228,5 @@ class TestGuardInstallE2E:
         assert session_discovery["body"]["hook_event_name"] == "SessionStartServerDiscovery"
         assert session_discovery["body"]["session_id"] == "e2e"
         assert isinstance(session_discovery["body"]["servers"], list)
+        assert isinstance(session_discovery["body"]["discovery_duration_ms"], int)
+        assert session_discovery["body"]["discovery_duration_ms"] >= 0

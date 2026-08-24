@@ -2864,6 +2864,8 @@ class TestSendServersDiscoveredEvent:
         assert payload[id_key] == "hooks-setup"
         assert ({"session_id", "conversation_id"} - {id_key}).isdisjoint(payload)
         assert payload["servers"][0]["command"] == "PUSH_KEY='**REDACTED**'"
+        assert isinstance(payload["discovery_duration_ms"], int)
+        assert payload["discovery_duration_ms"] >= 0
         assert push_key not in json.dumps(payload)
         assert captured["env"]["MACHINE_ID"] == "machine-42"
 
@@ -2897,6 +2899,28 @@ class TestSendServersDiscoveredEvent:
         assert ok is True
         assert captured["payload"]["hook_event_name"] == "SessionStartServerDiscovery"
         assert captured["payload"]["session_id"] == "session-start-server-discovery"
+
+    def test_payload_includes_discovery_duration_ms_from_monotonic_clock(self):
+        captured = {}
+
+        def fake_run(cmd, *, input, **kwargs):
+            captured["payload"] = json.loads(input)
+            return subprocess.CompletedProcess(cmd, 0, stdout="ok", stderr="")
+
+        with (
+            patch(f"{_G}.IS_WINDOWS", False),
+            patch(f"{_G}._discover_servers_payload", return_value=[]),
+            patch("subprocess.run", side_effect=fake_run),
+            patch("time.monotonic", side_effect=[100.0, 100.25]),
+            patch(f"{_G}.rich"),
+        ):
+            ok = guard_module._send_servers_discovered_event(
+                "pk-test", "https://api.snyk.io", "claude-code", Path("/hook.sh"), "machine-42"
+            )
+
+        assert ok is True
+        assert captured["payload"]["discovery_duration_ms"] == 250
+        assert isinstance(captured["payload"]["discovery_duration_ms"], int)
 
     def test_nonzero_exit_warns_and_returns_false(self):
         completed = subprocess.CompletedProcess([], 2, stdout="", stderr="failed")
@@ -3034,6 +3058,9 @@ class TestRunDiscover:
 
         assert result == 0
         assert captured["cmd"] == ["bash", str(script), "--client", "claude-code"]
+        duration = captured["payload"].pop("discovery_duration_ms")
+        assert isinstance(duration, int)
+        assert duration >= 0
         assert captured["payload"] == {
             "hook_event_name": "SessionStartServerDiscovery",
             "servers": [],

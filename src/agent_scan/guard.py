@@ -11,6 +11,7 @@ import re
 import shutil
 import stat
 import sys
+import time
 from importlib import resources as importlib_resources
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -1232,15 +1233,18 @@ def _send_servers_discovered_event(
     project_folders: list[str] | None = None,
 ) -> bool:
     rich.print("[dim]Discovering MCP servers...[/dim]")
+    started = time.monotonic()
     try:
         servers = _discover_servers_payload(project_folders)
     except Exception as e:
         rich.print(f"[yellow]Warning:[/yellow] Could not discover MCP servers: {e}")
         return False
+    duration_ms = round((time.monotonic() - started) * 1000)
 
     payload_dict: dict = {
         "hook_event_name": event_name,
         "servers": servers,
+        "discovery_duration_ms": duration_ms,
     }
     if hook_client == "claude-code" or hook_client == "codex":
         payload_dict["session_id"] = session_marker
