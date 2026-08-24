@@ -9,6 +9,8 @@
   and vulnerabilities (including agents, MCP servers, skills).
 </p>
 
+> **Note:** We don't publish an npm package for Agent Scan. Install it via [`uvx`](#run-with-uvx) or as a [standalone binary](#run-with-a-standalone-binary).
+
 > **Note: CLI output is experimental and subject to change**
 >
 > **Agent Scan v0.5.x (planned for deprecation)**
@@ -124,12 +126,6 @@ Both versions scan MCP servers, tools, prompts, resources, and skills, and autom
 ### Run with a standalone binary
 
 Download the binary for your operating system and architecture from the [latest GitHub Release](https://github.com/snyk/agent-scan/releases/latest). The release page also provides an SBOM (`sbom-<version>.json`), checksum files, and GitHub-generated source code archives. See [Verifying Standalone Binaries](#verifying-standalone-binaries) to verify your download.
-
-### Agent Scan v0.5.x example run
-
-[![Agent Scan v0.5 security vulnerabilities demo](demo.svg)](https://asciinema.org/a/716858)
-
-For the v0.6 risk-based output, see the v0.6 image at the top of this README.
 
 ## Highlights
 
