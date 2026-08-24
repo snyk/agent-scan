@@ -343,7 +343,10 @@ class TestBuildDiscoverHookCommand:
     @pytest.mark.parametrize("client", ["claude-code", "cursor", "codex"])
     def test_builds_quoted_environment_prefix_with_agent_scan_binary(self, client):
         config_path = Path("/x/config with spaces/settings.json")
-        with patch(f"{_G}._agent_scan_bin", return_value="/opt/Snyk's bin/snyk-agent-scan"):
+        with (
+            patch(f"{_G}.IS_WINDOWS", False),
+            patch(f"{_G}._agent_scan_bin", return_value="/opt/Snyk's bin/snyk-agent-scan"),
+        ):
             command = guard_module._build_discover_hook_command(
                 "pk",
                 "https://api.snyk.io",
@@ -365,7 +368,10 @@ class TestBuildDiscoverHookCommand:
         assert _is_agent_scan_command(command)
 
     def test_omits_agent_scan_binary_when_unresolved(self):
-        with patch(f"{_G}._agent_scan_bin", return_value=None):
+        with (
+            patch(f"{_G}.IS_WINDOWS", False),
+            patch(f"{_G}._agent_scan_bin", return_value=None),
+        ):
             command = guard_module._build_discover_hook_command(
                 "pk",
                 "https://api.snyk.io",
@@ -407,11 +413,12 @@ class TestPrepareClaudeDiscoveryHook:
     )
 
     def test_adds_separate_async_matcherless_session_start_group(self, tmp_path):
-        settings, _, _ = _prepare_claude_config(
-            AGENT_SCAN_CMD,
-            tmp_path / "settings.json",
-            discover_command=self.discover_command,
-        )
+        with patch(f"{_G}.IS_WINDOWS", False):
+            settings, _, _ = _prepare_claude_config(
+                AGENT_SCAN_CMD,
+                tmp_path / "settings.json",
+                discover_command=self.discover_command,
+            )
 
         for event in CLAUDE_HOOK_EVENTS:
             expected_count = 2 if event == "SessionStart" else 1
@@ -2532,7 +2539,10 @@ class TestInstallHooksOrchestration:
         ctx["dest"].unlink.assert_called_once_with(missing_ok=True)
 
     def test_test_event_failure_cleans_new_discovery_script(self, ctx, tmp_path):
-        discover_script = tmp_path / "hooks" / "snyk-agent-guard-discover.sh"
+        discover_script_name = (
+            "snyk-agent-guard-discover.ps1" if guard_module.IS_WINDOWS else "snyk-agent-guard-discover.sh"
+        )
+        discover_script = tmp_path / "hooks" / discover_script_name
 
         def copy_scripts(_config_path):
             discover_script.parent.mkdir(parents=True)
@@ -2548,7 +2558,10 @@ class TestInstallHooksOrchestration:
         assert not discover_script.exists()
 
     def test_test_event_failure_keeps_existing_discovery_script(self, ctx, tmp_path):
-        discover_script = tmp_path / "hooks" / "snyk-agent-guard-discover.sh"
+        discover_script_name = (
+            "snyk-agent-guard-discover.ps1" if guard_module.IS_WINDOWS else "snyk-agent-guard-discover.sh"
+        )
+        discover_script = tmp_path / "hooks" / discover_script_name
         discover_script.parent.mkdir(parents=True)
         discover_script.write_text("existing\n")
         ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM)
