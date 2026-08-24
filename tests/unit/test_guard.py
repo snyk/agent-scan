@@ -3078,7 +3078,16 @@ class TestDiscoverServersPayload:
 
     @pytest.mark.parametrize(
         "raw_value,expected",
-        [(None, 60.0), ("garbage", 60.0), ("0", 60.0), ("-1", 60.0), ("2.5", 2.5)],
+        [
+            (None, 60.0),
+            ("garbage", 60.0),
+            ("0", 60.0),
+            ("-1", 60.0),
+            ("nan", 60.0),
+            ("inf", 60.0),
+            ("1e100", 60.0),
+            ("2.5", 2.5),
+        ],
     )
     def test_discovery_timeout_environment_parsing(self, raw_value, expected, monkeypatch):
         if raw_value is None:
