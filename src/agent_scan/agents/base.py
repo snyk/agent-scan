@@ -456,8 +456,19 @@ class AgentDiscoverer(ABC):
         return []
 
     def _all_project_folders(self) -> list[Path]:
-        """Agent-recorded project roots followed by explicitly supplied roots."""
-        return list(dict.fromkeys([*self._discover_project_folders(), *self.extra_project_folders]))
+        """Return recorded roots then explicit roots, deduped without changing their spelling."""
+        result: list[Path] = []
+        seen: set[Path] = set()
+        for folder in (*self._discover_project_folders(), *self.extra_project_folders):
+            try:
+                key = folder.resolve()
+            except OSError:
+                key = folder
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(folder)
+        return result
 
     def _project_paths_with_ancestors(self) -> list[Path]:
         """Project roots plus every ancestor up to filesystem root, deduplicated.
