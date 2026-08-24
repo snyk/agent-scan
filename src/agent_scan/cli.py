@@ -908,7 +908,11 @@ def run_sandbox_scan_command(args) -> int:
     try:
         if args.build:
             build_images(DEFAULT_REPO_ROOT)
-        result = run_sandboxed_scan(args.target, input_dir=input_dir)
+        result = run_sandboxed_scan(
+            args.target,
+            input_dir=input_dir,
+            extra_args=["--server-timeout", str(args.server_timeout)],
+        )
     except RuntimeError as e:
         # build_images()/run_sandboxed_scan() wrap subprocess.CalledProcessError into a
         # RuntimeError that includes Docker's own stderr -- surface it as-is rather than
@@ -1130,6 +1134,17 @@ def main():
         action="store_true",
         default=False,
         help="(Re)build the sandbox images before running",
+    )
+    sandbox_scan_parser.add_argument(
+        "--server-timeout",
+        type=float,
+        default=60,
+        help=(
+            "Seconds to wait for the sandboxed server's handshake (default: 60, higher than "
+            "the normal 10s default -- the sandbox has no persistent npm/pip cache, so every "
+            "npm:/pypi: target is a cold install that can take longer than a typical run)"
+        ),
+        metavar="SECONDS",
     )
 
     # Parse arguments (default to 'scan' if no command provided)
