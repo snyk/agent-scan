@@ -31,6 +31,7 @@ if ($RemoteUrl) { $env:REMOTE_HOOKS_BASE_URL = $RemoteUrl }
 if ($MachineId) { $env:MACHINE_ID = $MachineId }
 
 $bin = if ($AgentScanBin) { $AgentScanBin } elseif ($env:AGENT_SCAN_BIN) { $env:AGENT_SCAN_BIN } else { "snyk-agent-scan" }
+if (-not (Get-Command $bin -ErrorAction SilentlyContinue)) { $bin = "snyk-agent-scan" }
 
 $arguments = @("guard", "discover", "--client", $Client)
 if ($ConfigFile) { $arguments += @("--file", $ConfigFile) }

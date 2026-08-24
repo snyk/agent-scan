@@ -14,7 +14,7 @@ import sys
 import time
 from importlib import resources as importlib_resources
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple, TypeVar
 from urllib.parse import urlparse
 
 import rich
@@ -29,9 +29,12 @@ from agent_scan.pushkeys import (
 from agent_scan.redact import redact_push_keys, redact_push_keys_in_data
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from agent_scan.models import ClientToInspect
 
 IS_WINDOWS = sys.platform == "win32"
+_T = TypeVar("_T")
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -54,6 +57,8 @@ _DETECTION_RE = re.compile(
     r"|snyk-agent-guard.*-PushKey\b"
 )
 _PERMISSION_DENIED = "__permission_denied__"
+_STDIN_READ_TIMEOUT_SECONDS = 5.0
+_DEFAULT_DISCOVERY_TIMEOUT_SECONDS = 60.0
 
 CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 CURSOR_HOOKS_PATH = Path.home() / ".cursor" / "hooks.json"
@@ -306,6 +311,48 @@ def _run_install(args) -> None:
         _send_servers_discovered_event(push_key, url, *first_installed, machine_id)
 
 
+def _run_with_timeout(func: Callable[[], _T], timeout: float) -> _T:
+    """Run ``func`` on a daemon thread; raise ``TimeoutError`` if it outlives ``timeout``."""
+    import threading
+
+    result: list[_T] = []
+    error: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            result.append(func())
+        except BaseException as e:
+            error.append(e)
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    thread.join(timeout)
+    if thread.is_alive():
+        raise TimeoutError(f"timed out after {timeout:g}s")
+    if error:
+        raise error[0]
+    return result[0]
+
+
+def _discovery_timeout_seconds() -> float:
+    try:
+        value = float(os.environ.get("AGENT_SCAN_DISCOVERY_TIMEOUT_SECONDS", ""))
+    except ValueError:
+        return _DEFAULT_DISCOVERY_TIMEOUT_SECONDS
+    return value if value > 0 else _DEFAULT_DISCOVERY_TIMEOUT_SECONDS
+
+
+def _read_hook_payload() -> str:
+    """Read hook JSON from stdin without allowing an open stream to hang discovery."""
+    stream = sys.stdin
+    try:
+        if stream is None or stream.isatty():
+            return ""
+        return _run_with_timeout(lambda: stream.read(1024 * 1024), _STDIN_READ_TIMEOUT_SECONDS)
+    except Exception:
+        return ""
+
+
 def _run_discover(args) -> int:
     push_key = os.environ.get("PUSH_KEY", "")
     if not push_key:
@@ -331,7 +378,7 @@ def _run_discover(args) -> int:
     session_payload_field = _HOOK_CLIENT_SESSION_FIELDS.get(hook_client) if hook_client else None
     if project_folder_payload_field or session_payload_field:
         try:
-            hook_payload = json.loads(sys.stdin.read(1024 * 1024))
+            hook_payload = json.loads(_read_hook_payload())
             project_folder = (
                 hook_payload.get(project_folder_payload_field)
                 if isinstance(hook_payload, dict) and project_folder_payload_field
@@ -448,10 +495,19 @@ def _install_hooks(
     old_push_key = existing_info.get("auth_value", "") if existing_info else ""
     push_key_changed = bool(old_push_key) and old_push_key != push_key
 
+    is_codex_requirements = _is_codex_requirements_toml(config_path)
     discover_script_name = "snyk-agent-guard-discover.ps1" if IS_WINDOWS else "snyk-agent-guard-discover.sh"
     discover_script_path = config_path.parent / "hooks" / discover_script_name
     discover_script_existed = discover_script_path.exists()
-    dest_path, script_existed, script_updated, current_checksum, new_checksum = _copy_hook_script(config_path)
+    (
+        dest_path,
+        script_existed,
+        script_updated,
+        current_checksum,
+        new_checksum,
+        discover_current_checksum,
+        discover_new_checksum,
+    ) = _copy_hook_script(config_path, include_discover=not is_codex_requirements)
     command = _build_hook_command(
         push_key,
         url,
@@ -461,7 +517,7 @@ def _install_hooks(
         machine_id=machine_id,
     )
     discover_command = None
-    if not _is_codex_requirements_toml(config_path):
+    if not is_codex_requirements:
         installed_discover_script_path = dest_path.with_name(discover_script_name)
         discover_command = _build_discover_hook_command(
             push_key,
@@ -493,6 +549,8 @@ def _install_hooks(
         push_key_changed=push_key_changed,
         current_checksum=current_checksum,
         new_checksum=new_checksum,
+        discover_current_checksum=discover_current_checksum,
+        discover_new_checksum=discover_new_checksum,
         machine_id=machine_id,
     ):
         if not script_existed:
@@ -545,6 +603,7 @@ def _prepare_claude_config(
         hooks[event] = existing
 
     if discover_command:
+        # Claude supports async hooks; keep session start independent of the discovery scan.
         discover_entry: dict = {
             "type": "command",
             "command": discover_command,
@@ -597,6 +656,7 @@ def _prepare_cursor_config(
         hooks[event] = existing
 
     if discover_command:
+        # Cursor sessionStart hooks are fire-and-forget without an explicit async marker.
         hooks["sessionStart"].append({"command": discover_command})
 
     for event, entries in filtered.items():
@@ -642,6 +702,7 @@ def _prepare_codex_config(
         hooks[event] = existing
 
     if discover_command:
+        # Codex supports async hooks; keep session start independent of the discovery scan.
         hooks["SessionStart"].append({"hooks": [{"type": "command", "command": discover_command, "async": True}]})
 
     for event, groups in filtered.items():
@@ -1092,21 +1153,41 @@ def _detect_cursor_install(path: Path = CURSOR_HOOKS_PATH) -> dict | None:
 
 
 def _servers_discovered_entries(clients_to_inspect: list[ClientToInspect]) -> list[dict]:
-    from agent_scan.models import InspectedPath, InspectedServer
-    from agent_scan.models.api.v20260710 import ScanPathRequest
+    """Serialize discovered clients exactly as ``scan`` serializes them for analysis."""
+    from agent_scan.inspect import (
+        _config_error_to_scan_error,
+        _inspection_component_name,
+        _join_scan_errors,
+    )
+    from agent_scan.models import InspectedPath, InspectedServer, ScanError
+    from agent_scan.models.errors import CouldNotParseMCPConfig, FileNotFoundConfig, UnknownConfigFormat
+    from agent_scan.verify_api import build_scan_request
 
-    entries = []
+    inspected_paths: list[InspectedPath] = []
     for client in clients_to_inspect:
         servers: list[InspectedServer] = []
+        config_errors: list[ScanError] = []
         for config_path, discovered in client.mcp_configs.items():
-            if not isinstance(discovered, list):
+            if isinstance(discovered, FileNotFoundConfig | UnknownConfigFormat | CouldNotParseMCPConfig):
+                config_errors.append(_config_error_to_scan_error(discovered))
                 continue
             servers.extend(
-                InspectedServer(name=name, config_path=config_path, server=server) for name, server in discovered
+                InspectedServer(
+                    name=_inspection_component_name(name, "server", config_path),
+                    config_path=config_path,
+                    server=server,
+                )
+                for name, server in discovered
             )
-        inspected_path = InspectedPath(client=client.name, path=client.client_path, servers=servers)
-        entries.append(ScanPathRequest.from_inspected(inspected_path).model_dump(mode="json"))
-    return entries
+        inspected_paths.append(
+            InspectedPath(
+                client=client.name,
+                path=client.client_path,
+                servers=servers,
+                error=_join_scan_errors(config_errors),
+            )
+        )
+    return [request.model_dump(mode="json") for request in build_scan_request(inspected_paths).scan_path_requests]
 
 
 def _discover_servers_payload(project_folders: list[str] | None = None) -> list[dict]:
@@ -1121,7 +1202,10 @@ def _discover_servers_payload(project_folders: list[str] | None = None) -> list[
         paths=[],
         project_folders=project_folders or [],
     )
-    clients_to_inspect, _, _ = asyncio.run(pipelines.discover_clients_to_inspect(inspect_args))
+    clients_to_inspect, _, _ = _run_with_timeout(
+        lambda: asyncio.run(pipelines.discover_clients_to_inspect(inspect_args)),
+        _discovery_timeout_seconds(),
+    )
     return _servers_discovered_entries(clients_to_inspect)
 
 
@@ -1190,6 +1274,8 @@ def _send_test_event(
     push_key_changed: bool = False,
     current_checksum: str | None = None,
     new_checksum: str | None = None,
+    discover_current_checksum: str | None = None,
+    discover_new_checksum: str | None = None,
     machine_id: str = "",
 ) -> bool:
     """Send a test hooksConfigured event by invoking the hook script. Returns True on success."""
@@ -1211,6 +1297,10 @@ def _send_test_event(
         hooks_script["current_checksum"] = current_checksum
     if new_checksum is not None:
         hooks_script["new_checksum"] = new_checksum
+    if discover_current_checksum is not None:
+        hooks_script["discover_current_checksum"] = discover_current_checksum
+    if discover_new_checksum is not None:
+        hooks_script["discover_new_checksum"] = discover_new_checksum
     if hooks_script:
         payload_dict["hooks_script"] = hooks_script
     redact_push_keys_in_data(payload_dict)
@@ -1512,13 +1602,15 @@ def _agent_scan_bin() -> str | None:
     if getattr(sys, "frozen", False):
         return str(Path(sys.executable).resolve())
 
+    names = ("snyk-agent-scan.exe", "snyk-agent-scan") if IS_WINDOWS else ("snyk-agent-scan",)
     invoked_path = Path(sys.argv[0])
-    if invoked_path.name == "snyk-agent-scan" and invoked_path.is_file() and os.access(invoked_path, os.X_OK):
+    if invoked_path.name in names and invoked_path.is_file() and os.access(invoked_path, os.X_OK):
         return str(invoked_path.resolve())
 
-    console_script = Path(sys.executable).parent / "snyk-agent-scan"
-    if console_script.is_file() and os.access(console_script, os.X_OK):
-        return str(console_script.resolve())
+    for name in names:
+        console_script = Path(sys.executable).parent / name
+        if console_script.is_file() and os.access(console_script, os.X_OK):
+            return str(console_script.resolve())
     return None
 
 
@@ -1569,14 +1661,16 @@ def _build_discover_hook_command_powershell(
     tenant_id: str = "",
     machine_id: str = "",
 ) -> str:
-    command = f"powershell -File '{script_path}' -Client {hook_client} -PushKey '{push_key}' -RemoteUrl '{url}'"
+    command = (
+        f"powershell -File {_ps_quote(str(script_path))} -Client {hook_client} "
+        f"-PushKey {_ps_quote(push_key)} -RemoteUrl {_ps_quote(url)}"
+    )
     if machine_id:
-        escaped_machine_id = machine_id.replace("'", "''")
-        command += f" -MachineId '{escaped_machine_id}'"
-    command += f" -ConfigFile '{config_path}'"
+        command += f" -MachineId {_ps_quote(machine_id)}"
+    command += f" -ConfigFile {_ps_quote(str(config_path))}"
     agent_scan_bin = _agent_scan_bin()
     if agent_scan_bin is not None:
-        command += f" -AgentScanBin '{agent_scan_bin}'"
+        command += f" -AgentScanBin {_ps_quote(agent_scan_bin)}"
     return command
 
 
@@ -1589,15 +1683,22 @@ def _build_hook_command_powershell(
     tenant_id: str = "",
     machine_id: str = "",
 ) -> str:
-    command = f"powershell -File '{script_path}' -Client {hook_client} -PushKey '{push_key}' -RemoteUrl '{url}'"
+    command = (
+        f"powershell -File {_ps_quote(str(script_path))} -Client {hook_client} "
+        f"-PushKey {_ps_quote(push_key)} -RemoteUrl {_ps_quote(url)}"
+    )
     if machine_id:
-        escaped_machine_id = machine_id.replace("'", "''")
-        command += f" -MachineId '{escaped_machine_id}'"
+        command += f" -MachineId {_ps_quote(machine_id)}"
     return command
 
 
 def _shell_quote(s: str) -> str:
     return "'" + s.replace("'", "'\"'\"'") + "'"
+
+
+def _ps_quote(s: str) -> str:
+    """Quote a value for a PowerShell single-quoted literal."""
+    return "'" + s.replace("'", "''") + "'"
 
 
 def _mask_key(k: str) -> str:
@@ -1615,13 +1716,21 @@ def _compact_events(events: list[str]) -> str:
     return f"({', '.join(events[:show])} + {len(events) - show} more)"
 
 
-def _copy_hook_script(config_path: Path) -> tuple[Path, bool, bool, str | None, str]:
+class _HookScripts(NamedTuple):
+    path: Path
+    existed: bool
+    updated: bool
+    current_checksum: str | None
+    new_checksum: str
+    discover_current_checksum: str | None = None
+    discover_new_checksum: str | None = None
+
+
+def _copy_hook_script(config_path: Path, *, include_discover: bool = True) -> _HookScripts:
     """Copy bundled hook scripts to a hooks/ dir next to the config file.
 
-    Returns (path, already_existed, was_updated, current_checksum, new_checksum).
-    All values describe the forwarding script, except ``was_updated``, which is
-    True when either the forwarding or the discovery script was written.
-    current_checksum is None when the forwarding script did not exist before.
+    Checksums describe both the forwarding script and, when requested, the
+    session-start discovery trampoline.
     """
     dest_dir = config_path.parent / "hooks"
 
@@ -1641,25 +1750,49 @@ def _copy_hook_script(config_path: Path) -> tuple[Path, bool, bool, str | None, 
     new_content = source.read_bytes().replace(b"__AGENT_SCAN_VERSION__", version_info.encode())
     new_checksum = hashlib.sha256(new_content).hexdigest()
 
-    discover_name = "snyk-agent-guard-discover.ps1" if IS_WINDOWS else "snyk-agent-guard-discover.sh"
-    discover_source = hook_pkg.joinpath(discover_name)
-    discover_dest = dest_dir / discover_name
-    discover_content = discover_source.read_bytes()
+    discover_current_checksum: str | None = None
+    discover_new_checksum: str | None = None
     discover_updated = False
-    if not discover_dest.exists() or discover_dest.read_bytes() != discover_content:
-        discover_dest.write_bytes(discover_content)
-        rich.print(f"[green]\u2713[/green]  Copied hook script to [dim]{discover_dest}[/dim]")
-        discover_updated = True
-    if not IS_WINDOWS:
-        discover_dest.chmod(discover_dest.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    if include_discover:
+        discover_name = "snyk-agent-guard-discover.ps1" if IS_WINDOWS else "snyk-agent-guard-discover.sh"
+        discover_source = hook_pkg.joinpath(discover_name)
+        discover_dest = dest_dir / discover_name
+        discover_content = discover_source.read_bytes()
+        discover_new_checksum = hashlib.sha256(discover_content).hexdigest()
+        discover_existing_content: bytes | None = None
+        if discover_dest.exists():
+            discover_existing_content = discover_dest.read_bytes()
+            discover_current_checksum = hashlib.sha256(discover_existing_content).hexdigest()
+        if discover_existing_content != discover_content:
+            discover_dest.write_bytes(discover_content)
+            rich.print(f"[green]\u2713[/green]  Copied hook script to [dim]{discover_dest}[/dim]")
+            discover_updated = True
+        if not IS_WINDOWS:
+            discover_dest.chmod(discover_dest.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
     if existed and current_checksum == new_checksum:
-        return dest, existed, discover_updated, current_checksum, new_checksum
+        return _HookScripts(
+            dest,
+            existed,
+            discover_updated,
+            current_checksum,
+            new_checksum,
+            discover_current_checksum,
+            discover_new_checksum,
+        )
 
     dest.write_bytes(new_content)
     dest.chmod(dest.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
     rich.print(f"[green]\u2713[/green]  Copied hook script to [dim]{dest}[/dim]")
-    return dest, existed, True, current_checksum, new_checksum
+    return _HookScripts(
+        dest,
+        existed,
+        True,
+        current_checksum,
+        new_checksum,
+        discover_current_checksum,
+        discover_new_checksum,
+    )
 
 
 def _remove_hook_script(client: str, config_path: Path) -> None:

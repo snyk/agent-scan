@@ -89,11 +89,15 @@ async def discover_clients_to_inspect(
         project_folders: list[Path] = []
         seen_project_folders: set[Path] = set()
         for raw_path in inspect_args.project_folders:
-            project_path = Path(raw_path).expanduser().resolve()
-            if project_path in seen_project_folders:
+            project_path = Path(raw_path).expanduser()
+            try:
+                key = project_path.resolve()
+            except OSError:
+                key = project_path
+            if key in seen_project_folders:
                 continue
-            seen_project_folders.add(project_path)
-            if not project_path.exists():
+            seen_project_folders.add(key)
+            if not key.exists():
                 logger.warning("Skipping non-existent project folder: %s", project_path)
                 continue
             project_folders.append(project_path)

@@ -66,7 +66,6 @@ from agent_scan.guard import (
     _write_cursor_config,
 )
 from agent_scan.models import ClientToInspect, InspectedPath, InspectedServer, RemoteServer, StdioServer
-from agent_scan.models.api.v20260710 import ScanPathRequest
 from agent_scan.models.errors import CouldNotParseMCPConfig, FileNotFoundConfig
 from agent_scan.pushkeys import GuardEnabledAccessDeniedError
 
@@ -259,6 +258,18 @@ class TestBuildHookCommand:
         )
         assert "-MachineId 'O''Brien-laptop'" in cmd
 
+    def test_powershell_escapes_single_quotes_in_all_literals(self):
+        cmd = _build_hook_command_powershell(
+            "pk'quoted",
+            "https://example.com/O'Brien",
+            Path("C:/Users/O'Brien/hook.ps1"),
+            "codex",
+        )
+
+        assert "-File 'C:/Users/O''Brien/hook.ps1'" in cmd
+        assert "-PushKey 'pk''quoted'" in cmd
+        assert "-RemoteUrl 'https://example.com/O''Brien'" in cmd
+
     @pytest.mark.skipif(sys.platform != "win32", reason="powershell command format")
     def test_without_tenant_powershell(self):
         cmd = _build_hook_command("pk", "https://api.snyk.io", Path("/x/hook.ps1"), "claude-code")
@@ -322,6 +333,44 @@ class TestAgentScanBin:
         monkeypatch.setattr(sys, "executable", str(bin_dir / "python"))
 
         assert guard_module._agent_scan_bin() == str(executable.resolve())
+
+    def test_windows_console_script_uses_resolved_argv_zero(self, tmp_path, monkeypatch):
+        executable = tmp_path / "snyk-agent-scan.exe"
+        executable.write_text("binary")
+        executable.chmod(0o755)
+        monkeypatch.delenv("AGENT_SCAN_BIN", raising=False)
+        monkeypatch.setattr(sys, "frozen", False, raising=False)
+        monkeypatch.setattr(sys, "argv", [str(executable)])
+        monkeypatch.setattr(sys, "executable", str(tmp_path / "python.exe"))
+
+        with patch(f"{_G}.IS_WINDOWS", True):
+            assert guard_module._agent_scan_bin() == str(executable.resolve())
+
+    def test_windows_venv_console_script_sibling_is_used(self, tmp_path, monkeypatch):
+        scripts_dir = tmp_path / "Scripts"
+        scripts_dir.mkdir()
+        executable = scripts_dir / "snyk-agent-scan.exe"
+        executable.write_text("binary")
+        executable.chmod(0o755)
+        monkeypatch.delenv("AGENT_SCAN_BIN", raising=False)
+        monkeypatch.setattr(sys, "frozen", False, raising=False)
+        monkeypatch.setattr(sys, "argv", [str(tmp_path / "src" / "agent_scan" / "cli.py")])
+        monkeypatch.setattr(sys, "executable", str(scripts_dir / "python.exe"))
+
+        with patch(f"{_G}.IS_WINDOWS", True):
+            assert guard_module._agent_scan_bin() == str(executable.resolve())
+
+    def test_posix_refuses_windows_console_script_name(self, tmp_path, monkeypatch):
+        executable = tmp_path / "snyk-agent-scan.exe"
+        executable.write_text("binary")
+        executable.chmod(0o755)
+        monkeypatch.delenv("AGENT_SCAN_BIN", raising=False)
+        monkeypatch.setattr(sys, "frozen", False, raising=False)
+        monkeypatch.setattr(sys, "argv", [str(executable)])
+        monkeypatch.setattr(sys, "executable", str(tmp_path / "python"))
+
+        with patch(f"{_G}.IS_WINDOWS", False):
+            assert guard_module._agent_scan_bin() is None
 
     def test_returns_none_when_no_executable_matches(self, tmp_path, monkeypatch):
         monkeypatch.delenv("AGENT_SCAN_BIN", raising=False)
@@ -405,6 +454,23 @@ class TestBuildDiscoverHookCommand:
             r"-ConfigFile 'C:\config path\hooks.json' "
             r"-AgentScanBin 'C:\Program Files\Snyk\snyk-agent-scan.exe'"
         )
+
+    def test_powershell_escapes_single_quotes_in_paths(self):
+        with (
+            patch(f"{_G}.IS_WINDOWS", True),
+            patch(f"{_G}._agent_scan_bin", return_value=r"C:\Users\O'Brien\snyk-agent-scan.exe"),
+        ):
+            command = guard_module._build_discover_hook_command(
+                "pk",
+                "https://api.snyk.io",
+                Path(r"C:\Users\O'Brien\discover.ps1"),
+                "claude-code",
+                config_path=Path(r"C:\Users\O'Brien\.claude\settings.json"),
+            )
+
+        assert r"-File 'C:\Users\O''Brien\discover.ps1'" in command
+        assert r"-ConfigFile 'C:\Users\O''Brien\.claude\settings.json'" in command
+        assert r"-AgentScanBin 'C:\Users\O''Brien\snyk-agent-scan.exe'" in command
 
 
 class TestPrepareClaudeDiscoveryHook:
@@ -597,9 +663,59 @@ class TestDiscoveryHookScriptFiles:
 
         assert discover_script.read_text() == (
             "#!/usr/bin/env bash\nset -euo pipefail\n"
-            'exec "${AGENT_SCAN_BIN:-snyk-agent-scan}" guard discover "$@" >/dev/null 2>&1\n'
+            "# The path baked in at install time can go stale: a uvx install resolves to an\n"
+            "# absolute path under ~/.cache/uv that uv later garbage-collects. Fall back to\n"
+            "# PATH rather than exec'ing a binary that is no longer there.\n"
+            'bin="${AGENT_SCAN_BIN:-snyk-agent-scan}"\n'
+            'if ! command -v "$bin" >/dev/null 2>&1; then\n'
+            '  bin="snyk-agent-scan"\n'
+            "fi\n"
+            'exec "$bin" guard discover "$@" >/dev/null 2>&1\n'
         )
         assert os.access(discover_script, os.X_OK)
+
+    def test_copy_reports_discovery_script_checksums(self, tmp_path):
+        import hashlib
+
+        config = tmp_path / "settings.json"
+        scripts = guard_module._copy_hook_script(config)
+        discover_script = scripts.path.with_name("snyk-agent-guard-discover.sh")
+
+        assert scripts.discover_current_checksum is None
+        assert scripts.discover_new_checksum == hashlib.sha256(discover_script.read_bytes()).hexdigest()
+
+        discover_script.write_text("stale discovery script\n")
+        scripts = guard_module._copy_hook_script(config)
+
+        assert scripts.discover_current_checksum == hashlib.sha256(b"stale discovery script\n").hexdigest()
+        assert scripts.discover_new_checksum == hashlib.sha256(discover_script.read_bytes()).hexdigest()
+
+    def test_stale_absolute_binary_falls_back_to_path(self, tmp_path):
+        script = Path(guard_module.__file__).parent / "hooks" / "snyk-agent-guard-discover.sh"
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        stub = bin_dir / "snyk-agent-scan"
+        marker = tmp_path / "invoked"
+        stub.write_text('#!/bin/sh\nprintf "%s\\n" "$*" > "$MARKER"\n')
+        stub.chmod(0o755)
+        env = {
+            **os.environ,
+            "AGENT_SCAN_BIN": str(tmp_path / "deleted" / "snyk-agent-scan"),
+            "MARKER": str(marker),
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+        }
+
+        result = subprocess.run(
+            ["bash", str(script), "--client", "claude-code"],
+            input="{}",
+            text=True,
+            capture_output=True,
+            timeout=5,
+            env=env,
+        )
+
+        assert result.returncode == 0
+        assert marker.read_text().strip() == "guard discover --client claude-code"
 
     def test_copy_restores_missing_discovery_script_when_forwarder_is_current(self, tmp_path):
         config = tmp_path / "settings.json"
@@ -1540,6 +1656,31 @@ class TestCodexManagedRequirementsToml:
         install(CODEX_AGENT_SCAN_CMD, path, script)
         assert install(CODEX_AGENT_SCAN_CMD, path, script) is False
 
+    def test_guard_install_does_not_write_orphan_discovery_script(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+
+        with (
+            patch(f"{_G}.IS_WINDOWS", False),
+            patch(f"{_G}._send_test_event", return_value=True),
+            patch(f"{_G}.rich"),
+        ):
+            _install_hooks(
+                "codex",
+                "codex",
+                "pk-test",
+                "https://api.snyk.io",
+                path,
+                "managed",
+                "Codex",
+                False,
+                "tid-1",
+                "snyk-token",
+                "machine-42",
+            )
+
+        assert (tmp_path / "hooks" / "snyk-agent-guard.sh").exists()
+        assert not (tmp_path / "hooks" / "snyk-agent-guard-discover.sh").exists()
+
     def test_detect_after_install(self, tmp_path):
         install, _, detect, _ = self._import_managed_helpers()
         path = tmp_path / "requirements.toml"
@@ -2189,7 +2330,10 @@ class TestInstallHooksOrchestration:
         """
         dest = MagicMock(name="dest_path")
         targets = {
-            "copy": (f"{_G}._copy_hook_script", (dest, True, False, _CURRENT_CHECKSUM, _NEW_CHECKSUM)),
+            "copy": (
+                f"{_G}._copy_hook_script",
+                (dest, True, False, _CURRENT_CHECKSUM, _NEW_CHECKSUM, None, None),
+            ),
             "build": (f"{_G}._build_hook_command", "test-cmd"),
             "build_discover": (f"{_G}._build_discover_hook_command", "discover-cmd"),
             "prep_claude": (f"{_G}._prepare_claude_config", (_PREPARED, _DIFF_REMOVED, 0)),
@@ -2250,9 +2394,9 @@ class TestInstallHooksOrchestration:
     # _copy_hook_script receives only config_path
     # ---------------------------------------------------------------
 
-    def test_copy_hook_script_called_with_config_path_only(self, ctx, tmp_path):
+    def test_copy_hook_script_includes_discovery_for_regular_config(self, ctx, tmp_path):
         config = self._call(tmp_path, client="claude", config_exists=True)
-        ctx["copy"].assert_called_once_with(config)
+        ctx["copy"].assert_called_once_with(config, include_discover=True)
 
     def test_machine_id_forwarded_to_command_and_test_event(self, ctx, tmp_path):
         self._call(tmp_path, machine_id="machine-42")
@@ -2297,9 +2441,10 @@ class TestInstallHooksOrchestration:
     def test_codex_managed_does_not_build_discovery_hook(self, ctx, tmp_path):
         ctx["is_toml"].return_value = True
 
-        self._call(tmp_path, client="codex", hook_client="codex")
+        config = self._call(tmp_path, client="codex", hook_client="codex")
 
         ctx["build_discover"].assert_not_called()
+        ctx["copy"].assert_called_once_with(config, include_discover=False)
 
     def test_returns_installed_script_path(self, ctx, tmp_path):
         result = _install_hooks(
@@ -2383,7 +2528,7 @@ class TestInstallHooksOrchestration:
 
     def test_test_event_sent_when_script_new(self, ctx, tmp_path):
         """first_install=True because script did not exist prior."""
-        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM)
+        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM, None, None)
         self._call(tmp_path, config_exists=True)
         ctx["test_event"].assert_called_once()
         _, kwargs = ctx["test_event"].call_args
@@ -2403,7 +2548,7 @@ class TestInstallHooksOrchestration:
 
     def test_test_event_receives_diff(self, ctx, tmp_path):
         ctx["prep_claude"].return_value = (_PREPARED, _DIFF_REMOVED, 0)
-        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM)
+        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM, None, None)
         self._call(tmp_path)
         ctx["test_event"].assert_called_once_with(
             "pk-test",
@@ -2416,12 +2561,14 @@ class TestInstallHooksOrchestration:
             push_key_changed=False,
             current_checksum=None,
             new_checksum=_NEW_CHECKSUM,
+            discover_current_checksum=None,
+            discover_new_checksum=None,
             machine_id="",
         )
 
     def test_test_event_receives_empty_diff(self, ctx, tmp_path):
         ctx["prep_claude"].return_value = (_PREPARED, _DIFF_EMPTY, 0)
-        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM)
+        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM, None, None)
         self._call(tmp_path)
         ctx["test_event"].assert_called_once_with(
             "pk-test",
@@ -2434,6 +2581,8 @@ class TestInstallHooksOrchestration:
             push_key_changed=False,
             current_checksum=None,
             new_checksum=_NEW_CHECKSUM,
+            discover_current_checksum=None,
+            discover_new_checksum=None,
             machine_id="",
         )
 
@@ -2451,12 +2600,14 @@ class TestInstallHooksOrchestration:
             push_key_changed=False,
             current_checksum=_CURRENT_CHECKSUM,
             new_checksum=_NEW_CHECKSUM,
+            discover_current_checksum=None,
+            discover_new_checksum=None,
             machine_id="",
         )
 
     def test_test_event_push_key_changed(self, ctx, tmp_path):
         ctx["detect_existing"].return_value = {"auth_value": "old-push-key"}
-        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM)
+        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM, None, None)
         self._call(tmp_path)
         ctx["test_event"].assert_called_once_with(
             "pk-test",
@@ -2469,12 +2620,14 @@ class TestInstallHooksOrchestration:
             push_key_changed=True,
             current_checksum=None,
             new_checksum=_NEW_CHECKSUM,
+            discover_current_checksum=None,
+            discover_new_checksum=None,
             machine_id="",
         )
 
     def test_test_event_push_key_unchanged(self, ctx, tmp_path):
         ctx["detect_existing"].return_value = {"auth_value": "pk-test"}
-        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM)
+        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM, None, None)
         self._call(tmp_path)
         ctx["test_event"].assert_called_once_with(
             "pk-test",
@@ -2487,6 +2640,8 @@ class TestInstallHooksOrchestration:
             push_key_changed=False,
             current_checksum=None,
             new_checksum=_NEW_CHECKSUM,
+            discover_current_checksum=None,
+            discover_new_checksum=None,
             machine_id="",
         )
 
@@ -2496,7 +2651,7 @@ class TestInstallHooksOrchestration:
 
     def test_test_event_checksums_first_install(self, ctx, tmp_path):
         """First install: current_checksum is None, new_checksum is populated."""
-        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM)
+        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM, None, None)
         self._call(tmp_path)
         _, kwargs = ctx["test_event"].call_args
         assert kwargs["current_checksum"] is None
@@ -2508,6 +2663,23 @@ class TestInstallHooksOrchestration:
         _, kwargs = ctx["test_event"].call_args
         assert kwargs["current_checksum"] == _CURRENT_CHECKSUM
         assert kwargs["new_checksum"] == _NEW_CHECKSUM
+
+    def test_test_event_receives_discovery_script_checksums(self, ctx, tmp_path):
+        ctx["copy"].return_value = (
+            ctx["dest"],
+            True,
+            False,
+            _CURRENT_CHECKSUM,
+            _NEW_CHECKSUM,
+            "discover-current",
+            "discover-new",
+        )
+
+        self._call(tmp_path, minted=True, config_exists=True)
+
+        _, kwargs = ctx["test_event"].call_args
+        assert kwargs["discover_current_checksum"] == "discover-current"
+        assert kwargs["discover_new_checksum"] == "discover-new"
 
     # ---------------------------------------------------------------
     # Test event failure: abort, cleanup, revoke
@@ -2525,14 +2697,14 @@ class TestInstallHooksOrchestration:
         ctx["revoke"].assert_not_called()
 
     def test_test_event_failure_no_revoke_when_not_minted(self, ctx, tmp_path):
-        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM)
+        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM, None, None)
         ctx["test_event"].return_value = False
         with pytest.raises(SystemExit):
             self._call(tmp_path, minted=False, config_exists=True)
         ctx["revoke"].assert_not_called()
 
     def test_test_event_failure_cleans_new_script(self, ctx, tmp_path):
-        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM)
+        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM, None, None)
         ctx["test_event"].return_value = False
         with pytest.raises(SystemExit):
             self._call(tmp_path)
@@ -2544,10 +2716,11 @@ class TestInstallHooksOrchestration:
         )
         discover_script = tmp_path / "hooks" / discover_script_name
 
-        def copy_scripts(_config_path):
+        def copy_scripts(_config_path, *, include_discover):
+            assert include_discover is True
             discover_script.parent.mkdir(parents=True)
             discover_script.write_text("#!/bin/sh\n")
-            return ctx["dest"], False, True, None, _NEW_CHECKSUM
+            return ctx["dest"], False, True, None, _NEW_CHECKSUM, None, None
 
         ctx["copy"].side_effect = copy_scripts
         ctx["test_event"].return_value = False
@@ -2564,7 +2737,7 @@ class TestInstallHooksOrchestration:
         discover_script = tmp_path / "hooks" / discover_script_name
         discover_script.parent.mkdir(parents=True)
         discover_script.write_text("existing\n")
-        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM)
+        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM, None, None)
         ctx["test_event"].return_value = False
 
         with pytest.raises(SystemExit):
@@ -2573,7 +2746,15 @@ class TestInstallHooksOrchestration:
         assert discover_script.read_text() == "existing\n"
 
     def test_test_event_failure_keeps_existing_script(self, ctx, tmp_path):
-        ctx["copy"].return_value = (ctx["dest"], True, False, _CURRENT_CHECKSUM, _NEW_CHECKSUM)
+        ctx["copy"].return_value = (
+            ctx["dest"],
+            True,
+            False,
+            _CURRENT_CHECKSUM,
+            _NEW_CHECKSUM,
+            None,
+            None,
+        )
         ctx["test_event"].return_value = False
         with pytest.raises(SystemExit):
             self._call(tmp_path, minted=True, config_exists=True)
@@ -2631,7 +2812,15 @@ class TestInstallHooksOrchestration:
         assert any("hooks installed" in m for m in self._print_messages(ctx))
 
     def test_status_installed_when_script_updated(self, ctx, tmp_path):
-        ctx["copy"].return_value = (ctx["dest"], True, True, _CURRENT_CHECKSUM, _NEW_CHECKSUM)
+        ctx["copy"].return_value = (
+            ctx["dest"],
+            True,
+            True,
+            _CURRENT_CHECKSUM,
+            _NEW_CHECKSUM,
+            None,
+            None,
+        )
         ctx["write_claude"].return_value = False
         self._call(tmp_path, config_exists=True)
         assert any("hooks installed" in m for m in self._print_messages(ctx))
@@ -2693,6 +2882,21 @@ class TestSendTestEventHooksScript:
             "new_checksum": "new222",
         }
 
+    def test_discovery_script_checksums_are_included(self):
+        payload = self._capture_payload(
+            current_checksum="old111",
+            new_checksum="new222",
+            discover_current_checksum="discover-old",
+            discover_new_checksum="discover-new",
+        )
+
+        assert payload["hooks_script"] == {
+            "current_checksum": "old111",
+            "new_checksum": "new222",
+            "discover_current_checksum": "discover-old",
+            "discover_new_checksum": "discover-new",
+        }
+
     def test_no_checksums_omits_hooks_script(self):
         payload = self._capture_payload(first_install=True)
         assert "hooks_script" not in payload
@@ -2700,8 +2904,13 @@ class TestSendTestEventHooksScript:
 
 class TestServersDiscoveredPayload:
     @staticmethod
-    def _client(*, mcp_configs, name="claude code", path="/Users/me/.claude"):
-        return ClientToInspect(name=name, client_path=path, mcp_configs=mcp_configs, skills_dirs={})
+    def _client(*, mcp_configs, name="claude code", path=None):
+        return ClientToInspect(
+            name=name,
+            client_path=path or (Path.home() / ".claude").as_posix(),
+            mcp_configs=mcp_configs,
+            skills_dirs={},
+        )
 
     def test_builds_one_entry_per_client_and_merges_config_paths(self):
         stdio = StdioServer(
@@ -2715,29 +2924,30 @@ class TestServersDiscoveredPayload:
             type="http",
             headers={"Authorization": "Bearer remote-secret"},
         )
+        home = Path.home()
         clients = [
             self._client(
                 mcp_configs={
-                    "/Users/me/.claude.json": [("github", stdio)],
-                    "/Users/me/project/.mcp.json": [("remote", remote)],
+                    (home / ".claude.json").as_posix(): [("github", stdio)],
+                    (home / "project" / ".mcp.json").as_posix(): [("remote", remote)],
                 }
             ),
-            self._client(mcp_configs={}, name="cursor", path="/Users/me/.cursor"),
+            self._client(mcp_configs={}, name="cursor", path=(home / ".cursor").as_posix()),
         ]
 
         result = guard_module._servers_discovered_entries(clients)
 
         assert [(entry["client"], entry["path"]) for entry in result] == [
-            ("claude code", "/Users/me/.claude"),
-            ("cursor", "/Users/me/.cursor"),
+            ("claude code", "~/.claude"),
+            ("cursor", "~/.cursor"),
         ]
         assert [(server["name"], server["config_path"]) for server in result[0]["servers"]] == [
-            ("github", "/Users/me/.claude.json"),
-            ("remote", "/Users/me/project/.mcp.json"),
+            ("github", (home / ".claude.json").as_posix()),
+            ("remote", (home / "project" / ".mcp.json").as_posix()),
         ]
         assert result[1]["servers"] == []
 
-    def test_skips_config_discovery_errors(self):
+    def test_reports_config_discovery_errors(self):
         client = self._client(
             mcp_configs={
                 "/bad.json": CouldNotParseMCPConfig(message="bad", traceback=None),
@@ -2749,6 +2959,7 @@ class TestServersDiscoveredPayload:
         result = guard_module._servers_discovered_entries([client])
 
         assert [server["name"] for server in result[0]["servers"]] == ["good"]
+        assert result[0]["error"]["category"] == "parse_error"
 
     def test_client_with_only_error_configs_still_emits_entry(self):
         client = self._client(
@@ -2761,11 +2972,36 @@ class TestServersDiscoveredPayload:
         result = guard_module._servers_discovered_entries([client])
 
         assert [(entry["client"], entry["servers"]) for entry in result] == [("claude code", [])]
+        assert result[0]["error"]["category"] == "parse_error"
+
+    def test_unnamed_server_gets_attributable_name(self):
+        config_path = (Path.home() / "project" / ".mcp.json").as_posix()
+        client = self._client(mcp_configs={config_path: [("", StdioServer(command="server"))]})
+
+        result = guard_module._servers_discovered_entries([client])
+
+        assert result[0]["servers"][0]["name"] == "unnamed server (~/project/.mcp.json)"
+
+    def test_top_level_paths_match_scan_transport_boundary(self):
+        from agent_scan.verify_api import build_scan_request
+
+        clients = [
+            self._client(mcp_configs={}),
+            self._client(mcp_configs={}, name="cursor", path=(Path.home() / ".cursor").as_posix()),
+        ]
+        inspected_paths = [InspectedPath(client=client.name, path=client.client_path, servers=[]) for client in clients]
+
+        discovered = guard_module._servers_discovered_entries(clients)
+        scanned = build_scan_request(inspected_paths).scan_path_requests
+
+        assert [entry["path"] for entry in discovered] == [entry.path for entry in scanned]
 
     def test_empty_input_returns_empty_list(self):
         assert guard_module._servers_discovered_entries([]) == []
 
     def test_matches_scan_path_request_wire_shape(self):
+        from agent_scan.verify_api import build_scan_request
+
         server = StdioServer(command="npx", args=["--mode", "read-only"], binary_identifier="binary-id")
         client = self._client(mcp_configs={"/config.json": [("github", server)]})
         inspected = InspectedPath(
@@ -2776,7 +3012,7 @@ class TestServersDiscoveredPayload:
 
         result = guard_module._servers_discovered_entries([client])
 
-        expected = ScanPathRequest.from_inspected(inspected).model_dump(mode="json")
+        expected = build_scan_request([inspected]).scan_path_requests[0].model_dump(mode="json")
         assert result == [expected]
         assert set(result[0]) == {"client", "path", "servers", "skills", "error"}
         assert set(result[0]["servers"][0]) == {"name", "config_path", "server", "signature", "error"}
@@ -2839,6 +3075,18 @@ class TestDiscoverServersPayload:
         args = discover.await_args.args[0]
         assert args.project_folders == ["/repo/one", "/repo/two"]
         assert result == []
+
+    @pytest.mark.parametrize(
+        "raw_value,expected",
+        [(None, 60.0), ("garbage", 60.0), ("0", 60.0), ("-1", 60.0), ("2.5", 2.5)],
+    )
+    def test_discovery_timeout_environment_parsing(self, raw_value, expected, monkeypatch):
+        if raw_value is None:
+            monkeypatch.delenv("AGENT_SCAN_DISCOVERY_TIMEOUT_SECONDS", raising=False)
+        else:
+            monkeypatch.setenv("AGENT_SCAN_DISCOVERY_TIMEOUT_SECONDS", raw_value)
+
+        assert guard_module._discovery_timeout_seconds() == expected
 
 
 class TestInvokeHookScript:
@@ -3023,6 +3271,29 @@ class TestSendServersDiscoveredEvent:
         run.assert_not_called()
         assert "discovery failed" in rich_mock.print.call_args.args[0]
 
+    def test_discovery_timeout_warns_without_invoking_script(self):
+        import asyncio
+        import time as test_time
+
+        async def slow_discovery(_inspect_args):
+            await asyncio.sleep(0.5)
+            return [], [], []
+
+        with (
+            patch("agent_scan.pipelines.discover_clients_to_inspect", side_effect=slow_discovery),
+            patch(f"{_G}._discovery_timeout_seconds", return_value=0.01),
+            patch("subprocess.run") as run,
+            patch(f"{_G}.rich") as rich_mock,
+        ):
+            started = test_time.monotonic()
+            result = guard_module._send_servers_discovered_event("pk", "url", "cursor", Path("/hook.sh"), "")
+            elapsed = test_time.monotonic() - started
+
+        assert result is False
+        assert elapsed < 0.2
+        run.assert_not_called()
+        assert "timed out" in rich_mock.print.call_args.args[0]
+
 
 class TestGuardInstallMachineIdCli:
     @pytest.mark.parametrize("flag", ["--machine-id", "--control-identifier"])
@@ -3177,6 +3448,7 @@ class TestRunDiscover:
         self._write_forwarder(config)
         monkeypatch.setenv("PUSH_KEY", "env-pk")
         stdin = MagicMock()
+        stdin.isatty.return_value = False
         stdin.read.return_value = '{"cwd":"/session/project","session_id":"session"}'
         discover = MagicMock(return_value=[])
         with (
@@ -3202,6 +3474,7 @@ class TestRunDiscover:
         self._write_forwarder(config)
         monkeypatch.setenv("PUSH_KEY", "env-pk")
         stdin = MagicMock()
+        stdin.isatty.return_value = False
         stdin.read.return_value = (
             '{"cwd":"/session/project","workspace_roots":["/wrong/project"],"session_id":"session"}'
         )
@@ -3224,6 +3497,7 @@ class TestRunDiscover:
         self._write_forwarder(config)
         monkeypatch.setenv("PUSH_KEY", "env-pk")
         stdin = MagicMock()
+        stdin.isatty.return_value = False
         stdin.read.return_value = (
             '{"workspace_roots":["/workspace/one","/workspace/two"],"conversation_id":"conversation"}'
         )
@@ -3251,6 +3525,7 @@ class TestRunDiscover:
         self._write_forwarder(config)
         monkeypatch.setenv("PUSH_KEY", "env-pk")
         stdin = MagicMock()
+        stdin.isatty.return_value = False
         stdin.read.return_value = "not-json"
         discover = MagicMock(return_value=[])
         with (
@@ -3269,6 +3544,55 @@ class TestRunDiscover:
         assert result == 0
         discover.assert_called_once_with([])
         assert json.loads(run.call_args.kwargs["input"])["session_id"] == "session-start-server-discovery"
+
+    def test_tty_stdin_is_not_read(self, tmp_path, monkeypatch):
+        config = tmp_path / "settings.json"
+        self._write_forwarder(config)
+        monkeypatch.setenv("PUSH_KEY", "env-pk")
+        stdin = MagicMock()
+        stdin.isatty.return_value = True
+        stdin.read.side_effect = AssertionError("tty stdin must not be read")
+        discover = MagicMock(return_value=[])
+
+        with (
+            patch.object(sys, "stdin", stdin),
+            patch(f"{_G}._discover_servers_payload", discover),
+            patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")),
+            patch(f"{_G}.rich"),
+        ):
+            result = guard_module.run_guard(self._args(config, client="claude-code"))
+
+        assert result == 0
+        stdin.read.assert_not_called()
+        discover.assert_called_once_with([])
+
+    def test_pipe_that_never_closes_does_not_block_discovery(self, tmp_path, monkeypatch):
+        import time as test_time
+
+        config = tmp_path / "settings.json"
+        self._write_forwarder(config)
+        monkeypatch.setenv("PUSH_KEY", "env-pk")
+        release_read = threading.Event()
+        stdin = MagicMock()
+        stdin.isatty.return_value = False
+        stdin.read.side_effect = lambda _limit: release_read.wait(0.5) and "{}"
+
+        try:
+            with (
+                patch.object(sys, "stdin", stdin),
+                patch(f"{_G}._STDIN_READ_TIMEOUT_SECONDS", 0.01),
+                patch(f"{_G}._discover_servers_payload", return_value=[]),
+                patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")),
+                patch(f"{_G}.rich"),
+            ):
+                started = test_time.monotonic()
+                result = guard_module.run_guard(self._args(config, client="claude-code"))
+                elapsed = test_time.monotonic() - started
+        finally:
+            release_read.set()
+
+        assert result == 0
+        assert elapsed < 0.2
 
     @pytest.mark.parametrize(
         "client,session_field,event_session_field",
@@ -3302,6 +3626,7 @@ class TestRunDiscover:
         monkeypatch.setenv("PUSH_KEY", "env-pk")
         hook_payload = {} if session_value is None else {session_field: session_value}
         stdin = MagicMock()
+        stdin.isatty.return_value = False
         stdin.read.return_value = json.dumps(hook_payload)
         with (
             patch.object(sys, "stdin", stdin),
@@ -3320,6 +3645,7 @@ class TestRunDiscover:
         self._write_forwarder(config)
         monkeypatch.setenv("PUSH_KEY", "env-pk")
         stdin = MagicMock()
+        stdin.isatty.return_value = False
         stdin.read.side_effect = AssertionError("stdin must not be read")
         with (
             patch.object(sys, "stdin", stdin),

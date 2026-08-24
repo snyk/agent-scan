@@ -8875,6 +8875,24 @@ def test_explicit_project_folders_gain_ancestors_and_dedup_recorded_roots(tmp_pa
     assert tmp_path in paths
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink semantics")
+def test_all_project_folders_dedupes_resolved_paths_and_keeps_recorded_spelling(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    target = tmp_path / "real-project"
+    target.mkdir()
+    recorded_link = tmp_path / "linked-project"
+    recorded_link.symlink_to(target, target_is_directory=True)
+    (tmp_path / ".claude.json").write_text(f'{{"projects": {{"{recorded_link.as_posix()}": {{}}}}}}')
+
+    discoverer = ClaudeCodeDiscoverer(tmp_path, [target])
+
+    assert discoverer._all_project_folders() == [recorded_link]
+    paths = discoverer._project_paths_with_ancestors()
+    assert recorded_link in paths
+    assert target not in paths
+
+
 def test_claude_code_discovers_servers_and_skills_from_explicit_project_without_state_entry(tmp_path):
     from agent_scan.agents import ClaudeCodeDiscoverer
 
@@ -8984,6 +9002,30 @@ async def test_pipeline_merges_explicit_project_servers_and_skills_into_installe
         name for entries in claude.mcp_configs.values() if isinstance(entries, list) for name, _ in entries
     }
     assert (project / ".claude" / "skills").as_posix() in claude.skills_dirs
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink semantics")
+async def test_pipeline_preserves_unresolved_project_folder_spelling(tmp_path):
+    from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
+
+    home = tmp_path / "home"
+    home.mkdir()
+    target = tmp_path / "real-project"
+    target.mkdir()
+    project_link = tmp_path / "linked-project"
+    project_link.symlink_to(target, target_is_directory=True)
+
+    with (
+        patch("agent_scan.pipelines.get_readable_home_directories", return_value=[(home, "alice")]),
+        patch("agent_scan.pipelines.get_well_known_clients", return_value=[]),
+        patch("agent_scan.pipelines.find_discoverers", return_value=[]) as find,
+    ):
+        await discover_clients_to_inspect(
+            InspectArgs(timeout=0, tokens=[], paths=[], project_folders=[str(project_link)])
+        )
+
+    find.assert_called_once_with(home, project_folders=[project_link])
 
 
 @pytest.mark.asyncio

@@ -108,6 +108,23 @@ class TestExplicitlyProvidedDests:
         assert "control_identifier" in provided
         assert "machine_id" not in provided
 
+    def test_root_option_value_is_not_mistaken_for_subcommand(self):
+        parser = argparse.ArgumentParser(allow_abbrev=False)
+        parser.add_argument("--config-file")
+        subparsers = parser.add_subparsers(dest="command")
+        scan_parser = subparsers.add_parser("scan", allow_abbrev=False)
+        scan_parser.add_argument("--control-identifier")
+        guard_parser = subparsers.add_parser("guard", allow_abbrev=False)
+        guard_subparsers = guard_parser.add_subparsers(dest="guard_command")
+        guard_subparsers.add_parser("install", allow_abbrev=False)
+
+        provided = explicitly_provided_dests(
+            parser,
+            ["--config-file", "guard", "scan", "--control-identifier", "x"],
+        )
+
+        assert "control_identifier" in provided
+
 
 class TestAbbreviationDisabled:
     """main() sets allow_abbrev=False so prefix abbreviations are rejected, which

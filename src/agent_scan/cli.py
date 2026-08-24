@@ -227,18 +227,43 @@ def _iter_all_actions(parser: argparse.ArgumentParser):
             yield action
 
 
-def _iter_active_actions(parser: argparse.ArgumentParser, argv: list[str]):
-    """Yield actions from the root parser and the subparser path selected by ``argv``."""
-    for action in parser._actions:
-        if not isinstance(action, argparse._SubParsersAction):
-            yield action
-            continue
+def _option_value_count(action: argparse.Action) -> int:
+    """Return how many argv tokens follow an option for the shapes this CLI uses."""
+    if action.nargs == 0:
+        return 0
+    if isinstance(action.nargs, int):
+        return action.nargs
+    return 1
 
-        for index, token in enumerate(argv):
-            subparser = action.choices.get(token)
-            if subparser is not None:
-                yield from _iter_active_actions(subparser, argv[index + 1 :])
-                break
+
+def _iter_active_actions(parser: argparse.ArgumentParser, argv: list[str]):
+    """Yield actions from the parser path selected while consuming ``argv`` like argparse."""
+    subparsers: argparse._SubParsersAction | None = None
+    values_consumed: dict[str, int] = {}
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            subparsers = action
+            continue
+        yield action
+        for option in action.option_strings:
+            values_consumed[option] = _option_value_count(action)
+
+    if subparsers is None:
+        return
+
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        if token == "--":
+            index += 1
+            continue
+        if token.startswith("-") and token != "-":
+            index += 1 if "=" in token else 1 + values_consumed.get(token, 0)
+            continue
+        subparser = subparsers.choices.get(token)
+        if subparser is not None:
+            yield from _iter_active_actions(subparser, argv[index + 1 :])
+        return
 
 
 def explicitly_provided_dests(parser: argparse.ArgumentParser, argv: list[str]) -> set[str]:
