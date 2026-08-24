@@ -51,8 +51,16 @@ def _ensure_unicode_console():
 
 
 def _get_binary_path() -> Path:
-    """Path to the PyInstaller-built mcp-scan binary."""
-    return REPO_ROOT / "dist" / ("agent-scan.exe" if sys.platform == "win32" else "agent-scan")
+    """Path to the PyInstaller-built agent-scan binary.
+
+    Built with ``--onedir`` (see the Makefile ``binary`` target), so the
+    executable lives inside the ``dist/agent-scan/`` collection dir alongside
+    its ``_internal/`` payload — not as a bare ``dist/agent-scan`` file.
+    ``--onedir`` avoids the per-launch archive extraction + per-dylib code-sign
+    validation that made the ``--onefile`` build ~10s slow to start on macOS.
+    """
+    exe = "agent-scan.exe" if sys.platform == "win32" else "agent-scan"
+    return REPO_ROOT / "dist" / "agent-scan" / exe
 
 
 def _build_binary() -> None:
