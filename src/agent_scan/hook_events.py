@@ -12,7 +12,7 @@ import aiohttp
 
 from agent_scan.hook_version import HOOK_VERSION
 from agent_scan.utils import get_hostname, get_username
-from agent_scan.verify_api import RETRYABLE_TRANSPORT_EXCEPTIONS, platform_client_session
+from agent_scan.verify_api import RETRYABLE_TRANSPORT_EXCEPTIONS, backend_client_session
 from agent_scan.version import version_info
 
 
@@ -36,7 +36,7 @@ async def _post_hook_event(url: str, body: bytes, headers: dict[str, str], max_r
     detail = ""
     for attempt in range(max_retries):
         try:
-            async with platform_client_session() as session:
+            async with backend_client_session() as session:
                 async with session.post(url, data=body, headers=headers, timeout=timeout) as response:
                     if response.status >= 400:
                         # A rejected event will be rejected again; only transport faults retry.

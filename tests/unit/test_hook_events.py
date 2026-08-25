@@ -25,7 +25,7 @@ class _FakeResponse:
 
 
 class _FakeSession:
-    """Stand-in for the aiohttp session the shared platform factory builds."""
+    """Stand-in for the aiohttp session the shared backend factory builds."""
 
     def __init__(self, status: int = 200, error: BaseException | None = None) -> None:
         self.status = status
@@ -47,7 +47,7 @@ class _FakeSession:
 
 def _patch_session(session: _FakeSession):
     """Patch the shared factory, so a test failure here means the TLS posture was bypassed."""
-    return patch("agent_scan.hook_events.platform_client_session", return_value=session)
+    return patch("agent_scan.hook_events.backend_client_session", return_value=session)
 
 
 @pytest.mark.parametrize("client", ["claude-code", "cursor", "codex"])
@@ -79,7 +79,7 @@ def test_sends_existing_hook_wire_contract(client):
     }
 
 
-def test_uses_the_shared_platform_session_factory():
+def test_uses_the_shared_backend_session_factory():
     """Hook events must ride the same connector as the analysis path (certifi + extra CAs)."""
     session = _FakeSession()
 
