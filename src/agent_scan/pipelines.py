@@ -23,7 +23,7 @@ from agent_scan.models import (
     TokenAndClientInfo,
 )
 from agent_scan.redact import redact_inspected_path
-from agent_scan.utils import get_readable_home_directories, safe_resolve
+from agent_scan.utils import get_readable_home_directories
 from agent_scan.verify_api import analyze_machine
 from agent_scan.well_known_clients import get_well_known_clients
 
@@ -94,7 +94,13 @@ async def discover_clients_to_inspect(
         seen_target_folders: set[Path] = set()
         for raw_path in inspect_args.target_folders:
             target_path = Path(raw_path).expanduser()
-            key = safe_resolve(target_path)
+            try:
+                key = target_path.resolve()
+            except (OSError, RuntimeError, ValueError):
+                # Target folders come from untrusted hook-payload JSON, where a NUL byte
+                # raises ValueError; fall back to the literal path so one bad entry cannot
+                # abort the whole discovery.
+                key = target_path
             if key in seen_target_folders:
                 continue
             seen_target_folders.add(key)

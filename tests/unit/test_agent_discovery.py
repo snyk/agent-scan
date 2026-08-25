@@ -6134,6 +6134,38 @@ def test_claude_code_project_skills_path_that_is_a_file_is_skipped(tmp_path):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink semantics")
+def test_scans_own_home_false_when_home_resolution_fails(tmp_path, monkeypatch):
+    """An unresolvable ``home_directory`` answers False instead of comparing literals.
+
+    This gate decides whether the *scanning process's* ``CLAUDE_CONFIG_DIR`` /
+    ``VSCODE_PORTABLE`` are honored for the home being scanned, so "cannot prove this is
+    my own home" must fail closed. Here the scanned home really is the same directory as
+    ``Path.home()`` (one is a symlink of the other), but its resolution fails -- and the
+    conservative answer is still False.
+    """
+    from pathlib import Path
+
+    from agent_scan.agents import VSCodeDiscoverer
+
+    real_home = tmp_path / "real_home"
+    real_home.mkdir()
+    link_home = tmp_path / "link_home"
+    link_home.symlink_to(real_home)
+    monkeypatch.setattr(Path, "home", lambda: link_home)
+
+    unpatched_resolve = Path.resolve
+
+    def resolve_fails_for_real_home(self, *args, **kwargs):
+        if self == real_home:
+            raise OSError("stale NFS file handle")
+        return unpatched_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", resolve_fails_for_real_home)
+
+    assert VSCodeDiscoverer(real_home)._scans_own_home() is False
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink semantics")
 def test_scans_own_home_true_for_symlinked_home(tmp_path, monkeypatch):
     """A ``home_directory`` that is a symlink to the real home is still recognized
     as own-home (both sides are resolved before comparing)."""
@@ -9241,6 +9273,33 @@ async def test_pipeline_runtime_error_resolving_target_keeps_literal_folder(tmp_
         )
 
     find.assert_called_once_with(home, target_folders=[target])
+
+
+@pytest.mark.asyncio
+async def test_pipeline_null_byte_target_folder_is_skipped_without_aborting(tmp_path):
+    """Target folders arrive from untrusted hook JSON, where a NUL byte raises ValueError.
+
+    ``Path.resolve()`` raises ``ValueError`` (not ``OSError``) for an embedded NUL, so a
+    payload such as ``{"cwd": "a\\0b"}`` must not take the whole discovery down with it --
+    the bad entry is dropped and the good one still reaches the discoverers.
+    """
+    from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
+
+    home = tmp_path / "home"
+    home.mkdir()
+    good = tmp_path / "project"
+    good.mkdir()
+
+    with (
+        patch("agent_scan.pipelines.get_readable_home_directories", return_value=[(home, "alice")]),
+        patch("agent_scan.pipelines.get_well_known_clients", return_value=[]),
+        patch("agent_scan.pipelines.find_discoverers", return_value=[]) as find,
+    ):
+        await discover_clients_to_inspect(
+            InspectArgs(timeout=0, tokens=[], paths=[], target_folders=["a\x00b", good.as_posix()])
+        )
+
+    find.assert_called_once_with(home, target_folders=[good])
 
 
 @pytest.mark.asyncio

@@ -2,9 +2,7 @@ import io
 import os
 import subprocess
 import sys
-from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 
@@ -14,7 +12,6 @@ from agent_scan.utils import (
     calculate_distance,
     get_readable_home_directories,
     get_relative_path,
-    safe_resolve,
     suppress_stdout,
 )
 
@@ -563,37 +560,3 @@ class TestGetReadableHomeDirectoriesWindows:
 
         usernames = {u for _p, u in result}
         assert usernames == {"wsl_alice"}, f"WSL homes must still surface when CIM query fails; got {usernames}"
-
-
-class TestSafeResolve:
-    """``safe_resolve`` must never raise: callers rely on the literal path as a fallback."""
-
-    def test_resolves_a_real_path(self, tmp_path):
-        target = tmp_path / "project"
-        target.mkdir()
-
-        assert safe_resolve(target) == target.resolve()
-
-    def test_embedded_null_byte_returns_literal_path(self):
-        """``Path.resolve()`` raises ValueError (not OSError) for a NUL byte.
-
-        Target folders reach ``safe_resolve`` from untrusted hook-payload JSON, so a
-        payload such as ``{"cwd": "a\\0b"}`` must not abort discovery.
-        """
-        path = Path("a\x00b")
-
-        assert safe_resolve(path) == path
-
-    @pytest.mark.parametrize(
-        "error",
-        [
-            OSError("stale NFS handle"),
-            RuntimeError("Symlink loop"),
-            ValueError("embedded null character in path"),
-        ],
-    )
-    def test_resolution_failures_return_the_literal_path(self, error, tmp_path):
-        target = tmp_path / "project"
-
-        with patch.object(Path, "resolve", side_effect=error):
-            assert safe_resolve(target) == target

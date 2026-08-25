@@ -32,7 +32,6 @@ from agent_scan.models import (
 )
 from agent_scan.signed_binary import check_server_signature
 from agent_scan.skill_client import inspect_skills_dir
-from agent_scan.utils import safe_resolve
 
 logger = logging.getLogger(__name__)
 McpConfigsResult = dict[
@@ -193,8 +192,15 @@ class AgentDiscoverer(ABC):
             pass
         if self.home_directory in candidates:
             return True
-        resolved_home = safe_resolve(self.home_directory)
-        return any(resolved_home == safe_resolve(candidate) for candidate in candidates)
+        try:
+            resolved_home = self.home_directory.resolve()
+            return any(resolved_home == candidate.resolve() for candidate in candidates)
+        except (OSError, RuntimeError, ValueError):
+            # Fail closed: an unresolvable path is not proof of own-home, and this gate
+            # decides whether *this* process's relocating env vars apply to it. Catching
+            # more than OSError only widens what maps to that same safe answer -- letting
+            # anything else escape here would abort the whole discovery.
+            return False
 
     def __init_subclass__(cls, *, abstract: bool = False, **kwargs: object) -> None:
         """Enforce a non-empty ``name`` on concrete subclasses.
@@ -496,8 +502,21 @@ class AgentDiscoverer(ABC):
     def _all_discovery_folders(self) -> list[Path]:
         """Return project roots and non-alias target roots in stable literal order."""
         projects = self._all_project_folders()
-        resolved_projects = {safe_resolve(project) for project in projects}
-        targets = [target for target in self._all_target_folders() if safe_resolve(target) not in resolved_projects]
+        resolved_projects: set[Path] = set()
+        for project in projects:
+            try:
+                resolved_projects.add(project.resolve())
+            except (OSError, RuntimeError, ValueError):
+                # Unresolvable paths stay distinct under their literal spelling.
+                resolved_projects.add(project)
+        targets: list[Path] = []
+        for target in self._all_target_folders():
+            try:
+                key = target.resolve()
+            except (OSError, RuntimeError, ValueError):
+                key = target
+            if key not in resolved_projects:
+                targets.append(target)
         return self._dedupe_folders(iter((*projects, *targets)))
 
     @staticmethod

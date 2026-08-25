@@ -120,7 +120,7 @@ async def _async_analysis_enabled(
     """
     for attempt in range(max_retries):
         try:
-            async with platform_client_session(trace_configs, skip_ssl_verify) as session:
+            async with backend_client_session(trace_configs, skip_ssl_verify) as session:
                 async with session.get(
                     config_url,
                     headers={"X-Push-Key": push_key},
@@ -180,7 +180,7 @@ async def _submit_async_analysis(
 
     for attempt in range(max_retries):
         try:
-            async with platform_client_session(trace_configs, skip_ssl_verify) as session:
+            async with backend_client_session(trace_configs, skip_ssl_verify) as session:
                 async with session.post(
                     async_url,
                     data=body,
@@ -417,10 +417,10 @@ def setup_tcp_connector(skip_ssl_verify: bool = False) -> aiohttp.TCPConnector:
     return connector
 
 
-def platform_client_session(trace_configs: list | None = None, skip_ssl_verify: bool = False) -> aiohttp.ClientSession:
+def backend_client_session(trace_configs: list | None = None, skip_ssl_verify: bool = False) -> aiohttp.ClientSession:
     """Build a ClientSession with the shared connector, tracing and proxy settings.
 
-    Shared by every outbound call to the Snyk platform (analysis and Agent Guard hook
+    Shared by every outbound call to the Snyk backend (analysis and Agent Guard hook
     events alike) so they all get the same trust posture: certifi plus any CA the
     environment points at via load_extra_ca_certs.
     """
@@ -455,7 +455,7 @@ async def analyze_machine(
         identifier: Identifier for the user
         additional_headers: Additional headers to send to the analysis server
         verbose: Whether to enable verbose logging
-        skip_pushing: Whether to skip pushing the scan to the platform
+        skip_pushing: Whether to skip pushing the scan to the backend
         max_retries: Maximum number of retry attempts
         skip_ssl_verify: Whether to skip SSL verification
         scan_context: Optional dict containing scan metadata to include in the request
@@ -526,7 +526,7 @@ async def analyze_machine(
 
     for attempt in range(max_retries):
         try:
-            async with platform_client_session(trace_configs, skip_ssl_verify) as session:
+            async with backend_client_session(trace_configs, skip_ssl_verify) as session:
                 async with session.post(
                     analysis_url,
                     data=payload.model_dump_json(),
