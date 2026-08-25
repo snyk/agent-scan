@@ -25,19 +25,21 @@ def send_hook_event(
     hook_client: str,
     push_key: str,
     payload: str,
-    machine_id: str = "",
+    machine_id: str,
 ) -> tuple[bool, str]:
     """POST a hook event using the same wire contract as the hook scripts."""
     endpoint = _HOOK_ENDPOINTS.get(hook_client)
     if endpoint is None:
         return False, f"unknown client: {hook_client}"
+    if not machine_id.strip():
+        return False, "machine ID is required"
 
     hostname = get_hostname()
     x_user = json.dumps(
         {
             "hostname": hostname,
             "username": get_username(),
-            "identifier": machine_id or hostname,
+            "identifier": machine_id,
         },
         separators=(",", ":"),
     )

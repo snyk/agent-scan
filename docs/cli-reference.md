@@ -361,7 +361,7 @@ Installation also configures a fire-and-forget session-start hook that reports d
 | --- | --- | --- | --- |
 | `--url URL` | string | `https://api.snyk.io` | Remote hook base URL for the Snyk API environment. |
 | `--tenant-id ID` | string | — | Snyk tenant UUID. Required when minting a push key; unnecessary when `PUSH_KEY` is set. |
-| `--machine-id ID`, `--control-identifier ID` | string | — | Non-anonymous machine identifier sent in the `X-User` header's `identifier` field. |
+| `--machine-id ID`, `--control-identifier ID` | string | — | Required non-anonymous machine identifier sent in the `X-User` header's `identifier` field. May instead be set with `MACHINE_ID`. |
 | `--file PATH` | string | — | Override the client configuration path. |
 | `--managed` | boolean | `false` | Install in the admin/MDM-managed configuration rather than the user configuration. |
 | `--test` | boolean | `false` | **Deprecated/no-op.** |
@@ -399,7 +399,7 @@ snyk-agent-scan guard uninstall {claude,cursor,codex,all} [OPTIONS]
 | `PUSH_KEY` | Pre-provisioned push key; skips minting when set |
 | `TENANT_ID` | Tenant UUID alternative to `--tenant-id` |
 | `SNYK_TOKEN` | Required to mint/revoke push keys and verify that Guard is enabled for the tenant |
-| `MACHINE_ID` | Non-anonymous machine identifier sent with hook events |
+| `MACHINE_ID` | Required non-anonymous machine identifier sent with hook events; alternative to `guard install --machine-id` |
 | `AGENT_SCAN_BIN` | Agent Scan executable used by the session-start discovery trampoline |
 | `AGENT_SCAN_DISCOVERY_TIMEOUT_SECONDS` | Discovery timeout in seconds (default: `60`) |
 
@@ -523,10 +523,10 @@ snyk agent-scan --experimental ~/.claude/skills
 snyk-agent-scan guard
 
 # Install for all supported clients
-SNYK_TOKEN=... snyk-agent-scan guard install all --tenant-id "<tenant-uuid>"
+SNYK_TOKEN=... snyk-agent-scan guard install all --tenant-id "<tenant-uuid>" --machine-id "<machine-id>"
 
 # Install through an MDM-managed configuration
-PUSH_KEY=... snyk-agent-scan guard install cursor --managed
+PUSH_KEY=... snyk-agent-scan guard install cursor --managed --machine-id "<machine-id>"
 
 # Uninstall
 snyk-agent-scan guard uninstall all

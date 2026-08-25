@@ -88,6 +88,7 @@ hook_main() {
   local pushkey
   pushkey="${PUSH_KEY:-${PUSHKEY:-}}"
   [[ -n "$pushkey" ]] || die "PUSH_KEY environment variable is not set"
+  [[ -n "${MACHINE_ID:-}" ]] || die "MACHINE_ID environment variable is not set"
 
   # Determine endpoint and user-agent based on client
   local endpoint user_agent
@@ -129,7 +130,7 @@ hook_main() {
   x_user="$(printf '{%s:%s,%s:%s,%s:%s}' \
     "\"hostname\"" "$(json_quote "$hostname")" \
     "\"username\"" "$(json_quote "$username")" \
-    "\"identifier\"" "$(json_quote "${MACHINE_ID:-$hostname}")")"
+    "\"identifier\"" "$(json_quote "$MACHINE_ID")")"
 
   # Execute request
   local resp body http_code marker
