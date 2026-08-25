@@ -34,7 +34,7 @@ import os
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 import httpx
 from mcp.client.auth import TokenStorage
@@ -88,18 +88,21 @@ def is_secure_token_url(url: str) -> bool:
 def normalize_server_url(url: str) -> str:
     """Reduce a remote MCP server URL to a stable identity key.
 
-    Mirrors the reduction ``check_server`` applies while probing transports
-    (``mcp_client.py``): strip a trailing slash, then a trailing ``/mcp`` or
-    ``/sse`` path segment. This ensures the same server keys to one store entry
-    whether it is reached via ``.../mcp``, ``.../sse``, or the bare base URL.
+    Similar in spirit to the reduction ``check_server`` applies while probing
+    transports (``mcp_client.py``): strip a trailing slash, then a trailing
+    ``/mcp`` or ``/sse`` path segment. This ensures the same server keys to one
+    store entry whether it is reached via ``.../mcp``, ``.../sse``, or the bare
+    base URL. Unlike that helper, the suffix is stripped from the parsed
+    *path* only, so a query string or fragment (e.g. ``?tenant=acme``) is
+    preserved rather than sliced off along with the suffix.
     """
-    base = url.rstrip("/")
-    path = urlparse(base).path
+    split = urlsplit(url)
+    path = split.path.rstrip("/")
     if path.endswith("/sse"):
-        base = base[: -len("/sse")]
+        path = path[: -len("/sse")]
     elif path.endswith("/mcp"):
-        base = base[: -len("/mcp")]
-    return base.rstrip("/")
+        path = path[: -len("/mcp")]
+    return urlunsplit((split.scheme, split.netloc, path.rstrip("/"), split.query, split.fragment))
 
 
 def _store_path() -> Path:
@@ -360,6 +363,15 @@ class PersistentTokenStorage(TokenStorage):
     Unlike the read-only ``FileTokenStorage`` it replaces on the scan path,
     this persists refreshed tokens (``set_tokens``) and registered client info
     (``set_client_info``) back to disk, so the next process run reuses them.
+
+    When the entry's token endpoint fails ``is_secure_token_url`` -- the same
+    check ``ensure_fresh_token`` uses before its own guarded refresh -- the
+    refresh token and client secret are withheld from what is handed to the
+    SDK's ``OAuthClientProvider``. Without that, the provider still holds a
+    live refresh token and would perform its *own* unguarded refresh against
+    that endpoint on a 401, bypassing the HTTPS/loopback and no-redirect
+    protections entirely. The (possibly stale) access token is still returned,
+    so the connection attempt itself is unaffected.
     """
 
     def __init__(self, store: OAuthTokenStore, server_url: str):
@@ -368,7 +380,11 @@ class PersistentTokenStorage(TokenStorage):
 
     async def get_tokens(self) -> OAuthToken | None:
         entry = self._store.get(self._server_url)
-        return entry.token if entry else None
+        if entry is None:
+            return None
+        if entry.token.refresh_token is not None and not is_secure_token_url(entry.token_url):
+            return entry.token.model_copy(update={"refresh_token": None})
+        return entry.token
 
     async def set_tokens(self, tokens: OAuthToken) -> None:
         expires_at: float | None = None
@@ -380,11 +396,14 @@ class PersistentTokenStorage(TokenStorage):
         entry = self._store.get(self._server_url)
         if entry is None:
             return None
+        client_secret = entry.client_secret
+        if client_secret is not None and not is_secure_token_url(entry.token_url):
+            client_secret = None
         return OAuthClientInformationFull(
             client_id=entry.client_id,
-            client_secret=entry.client_secret,
+            client_secret=client_secret,
             redirect_uris=entry.redirect_uris or [_PLACEHOLDER_REDIRECT_URI],
-            token_endpoint_auth_method="client_secret_post" if entry.client_secret else "none",
+            token_endpoint_auth_method="client_secret_post" if client_secret else "none",
         )
 
     async def set_client_info(self, client_info: OAuthClientInformationFull) -> None:

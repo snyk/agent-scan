@@ -202,14 +202,15 @@ def _transport_strategy(url: str) -> list[tuple[str, str]]:
     The OAuth flow triggers on the 401 from whichever transport/URL the server
     actually answers on, so we try the common shapes until one connects.
     """
-    base = url.rstrip("/")
-    path = urlparse(base).path
-    if path.endswith("/sse"):
-        base = base[: -len("/sse")]
-    elif path.endswith("/mcp"):
-        base = base[: -len("/mcp")]
-    base = base.rstrip("/")
-    with_mcp, with_sse = base + "/mcp", base + "/sse"
+    # Reuse the store's suffix-stripping so a query string or fragment (e.g.
+    # ``?tenant=acme``) is preserved rather than sliced off with the suffix.
+    base = normalize_server_url(url)
+    split = urlparse(base)
+
+    def _with_path_suffix(suffix: str) -> str:
+        return split._replace(path=split.path + suffix).geturl()
+
+    with_mcp, with_sse = _with_path_suffix("/mcp"), _with_path_suffix("/sse")
     ordered = [
         ("http", with_mcp),
         ("http", base),

@@ -282,39 +282,39 @@ def filter_clients_to_server(
     server_name: str,
     server_type: Literal["sse", "http"] | None = None,
 ) -> list[ClientToInspect]:
-    """Narrow a discovered plan down to entries named exactly ``server_name``.
+    """Narrow a discovered plan down to the single, first-occurrence entry named ``server_name``.
 
-    Clients left holding nothing are dropped. ``skills_dirs`` is emptied
-    because a single-server scan never wants skills. When ``server_type`` is
-    given it overrides the configured transport on matched remote servers,
-    which is what lets ``--server-type`` correct a wrong type in a config.
+    First-occurrence-wins, matching ``discover_servers_by_name``'s definition of
+    "the server named X": the traversal order (clients, then each client's
+    config paths, then each config's entries) is identical, so both agree on
+    which entry that name resolves to. This also guarantees exactly one server
+    is ever targeted -- if the same name is configured in more than one place,
+    only the first is used, rather than every matching entry across every
+    client and config file. ``skills_dirs`` is emptied because a single-server
+    scan never wants skills. When ``server_type`` is given it overrides the
+    configured transport on the matched remote server, which is what lets
+    ``--server-type`` correct a wrong type in a config.
     """
-    filtered: list[ClientToInspect] = []
     for client in clients:
-        kept: dict[str, list[tuple[str, StdioServer | RemoteServer]]] = {}
         for config_path, entries in client.mcp_configs.items():
             # Values may be error sentinels rather than lists; skip those.
             if not isinstance(entries, list):
                 continue
-            matches = [(entry_name, cfg) for entry_name, cfg in entries if entry_name == server_name]
-            if not matches:
-                continue
-            if server_type is not None:
-                for _entry_name, cfg in matches:
-                    if isinstance(cfg, RemoteServer):
-                        cfg.type = server_type
-            kept[config_path] = matches
-        if kept:
-            filtered.append(
-                ClientToInspect(
-                    name=client.name,
-                    client_path=client.client_path,
-                    username=client.username,
-                    mcp_configs=kept,
-                    skills_dirs={},
-                )
-            )
-    return filtered
+            for entry_name, cfg in entries:
+                if entry_name != server_name:
+                    continue
+                if server_type is not None and isinstance(cfg, RemoteServer):
+                    cfg.type = server_type
+                return [
+                    ClientToInspect(
+                        name=client.name,
+                        client_path=client.client_path,
+                        username=client.username,
+                        mcp_configs={config_path: [(entry_name, cfg)]},
+                        skills_dirs={},
+                    )
+                ]
+    return []
 
 
 async def discover_servers_by_name(

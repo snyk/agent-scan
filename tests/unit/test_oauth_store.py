@@ -63,6 +63,8 @@ def permissive_umask():
         ("https://mcp.linear.app/", "https://mcp.linear.app"),
         ("https://mcp.linear.app", "https://mcp.linear.app"),
         ("https://cf.mcp.atlassian.com/v1/mcp", "https://cf.mcp.atlassian.com/v1"),
+        # A query string is preserved, not sliced off along with the /mcp suffix.
+        ("https://host/mcp?tenant=acme", "https://host?tenant=acme"),
     ],
 )
 def test_normalize_server_url(url, expected):
@@ -139,6 +141,30 @@ async def test_persistent_storage_roundtrip(tmp_path):
     # set_tokens persists a rotation back to disk.
     await storage.set_tokens(_token(access="rotated", refresh="r2"))
     assert store.get("https://mcp.linear.app/mcp").token.access_token == "rotated"
+
+
+@pytest.mark.asyncio
+async def test_persistent_storage_withholds_refresh_credentials_for_insecure_endpoint(tmp_path):
+    """The SDK provider must not receive a usable refresh token/secret when the
+    stored token endpoint fails ``is_secure_token_url`` -- otherwise it would
+    perform its own unguarded refresh against that endpoint on a 401, bypassing
+    ``ensure_fresh_token``'s HTTPS/loopback and no-redirect protections.
+    """
+    store = OAuthTokenStore(path=tmp_path / "store.json")
+    entry = _entry(token=_token(access="live", refresh="refresh-token"))
+    entry.token_url = "http://attacker.example/token"  # not HTTPS, not loopback
+    entry.client_secret = "shh"
+    store.put("https://mcp.linear.app/mcp", entry)
+
+    storage = PersistentTokenStorage(store, "https://mcp.linear.app/mcp")
+    tokens = await storage.get_tokens()
+    client_info = await storage.get_client_info()
+
+    assert tokens is not None
+    assert tokens.access_token == "live"  # the (possibly stale) access token still flows through
+    assert tokens.refresh_token is None
+    assert client_info.client_secret is None
+    assert client_info.token_endpoint_auth_method == "none"
 
 
 class _FakeResponse:

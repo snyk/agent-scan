@@ -1281,6 +1281,11 @@ class TestRedactBearerTokens:
         out = redact_bearer_tokens("prefix bearer TOKEN123 suffix")
         assert out == "prefix Bearer **REDACTED** suffix"
 
+    def test_redacts_other_case_variants(self):
+        # RFC 7235 s2.1: the auth-scheme token is case-insensitive.
+        assert redact_bearer_tokens("Authorization: BEARER TOKEN123") == "Authorization: Bearer **REDACTED**"
+        assert redact_bearer_tokens("Authorization: BeArEr TOKEN123") == "Authorization: Bearer **REDACTED**"
+
     def test_passthrough_when_no_token(self):
         assert redact_bearer_tokens("no credentials here") == "no credentials here"
         assert redact_bearer_tokens(None) is None

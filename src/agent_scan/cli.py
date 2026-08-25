@@ -1152,8 +1152,7 @@ def main():
         asyncio.run(evo(args))
         sys.exit(0)
     elif args.command == "mcp-auth":
-        asyncio.run(mcp_auth(args))
-        sys.exit(0)
+        sys.exit(asyncio.run(mcp_auth(args)))
     elif args.command == "guard":
         from agent_scan.guard import run_guard
 
@@ -1230,12 +1229,16 @@ def _should_show_analysis_results(args) -> bool:
     )
 
 
-async def mcp_auth(args):
+async def mcp_auth(args) -> int:
     """Interactively authenticate an OAuth-protected remote MCP server.
 
     Runs the browser OAuth flow and persists the token to the local store, so
     subsequent (unattended) scans use and refresh it. This is the only command
     that performs an interactive authorization; the scan path never does.
+
+    Returns an exit status: 0 if every requested target authenticated
+    successfully, 1 otherwise (including invalid/missing target selection), so
+    scripts can detect failure instead of always seeing a zero exit.
     """
     from urllib.parse import urlparse
 
@@ -1267,16 +1270,17 @@ async def mcp_auth(args):
         elif server_arg:
             if server_arg not in remote:
                 print_server_not_found(server_arg, remote, remote_only=True)
-                return
+                return 1
             targets = [(server_arg, remote[server_arg])]
         else:
             rich.print("[bold red]Specify a server name, --url <url>, or --all-unauthenticated.[/bold red]")
-            return
+            return 1
 
     if not targets:
         rich.print("No remote MCP servers to authenticate.")
-        return
+        return 1
 
+    all_ok = True
     for name, url in targets:
         rich.print(f"\n[bold]Authenticating '{name}'[/bold] ({url}) ...")
         result = await authenticate_server(url, name, store)
@@ -1284,6 +1288,8 @@ async def mcp_auth(args):
             rich.print(f"[bold green]{name}: authenticated[/bold green]")
         else:
             rich.print(f"[bold red]{name}: authentication failed[/bold red] — {result.message}")
+            all_ok = False
+    return 0 if all_ok else 1
 
 
 async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> ScanResponse | list[InspectedPath]:
