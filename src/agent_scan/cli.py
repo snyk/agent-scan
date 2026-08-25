@@ -989,7 +989,7 @@ def main():
         default=None,
         metavar="ID",
         help=(
-            "Non-anonymous identifier for this machine, sent as the X-User identifier on hook events "
+            "Required non-anonymous identifier for this machine, sent as the X-User identifier on hook events "
             "(accepts --control-identifier for symmetry with scan)"
         ),
     )

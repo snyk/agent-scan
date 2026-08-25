@@ -50,6 +50,10 @@ if (-not $RemoteUrl) {
 }
 
 if (-not $MachineId) { $MachineId = $env:MACHINE_ID }
+if (-not $MachineId) {
+    Write-Error "MACHINE_ID is required (pass -MachineId or set env var)"
+    exit 1
+}
 
 switch ($Client) {
     "claude-code" {
@@ -93,9 +97,8 @@ function JsonEscape($s) {
     return $s
 }
 
-$identifier = if ($MachineId) { $MachineId } else { $hostname }
 $xUser = '{{"hostname":"{0}","username":"{1}","identifier":"{2}"}}' -f `
-    (JsonEscape $hostname), (JsonEscape $username), (JsonEscape $identifier)
+    (JsonEscape $hostname), (JsonEscape $username), (JsonEscape $MachineId)
 
 # Execute request
 try {

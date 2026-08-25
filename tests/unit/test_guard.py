@@ -654,9 +654,7 @@ class TestDiscoveryHookScriptFiles:
 
         assert discover_script.read_text() == (
             "#!/usr/bin/env bash\nset -euo pipefail\n"
-            "# The path baked in at install time can go stale: a uvx install resolves to an\n"
-            "# absolute path under ~/.cache/uv that uv later garbage-collects. Fall back to\n"
-            "# PATH rather than exec'ing a binary that is no longer there.\n"
+            '[[ -n "${MACHINE_ID:-}" ]] || exit 1\n'
             'bin="${AGENT_SCAN_BIN:-snyk-agent-scan}"\n'
             'if ! command -v "$bin" >/dev/null 2>&1; then\n'
             '  bin="snyk-agent-scan"\n'
@@ -692,6 +690,7 @@ class TestDiscoveryHookScriptFiles:
         env = {
             **os.environ,
             "AGENT_SCAN_BIN": str(tmp_path / "deleted" / "snyk-agent-scan"),
+            "MACHINE_ID": "machine-42",
             "MARKER": str(marker),
             "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
         }
@@ -1747,6 +1746,7 @@ class TestBashHookScript:
                 "PATH": "/usr/bin:/bin:/usr/local/bin",
                 "PUSH_KEY": "test-pk-123",
                 "REMOTE_HOOKS_BASE_URL": hook_server,
+                "MACHINE_ID": "machine-42",
             },
         )
         assert result.returncode == 0, result.stderr
@@ -1778,6 +1778,7 @@ class TestBashHookScript:
                 "PATH": "/usr/bin:/bin:/usr/local/bin",
                 "PUSH_KEY": "test-pk-large-payload",
                 "REMOTE_HOOKS_BASE_URL": hook_server,
+                "MACHINE_ID": "machine-42",
             },
         )
 
@@ -1800,6 +1801,7 @@ class TestBashHookScript:
                 "PATH": "/usr/bin:/bin:/usr/local/bin",
                 "PUSH_KEY": "test-pk-456",
                 "REMOTE_HOOKS_BASE_URL": hook_server,
+                "MACHINE_ID": "machine-42",
             },
         )
         assert result.returncode == 0, result.stderr
@@ -1818,6 +1820,7 @@ class TestBashHookScript:
                 "PATH": "/usr/bin:/bin:/usr/local/bin",
                 "PUSH_KEY": "test-pk-codex",
                 "REMOTE_HOOKS_BASE_URL": hook_server,
+                "MACHINE_ID": "machine-42",
             },
         )
         assert result.returncode == 0, result.stderr
@@ -1842,7 +1845,7 @@ class TestBashHookScript:
         x_user = json.loads(_HookHandler.last_request["headers"]["X-User"])
         assert x_user["identifier"] == "machine-42"
 
-    def test_x_user_identifier_falls_back_to_hostname(self, hook_server):
+    def test_missing_machine_id_fails(self, hook_server):
         script = _get_script_path("snyk-agent-guard.sh")
         result = subprocess.run(
             ["bash", str(script), "--client", "claude-code"],
@@ -1854,12 +1857,10 @@ class TestBashHookScript:
                 "PATH": "/usr/bin:/bin:/usr/local/bin",
                 "PUSH_KEY": "test-pk",
                 "REMOTE_HOOKS_BASE_URL": hook_server,
-                "HOSTNAME": "fallback-host",
             },
         )
-        assert result.returncode == 0, result.stderr
-        x_user = json.loads(_HookHandler.last_request["headers"]["X-User"])
-        assert x_user["identifier"] == "fallback-host"
+        assert result.returncode != 0
+        assert "MACHINE_ID" in result.stderr
 
     def test_missing_push_key_fails(self, hook_server):
         script = _get_script_path("snyk-agent-guard.sh")
@@ -1888,6 +1889,7 @@ class TestBashHookScript:
             env={
                 "PATH": "/usr/bin:/bin:/usr/local/bin",
                 "PUSH_KEY": "pk",
+                "MACHINE_ID": "machine-42",
             },
         )
         assert result.returncode != 0
@@ -1921,6 +1923,8 @@ class TestPowerShellHookScript:
                 "test-pk-123",
                 "-RemoteUrl",
                 hook_server,
+                "-MachineId",
+                "machine-42",
             ],
             input=payload,
             capture_output=True,
@@ -1951,6 +1955,8 @@ class TestPowerShellHookScript:
                 "test-pk-456",
                 "-RemoteUrl",
                 hook_server,
+                "-MachineId",
+                "machine-42",
             ],
             input=payload,
             capture_output=True,
@@ -1985,7 +1991,7 @@ class TestPowerShellHookScript:
         x_user = json.loads(_HookHandler.last_request["headers"]["X-User"])
         assert x_user["identifier"] == "machine-42"
 
-    def test_x_user_identifier_falls_back_to_hostname(self, hook_server):
+    def test_missing_machine_id_fails(self, hook_server):
         script = _get_script_path("snyk-agent-guard.ps1")
         env = dict(__import__("os").environ)
         env.pop("MACHINE_ID", None)
@@ -2007,9 +2013,8 @@ class TestPowerShellHookScript:
             timeout=15,
             env=env,
         )
-        assert result.returncode == 0, result.stderr
-        x_user = json.loads(_HookHandler.last_request["headers"]["X-User"])
-        assert x_user["identifier"] == x_user["hostname"]
+        assert result.returncode != 0
+        assert "MACHINE_ID" in result.stderr
 
     def test_missing_push_key_fails(self, hook_server):
         script = _get_script_path("snyk-agent-guard.ps1")
@@ -2092,6 +2097,7 @@ class TestCursorStyleBashInvocation:
             hook_server,
             script,
             "cursor",
+            machine_id="machine-42",
         )
         payload = '{"hook_event_name":"test","conversation_id":"cursor-test"}'
         result = subprocess.run(
@@ -2186,7 +2192,10 @@ class TestRunInstallCallsEnsureGuardEnabled:
     def _no_servers_discovered_event(self):
         # _install_hooks is mocked below, so without this the real post-install
         # send would run actual machine discovery and invoke the hook script.
-        with patch("agent_scan.guard._send_servers_discovered_event", return_value=True):
+        with (
+            patch("agent_scan.guard._send_servers_discovered_event", return_value=True),
+            patch.dict(os.environ, {"MACHINE_ID": "machine-42"}),
+        ):
             yield
 
     @patch("agent_scan.guard._install_hooks")
@@ -3374,7 +3383,7 @@ class TestGuardDiscoverCli:
 class TestRunDiscover:
     @pytest.fixture(autouse=True)
     def _posix_mode(self):
-        with patch(f"{_G}.IS_WINDOWS", False):
+        with patch(f"{_G}.IS_WINDOWS", False), patch.dict(os.environ, {"MACHINE_ID": "machine-42"}):
             yield
 
     @staticmethod
@@ -3447,6 +3456,22 @@ class TestRunDiscover:
 
         assert result == 1
         send.assert_not_called()
+
+    def test_missing_machine_id_returns_one_without_discovery(self, tmp_path, monkeypatch):
+        config = tmp_path / "settings.json"
+        monkeypatch.setenv("PUSH_KEY", "env-pk")
+        monkeypatch.delenv("MACHINE_ID")
+        with (
+            patch(f"{_G}._discover_servers_payload") as discover,
+            patch(f"{_G}.send_hook_event") as send,
+            patch(f"{_G}.rich") as rich_mock,
+        ):
+            result = guard_module.run_guard(self._args(config))
+
+        assert result == 1
+        discover.assert_not_called()
+        send.assert_not_called()
+        assert "MACHINE_ID is required" in rich_mock.print.call_args.args[0]
 
     def test_no_forwarding_script_is_needed(self, tmp_path, monkeypatch):
         monkeypatch.setenv("PUSH_KEY", "env-pk")
@@ -3685,7 +3710,7 @@ class TestRunDiscover:
 
 class TestRunInstallSendsServersDiscovered:
     @staticmethod
-    def _args(tmp_path, *, client="claude", file_override=True, managed=False, machine_id=None):
+    def _args(tmp_path, *, client="claude", file_override=True, managed=False, machine_id="machine-42"):
         return SimpleNamespace(
             client=client,
             url="https://api.snyk.io",
@@ -3797,7 +3822,7 @@ class TestRunInstallSendsServersDiscovered:
 
     @pytest.mark.parametrize(
         "arg_machine_id, env_machine_id, expected",
-        [("args-id", "env-id", "args-id"), (None, "env-id", "env-id"), (None, None, "")],
+        [("args-id", "env-id", "args-id"), (None, "env-id", "env-id")],
     )
     def test_machine_id_precedence_reaches_install_and_send(
         self, tmp_path, monkeypatch, arg_machine_id, env_machine_id, expected
@@ -3815,6 +3840,20 @@ class TestRunInstallSendsServersDiscovered:
 
         assert install.call_args.args[-1] == expected
         assert send.call_args.args[-1] == expected
+
+    def test_missing_machine_id_aborts_before_install(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("PUSH_KEY", "headless-pk")
+        monkeypatch.delenv("MACHINE_ID", raising=False)
+        with (
+            patch(f"{_G}._install_hooks") as install,
+            patch(f"{_G}._send_servers_discovered_event") as send,
+            pytest.raises(SystemExit) as exc,
+        ):
+            _run_install(self._args(tmp_path, machine_id=None))
+
+        assert exc.value.code == 1
+        install.assert_not_called()
+        send.assert_not_called()
 
     def test_managed_install_sends(self, tmp_path, monkeypatch):
         monkeypatch.setenv("PUSH_KEY", "headless-pk")
@@ -4347,7 +4386,10 @@ class TestRunInstallAll:
     def _no_servers_discovered_event(self):
         # _install_hooks is mocked below, so without this the real post-install
         # send would run actual machine discovery and invoke the hook script.
-        with patch("agent_scan.guard._send_servers_discovered_event", return_value=True):
+        with (
+            patch("agent_scan.guard._send_servers_discovered_event", return_value=True),
+            patch.dict(os.environ, {"MACHINE_ID": "machine-42"}),
+        ):
             yield
 
     @patch("agent_scan.guard._install_hooks")
@@ -4539,7 +4581,10 @@ class TestRunInstallSkipsUninstalledClients:
     def _no_servers_discovered_event(self):
         # _install_hooks is mocked below, so without this the real post-install
         # send would run actual machine discovery and invoke the hook script.
-        with patch("agent_scan.guard._send_servers_discovered_event", return_value=True):
+        with (
+            patch("agent_scan.guard._send_servers_discovered_event", return_value=True),
+            patch.dict(os.environ, {"MACHINE_ID": "machine-42"}),
+        ):
             yield
 
     @staticmethod

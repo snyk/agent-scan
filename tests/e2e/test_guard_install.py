@@ -137,6 +137,8 @@ class TestGuardInstallE2E:
                 str(config_file),
                 "--url",
                 fake_hook_server,
+                "--machine-id",
+                "e2e-machine-id",
             ],
             capture_output=True,
             text=True,
@@ -164,7 +166,12 @@ class TestGuardInstallE2E:
             capture_output=True,
             text=True,
             timeout=60,
-            env={**os.environ, "PUSH_KEY": "test-pk-e2e", "REMOTE_HOOKS_BASE_URL": fake_hook_server},
+            env={
+                **os.environ,
+                "PUSH_KEY": "test-pk-e2e",
+                "REMOTE_HOOKS_BASE_URL": fake_hook_server,
+                "MACHINE_ID": "e2e-machine-id",
+            },
         )
         assert discover_result.returncode == 0, (
             f"guard discover failed:\nstdout: {discover_result.stdout}\nstderr: {discover_result.stderr}"
@@ -190,6 +197,8 @@ class TestGuardInstallE2E:
                 str(config_file),
                 "--url",
                 fake_hook_server,
+                "--machine-id",
+                "e2e-machine-id",
             ],
             capture_output=True,
             text=True,
@@ -219,7 +228,12 @@ class TestGuardInstallE2E:
             capture_output=True,
             text=True,
             timeout=60,
-            env={**os.environ, "PUSH_KEY": "test-pk-e2e", "REMOTE_HOOKS_BASE_URL": fake_hook_server},
+            env={
+                **os.environ,
+                "PUSH_KEY": "test-pk-e2e",
+                "REMOTE_HOOKS_BASE_URL": fake_hook_server,
+                "MACHINE_ID": "e2e-machine-id",
+            },
         )
         assert discover_result.returncode == 0, (
             f"guard discover failed:\nstdout: {discover_result.stdout}\nstderr: {discover_result.stderr}"

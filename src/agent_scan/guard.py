@@ -210,6 +210,9 @@ def _run_install(args) -> None:
         tenant_id = (os.environ.get("TENANT_ID", "") or "").strip()
     managed: bool = getattr(args, "managed", False)
     machine_id = (getattr(args, "machine_id", None) or os.environ.get("MACHINE_ID", "") or "").strip()
+    if not machine_id:
+        rich.print("[bold red]Error:[/bold red] --machine-id is required (or set the MACHINE_ID environment variable).")
+        sys.exit(1)
 
     clients = ALL_CLIENTS if client == "all" else [client]
 
@@ -366,10 +369,13 @@ def _run_discover(args) -> int:
         return 1
 
     url = getattr(args, "url", None) or os.environ.get("REMOTE_HOOKS_BASE_URL") or DEFAULT_REMOTE_URL
-    machine_id = (os.environ.get("MACHINE_ID", "") or "").strip()
     hook_client = getattr(args, "client", None)
     if not hook_client:
         rich.print("[bold red]Error:[/bold red] --client is required to run guard discovery.")
+        return 1
+    machine_id = (os.environ.get("MACHINE_ID", "") or "").strip()
+    if not machine_id:
+        rich.print("[bold red]Error:[/bold red] MACHINE_ID is required to run guard discovery.")
         return 1
 
     target_folders: list[str] = []
@@ -1040,13 +1046,16 @@ def _run_status() -> None:
     rich.print()
 
     rich.print("[dim]# interactive flow (user-level)[/dim]")
-    rich.print("[dim]snyk-agent-scan guard install <client>[/dim]")
+    rich.print("[dim]snyk-agent-scan guard install <client> --machine-id <machine-id>[/dim]")
     rich.print()
     rich.print("[dim]# managed flow[/dim]")
-    rich.print("[dim]snyk-agent-scan guard install <client> --managed[/dim]")
+    rich.print("[dim]snyk-agent-scan guard install <client> --managed --machine-id <machine-id>[/dim]")
     rich.print()
     rich.print("[dim]# headless flow (MDM)[/dim]")
-    rich.print("[dim]PUSH_KEY=<YOUR_PUSH_KEY> snyk-agent-scan guard install <client> [--managed][/dim]")
+    rich.print(
+        "[dim]PUSH_KEY=<YOUR_PUSH_KEY> snyk-agent-scan guard install <client> "
+        "[--managed] --machine-id <machine-id>[/dim]"
+    )
     rich.print()
     rich.print(
         "[dim]If hooks are already installed and up to date, install commands are no-ops. To uninstall use 'snyk-agent-scan guard uninstall <client>'[/dim]"

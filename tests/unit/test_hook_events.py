@@ -42,19 +42,12 @@ def test_sends_existing_hook_wire_contract(client):
     }
 
 
-def test_machine_identifier_defaults_to_hostname():
-    response = MagicMock()
-    response.__enter__.return_value = SimpleNamespace(status=200)
-    with (
-        patch("agent_scan.hook_events.get_hostname", return_value="host-1"),
-        patch("agent_scan.hook_events.get_username", return_value="user-1"),
-        patch("agent_scan.hook_events.urlopen", return_value=response) as urlopen,
-    ):
-        result = send_hook_event("https://api.snyk.io", "claude-code", "push-key", "{}")
+def test_rejects_missing_machine_identifier_without_request():
+    with patch("agent_scan.hook_events.urlopen") as urlopen:
+        result = send_hook_event("https://api.snyk.io", "claude-code", "push-key", "{}", "  ")
 
-    assert result == (True, "")
-    request = urlopen.call_args.args[0]
-    assert json.loads(request.get_header("X-user"))["identifier"] == "host-1"
+    assert result == (False, "machine ID is required")
+    urlopen.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -67,7 +60,7 @@ def test_machine_identifier_defaults_to_hostname():
 )
 def test_reports_http_and_network_failures(error, expected):
     with patch("agent_scan.hook_events.urlopen", side_effect=error):
-        ok, detail = send_hook_event("https://api.snyk.io", "claude-code", "push-key", "{}")
+        ok, detail = send_hook_event("https://api.snyk.io", "claude-code", "push-key", "{}", "machine-1")
 
     assert ok is False
     assert expected in detail
@@ -75,7 +68,7 @@ def test_reports_http_and_network_failures(error, expected):
 
 def test_rejects_unknown_client_without_request():
     with patch("agent_scan.hook_events.urlopen") as urlopen:
-        result = send_hook_event("https://api.snyk.io", "unknown", "push-key", "{}")
+        result = send_hook_event("https://api.snyk.io", "unknown", "push-key", "{}", "machine-1")
 
     assert result == (False, "unknown client: unknown")
     urlopen.assert_not_called()

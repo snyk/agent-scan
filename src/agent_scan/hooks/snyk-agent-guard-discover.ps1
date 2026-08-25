@@ -25,7 +25,9 @@ $ErrorActionPreference = "Stop"
 
 if ($PushKey)   { $env:PUSH_KEY = $PushKey }
 if ($RemoteUrl) { $env:REMOTE_HOOKS_BASE_URL = $RemoteUrl }
-if ($MachineId) { $env:MACHINE_ID = $MachineId }
+if (-not $MachineId) { $MachineId = $env:MACHINE_ID }
+if (-not $MachineId) { exit 1 }
+$env:MACHINE_ID = $MachineId
 
 $bin = if ($AgentScanBin) { $AgentScanBin } elseif ($env:AGENT_SCAN_BIN) { $env:AGENT_SCAN_BIN } else { "snyk-agent-scan" }
 if (-not (Get-Command $bin -ErrorAction SilentlyContinue)) { $bin = "snyk-agent-scan" }
