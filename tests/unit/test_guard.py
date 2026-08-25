@@ -2942,8 +2942,9 @@ class TestInstallHooksOrchestration:
 
         assert main_script.read_bytes() == b"old forwarder\n"
         assert discover_script.read_bytes() == b"old discovery\n"
-        assert main_script.stat().st_mode & 0o777 == 0o600
-        assert discover_script.stat().st_mode & 0o777 == 0o640
+        if sys.platform != "win32":
+            assert main_script.stat().st_mode & 0o777 == 0o600
+            assert discover_script.stat().st_mode & 0o777 == 0o640
 
     def test_test_event_failure_does_not_write_config(self, ctx, tmp_path):
         ctx["test_event"].return_value = False
