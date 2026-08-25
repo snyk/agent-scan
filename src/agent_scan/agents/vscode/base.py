@@ -592,7 +592,7 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         ``.code-workspace`` files (:attr:`_code_workspace_enabled`) — so each
         folder's own workspace-scoped config (``.vscode/mcp.json``, skills,
         ``.devcontainer``, …) is discovered exactly as single-root folders are.
-        These roots flow into :meth:`_project_paths_with_ancestors`, which every
+        These roots flow into :meth:`_discovery_paths_with_ancestors`, which every
         workspace-relative scan consumes.
 
         Entries that are malformed, lack a resolvable root, or use a non-``file://``

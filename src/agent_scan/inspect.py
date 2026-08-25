@@ -5,6 +5,7 @@ from pathlib import Path
 
 from httpx import HTTPStatusError
 
+from agent_scan.agents.base import DiscoveryScope
 from agent_scan.mcp_client import check_server, scan_mcp_config_file
 from agent_scan.models import (
     CandidateClient,
@@ -78,6 +79,8 @@ async def get_mcp_config_per_client(
     client: CandidateClient,
     home_dirs: list[tuple[Path, str]],
     create_file_not_found_error: bool = False,
+    *,
+    scope: DiscoveryScope = DiscoveryScope.ALL,
 ) -> list[ClientToInspect]:
     """
     Looks for Client (Cursor, VSCode, etc.) across all home directories in the machine.
@@ -86,25 +89,38 @@ async def get_mcp_config_per_client(
 
     if any(path.startswith("~") for path in client.client_exists_paths):
         for home_directory, username in home_dirs:
-            cti = await get_mcp_config_per_home_directory(client, home_directory, create_file_not_found_error)
+            cti = await get_mcp_config_per_home_directory(
+                client, home_directory, create_file_not_found_error, scope=scope
+            )
             if cti is not None:
                 cti.username = username
                 ctis.append(cti)
     else:
-        cti = await get_mcp_config_per_home_directory(client, None, create_file_not_found_error)
+        cti = await get_mcp_config_per_home_directory(client, None, create_file_not_found_error, scope=scope)
         if cti is not None:
             ctis.append(cti)
     return ctis
 
 
 async def get_mcp_config_per_home_directory(
-    client: CandidateClient, home_directory: Path | None, create_file_not_found_error: bool = False
+    client: CandidateClient,
+    home_directory: Path | None,
+    create_file_not_found_error: bool = False,
+    *,
+    scope: DiscoveryScope = DiscoveryScope.ALL,
 ) -> ClientToInspect | None:
     """
     Looks for Client (Cursor, VSCode, etc.) config files.
     If found, returns a ClientToInspect object with the MCP config paths and skills dir paths.
     If not found, returns None.
+
+    ``scope`` gates the two halves the same way ``AgentDiscoverer.discover`` does, so a
+    servers-only request does not pay for the skills glob (and vice versa). Client
+    detection itself always runs, so a client never disappears from a scoped report.
     """
+    scope = DiscoveryScope(scope)
+    want_servers = scope in (DiscoveryScope.SERVERS, DiscoveryScope.ALL)
+    want_skills = scope in (DiscoveryScope.SKILLS, DiscoveryScope.ALL)
 
     # check if client exists
     client_path: str | None = None
@@ -130,13 +146,15 @@ async def get_mcp_config_per_home_directory(
         | CouldNotParseMCPConfig,
     ] = {}
 
-    all_mcp_config_paths: list[str] = list(client.mcp_config_paths)
-    for glob_pattern in client.mcp_config_globs:
-        expanded_glob = str(expand_path(Path(glob_pattern), home_directory))
-        all_mcp_config_paths.extend(_resolve_glob_with_depth(expanded_glob, client.max_glob_depth))
-    all_mcp_config_paths = list(
-        dict.fromkeys(str(expand_path(Path(p), home_directory).resolve()) for p in all_mcp_config_paths)
-    )
+    all_mcp_config_paths: list[str] = []
+    if want_servers:
+        all_mcp_config_paths = list(client.mcp_config_paths)
+        for glob_pattern in client.mcp_config_globs:
+            expanded_glob = str(expand_path(Path(glob_pattern), home_directory))
+            all_mcp_config_paths.extend(_resolve_glob_with_depth(expanded_glob, client.max_glob_depth))
+        all_mcp_config_paths = list(
+            dict.fromkeys(str(expand_path(Path(p), home_directory).resolve()) for p in all_mcp_config_paths)
+        )
 
     for mcp_config_path in all_mcp_config_paths:
         mcp_config_path_expanded = expand_path(Path(mcp_config_path), home_directory)
@@ -174,15 +192,17 @@ async def get_mcp_config_per_home_directory(
     # parse skills dirs
     skills_dirs: dict[str, list[DiscoveredSkill] | FileNotFoundConfig] = {}
 
-    all_skills_dir_paths: list[str] = list(client.skills_dir_paths)
-    for glob_pattern in client.skills_dir_globs:
-        expanded_glob = str(expand_path(Path(glob_pattern), home_directory))
-        for match in _resolve_glob_with_depth(expanded_glob, client.max_glob_depth):
-            if Path(match).is_dir():
-                all_skills_dir_paths.append(match)
-    all_skills_dir_paths = list(
-        dict.fromkeys(str(expand_path(Path(p), home_directory).resolve()) for p in all_skills_dir_paths)
-    )
+    all_skills_dir_paths: list[str] = []
+    if want_skills:
+        all_skills_dir_paths = list(client.skills_dir_paths)
+        for glob_pattern in client.skills_dir_globs:
+            expanded_glob = str(expand_path(Path(glob_pattern), home_directory))
+            for match in _resolve_glob_with_depth(expanded_glob, client.max_glob_depth):
+                if Path(match).is_dir():
+                    all_skills_dir_paths.append(match)
+        all_skills_dir_paths = list(
+            dict.fromkeys(str(expand_path(Path(p), home_directory).resolve()) for p in all_skills_dir_paths)
+        )
 
     for skills_dir_path in all_skills_dir_paths:
         skills_dir_path_expanded = expand_path(Path(skills_dir_path), home_directory)

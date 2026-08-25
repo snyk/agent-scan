@@ -123,7 +123,7 @@ class AntigravityDiscoverer(VSCodeFamilyDiscoverer):
         ``super()`` (the ``workspaceStorage`` walk) is still consulted so that if
         a future Antigravity build does populate it, those workspaces surface too;
         in practice it returns nothing today. Duplicates across the two sources are
-        collapsed downstream by :meth:`_project_paths_with_ancestors`.
+        collapsed downstream by :meth:`_discovery_paths_with_ancestors`.
         """
         folders = super()._discover_project_folders()
         folders.extend(self._gemini_project_folders())

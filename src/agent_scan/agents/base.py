@@ -161,12 +161,11 @@ class AgentDiscoverer(ABC):
         # (e.g. ``~/.claude``) on an own-home scan whose relocating env var is unset.
         self.home_directory = home_directory if home_directory is not None else Path.home()
         self.target_folders = list(target_folders or [])
-        # Lazily-populated caches for recorded project roots and explicit target
-        # roots. A discoverer serves a single scan (see find_discoverers), so both
-        # lists are stable for its lifetime and discovery does not need to re-walk
-        # workspaceStorage / re-read ~/.claude.json each time.
-        self._project_paths_cache: list[Path] | None = None
-        self._target_paths_cache: list[Path] | None = None
+        # Lazily-populated cache of the discovery roots (recorded project roots plus
+        # explicit target roots) with their ancestors. A discoverer serves a single
+        # scan (see find_discoverers), so the list is stable for its lifetime and
+        # discovery does not need to re-walk workspaceStorage / re-read
+        # ~/.claude.json each time.
         self._discovery_paths_cache: list[Path] | None = None
 
     def _scans_own_home(self) -> bool:
@@ -518,29 +517,15 @@ class AgentDiscoverer(ABC):
                 cur = parent
         return result
 
-    def _project_paths_with_ancestors(self) -> list[Path]:
-        """Project roots plus every ancestor up to filesystem root, deduplicated.
+    def _discovery_paths_with_ancestors(self) -> list[Path]:
+        """Project and target roots plus every ancestor, deduplicated across both.
 
-        Walking up lets project-scope MCP and skills discovery pick up config
-        living in any parent folder of an opened project (e.g. a monorepo root
-        that contains many project subdirectories).
+        Walking up lets project-scope MCP and skills discovery pick up config living
+        in any parent folder of an opened project (e.g. a monorepo root that contains
+        many project subdirectories).
 
         The result is cached for the discoverer's lifetime.
         """
-        if self._project_paths_cache is not None:
-            return self._project_paths_cache
-        self._project_paths_cache = self._folders_with_ancestors(self._all_project_folders())
-        return self._project_paths_cache
-
-    def _target_paths_with_ancestors(self) -> list[Path]:
-        """Target roots plus every ancestor up to filesystem root, deduplicated."""
-        if self._target_paths_cache is not None:
-            return self._target_paths_cache
-        self._target_paths_cache = self._folders_with_ancestors(self._all_target_folders())
-        return self._target_paths_cache
-
-    def _discovery_paths_with_ancestors(self) -> list[Path]:
-        """Return project and target paths with ancestors, deduplicated across both."""
         if self._discovery_paths_cache is not None:
             return self._discovery_paths_cache
         self._discovery_paths_cache = self._folders_with_ancestors(self._all_discovery_folders())

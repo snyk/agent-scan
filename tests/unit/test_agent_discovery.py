@@ -4,10 +4,11 @@ import json
 import sys
 import threading
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from agent_scan.agents import DiscoveryScope
 from agent_scan.models import (
     ClientToInspect,
     CouldNotParseMCPConfig,
@@ -241,22 +242,22 @@ def test_claude_code_discoverer_project_folders_empty_when_config_missing(tmp_pa
     assert folders == []
 
 
-# --- ClaudeCodeDiscoverer: _project_paths_with_ancestors ---
+# --- ClaudeCodeDiscoverer: _discovery_paths_with_ancestors ---
 
 
-def test_project_paths_with_ancestors_empty_when_no_projects(tmp_path):
+def test_discovery_paths_with_ancestors_empty_when_no_projects(tmp_path):
     """No projects listed in ~/.claude.json → empty list."""
     from agent_scan.agents import ClaudeCodeDiscoverer
 
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude.json").write_text('{"projects": {}}')
 
-    paths = ClaudeCodeDiscoverer(tmp_path)._project_paths_with_ancestors()
+    paths = ClaudeCodeDiscoverer(tmp_path)._discovery_paths_with_ancestors()
 
     assert paths == []
 
 
-def test_project_paths_with_ancestors_walks_up_to_filesystem_root(tmp_path):
+def test_discovery_paths_with_ancestors_walks_up_to_filesystem_root(tmp_path):
     """A single project fans out into itself + every ancestor up to '/'."""
     from pathlib import Path
 
@@ -265,7 +266,7 @@ def test_project_paths_with_ancestors_walks_up_to_filesystem_root(tmp_path):
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude.json").write_text('{"projects": {"/a/b/c/d": {"mcpServers": {}}}}')
 
-    paths = set(ClaudeCodeDiscoverer(tmp_path)._project_paths_with_ancestors())
+    paths = set(ClaudeCodeDiscoverer(tmp_path)._discovery_paths_with_ancestors())
 
     assert Path("/a/b/c/d") in paths
     assert Path("/a/b/c") in paths
@@ -274,7 +275,7 @@ def test_project_paths_with_ancestors_walks_up_to_filesystem_root(tmp_path):
     assert Path("/") in paths
 
 
-def test_project_paths_with_ancestors_dedups_shared_ancestors(tmp_path):
+def test_discovery_paths_with_ancestors_dedups_shared_ancestors(tmp_path):
     """Two sibling projects sharing ancestors yield each ancestor only once."""
     from pathlib import Path
 
@@ -285,7 +286,7 @@ def test_project_paths_with_ancestors_dedups_shared_ancestors(tmp_path):
         '{"projects": {"/a/b/c/d": {"mcpServers": {}}, "/a/b/x/y": {"mcpServers": {}}}}'
     )
 
-    paths = ClaudeCodeDiscoverer(tmp_path)._project_paths_with_ancestors()
+    paths = ClaudeCodeDiscoverer(tmp_path)._discovery_paths_with_ancestors()
 
     assert len(paths) == len(set(paths))  # no duplicates
     as_set = set(paths)
@@ -300,7 +301,7 @@ def test_project_paths_with_ancestors_dedups_shared_ancestors(tmp_path):
     } <= as_set
 
 
-def test_project_paths_with_ancestors_terminates_at_root(tmp_path):
+def test_discovery_paths_with_ancestors_terminates_at_root(tmp_path):
     """Walk terminates at filesystem root (no infinite loop)."""
     from pathlib import Path
 
@@ -309,7 +310,7 @@ def test_project_paths_with_ancestors_terminates_at_root(tmp_path):
     (tmp_path / ".claude").mkdir()
     (tmp_path / ".claude.json").write_text('{"projects": {"/": {"mcpServers": {}}}}')
 
-    paths = ClaudeCodeDiscoverer(tmp_path)._project_paths_with_ancestors()
+    paths = ClaudeCodeDiscoverer(tmp_path)._discovery_paths_with_ancestors()
 
     assert paths == [Path("/")]
 
@@ -1298,6 +1299,41 @@ async def test_discover_clients_to_inspect_runs_legacy_for_claude_code(tmp_path)
         await discover_clients_to_inspect(args)
 
     assert spy_legacy.called, "Legacy path must be called for claude code"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("scope", list(DiscoveryScope))
+async def test_phase_a_receives_the_requested_discovery_scope(tmp_path, scope):
+    """Phase A must honor discovery_scope too; otherwise --scope servers saves nothing."""
+    from agent_scan.models import CandidateClient
+    from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
+
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude.json").write_text('{"mcpServers": {}}')
+
+    candidate = CandidateClient(
+        name="claude code",
+        client_exists_paths=["~/.claude"],
+        mcp_config_paths=["~/.claude.json"],
+        skills_dir_paths=["~/.claude/skills"],
+    )
+
+    with (
+        patch(
+            "agent_scan.pipelines.get_readable_home_directories",
+            return_value=[(tmp_path, "alice")],
+        ),
+        patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
+        patch("agent_scan.pipelines.find_discoverers", return_value=[]),
+        patch(
+            "agent_scan.pipelines.get_mcp_config_per_client",
+            new=AsyncMock(return_value=[]),
+        ) as spy_legacy,
+    ):
+        args = InspectArgs(timeout=10, tokens=[], paths=[], discovery_scope=scope)
+        await discover_clients_to_inspect(args)
+
+    assert spy_legacy.await_args.kwargs["scope"] is scope
     called_names = {call.args[0].name for call in spy_legacy.call_args_list}
     assert "claude code" in called_names
 
@@ -3102,18 +3138,18 @@ def _setup_cursor_workspace(tmp_path, workspace_relpath):
     return discoverer, workspace
 
 
-def test_project_paths_with_ancestors_lives_on_agent_discoverer_base():
+def test_discovery_paths_with_ancestors_lives_on_agent_discoverer_base():
     """The ancestor walk is shared by every discoverer, so it lives on the abstract base."""
     from agent_scan.agents import AgentDiscoverer
 
-    assert "_project_paths_with_ancestors" in AgentDiscoverer.__dict__
+    assert "_discovery_paths_with_ancestors" in AgentDiscoverer.__dict__
 
 
-def test_vscode_family_project_paths_with_ancestors_uses_workspace_storage(tmp_path):
+def test_vscode_family_discovery_paths_with_ancestors_uses_workspace_storage(tmp_path):
     """For VSCode family, project roots come from workspaceStorage, then fan out into ancestors."""
     discoverer, workspace = _setup_cursor_workspace(tmp_path, "deep/nested/repo")
 
-    paths = set(discoverer._project_paths_with_ancestors())
+    paths = set(discoverer._discovery_paths_with_ancestors())
 
     # Workspace + every ancestor up to filesystem root.
     cur = workspace
@@ -3124,12 +3160,12 @@ def test_vscode_family_project_paths_with_ancestors_uses_workspace_storage(tmp_p
         cur = cur.parent
 
 
-def test_vscode_family_project_paths_empty_when_no_workspaces(tmp_path):
+def test_vscode_family_discovery_paths_empty_when_no_workspaces(tmp_path):
     """No workspaceStorage entries means no project paths and no ancestors."""
     from agent_scan.agents import CursorDiscoverer
 
     (tmp_path / ".cursor").mkdir()
-    assert CursorDiscoverer(tmp_path)._project_paths_with_ancestors() == []
+    assert CursorDiscoverer(tmp_path)._discovery_paths_with_ancestors() == []
 
 
 # --- Cursor workspace-scoped skills discovery ---
@@ -8901,13 +8937,10 @@ def test_target_folders_gain_ancestors_and_dedup_recorded_roots(tmp_path):
     (tmp_path / ".claude.json").write_text(f'{{"projects": {{"{project.as_posix()}": {{}}}}}}')
 
     discoverer = ClaudeCodeDiscoverer(tmp_path, [project])
-    project_paths = discoverer._project_paths_with_ancestors()
-    target_paths = discoverer._target_paths_with_ancestors()
     paths = discoverer._discovery_paths_with_ancestors()
 
+    # ``project`` is both a recorded project root and an explicit target: listed once.
     assert paths.count(project) == 1
-    assert project in project_paths
-    assert project in target_paths
     assert project.parent in paths
     assert tmp_path in paths
 

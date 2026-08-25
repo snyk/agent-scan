@@ -37,7 +37,7 @@ class OpenCodeDiscoverer(AgentDiscoverer):
       empirically). Singular ``skill/`` is opencode's documented
       backwards-compat spelling (https://opencode.ai/docs/config: "Singular
       names (e.g., ``agent/``) are also supported for backwards compatibility").
-    * Project — for every project root in ``_project_paths_with_ancestors``
+    * Project — for every project root in ``_discovery_paths_with_ancestors``
       (and its ancestors): ``<root>/opencode.{json,jsonc}`` plus
       ``<root>/.opencode/{skills,skill}``.
     * Managed — per-OS system-wide ``opencode.{json,jsonc}`` (and skill dirs)

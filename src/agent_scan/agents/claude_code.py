@@ -176,7 +176,7 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         return {config_path.as_posix(): entries}
 
     def _discover_project_mcp_servers(self) -> McpConfigsResult:
-        """Per-project MCP discovery for each path in ``_project_paths_with_ancestors``.
+        """Per-project MCP discovery for each path in ``_discovery_paths_with_ancestors``.
 
         Two sources are checked at every path:
 

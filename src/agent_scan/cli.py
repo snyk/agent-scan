@@ -228,57 +228,38 @@ def _iter_all_actions(parser: argparse.ArgumentParser):
             yield action
 
 
-def _option_value_count(action: argparse.Action) -> int:
-    """Return how many argv tokens follow an option for the shapes this CLI uses."""
-    if action.nargs == 0:
-        return 0
-    if isinstance(action.nargs, int):
-        return action.nargs
-    return 1
+def _iter_active_actions(parser: argparse.ArgumentParser, args: argparse.Namespace):
+    """Yield actions from the subparser path argparse already resolved into ``args``.
 
-
-def _iter_active_actions(parser: argparse.ArgumentParser, argv: list[str]):
-    """Yield actions from the parser path selected while consuming ``argv`` like argparse."""
-    subparsers: argparse._SubParsersAction | None = None
-    values_consumed: dict[str, int] = {}
+    Each ``add_subparsers`` call names a dest (``command``, ``guard_command``), so the
+    selected subcommand can be read straight off the namespace instead of re-walking
+    argv. An unset dest means that level was not reached, and the walk stops there.
+    """
     for action in parser._actions:
         if isinstance(action, argparse._SubParsersAction):
-            subparsers = action
-            continue
-        yield action
-        for option in action.option_strings:
-            values_consumed[option] = _option_value_count(action)
-
-    if subparsers is None:
-        return
-
-    index = 0
-    while index < len(argv):
-        token = argv[index]
-        if token == "--":
-            return
-        if token.startswith("-") and token != "-":
-            index += 1 if "=" in token else 1 + values_consumed.get(token, 0)
-            continue
-        subparser = subparsers.choices.get(token)
-        if subparser is not None:
-            yield from _iter_active_actions(subparser, argv[index + 1 :])
-        return
+            selected = getattr(args, action.dest, None)
+            chosen = action.choices.get(selected) if isinstance(selected, str) else None
+            if chosen is not None:
+                yield from _iter_active_actions(chosen, args)
+        else:
+            yield action
 
 
-def explicitly_provided_dests(parser: argparse.ArgumentParser, argv: list[str]) -> set[str]:
+def explicitly_provided_dests(parser: argparse.ArgumentParser, args: argparse.Namespace, argv: list[str]) -> set[str]:
     """
     Return the set of argument ``dest`` names the user passed explicitly on the
     command line.
 
-    We inspect the raw ``argv`` rather than the parsed namespace because argparse
+    We scan the raw ``argv`` rather than reading the parsed namespace because argparse
     cannot distinguish "flag omitted" (dest holds its default) from "flag passed
-    with a value equal to its default". Both ``--flag value`` and ``--flag=value``
-    spellings are recognized, as are the two option strings of a
-    BooleanOptionalAction (``--skills`` / ``--no-skills`` both map to ``skills``).
+    with a value equal to its default". ``args`` is used only to know which subparser
+    is active, which is what disambiguates an option string defined on more than one
+    subcommand. Both ``--flag value`` and ``--flag=value`` spellings are recognized,
+    as are the two option strings of a BooleanOptionalAction (``--skills`` /
+    ``--no-skills`` both map to ``skills``).
     """
     option_to_dest: dict[str, str] = {}
-    for action in _iter_active_actions(parser, argv):
+    for action in _iter_active_actions(parser, args):
         for option in action.option_strings:
             option_to_dest[option] = action.dest
 
@@ -455,7 +436,7 @@ def apply_config_file(parser: argparse.ArgumentParser, args: argparse.Namespace,
         return
 
     config = load_config_file(config_path)
-    explicit = explicitly_provided_dests(parser, argv)
+    explicit = explicitly_provided_dests(parser, args, argv)
 
     # The positional ``files`` list has no option string, so treat any positional
     # value present on the CLI as an explicit override of the YAML ``files``.
