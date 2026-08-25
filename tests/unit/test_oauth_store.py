@@ -108,8 +108,9 @@ def test_store_roundtrip_and_permissions(tmp_path):
     store.put("https://mcp.linear.app/mcp", _entry())
     got = store.get("https://mcp.linear.app/mcp")
     assert got is not None and got.client_id == "client-123"
-    # File is written 0600.
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    if sys.platform != "win32":
+        # File is written 0600. POSIX file modes are not meaningful on Windows.
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
     # It is valid JSON keyed by the normalized URL.
     data = json.loads(path.read_text())
     assert list(data.keys()) == ["https://mcp.linear.app"]
