@@ -401,7 +401,6 @@ snyk-agent-scan guard uninstall {claude,cursor,codex,all} [OPTIONS]
 | `SNYK_TOKEN` | Required to mint/revoke push keys and verify that Guard is enabled for the tenant |
 | `MACHINE_ID` | Required non-anonymous machine identifier sent with hook events; alternative to `guard install --machine-id` |
 | `AGENT_SCAN_BIN` | Agent Scan executable used by the session-start discovery trampoline |
-| `AGENT_SCAN_DISCOVERY_TIMEOUT_SECONDS` | Discovery timeout in seconds (default: `60`) |
 
 ## Environment variables
 

@@ -1,7 +1,6 @@
 import getpass
 import logging
 import os
-import threading
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -61,8 +60,6 @@ class PushArgs(BaseModel):
 
 async def discover_clients_to_inspect(
     inspect_args: InspectArgs,
-    *,
-    cancel: threading.Event | None = None,
 ) -> tuple[list[ClientToInspect], list[InspectedPath], list[str]]:
     """
     Discover the clients/configs that would be inspected, without actually
@@ -111,8 +108,6 @@ async def discover_clients_to_inspect(
 
         # Phase A — legacy path. Runs for EVERY well-known client including Claude Code.
         for client in get_well_known_clients():
-            if cancel is not None and cancel.is_set():
-                break
             ctis = await get_mcp_config_per_client(client, home_dirs_with_users, scope=inspect_args.discovery_scope)
             if ctis:
                 clients_to_inspect.extend(ctis)
@@ -121,11 +116,7 @@ async def discover_clients_to_inspect(
 
         # Phase B — ABC path. Runs sequentially after Phase A and merges into its output.
         for home_directory, username in home_dirs_with_users:
-            if cancel is not None and cancel.is_set():
-                break
             for discoverer in find_discoverers(home_directory, target_folders=target_folders):
-                if cancel is not None and cancel.is_set():
-                    break
                 try:
                     cti = discoverer.discover(inspect_args.discovery_scope)
                 except Exception:
