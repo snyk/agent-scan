@@ -92,6 +92,12 @@ class TestExplicitlyProvidedDests:
         assert "skills" in explicitly_provided_dests(parser, ["scan", "--no-skills"])
         assert "skills" in explicitly_provided_dests(parser, ["scan", "--skills"])
 
+    def test_double_dash_stops_option_detection(self):
+        parser = _build_parser()
+
+        assert "json" not in explicitly_provided_dests(parser, ["scan", "--", "--json"])
+        assert "json" in explicitly_provided_dests(parser, ["scan", "--json"])
+
     def test_uses_destination_from_active_subparser_when_option_aliases_collide(self):
         parser = _build_parser()
         subparsers = next(action for action in parser._actions if isinstance(action, argparse._SubParsersAction))

@@ -191,6 +191,14 @@ def get_push_key(control_servers: list[ControlServer] | list[dict[str, Any]]) ->
     return None
 
 
+def safe_resolve(path: Path) -> Path:
+    """Resolve ``path`` when possible, preserving its literal spelling on failure."""
+    try:
+        return path.resolve()
+    except (OSError, RuntimeError):
+        return path
+
+
 def get_readable_home_directories(all_users: bool = False) -> list[tuple[Path, str]]:
     """
     Retrieve a list of all human user home directories on the machine

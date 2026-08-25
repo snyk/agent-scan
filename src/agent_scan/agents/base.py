@@ -13,6 +13,7 @@ import os
 import traceback
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
+from enum import Enum
 from pathlib import Path
 
 import pyjson5
@@ -31,6 +32,7 @@ from agent_scan.models import (
 )
 from agent_scan.signed_binary import check_server_signature
 from agent_scan.skill_client import inspect_skills_dir
+from agent_scan.utils import safe_resolve
 
 logger = logging.getLogger(__name__)
 McpConfigsResult = dict[
@@ -42,6 +44,13 @@ SkillsDirsResult = dict[str, list[DiscoveredSkill] | FileNotFoundConfig]
 # ``_parse_settings_mcp_gated``): parsed servers, a parse failure, or ``None``
 # when the file is absent/empty/not-MCP.
 McpScanResult = list[tuple[str, StdioServer | RemoteServer]] | CouldNotParseMCPConfig | None
+
+
+class DiscoveryScope(str, Enum):
+    SERVERS = "servers"
+    SKILLS = "skills"
+    ALL = "all"
+
 
 # Cap traversal into ``~/.claude/plugins/{cache,repos}``
 _MAX_PLUGIN_RGLOB_DEPTH = 10
@@ -158,6 +167,7 @@ class AgentDiscoverer(ABC):
         # workspaceStorage / re-read ~/.claude.json each time.
         self._project_paths_cache: list[Path] | None = None
         self._target_paths_cache: list[Path] | None = None
+        self._discovery_paths_cache: list[Path] | None = None
 
     def _scans_own_home(self) -> bool:
         """True when this discoverer targets the scanning process's own user.
@@ -184,11 +194,8 @@ class AgentDiscoverer(ABC):
             pass
         if self.home_directory in candidates:
             return True
-        try:
-            resolved_home = self.home_directory.resolve()
-            return any(resolved_home == candidate.resolve() for candidate in candidates)
-        except OSError:
-            return False
+        resolved_home = safe_resolve(self.home_directory)
+        return any(resolved_home == safe_resolve(candidate) for candidate in candidates)
 
     def __init_subclass__(cls, *, abstract: bool = False, **kwargs: object) -> None:
         """Enforce a non-empty ``name`` on concrete subclasses.
@@ -216,13 +223,14 @@ class AgentDiscoverer(ABC):
     def discover_skills(self) -> SkillsDirsResult:
         """List the agent's skills, keyed by absolute skills-dir path."""
 
-    def discover(self) -> ClientToInspect | None:
+    def discover(self, scope: DiscoveryScope = DiscoveryScope.ALL) -> ClientToInspect | None:
         """Assemble a ClientToInspect, or None when the agent isn't installed."""
         client_path = self.client_exists()
         if client_path is None:
             return None
-        mcp_configs = self.discover_mcp_servers()
-        skills_dirs = self.discover_skills()
+        scope = DiscoveryScope(scope)
+        mcp_configs = self.discover_mcp_servers() if scope in (DiscoveryScope.SERVERS, DiscoveryScope.ALL) else {}
+        skills_dirs = self.discover_skills() if scope in (DiscoveryScope.SKILLS, DiscoveryScope.ALL) else {}
         return ClientToInspect(
             name=self.name,
             client_path=client_path,
@@ -468,17 +476,13 @@ class AgentDiscoverer(ABC):
 
     @staticmethod
     def _dedupe_folders(folders: Iterator[Path]) -> list[Path]:
-        """Deduplicate folders by resolved path while preserving spelling and order."""
+        """Deduplicate folders by literal path while preserving spelling and order."""
         result: list[Path] = []
         seen: set[Path] = set()
         for folder in folders:
-            try:
-                key = folder.resolve()
-            except OSError:
-                key = folder
-            if key in seen:
+            if folder in seen:
                 continue
-            seen.add(key)
+            seen.add(folder)
             result.append(folder)
         return result
 
@@ -491,8 +495,11 @@ class AgentDiscoverer(ABC):
         return self._dedupe_folders(iter(self._discover_target_folders()))
 
     def _all_discovery_folders(self) -> list[Path]:
-        """Return project roots then target roots, deduplicated across both sets."""
-        return self._dedupe_folders(iter((*self._all_project_folders(), *self._all_target_folders())))
+        """Return project roots and non-alias target roots in stable literal order."""
+        projects = self._all_project_folders()
+        resolved_projects = {safe_resolve(project) for project in projects}
+        targets = [target for target in self._all_target_folders() if safe_resolve(target) not in resolved_projects]
+        return self._dedupe_folders(iter((*projects, *targets)))
 
     @staticmethod
     def _folders_with_ancestors(folders: list[Path]) -> list[Path]:
@@ -534,4 +541,7 @@ class AgentDiscoverer(ABC):
 
     def _discovery_paths_with_ancestors(self) -> list[Path]:
         """Return project and target paths with ancestors, deduplicated across both."""
-        return self._dedupe_folders(iter((*self._project_paths_with_ancestors(), *self._target_paths_with_ancestors())))
+        if self._discovery_paths_cache is not None:
+            return self._discovery_paths_cache
+        self._discovery_paths_cache = self._folders_with_ancestors(self._all_discovery_folders())
+        return self._discovery_paths_cache

@@ -1,7 +1,10 @@
 """Tests for the per-agent discovery ABC (agent_scan.agents package)."""
 
+import json
 import sys
-from unittest.mock import patch
+import threading
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -1145,6 +1148,32 @@ def test_claude_code_discoverer_discover_returns_none_when_not_installed(tmp_pat
     cti = ClaudeCodeDiscoverer(tmp_path).discover()
 
     assert cti is None
+
+
+@pytest.mark.parametrize(
+    "scope,expect_servers,expect_skills",
+    [
+        ("all", True, True),
+        ("servers", True, False),
+        ("skills", False, True),
+    ],
+)
+def test_discover_scope_only_populates_requested_half(tmp_path, scope, expect_servers, expect_skills):
+    from agent_scan.agents import ClaudeCodeDiscoverer, DiscoveryScope
+
+    discoverer = ClaudeCodeDiscoverer(tmp_path)
+    with (
+        patch.object(discoverer, "client_exists", return_value="/installed/claude"),
+        patch.object(discoverer, "discover_mcp_servers", return_value={"servers": []}) as discover_servers,
+        patch.object(discoverer, "discover_skills", return_value={"skills": []}) as discover_skills,
+    ):
+        client = discoverer.discover(DiscoveryScope(scope))
+
+    assert client is not None
+    assert client.mcp_configs == ({"servers": []} if expect_servers else {})
+    assert client.skills_dirs == ({"skills": []} if expect_skills else {})
+    assert discover_servers.called is expect_servers
+    assert discover_skills.called is expect_skills
 
 
 # --- ABC enforcement ---
@@ -8883,6 +8912,60 @@ def test_target_folders_gain_ancestors_and_dedup_recorded_roots(tmp_path):
     assert tmp_path in paths
 
 
+def test_folder_dedupe_survives_resolve_runtime_error(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    target = tmp_path / "project"
+    target.mkdir()
+    discoverer = ClaudeCodeDiscoverer(tmp_path, [target])
+
+    with patch.object(Path, "resolve", side_effect=RuntimeError("Symlink loop")):
+        assert discoverer._all_discovery_folders() == [target]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink semantics")
+def test_literal_project_spellings_both_contribute_inline_servers(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    (tmp_path / ".claude").mkdir()
+    project = tmp_path / "project"
+    project.mkdir()
+    project_link = tmp_path / "project-link"
+    project_link.symlink_to(project, target_is_directory=True)
+    (tmp_path / ".claude.json").write_text(
+        json.dumps(
+            {
+                "projects": {
+                    project.as_posix(): {"mcpServers": {"literal": {"command": "echo"}}},
+                    project_link.as_posix(): {"mcpServers": {"linked": {"command": "echo"}}},
+                }
+            }
+        )
+    )
+
+    servers = ClaudeCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    names = {name for entries in servers.values() if isinstance(entries, list) for name, _ in entries}
+    assert names >= {"literal", "linked"}
+
+
+def test_discovery_paths_are_memoized_and_resolve_roots_once(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    project = tmp_path / "project"
+    discoverer = ClaudeCodeDiscoverer(tmp_path)
+
+    with (
+        patch.object(discoverer, "_discover_project_folders", return_value=[project]),
+        patch.object(Path, "resolve", autospec=True, side_effect=lambda path: path) as resolve,
+    ):
+        first = discoverer._discovery_paths_with_ancestors()
+        second = discoverer._discovery_paths_with_ancestors()
+
+    assert second is first
+    assert resolve.call_count == 1
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink semantics")
 def test_all_discovery_folders_dedupes_resolved_paths_and_keeps_recorded_spelling(tmp_path):
     from agent_scan.agents import ClaudeCodeDiscoverer
@@ -9103,3 +9186,43 @@ async def test_pipeline_explicit_paths_ignore_target_folders(tmp_path):
 
     from_path.assert_awaited_once()
     find.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_pipeline_runtime_error_resolving_target_keeps_literal_folder(tmp_path):
+    from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
+
+    target = tmp_path / "project"
+    target.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+
+    with (
+        patch("agent_scan.pipelines.get_readable_home_directories", return_value=[(home, "alice")]),
+        patch("agent_scan.pipelines.get_well_known_clients", return_value=[]),
+        patch("agent_scan.pipelines.find_discoverers", return_value=[]) as find,
+        patch.object(Path, "resolve", side_effect=RuntimeError("Symlink loop")),
+    ):
+        await discover_clients_to_inspect(
+            InspectArgs(timeout=0, tokens=[], paths=[], target_folders=[target.as_posix()])
+        )
+
+    find.assert_called_once_with(home, target_folders=[target])
+
+
+@pytest.mark.asyncio
+async def test_pipeline_preset_cancel_skips_discovery(tmp_path):
+    from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
+
+    cancel = threading.Event()
+    cancel.set()
+    discoverer = MagicMock()
+
+    with (
+        patch("agent_scan.pipelines.get_readable_home_directories", return_value=[(tmp_path, "alice")]),
+        patch("agent_scan.pipelines.get_well_known_clients", return_value=[]),
+        patch("agent_scan.pipelines.find_discoverers", return_value=[discoverer]),
+    ):
+        await discover_clients_to_inspect(InspectArgs(timeout=0, tokens=[], paths=[]), cancel=cancel)
+
+    discoverer.discover.assert_not_called()

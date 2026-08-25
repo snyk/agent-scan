@@ -21,6 +21,7 @@ import yaml
 from pydantic import ValidationError
 from rich.logging import RichHandler
 
+from agent_scan.agents import DiscoveryScope
 from agent_scan.consent import collect_consent
 from agent_scan.models import (
     FAILURE_CATEGORY_TO_CODE,
@@ -255,8 +256,7 @@ def _iter_active_actions(parser: argparse.ArgumentParser, argv: list[str]):
     while index < len(argv):
         token = argv[index]
         if token == "--":
-            index += 1
-            continue
+            return
         if token.startswith("-") and token != "-":
             index += 1 if "=" in token else 1 + values_consumed.get(token, 0)
             continue
@@ -284,6 +284,8 @@ def explicitly_provided_dests(parser: argparse.ArgumentParser, argv: list[str]) 
 
     provided: set[str] = set()
     for token in argv:
+        if token == "--":
+            break
         option = token.split("=", 1)[0]
         dest = option_to_dest.get(option)
         if dest is not None:
@@ -1034,6 +1036,12 @@ def main():
         metavar="CLIENT",
         help=("Required; read the selected agent's hook JSON payload from stdin and include its target folders"),
     )
+    guard_discover_parser.add_argument(
+        "--scope",
+        choices=[scope.value for scope in DiscoveryScope],
+        default=DiscoveryScope.ALL.value,
+        help="Discovery data to collect (default: all)",
+    )
     guard_uninstall_parser = guard_subparsers.add_parser(
         "uninstall",
         allow_abbrev=False,
@@ -1215,6 +1223,7 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> ScanRespo
         paths=files,
         all_users=scan_all_users,
         scan_skills=scan_skills,
+        discovery_scope=DiscoveryScope.ALL if scan_skills else DiscoveryScope.SERVERS,
     )
 
     # Resolve the MCP server IO flag and the consent flag.
