@@ -131,6 +131,29 @@ class TestFilterClientsToServer:
 
         assert isinstance(filtered[0].mcp_configs["/a.json"][0][1], StdioServer)
 
+    def test_duplicate_name_across_configs_keeps_only_first_occurrence(self):
+        # Same name configured in two different places (e.g. a global config
+        # and a per-project one) must resolve to exactly one server, matching
+        # discover_servers_by_name's first-occurrence-wins definition of "the
+        # server named X" -- not every matching entry across every client.
+        clients = [
+            _client(
+                "cursor",
+                {"/global.json": [("wanted", RemoteServer(url="https://a.test/mcp"))]},
+            ),
+            _client(
+                "vscode",
+                {"/project.json": [("wanted", RemoteServer(url="https://b.test/mcp"))]},
+            ),
+        ]
+
+        filtered = filter_clients_to_server(clients, "wanted")
+
+        assert len(filtered) == 1
+        assert filtered[0].name == "cursor"
+        assert list(filtered[0].mcp_configs) == ["/global.json"]
+        assert filtered[0].mcp_configs["/global.json"][0][1].url == "https://a.test/mcp"
+
 
 class TestDiscoverServersByName:
     @pytest.fixture
