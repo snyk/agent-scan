@@ -618,7 +618,7 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         result: McpConfigsResult = {}
         if not self._workspace_mcp_relative:
             return result
-        for path in self._project_paths_with_ancestors():
+        for path in self._discovery_paths_with_ancestors():
             for rel in self._workspace_mcp_relative:
                 mcp_path = path / rel
                 parsed = self._parse_mcp_file(mcp_path, formats=_VSCODE_FAMILY_FORMATS)
@@ -658,7 +658,7 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         if not self._agent_config_dir_paths and not self._workspace_agent_config_relative:
             return {}
         dirs: list[Path] = [expand_path(Path(raw), self.home_directory) for raw in self._agent_config_dir_paths]
-        for root in self._project_paths_with_ancestors():
+        for root in self._discovery_paths_with_ancestors():
             dirs.extend(root / rel for rel in self._workspace_agent_config_relative)
         result: McpConfigsResult = {}
         for base in dirs:
@@ -684,7 +684,7 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         result: SkillsDirsResult = {}
         if not self._workspace_skills_relative:
             return result
-        for path in self._project_paths_with_ancestors():
+        for path in self._discovery_paths_with_ancestors():
             for rel in self._workspace_skills_relative:
                 skills_path = path / rel
                 entries = self._scan_skills_dir(skills_path)
@@ -895,7 +895,7 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
                 pairs.append((userdata / self._user_settings_file, None))
                 for profile in self._profile_dirs(userdata):
                     pairs.append((profile / "settings.json", None))
-        for path in self._project_paths_with_ancestors():
+        for path in self._discovery_paths_with_ancestors():
             pairs.append((path / ".vscode" / "settings.json", path))
         return pairs
 
@@ -935,7 +935,7 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         result: McpConfigsResult = {}
         if not self._devcontainer_mcp_enabled:
             return result
-        for root in self._project_paths_with_ancestors():
+        for root in self._discovery_paths_with_ancestors():
             for rel in (".devcontainer/devcontainer.json", ".devcontainer.json"):
                 path = root / rel
                 data = self._load_json_file(path)

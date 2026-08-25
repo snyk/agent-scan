@@ -42,7 +42,7 @@ _T = TypeVar("_T")
 # ---------------------------------------------------------------------------
 
 ALL_CLIENTS = ["claude", "cursor", "codex"]
-_HOOK_CLIENT_PROJECT_FOLDER_FIELDS = {
+_HOOK_CLIENT_TARGET_FOLDER_FIELDS = {
     "claude-code": "cwd",
     "cursor": "workspace_roots",
     "codex": "cwd",
@@ -367,24 +367,27 @@ def _run_discover(args) -> int:
 
     url = getattr(args, "url", None) or os.environ.get("REMOTE_HOOKS_BASE_URL") or DEFAULT_REMOTE_URL
     machine_id = (os.environ.get("MACHINE_ID", "") or "").strip()
-
-    project_folders: list[str] = []
-    session_id = ""
     hook_client = getattr(args, "client", None)
-    project_folder_payload_field = _HOOK_CLIENT_PROJECT_FOLDER_FIELDS.get(hook_client) if hook_client else None
-    session_payload_field = _HOOK_CLIENT_SESSION_FIELDS.get(hook_client) if hook_client else None
-    if project_folder_payload_field or session_payload_field:
+    if not hook_client:
+        rich.print("[bold red]Error:[/bold red] --client is required to run guard discovery.")
+        return 1
+
+    target_folders: list[str] = []
+    session_id = ""
+    target_folder_payload_field = _HOOK_CLIENT_TARGET_FOLDER_FIELDS.get(hook_client)
+    session_payload_field = _HOOK_CLIENT_SESSION_FIELDS.get(hook_client)
+    if target_folder_payload_field or session_payload_field:
         try:
             hook_payload = json.loads(_read_hook_payload())
-            project_folder = (
-                hook_payload.get(project_folder_payload_field)
-                if isinstance(hook_payload, dict) and project_folder_payload_field
+            target_folder = (
+                hook_payload.get(target_folder_payload_field)
+                if isinstance(hook_payload, dict) and target_folder_payload_field
                 else None
             )
-            if isinstance(project_folder, str) and project_folder:
-                project_folders.append(project_folder)
-            elif isinstance(project_folder, list):
-                project_folders.extend(folder for folder in project_folder if isinstance(folder, str) and folder)
+            if isinstance(target_folder, str) and target_folder:
+                target_folders.append(target_folder)
+            elif isinstance(target_folder, list):
+                target_folders.extend(folder for folder in target_folder if isinstance(folder, str) and folder)
             raw_session_id = (
                 hook_payload.get(session_payload_field)
                 if isinstance(hook_payload, dict) and session_payload_field
@@ -398,11 +401,11 @@ def _run_discover(args) -> int:
     success = _send_servers_discovered_event(
         push_key,
         url,
-        hook_client or "claude-code",
+        hook_client,
         machine_id,
         event_name="SessionStartServerDiscovery",
         session_marker=session_id or "session-start-server-discovery",
-        project_folders=project_folders,
+        target_folders=target_folders,
     )
     return 0 if success else 1
 
@@ -1185,7 +1188,7 @@ def _servers_discovered_entries(clients_to_inspect: list[ClientToInspect]) -> li
     return [request.model_dump(mode="json") for request in build_scan_request(inspected_paths).scan_path_requests]
 
 
-def _discover_servers_payload(project_folders: list[str] | None = None) -> list[dict]:
+def _discover_servers_payload(target_folders: list[str] | None = None) -> list[dict]:
     import asyncio
 
     from agent_scan import pipelines
@@ -1195,7 +1198,7 @@ def _discover_servers_payload(project_folders: list[str] | None = None) -> list[
         timeout=0,
         tokens=[],
         paths=[],
-        project_folders=project_folders or [],
+        target_folders=target_folders or [],
     )
     clients_to_inspect, _, _ = _run_with_timeout(
         lambda: asyncio.run(pipelines.discover_clients_to_inspect(inspect_args)),
@@ -1317,12 +1320,12 @@ def _send_servers_discovered_event(
     *,
     event_name: str = "serversDiscovered",
     session_marker: str = "hooks-setup",
-    project_folders: list[str] | None = None,
+    target_folders: list[str] | None = None,
 ) -> bool:
     rich.print("[dim]Discovering MCP servers...[/dim]")
     started = time.monotonic()
     try:
-        servers = _discover_servers_payload(project_folders)
+        servers = _discover_servers_payload(target_folders)
     except Exception as e:
         rich.print(f"[yellow]Warning:[/yellow] Could not discover MCP servers: {e}")
         return False

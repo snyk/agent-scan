@@ -35,7 +35,7 @@ class InspectArgs(BaseModel):
     paths: list[str]
     all_users: bool = False
     scan_skills: bool = False
-    project_folders: list[str] = Field(default_factory=list)
+    target_folders: list[str] = Field(default_factory=list)
 
 
 class AnalyzeArgs(BaseModel):
@@ -86,21 +86,21 @@ async def discover_clients_to_inspect(
                     )
                 )
     else:
-        project_folders: list[Path] = []
-        seen_project_folders: set[Path] = set()
-        for raw_path in inspect_args.project_folders:
-            project_path = Path(raw_path).expanduser()
+        target_folders: list[Path] = []
+        seen_target_folders: set[Path] = set()
+        for raw_path in inspect_args.target_folders:
+            target_path = Path(raw_path).expanduser()
             try:
-                key = project_path.resolve()
+                key = target_path.resolve()
             except OSError:
-                key = project_path
-            if key in seen_project_folders:
+                key = target_path
+            if key in seen_target_folders:
                 continue
-            seen_project_folders.add(key)
+            seen_target_folders.add(key)
             if not key.exists():
-                logger.warning("Skipping non-existent project folder: %s", project_path)
+                logger.warning("Skipping non-existent target folder: %s", target_path)
                 continue
-            project_folders.append(project_path)
+            target_folders.append(target_path)
 
         # Phase A — legacy path. Runs for EVERY well-known client including Claude Code.
         for client in get_well_known_clients():
@@ -112,7 +112,7 @@ async def discover_clients_to_inspect(
 
         # Phase B — ABC path. Runs sequentially after Phase A and merges into its output.
         for home_directory, username in home_dirs_with_users:
-            for discoverer in find_discoverers(home_directory, project_folders=project_folders):
+            for discoverer in find_discoverers(home_directory, target_folders=target_folders):
                 try:
                     cti = discoverer.discover()
                 except Exception:

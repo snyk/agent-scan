@@ -387,7 +387,7 @@ class TestBuildDiscoverHookCommand:
         [("claude-code", "cwd"), ("cursor", "workspace_roots"), ("codex", "cwd")],
     )
     def test_client_payload_fields_match_hook_schemas(self, client, expected_field):
-        assert guard_module._HOOK_CLIENT_PROJECT_FOLDER_FIELDS[client] == expected_field
+        assert guard_module._HOOK_CLIENT_TARGET_FOLDER_FIELDS[client] == expected_field
 
     @pytest.mark.parametrize("client", ["claude-code", "cursor", "codex"])
     def test_builds_quoted_environment_prefix_with_agent_scan_binary(self, client):
@@ -3056,14 +3056,14 @@ class TestDiscoverServersPayload:
         assert args.scan_skills is False
         assert result == guard_module._servers_discovered_entries(clients)
 
-    def test_threads_explicit_project_folders_to_inspect_args(self):
+    def test_threads_target_folders_to_inspect_args(self):
         discover = AsyncMock(return_value=([], [], []))
 
         with patch("agent_scan.pipelines.discover_clients_to_inspect", discover):
             result = guard_module._discover_servers_payload(["/repo/one", "/repo/two"])
 
         args = discover.await_args.args[0]
-        assert args.project_folders == ["/repo/one", "/repo/two"]
+        assert args.target_folders == ["/repo/one", "/repo/two"]
         assert result == []
 
     @pytest.mark.parametrize(
@@ -3306,7 +3306,15 @@ class TestGuardDiscoverCli:
         monkeypatch.setattr(
             sys,
             "argv",
-            ["agent-scan", "guard", "discover", "--url", "https://hooks.example"],
+            [
+                "agent-scan",
+                "guard",
+                "discover",
+                "--url",
+                "https://hooks.example",
+                "--client",
+                "claude-code",
+            ],
         )
         with patch(f"{_G}.run_guard", return_value=0) as run:
             with pytest.raises(SystemExit) as exc:
@@ -3321,7 +3329,20 @@ class TestGuardDiscoverCli:
     def test_rejects_removed_file_option(self, monkeypatch):
         from agent_scan import cli
 
-        monkeypatch.setattr(sys, "argv", ["agent-scan", "guard", "discover", "--file", "/tmp/settings.json"])
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["agent-scan", "guard", "discover", "--client", "claude-code", "--file", "/tmp/settings.json"],
+        )
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+
+        assert exc.value.code == 2
+
+    def test_requires_discovery_client(self, monkeypatch):
+        from agent_scan import cli
+
+        monkeypatch.setattr(sys, "argv", ["agent-scan", "guard", "discover"])
         with pytest.raises(SystemExit) as exc:
             cli.main()
 
@@ -3361,7 +3382,7 @@ class TestRunDiscover:
         values = {
             "guard_command": "discover",
             "url": url,
-            "client": None,
+            "client": "claude-code",
         }
         values.update(overrides)
         return SimpleNamespace(**values)
@@ -3624,7 +3645,7 @@ class TestRunDiscover:
         event_payload = json.loads(send.call_args.args[3])
         assert event_payload[event_session_field] == expected_marker
 
-    def test_stdin_is_never_read_without_client(self, tmp_path, monkeypatch):
+    def test_missing_client_fails_without_discovery_or_send(self, tmp_path, monkeypatch):
         config = tmp_path / "settings.json"
         monkeypatch.setenv("PUSH_KEY", "env-pk")
         stdin = MagicMock()
@@ -3632,14 +3653,17 @@ class TestRunDiscover:
         stdin.read.side_effect = AssertionError("stdin must not be read")
         with (
             patch.object(sys, "stdin", stdin),
-            patch(f"{_G}._discover_servers_payload", return_value=[]),
-            patch(f"{_G}.send_hook_event", return_value=(True, "")),
-            patch(f"{_G}.rich"),
+            patch(f"{_G}._discover_servers_payload") as discover,
+            patch(f"{_G}.send_hook_event") as send,
+            patch(f"{_G}.rich") as rich_mock,
         ):
-            result = guard_module.run_guard(self._args(config))
+            result = guard_module.run_guard(self._args(config, client=None))
 
-        assert result == 0
+        assert result == 1
         stdin.read.assert_not_called()
+        discover.assert_not_called()
+        send.assert_not_called()
+        assert "--client is required" in rich_mock.print.call_args.args[0]
 
     def test_windows_uses_direct_sender(self, tmp_path, monkeypatch):
         config = tmp_path / "hooks.json"

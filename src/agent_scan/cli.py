@@ -1030,9 +1030,9 @@ def main():
         "--client",
         type=str,
         choices=["claude-code", "cursor", "codex"],
-        default=None,
+        required=True,
         metavar="CLIENT",
-        help=("Read the selected agent's hook JSON payload from stdin and include its project folders in discovery"),
+        help=("Required; read the selected agent's hook JSON payload from stdin and include its target folders"),
     )
     guard_uninstall_parser = guard_subparsers.add_parser(
         "uninstall",
