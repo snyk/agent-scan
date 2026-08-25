@@ -51,7 +51,7 @@ _DETECTION_RE = re.compile(
 )
 _PERMISSION_DENIED = "__permission_denied__"
 _STDIN_READ_TIMEOUT_SECONDS = 5.0
-_DEFAULT_DISCOVERY_TIMEOUT_SECONDS = 60.0
+_DISCOVERY_TIMEOUT_SECONDS = 60.0
 
 CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 CURSOR_HOOKS_PATH = Path.home() / ".cursor" / "hooks.json"
@@ -317,9 +317,13 @@ def _run_install(args) -> None:
 def _run_with_timeout(
     func: Callable[[], _T],
     timeout: float,
-    cancel: threading.Event | None = None,
 ) -> _T:
-    """Run ``func`` on a daemon thread and signal cooperative cancellation on timeout."""
+    """Run ``func`` on a daemon thread and abandon the worker on timeout.
+
+    Discovery can block inside a recursive glob, ``open()`` on a FIFO, ``codesign``,
+    or ``stat()`` on a dead mount. Those operations cannot be interrupted
+    cooperatively, so the daemon worker is deliberately abandoned after the deadline.
+    """
     result: list[_T] = []
     error: list[BaseException] = []
 
@@ -333,30 +337,14 @@ def _run_with_timeout(
     thread.start()
     thread.join(timeout)
     if thread.is_alive():
-        if cancel is not None:
-            cancel.set()
-            thread.join(0.1)
         raise TimeoutError(f"timed out after {timeout:g}s")
     if error:
         raise error[0]
     return result[0]
 
 
-def _discovery_timeout_seconds() -> float:
-    import math
-    import threading
-
-    try:
-        value = float(os.environ.get("AGENT_SCAN_DISCOVERY_TIMEOUT_SECONDS", ""))
-    except ValueError:
-        return _DEFAULT_DISCOVERY_TIMEOUT_SECONDS
-    if not math.isfinite(value) or not 0 < value <= threading.TIMEOUT_MAX:
-        return _DEFAULT_DISCOVERY_TIMEOUT_SECONDS
-    return value
-
-
 def _read_hook_payload() -> str:
-    """Read hook JSON with a timeout; a blocked stdin read cannot be cancelled cooperatively."""
+    """Read hook JSON with a timeout; a blocked stdin read cannot be interrupted cooperatively."""
     stream = sys.stdin
     try:
         if stream is None or stream.isatty():
@@ -1211,11 +1199,9 @@ def _discover_servers_payload(
         discovery_scope=discovery_scope,
         target_folders=target_folders or [],
     )
-    cancel = threading.Event()
     clients_to_inspect, _, _ = _run_with_timeout(
-        lambda: asyncio.run(pipelines.discover_clients_to_inspect(inspect_args, cancel=cancel)),
-        _discovery_timeout_seconds(),
-        cancel=cancel,
+        lambda: asyncio.run(pipelines.discover_clients_to_inspect(inspect_args)),
+        _DISCOVERY_TIMEOUT_SECONDS,
     )
     return _servers_discovered_entries(clients_to_inspect)
 

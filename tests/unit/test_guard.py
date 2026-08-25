@@ -3213,6 +3213,7 @@ class TestDiscoverServersPayload:
         assert args.paths == []
         assert args.all_users is False
         assert args.scan_skills is False
+        assert discover.await_args.kwargs == {}
         assert result == guard_module._servers_discovered_entries(clients)
 
     def test_forwards_discovery_scope(self):
@@ -3235,26 +3236,8 @@ class TestDiscoverServersPayload:
         assert args.target_folders == ["/repo/one", "/repo/two"]
         assert result == []
 
-    @pytest.mark.parametrize(
-        "raw_value,expected",
-        [
-            (None, 60.0),
-            ("garbage", 60.0),
-            ("0", 60.0),
-            ("-1", 60.0),
-            ("nan", 60.0),
-            ("inf", 60.0),
-            ("1e100", 60.0),
-            ("2.5", 2.5),
-        ],
-    )
-    def test_discovery_timeout_environment_parsing(self, raw_value, expected, monkeypatch):
-        if raw_value is None:
-            monkeypatch.delenv("AGENT_SCAN_DISCOVERY_TIMEOUT_SECONDS", raising=False)
-        else:
-            monkeypatch.setenv("AGENT_SCAN_DISCOVERY_TIMEOUT_SECONDS", raw_value)
-
-        assert guard_module._discovery_timeout_seconds() == expected
+    def test_discovery_timeout_is_60_seconds(self):
+        assert guard_module._DISCOVERY_TIMEOUT_SECONDS == 60.0
 
 
 class TestInvokeHookScript:
@@ -3335,19 +3318,17 @@ class TestInvokeHookScript:
         assert result == (False, "bad request")
 
 
-def test_run_with_timeout_signals_and_joins_cooperative_worker():
-    cancel = threading.Event()
-    stopped = threading.Event()
+def test_run_with_timeout_raises_when_worker_exceeds_deadline():
+    stop = threading.Event()
 
     def worker():
-        cancel.wait()
-        stopped.set()
+        stop.wait(5)
 
-    with pytest.raises(TimeoutError, match="timed out"):
-        guard_module._run_with_timeout(worker, 0.01, cancel=cancel)
-
-    assert cancel.is_set()
-    assert stopped.wait(0.2)
+    try:
+        with pytest.raises(TimeoutError, match="timed out"):
+            guard_module._run_with_timeout(worker, 0.01)
+    finally:
+        stop.set()
 
 
 class TestSendServersDiscoveredEvent:
@@ -3472,13 +3453,13 @@ class TestSendServersDiscoveredEvent:
         import asyncio
         import time as test_time
 
-        async def slow_discovery(_inspect_args, *, cancel=None):
+        async def slow_discovery(_inspect_args):
             await asyncio.sleep(0.5)
             return [], [], []
 
         with (
             patch("agent_scan.pipelines.discover_clients_to_inspect", side_effect=slow_discovery),
-            patch(f"{_G}._discovery_timeout_seconds", return_value=0.01),
+            patch(f"{_G}._DISCOVERY_TIMEOUT_SECONDS", 0.01),
             patch(f"{_G}.send_hook_event") as send,
             patch(f"{_G}.rich") as rich_mock,
         ):

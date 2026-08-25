@@ -2,9 +2,8 @@
 
 import json
 import sys
-import threading
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -9310,21 +9309,3 @@ async def test_pipeline_null_byte_target_folder_is_skipped_without_aborting(tmp_
         )
 
     find.assert_called_once_with(home, target_folders=[good])
-
-
-@pytest.mark.asyncio
-async def test_pipeline_preset_cancel_skips_discovery(tmp_path):
-    from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
-
-    cancel = threading.Event()
-    cancel.set()
-    discoverer = MagicMock()
-
-    with (
-        patch("agent_scan.pipelines.get_readable_home_directories", return_value=[(tmp_path, "alice")]),
-        patch("agent_scan.pipelines.get_well_known_clients", return_value=[]),
-        patch("agent_scan.pipelines.find_discoverers", return_value=[discoverer]),
-    ):
-        await discover_clients_to_inspect(InspectArgs(timeout=0, tokens=[], paths=[]), cancel=cancel)
-
-    discoverer.discover.assert_not_called()
