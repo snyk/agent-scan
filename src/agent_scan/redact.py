@@ -171,7 +171,7 @@ def _redaction_marker(plugin_name: str) -> str:
     return f"**REDACTED_SECRET_{plugin_name.upper()}**"
 
 
-_BEARER_TOKEN_RE = re.compile(r"[Bb]earer\s+[\w.\-~+/]+=*")
+_BEARER_TOKEN_RE = re.compile(r"bearer\s+[\w.\-~+/]+=*", re.IGNORECASE)
 
 
 def redact_bearer_tokens(text: str | None) -> str | None:
