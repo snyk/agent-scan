@@ -6,8 +6,10 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from agent_scan.cli import (
+    _detect_likely_missing_env_vars,
     _handle_ci_exit,
     _parse_sandbox_env_args,
+    _print_missing_env_hint,
     _should_show_analysis_results,
     print_scan_inspect,
     setup_scan_parser,
@@ -23,6 +25,7 @@ from agent_scan.models.api.v20260710 import (
     SkillRiskResponse,
     SkillRiskScore,
 )
+from agent_scan.sandbox_runner import SandboxScanResult
 
 
 def _cli_args(
@@ -552,3 +555,119 @@ class TestParseSandboxEnvArgs:
     def test_malformed_entry_raises_clear_error(self, entry):
         with pytest.raises(ValueError, match="KEY=VALUE"):
             _parse_sandbox_env_args([entry])
+
+
+class TestDetectLikelyMissingEnvVars:
+    """Tests for the best-effort stderr-parsing hint for sandbox-scan."""
+
+    def test_detects_comma_separated_list_with_and(self):
+        text = "STDERR: Error: JIRA_INSTANCE_URL, JIRA_USER_EMAIL, and JIRA_API_KEY must be set in the environment."
+        assert _detect_likely_missing_env_vars(text) == ["JIRA_INSTANCE_URL", "JIRA_USER_EMAIL", "JIRA_API_KEY"]
+
+    def test_detects_single_missing_var(self):
+        text = "STDERR: Error: GITHUB_TOKEN is required"
+        assert _detect_likely_missing_env_vars(text) == ["GITHUB_TOKEN"]
+
+    @pytest.mark.parametrize(
+        "phrasing",
+        [
+            "API_KEY must be set",
+            "API_KEY is required",
+            "API_KEY not set",
+            "API_KEY not defined",
+            "Missing API_KEY",
+            "API_KEY required in the environment",
+        ],
+    )
+    def test_recognizes_common_trigger_phrasings(self, phrasing):
+        assert _detect_likely_missing_env_vars(phrasing) == ["API_KEY"]
+
+    def test_ignores_lines_without_a_trigger_phrase(self):
+        text = "STDERR: npm warn deprecated some-package@1.0.0"
+        assert _detect_likely_missing_env_vars(text) == []
+
+    def test_ignores_all_caps_words_without_underscore(self):
+        # A single all-caps word (no underscore) shouldn't be mistaken for an env var name.
+        text = "STDERR: ERROR: something is required"
+        assert _detect_likely_missing_env_vars(text) == []
+
+    def test_deduplicates_preserving_first_occurrence_order(self):
+        text = "API_KEY is required\nAPI_KEY must be set\nAPI_SECRET is required"
+        assert _detect_likely_missing_env_vars(text) == ["API_KEY", "API_SECRET"]
+
+    def test_empty_text_returns_empty_list(self):
+        assert _detect_likely_missing_env_vars("") == []
+
+
+class TestPrintMissingEnvHint:
+    """Tests for the sandbox-scan retry-command hint printed on server_startup failures."""
+
+    def _result_with_error(self, category, server_output):
+        return SandboxScanResult(
+            exit_code=0,
+            stdout="",
+            stderr="",
+            results={
+                "/scan-config/mcp.generated.json": {
+                    "servers": [
+                        {
+                            "name": "some-server",
+                            "error": {"category": category, "server_output": server_output},
+                        }
+                    ]
+                }
+            },
+        )
+
+    def test_prints_retry_command_with_detected_vars(self, capsys):
+        result = self._result_with_error(
+            "server_startup", "STDERR: Error: JIRA_API_KEY must be set in the environment."
+        )
+
+        _print_missing_env_hint("npm:jira-mcp@latest", None, result)
+
+        err = capsys.readouterr().err
+        assert "JIRA_API_KEY" in err
+        assert "sandbox-scan npm:jira-mcp@latest" in err
+        assert "--env JIRA_API_KEY=<value>" in err
+
+    def test_includes_input_dir_when_given(self, capsys):
+        result = self._result_with_error("server_startup", "API_KEY is required")
+
+        _print_missing_env_hint("mcp.json", "/tmp/my-server", result)
+
+        err = capsys.readouterr().err
+        assert "--input-dir /tmp/my-server" in err
+
+    def test_silent_when_no_error(self, capsys):
+        result = SandboxScanResult(
+            exit_code=0,
+            stdout="",
+            stderr="",
+            results={"/scan-config/mcp.generated.json": {"servers": [{"name": "ok-server", "error": None}]}},
+        )
+
+        _print_missing_env_hint("npm:some-server@1.0.0", None, result)
+
+        assert capsys.readouterr().err == ""
+
+    def test_silent_when_error_is_not_server_startup_category(self, capsys):
+        result = self._result_with_error("network_error", "API_KEY is required")
+
+        _print_missing_env_hint("npm:some-server@1.0.0", None, result)
+
+        assert capsys.readouterr().err == ""
+
+    def test_silent_when_no_vars_detected(self, capsys):
+        result = self._result_with_error("server_startup", "STDERR: connection refused")
+
+        _print_missing_env_hint("npm:some-server@1.0.0", None, result)
+
+        assert capsys.readouterr().err == ""
+
+    def test_silent_when_results_is_none(self, capsys):
+        result = SandboxScanResult(exit_code=1, stdout="", stderr="boom", results=None)
+
+        _print_missing_env_hint("npm:some-server@1.0.0", None, result)
+
+        assert capsys.readouterr().err == ""

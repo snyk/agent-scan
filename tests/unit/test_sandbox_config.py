@@ -161,7 +161,7 @@ def test_extra_env_overrides_client_configs_own_env(tmp_path):
                     "Custom": {
                         "command": "python3",
                         "args": ["server.py"],
-                        "env": {"API_TOKEN": "stale-value-from-config-file"},
+                        "env": {"MY_VAR": "stale-value-from-config-file"},
                     }
                 }
             }
@@ -169,10 +169,10 @@ def test_extra_env_overrides_client_configs_own_env(tmp_path):
     )
 
     config = build_sandbox_config(
-        "mcp.json", "http://proxy:8888", input_dir=tmp_path, extra_env={"API_TOKEN": "fresh-value-from-cli"}
+        "mcp.json", "http://proxy:8888", input_dir=tmp_path, extra_env={"MY_VAR": "fresh-value-from-cli"}
     )
 
-    assert config["mcpServers"]["Custom"]["env"]["API_TOKEN"] == "fresh-value-from-cli"
+    assert config["mcpServers"]["Custom"]["env"]["MY_VAR"] == "fresh-value-from-cli"
 
 
 def test_extra_env_cannot_override_injected_proxy_vars():

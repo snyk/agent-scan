@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 from dataclasses import dataclass
 
@@ -905,6 +906,63 @@ def _parse_sandbox_env_args(env_args: list[str] | None) -> dict[str, str]:
     return parsed
 
 
+# Best-effort, not authoritative: MCP has no manifest standard for a server to
+# declare required config, so this only catches servers that print a reasonably
+# conventional "X, Y must be set" style message in their startup stderr -- it
+# will miss vaguer errors, raw stack traces, or servers that hang/fail silently
+# instead of naming what they need.
+_ENV_VAR_TOKEN_PATTERN = re.compile(r"\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b")
+_MISSING_ENV_TRIGGER_PATTERN = re.compile(
+    r"must be set|is required|are required|not set|not defined|missing|required in the environment",
+    re.IGNORECASE,
+)
+
+
+def _detect_likely_missing_env_vars(text: str) -> list[str]:
+    """Scan a failed server's captured stderr for env var names it says it needs."""
+    found: list[str] = []
+    seen: set[str] = set()
+    for line in text.splitlines():
+        if not _MISSING_ENV_TRIGGER_PATTERN.search(line):
+            continue
+        for token in _ENV_VAR_TOKEN_PATTERN.findall(line):
+            if token not in seen:
+                seen.add(token)
+                found.append(token)
+    return found
+
+
+def _print_missing_env_hint(target: str, input_dir_arg: str | None, result) -> None:
+    """Print a copy-pasteable retry command if a failed server's stderr named env vars it needs."""
+    if not result.results:
+        return
+
+    missing_vars: list[str] = []
+    for path_result in result.results.values():
+        for server in path_result.get("servers", []):
+            error = server.get("error")
+            if not error or error.get("category") != "server_startup":
+                continue
+            for var in _detect_likely_missing_env_vars(error.get("server_output") or ""):
+                if var not in missing_vars:
+                    missing_vars.append(var)
+
+    if not missing_vars:
+        return
+
+    retry_cmd = f"snyk-agent-scan sandbox-scan {target}"
+    if input_dir_arg:
+        retry_cmd += f" --input-dir {input_dir_arg}"
+    retry_cmd += "".join(f" --env {var}=<value>" for var in missing_vars)
+
+    rich.print(
+        f"\n[yellow]Hint (best-effort, not authoritative):[/yellow] the failed server's error output "
+        f"mentions {', '.join(missing_vars)} -- possibly missing environment variables. Retry with:\n"
+        f"  {retry_cmd}",
+        file=sys.stderr,
+    )
+
+
 def run_sandbox_scan_command(args) -> int:
     from pathlib import Path
 
@@ -946,6 +1004,7 @@ def run_sandbox_scan_command(args) -> int:
         print(result.stdout)
     if result.stderr:
         print(result.stderr, file=sys.stderr)
+    _print_missing_env_hint(args.target, args.input_dir, result)
     return result.exit_code
 
 
