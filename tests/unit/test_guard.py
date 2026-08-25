@@ -2908,6 +2908,43 @@ class TestInstallHooksOrchestration:
             self._call(tmp_path, minted=True, config_exists=True)
         ctx["dest"].unlink.assert_not_called()
 
+    def test_test_event_failure_restores_overwritten_existing_scripts(self, ctx, tmp_path):
+        hooks_dir = tmp_path / "hooks"
+        hooks_dir.mkdir()
+        main_script = hooks_dir / "snyk-agent-guard.sh"
+        discover_script = hooks_dir / "snyk-agent-guard-discover.sh"
+        main_script.write_bytes(b"old forwarder\n")
+        discover_script.write_bytes(b"old discovery\n")
+        main_script.chmod(0o600)
+        discover_script.chmod(0o640)
+
+        def overwrite_scripts(_config_path, *, include_discover):
+            assert include_discover is True
+            main_script.write_bytes(b"new forwarder requiring MACHINE_ID\n")
+            discover_script.write_bytes(b"new discovery\n")
+            main_script.chmod(0o755)
+            discover_script.chmod(0o755)
+            return (
+                main_script,
+                True,
+                True,
+                _CURRENT_CHECKSUM,
+                _NEW_CHECKSUM,
+                "discover-current",
+                "discover-new",
+            )
+
+        ctx["copy"].side_effect = overwrite_scripts
+        ctx["test_event"].return_value = False
+
+        with patch(f"{_G}.IS_WINDOWS", False), pytest.raises(SystemExit):
+            self._call(tmp_path, minted=True, config_exists=True)
+
+        assert main_script.read_bytes() == b"old forwarder\n"
+        assert discover_script.read_bytes() == b"old discovery\n"
+        assert main_script.stat().st_mode & 0o777 == 0o600
+        assert discover_script.stat().st_mode & 0o777 == 0o640
+
     def test_test_event_failure_does_not_write_config(self, ctx, tmp_path):
         ctx["test_event"].return_value = False
         with pytest.raises(SystemExit):
