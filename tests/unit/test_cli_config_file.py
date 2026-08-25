@@ -41,6 +41,11 @@ def _parse(argv: list[str]) -> tuple[argparse.ArgumentParser, argparse.Namespace
     return parser, args
 
 
+def _provided(parser: argparse.ArgumentParser, argv: list[str]) -> set[str]:
+    """Let argparse resolve the subparser path, then ask which dests were explicit."""
+    return explicitly_provided_dests(parser, parser.parse_args(argv), argv)
+
+
 def _write_yaml(tmp_path, text: str) -> str:
     path = tmp_path / "config.yaml"
     path.write_text(text)
@@ -76,27 +81,21 @@ class TestLoadConfigFile:
 
 class TestExplicitlyProvidedDests:
     def test_detects_passed_flags_only(self):
-        parser = _build_parser()
-        provided = explicitly_provided_dests(parser, ["scan", "--server-timeout", "5", "--json"])
+        provided = _provided(_build_parser(), ["scan", "--server-timeout", "5", "--json"])
         assert "server_timeout" in provided
         assert "json" in provided
         assert "verbose" not in provided
 
     def test_detects_equals_form(self):
-        parser = _build_parser()
-        provided = explicitly_provided_dests(parser, ["scan", "--server-timeout=5"])
-        assert "server_timeout" in provided
+        assert "server_timeout" in _provided(_build_parser(), ["scan", "--server-timeout=5"])
 
     def test_boolean_optional_both_spellings_map_to_same_dest(self):
-        parser = _build_parser()
-        assert "skills" in explicitly_provided_dests(parser, ["scan", "--no-skills"])
-        assert "skills" in explicitly_provided_dests(parser, ["scan", "--skills"])
+        assert "skills" in _provided(_build_parser(), ["scan", "--no-skills"])
+        assert "skills" in _provided(_build_parser(), ["scan", "--skills"])
 
     def test_double_dash_stops_option_detection(self):
-        parser = _build_parser()
-
-        assert "json" not in explicitly_provided_dests(parser, ["scan", "--", "--json"])
-        assert "json" in explicitly_provided_dests(parser, ["scan", "--json"])
+        assert "json" not in _provided(_build_parser(), ["scan", "--", "--json"])
+        assert "json" in _provided(_build_parser(), ["scan", "--json"])
 
     def test_uses_destination_from_active_subparser_when_option_aliases_collide(self):
         parser = _build_parser()
@@ -106,13 +105,28 @@ class TestExplicitlyProvidedDests:
         guard_install_parser = guard_subparsers.add_parser("install", allow_abbrev=False)
         guard_install_parser.add_argument("--machine-id", "--control-identifier", dest="machine_id", default=None)
 
-        provided = explicitly_provided_dests(
+        provided = _provided(
             parser,
             ["scan", "--control-server", "https://example.com", "--control-identifier", "legacy-id"],
         )
 
         assert "control_identifier" in provided
         assert "machine_id" not in provided
+
+    def test_uses_destination_from_nested_subparser(self):
+        """The same alias resolves to guard install's dest when that is the active path."""
+        parser = _build_parser()
+        subparsers = next(action for action in parser._actions if isinstance(action, argparse._SubParsersAction))
+        guard_parser = subparsers.add_parser("guard", allow_abbrev=False)
+        guard_subparsers = guard_parser.add_subparsers(dest="guard_command")
+        guard_install_parser = guard_subparsers.add_parser("install", allow_abbrev=False)
+        guard_install_parser.add_argument("client")
+        guard_install_parser.add_argument("--machine-id", "--control-identifier", dest="machine_id", default=None)
+
+        provided = _provided(parser, ["guard", "install", "claude", "--control-identifier", "m1"])
+
+        assert "machine_id" in provided
+        assert "control_identifier" not in provided
 
     def test_root_option_value_is_not_mistaken_for_subcommand(self):
         parser = argparse.ArgumentParser(allow_abbrev=False)
@@ -124,12 +138,18 @@ class TestExplicitlyProvidedDests:
         guard_subparsers = guard_parser.add_subparsers(dest="guard_command")
         guard_subparsers.add_parser("install", allow_abbrev=False)
 
-        provided = explicitly_provided_dests(
-            parser,
-            ["--config-file", "guard", "scan", "--control-identifier", "x"],
-        )
+        provided = _provided(parser, ["--config-file", "guard", "scan", "--control-identifier", "x"])
 
         assert "control_identifier" in provided
+
+    def test_no_subcommand_yields_only_root_options(self):
+        """A namespace whose subparser dest is unset must not crash the action walk."""
+        parser = _build_parser()
+        parser.add_argument("--top-level")
+
+        provided = explicitly_provided_dests(parser, parser.parse_args([]), ["--top-level", "x"])
+
+        assert provided == {"top_level"}
 
 
 class TestAbbreviationDisabled:

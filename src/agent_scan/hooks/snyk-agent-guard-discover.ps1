@@ -1,7 +1,7 @@
 #
 # Session-start discovery trampoline for Snyk Agent Guard (Windows).
-# Sets the environment expected by `guard discover` and forwards the hook
-# payload from stdin. Parameters mirror snyk-agent-guard.ps1.
+# Sets the environment expected by `guard discover` and hands it this process's
+# stdin, from which it reads the hook payload. Parameters mirror snyk-agent-guard.ps1.
 #
 param(
     [Parameter(Mandatory=$true)]
@@ -38,10 +38,12 @@ if (-not (Get-Command $bin -ErrorAction SilentlyContinue)) { $bin = "snyk-agent-
 
 $arguments = @("guard", "discover", "--client", $Client, "--scope", $Scope)
 
-$reader = New-Object System.IO.StreamReader([Console]::OpenStandardInput(), [System.Text.Encoding]::UTF8, $true)
-$payload = $reader.ReadToEnd()
+# Do not read stdin here. Invoking the binary outside a pipeline lets it inherit this
+# process's stdin, so `guard discover` reads the hook payload itself under its own 5s
+# cap -- matching snyk-agent-guard-discover.sh, which never touches fd 0. Reading it
+# here instead would block forever on an agent that keeps the pipe open.
 try {
-    $payload | & $bin @arguments *> $null
+    & $bin @arguments *> $null
 } catch {
     # Session-start discovery is best-effort telemetry.
 }

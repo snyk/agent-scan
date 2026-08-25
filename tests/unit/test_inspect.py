@@ -9,6 +9,7 @@ from httpx import HTTPStatusError, Request, Response
 from mcp.shared.auth import OAuthToken
 from mcp.types import Implementation, InitializeResult
 
+from agent_scan.agents import DiscoveryScope
 from agent_scan.inspect import (
     get_mcp_config_per_client,
     inspect_client,
@@ -849,3 +850,84 @@ async def test_inspect_skill_falls_back_to_directory_name_on_frontmatter_error(t
     assert {file.path for file in skill.files} == {"SKILL.md", "helper.py"}
     assert skill.error is not None
     assert skill.error.category == "skill_scan_error"
+
+
+# --- discovery scope tests ---
+
+
+@pytest.fixture
+def scoped_candidate(tmp_path):
+    """A client exposing both an MCP config and a skills dir, for scope gating."""
+    home = tmp_path / "user"
+    (home / ".fake-client").mkdir(parents=True)
+
+    plugin_dir = home / ".fake-client" / "plugins" / "cache" / "market" / "server-plugin" / "v1"
+    plugin_dir.mkdir(parents=True)
+    (plugin_dir / ".mcp.json").write_text('{"my-server": {"command": "node", "args": ["server.js"]}}')
+
+    skills_dir = home / ".fake-client" / "plugins" / "cache" / "market" / "skill-plugin" / "v1" / "skills" / "my-skill"
+    skills_dir.mkdir(parents=True)
+    (skills_dir / "SKILL.md").write_text("# My Skill\nA test skill.")
+
+    candidate = CandidateClient(
+        name="fake-client",
+        client_exists_paths=["~/.fake-client"],
+        mcp_config_paths=[],
+        skills_dir_paths=[],
+        mcp_config_globs=["~/.fake-client/plugins/cache/**/.mcp.json"],
+        skills_dir_globs=["~/.fake-client/plugins/cache/**/skills"],
+    )
+    return candidate, home
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "scope, expect_servers, expect_skills",
+    [
+        (DiscoveryScope.ALL, True, True),
+        (DiscoveryScope.SERVERS, True, False),
+        (DiscoveryScope.SKILLS, False, True),
+    ],
+)
+async def test_scope_only_populates_requested_half(scoped_candidate, scope, expect_servers, expect_skills):
+    """Mirror of AgentDiscoverer.discover's scope gate, for the well-known-client path."""
+    candidate, home = scoped_candidate
+
+    ctis = await get_mcp_config_per_client(candidate, [(home, "user")], scope=scope)
+
+    assert len(ctis) == 1
+    cti = ctis[0]
+    assert bool([path for path, value in cti.mcp_configs.items() if isinstance(value, list)]) is expect_servers
+    assert bool([path for path, value in cti.skills_dirs.items() if isinstance(value, list)]) is expect_skills
+
+
+@pytest.mark.asyncio
+async def test_servers_scope_does_no_skills_filesystem_work(scoped_candidate):
+    """``--scope servers`` exists to save latency, so the skills sweep must not run at all."""
+    candidate, home = scoped_candidate
+
+    with patch("agent_scan.inspect.inspect_skills_dir") as inspect_skills:
+        await get_mcp_config_per_client(candidate, [(home, "user")], scope=DiscoveryScope.SERVERS)
+
+    inspect_skills.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_scope_defaults_to_all(scoped_candidate):
+    candidate, home = scoped_candidate
+
+    ctis = await get_mcp_config_per_client(candidate, [(home, "user")])
+
+    assert [path for path, value in ctis[0].mcp_configs.items() if isinstance(value, list)]
+    assert [path for path, value in ctis[0].skills_dirs.items() if isinstance(value, list)]
+
+
+@pytest.mark.asyncio
+async def test_client_detection_is_scope_independent(scoped_candidate):
+    """The client_exists probe must run whatever the scope, or clients vanish from reports."""
+    candidate, home = scoped_candidate
+
+    for scope in DiscoveryScope:
+        ctis = await get_mcp_config_per_client(candidate, [(home, "user")], scope=scope)
+        assert len(ctis) == 1, scope
+        assert ctis[0].client_path is not None, scope

@@ -1938,6 +1938,114 @@ class TestBashHookScript:
 
 
 @pytest.mark.skipif(not IS_WINDOWS, reason="PowerShell script; Windows only")
+class TestPowerShellDiscoveryHookScript:
+    """Integration: execute the real discover .ps1, mirroring the POSIX .sh coverage.
+
+    The POSIX trampoline lets the child inherit stdin; these tests pin the same
+    behaviour on Windows, which is the contract the script relies on.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _skip_no_powershell(self):
+        if not shutil.which("powershell") and not shutil.which("pwsh"):
+            pytest.skip("powershell not available")
+
+    @staticmethod
+    def _ps_cmd():
+        return "powershell" if shutil.which("powershell") else "pwsh"
+
+    @staticmethod
+    def _recording_stub(tmp_path: Path, marker: Path) -> Path:
+        """A ``snyk-agent-scan.cmd`` stub recording its argv and stdin to *marker*."""
+        helper = tmp_path / "record.py"
+        helper.write_text(
+            "import os, sys\n"
+            "with open(os.environ['MARKER'], 'w') as fh:\n"
+            "    fh.write(' '.join(sys.argv[1:]) + '\\n')\n"
+            "    fh.write(sys.stdin.read())\n"
+        )
+        stub = tmp_path / "snyk-agent-scan.cmd"
+        stub.write_text(f'@echo off\r\n"{sys.executable}" "{helper}" %*\r\n')
+        return stub
+
+    def _run(self, script: Path, extra_args: list[str], env: dict, payload: str = "{}"):
+        return subprocess.run(
+            [self._ps_cmd(), "-File", str(script), "-Client", "claude-code", *extra_args],
+            input=payload,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+
+    def test_stdin_payload_and_arguments_reach_the_child(self, tmp_path):
+        """The whole point of inheriting stdin: guard discover sees the hook payload."""
+        script = _get_script_path("snyk-agent-guard-discover.ps1")
+        marker = tmp_path / "invoked"
+        stub = self._recording_stub(tmp_path, marker)
+        payload = '{"cwd":"C:\\\\work\\\\project","session_id":"s1"}'
+
+        result = self._run(
+            script,
+            ["-AgentScanBin", str(stub), "-MachineId", "machine-42"],
+            {**os.environ, "MARKER": str(marker)},
+            payload=payload,
+        )
+
+        assert result.returncode == 0, result.stderr
+        recorded = marker.read_text().splitlines()
+        assert recorded[0] == "guard discover --client claude-code --scope servers"
+        assert json.loads("\n".join(recorded[1:])) == json.loads(payload)
+
+    def test_nonzero_discovery_exit_is_swallowed(self, tmp_path):
+        script = _get_script_path("snyk-agent-guard-discover.ps1")
+        stub = tmp_path / "snyk-agent-scan.cmd"
+        stub.write_text("@echo off\r\nexit /b 1\r\n")
+
+        result = self._run(
+            script,
+            ["-AgentScanBin", str(stub), "-MachineId", "machine-42"],
+            dict(os.environ),
+        )
+
+        assert result.returncode == 0
+        assert result.stderr == ""
+
+    def test_missing_machine_id_exits_zero_without_invoking_binary(self, tmp_path):
+        script = _get_script_path("snyk-agent-guard-discover.ps1")
+        marker = tmp_path / "invoked"
+        stub = self._recording_stub(tmp_path, marker)
+        env = {**os.environ, "MARKER": str(marker)}
+        env.pop("MACHINE_ID", None)
+
+        result = self._run(script, ["-AgentScanBin", str(stub)], env)
+
+        assert result.returncode == 0
+        assert not marker.exists()
+
+    def test_stale_absolute_binary_falls_back_to_path(self, tmp_path):
+        script = _get_script_path("snyk-agent-guard-discover.ps1")
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        marker = tmp_path / "invoked"
+        self._recording_stub(bin_dir, marker)
+        env = {
+            **os.environ,
+            "MARKER": str(marker),
+            "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+        }
+
+        result = self._run(
+            script,
+            ["-AgentScanBin", str(tmp_path / "deleted" / "snyk-agent-scan.exe"), "-MachineId", "machine-42"],
+            env,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert marker.exists()
+
+
+@pytest.mark.skipif(not IS_WINDOWS, reason="PowerShell script; Windows only")
 class TestPowerShellHookScript:
     """Integration: invoke the real .ps1 script against a local HTTP server."""
 
@@ -3247,7 +3355,7 @@ class TestSendServersDiscoveredEvent:
     def _capture(hook_client="claude-code", entries=None, machine_id="machine-42"):
         captured = {}
 
-        def fake_send(url, client, push_key, payload, identifier):
+        def fake_send(url, client, push_key, payload, identifier, **kwargs):
             captured.update(
                 url=url,
                 client=client,
@@ -3296,7 +3404,7 @@ class TestSendServersDiscoveredEvent:
     def test_event_name_and_session_marker_can_be_overridden(self):
         captured = {}
 
-        def fake_send(_url, _client, _push_key, payload, _machine_id):
+        def fake_send(_url, _client, _push_key, payload, _machine_id, **kwargs):
             captured["payload"] = json.loads(payload)
             return True, ""
 
@@ -3321,7 +3429,7 @@ class TestSendServersDiscoveredEvent:
     def test_payload_includes_discovery_duration_ms_from_monotonic_clock(self):
         captured = {}
 
-        def fake_send(_url, _client, _push_key, payload, _machine_id):
+        def fake_send(_url, _client, _push_key, payload, _machine_id, **kwargs):
             captured["payload"] = json.loads(payload)
             return True, ""
 
@@ -3508,7 +3616,7 @@ class TestRunDiscover:
         config = tmp_path / "custom" / "settings.json"
         captured = {}
 
-        def fake_send(url, client, push_key, payload, machine_id):
+        def fake_send(url, client, push_key, payload, machine_id, **kwargs):
             captured.update(
                 url=url,
                 client=client,
@@ -3839,6 +3947,8 @@ class TestRunInstallSendsServersDiscovered:
         return paths
 
     def test_single_client_sends_once_directly(self, tmp_path, monkeypatch):
+        from agent_scan.agents import DiscoveryScope
+
         monkeypatch.setenv("PUSH_KEY", "headless-pk")
         script = Path("/installed/claude/hook.sh")
         with (
@@ -3848,7 +3958,38 @@ class TestRunInstallSendsServersDiscovered:
             _run_install(self._args(tmp_path, machine_id="machine-42"))
 
         assert install.call_args.args[-1] == "machine-42"
-        send.assert_called_once_with("headless-pk", "https://api.snyk.io", "claude-code", "machine-42")
+        send.assert_called_once_with(
+            "headless-pk",
+            "https://api.snyk.io",
+            "claude-code",
+            "machine-42",
+            discovery_scope=DiscoveryScope.SERVERS,
+            max_retries=2,
+        )
+
+    def test_install_does_not_request_skills_discovery(self, tmp_path, monkeypatch):
+        """The install event only ever reports servers, so it must not pay for a skills sweep."""
+        from agent_scan.agents import DiscoveryScope
+
+        monkeypatch.setenv("PUSH_KEY", "headless-pk")
+        with (
+            patch(f"{_G}._install_hooks", return_value=Path("/installed/claude/hook.sh")),
+            patch(f"{_G}._send_servers_discovered_event", return_value=True) as send,
+        ):
+            _run_install(self._args(tmp_path, machine_id="machine-42"))
+
+        assert send.call_args.kwargs["discovery_scope"] is DiscoveryScope.SERVERS
+
+    def test_install_retries_delivery_unlike_session_start(self, tmp_path, monkeypatch):
+        """``guard install`` is a one-shot the user is watching, so a transport blip retries."""
+        monkeypatch.setenv("PUSH_KEY", "headless-pk")
+        with (
+            patch(f"{_G}._install_hooks", return_value=Path("/installed/claude/hook.sh")),
+            patch(f"{_G}._send_servers_discovered_event", return_value=True) as send,
+        ):
+            _run_install(self._args(tmp_path, machine_id="machine-42"))
+
+        assert send.call_args.kwargs["max_retries"] == 2
 
     def test_cursor_install_uses_cursor_endpoint(self, tmp_path, monkeypatch):
         monkeypatch.setenv("PUSH_KEY", "headless-pk")
@@ -3870,7 +4011,7 @@ class TestRunInstallSendsServersDiscovered:
             order.append(f"install:{args[0]}")
             return scripts[len(order) - 1]
 
-        def send(*args):
+        def send(*args, **kwargs):
             order.append("send")
             return True
 

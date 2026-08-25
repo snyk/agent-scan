@@ -302,7 +302,16 @@ def _run_install(args) -> None:
         raise
 
     if first_installed_client is not None:
-        _send_servers_discovered_event(push_key, url, first_installed_client, machine_id)
+        # ``_servers_discovered_entries`` never emits skills, so requesting them here
+        # would walk every skills dir only to discard the result.
+        _send_servers_discovered_event(
+            push_key,
+            url,
+            first_installed_client,
+            machine_id,
+            discovery_scope=DiscoveryScope.SERVERS,
+            max_retries=2,
+        )
 
 
 def _run_with_timeout(
@@ -1335,6 +1344,7 @@ def _send_servers_discovered_event(
     session_marker: str = "hooks-setup",
     target_folders: list[str] | None = None,
     discovery_scope: DiscoveryScope = DiscoveryScope.ALL,
+    max_retries: int = 1,
 ) -> bool:
     rich.print("[dim]Discovering MCP servers...[/dim]")
     started = time.monotonic()
@@ -1354,7 +1364,7 @@ def _send_servers_discovered_event(
     redact_push_keys_in_data(payload_dict)
     payload = json.dumps(payload_dict)
 
-    ok, detail = send_hook_event(url, hook_client, push_key, payload, machine_id)
+    ok, detail = send_hook_event(url, hook_client, push_key, payload, machine_id, max_retries=max_retries)
     if ok:
         server_count = sum(len(entry.get("servers", [])) for entry in servers)
         noun = "server" if server_count == 1 else "servers"

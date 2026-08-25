@@ -107,7 +107,7 @@ async def discover_clients_to_inspect(
         for client in get_well_known_clients():
             if cancel is not None and cancel.is_set():
                 break
-            ctis = await get_mcp_config_per_client(client, home_dirs_with_users)
+            ctis = await get_mcp_config_per_client(client, home_dirs_with_users, scope=inspect_args.discovery_scope)
             if ctis:
                 clients_to_inspect.extend(ctis)
             else:

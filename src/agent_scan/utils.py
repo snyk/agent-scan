@@ -192,10 +192,15 @@ def get_push_key(control_servers: list[ControlServer] | list[dict[str, Any]]) ->
 
 
 def safe_resolve(path: Path) -> Path:
-    """Resolve ``path`` when possible, preserving its literal spelling on failure."""
+    """Resolve ``path`` when possible, preserving its literal spelling on failure.
+
+    ``ValueError`` is caught alongside the OS errors because ``Path.resolve()``
+    raises it for a path containing a NUL byte, and target folders reach this
+    helper straight from untrusted hook-payload JSON.
+    """
     try:
         return path.resolve()
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, ValueError):
         return path
 
 

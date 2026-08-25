@@ -85,7 +85,7 @@ def _force_analysis_api_version(analysis_url: str) -> str:
     return urlunsplit(parsed._replace(query=urlencode(query)))
 
 
-_RETRYABLE_TRANSPORT_EXCEPTIONS = (
+RETRYABLE_TRANSPORT_EXCEPTIONS = (
     TimeoutError,
     aiohttp.ClientConnectionError,
     aiohttp.ClientPayloadError,
@@ -120,7 +120,7 @@ async def _async_analysis_enabled(
     """
     for attempt in range(max_retries):
         try:
-            async with _analysis_client_session(trace_configs, skip_ssl_verify) as session:
+            async with platform_client_session(trace_configs, skip_ssl_verify) as session:
                 async with session.get(
                     config_url,
                     headers={"X-Push-Key": push_key},
@@ -140,7 +140,7 @@ async def _async_analysis_enabled(
                         attempt + 1,
                         max_retries,
                     )
-        except _RETRYABLE_TRANSPORT_EXCEPTIONS as e:
+        except RETRYABLE_TRANSPORT_EXCEPTIONS as e:
             logger.warning("Agent Scan config request failed (attempt %d/%d): %s", attempt + 1, max_retries, e)
         except aiohttp.ClientError as e:
             # Non-transient transport error (e.g. malformed URL): retrying will not help.
@@ -180,7 +180,7 @@ async def _submit_async_analysis(
 
     for attempt in range(max_retries):
         try:
-            async with _analysis_client_session(trace_configs, skip_ssl_verify) as session:
+            async with platform_client_session(trace_configs, skip_ssl_verify) as session:
                 async with session.post(
                     async_url,
                     data=body,
@@ -201,7 +201,7 @@ async def _submit_async_analysis(
                         attempt + 1,
                         max_retries,
                     )
-        except _RETRYABLE_TRANSPORT_EXCEPTIONS as e:
+        except RETRYABLE_TRANSPORT_EXCEPTIONS as e:
             logger.warning(
                 "Async analysis request failed (attempt %d/%d): %s",
                 attempt + 1,
@@ -417,8 +417,13 @@ def setup_tcp_connector(skip_ssl_verify: bool = False) -> aiohttp.TCPConnector:
     return connector
 
 
-def _analysis_client_session(trace_configs: list | None, skip_ssl_verify: bool) -> aiohttp.ClientSession:
-    """Build a ClientSession with the shared connector, tracing and proxy settings."""
+def platform_client_session(trace_configs: list | None = None, skip_ssl_verify: bool = False) -> aiohttp.ClientSession:
+    """Build a ClientSession with the shared connector, tracing and proxy settings.
+
+    Shared by every outbound call to the Snyk platform (analysis and Agent Guard hook
+    events alike) so they all get the same trust posture: certifi plus any CA the
+    environment points at via load_extra_ca_certs.
+    """
     return aiohttp.ClientSession(
         trace_configs=trace_configs,
         connector=setup_tcp_connector(skip_ssl_verify=skip_ssl_verify),
@@ -521,7 +526,7 @@ async def analyze_machine(
 
     for attempt in range(max_retries):
         try:
-            async with _analysis_client_session(trace_configs, skip_ssl_verify) as session:
+            async with platform_client_session(trace_configs, skip_ssl_verify) as session:
                 async with session.post(
                     analysis_url,
                     data=payload.model_dump_json(),
