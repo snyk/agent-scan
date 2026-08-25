@@ -101,7 +101,12 @@ async def discover_clients_to_inspect(
             if key in seen_target_folders:
                 continue
             seen_target_folders.add(key)
-            if not key.exists():
+            try:
+                exists = key.exists()
+            except (OSError, RuntimeError, ValueError):
+                logger.warning("Skipping inaccessible target folder: %s", target_path)
+                continue
+            if not exists:
                 logger.warning("Skipping non-existent target folder: %s", target_path)
                 continue
             target_folders.append(target_path)

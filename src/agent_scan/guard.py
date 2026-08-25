@@ -470,6 +470,11 @@ def _discover_script_path(config_path: Path) -> Path:
     return config_path.parent / "hooks" / name
 
 
+def _hook_script_path(config_path: Path) -> Path:
+    name = "snyk-agent-guard.ps1" if IS_WINDOWS else "snyk-agent-guard.sh"
+    return config_path.parent / "hooks" / name
+
+
 def _install_hooks(
     client: str,
     hook_client: str,
@@ -489,8 +494,9 @@ def _install_hooks(
     push_key_changed = bool(old_push_key) and old_push_key != push_key
 
     is_codex_requirements = _is_codex_requirements_toml(config_path)
+    hook_script_backup = _snapshot_hook_script(_hook_script_path(config_path))
     discover_script_path = _discover_script_path(config_path)
-    discover_script_existed = discover_script_path.exists()
+    discover_script_backup = _snapshot_hook_script(discover_script_path)
     (
         dest_path,
         script_existed,
@@ -543,10 +549,12 @@ def _install_hooks(
         discover_new_checksum=discover_new_checksum,
         machine_id=machine_id,
     ):
-        if not script_existed:
-            dest_path.unlink(missing_ok=True)
-        if not discover_script_existed:
-            discover_script_path.unlink(missing_ok=True)
+        _restore_hook_script(dest_path, hook_script_backup, existed=script_existed)
+        _restore_hook_script(
+            discover_script_path,
+            discover_script_backup,
+            existed=discover_current_checksum is not None,
+        )
         rich.print("[bold red]Aborting install \u2014 test event failed.[/bold red]")
         raise SystemExit(1)
 
@@ -1725,6 +1733,27 @@ class _HookScripts(NamedTuple):
     discover_new_checksum: str | None = None
 
 
+class _HookScriptBackup(NamedTuple):
+    content: bytes
+    mode: int
+
+
+def _snapshot_hook_script(path: Path) -> _HookScriptBackup | None:
+    """Capture an existing hook script so a failed upgrade can restore it."""
+    if not path.exists():
+        return None
+    return _HookScriptBackup(path.read_bytes(), stat.S_IMODE(path.stat().st_mode))
+
+
+def _restore_hook_script(path: Path, backup: _HookScriptBackup | None, *, existed: bool) -> None:
+    """Roll back a copied hook script after its pre-commit test event fails."""
+    if backup is not None:
+        path.write_bytes(backup.content)
+        path.chmod(backup.mode)
+    elif not existed:
+        path.unlink(missing_ok=True)
+
+
 def _copy_hook_script(config_path: Path, *, include_discover: bool = True) -> _HookScripts:
     """Copy bundled hook scripts to a hooks/ dir next to the config file.
 
@@ -1734,8 +1763,8 @@ def _copy_hook_script(config_path: Path, *, include_discover: bool = True) -> _H
     dest_dir = config_path.parent / "hooks"
 
     dest_dir.mkdir(parents=True, exist_ok=True)
-    script_name = "snyk-agent-guard.ps1" if IS_WINDOWS else "snyk-agent-guard.sh"
-    dest = dest_dir / script_name
+    dest = _hook_script_path(config_path)
+    script_name = dest.name
     existed = dest.exists()
 
     current_checksum: str | None = None

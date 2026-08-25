@@ -9233,6 +9233,40 @@ async def test_pipeline_skips_missing_target_folder_with_warning(tmp_path, caplo
 
 
 @pytest.mark.asyncio
+async def test_pipeline_skips_target_folder_when_exists_raises(tmp_path, caplog):
+    import errno
+
+    from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
+
+    home = tmp_path / "home"
+    home.mkdir()
+    stale = tmp_path / "stale-mount"
+    good = tmp_path / "project"
+    good.mkdir()
+    real_exists = Path.exists
+
+    def flaky_exists(path):
+        if path == stale:
+            raise OSError(errno.ESTALE, "Stale file handle")
+        return real_exists(path)
+
+    with (
+        patch("agent_scan.pipelines.get_readable_home_directories", return_value=[(home, "alice")]),
+        patch("agent_scan.pipelines.get_well_known_clients", return_value=[]),
+        patch("agent_scan.pipelines.find_discoverers", return_value=[]) as find,
+        patch.object(Path, "exists", flaky_exists),
+        caplog.at_level("WARNING", logger="agent_scan.pipelines"),
+    ):
+        await discover_clients_to_inspect(
+            InspectArgs(timeout=0, tokens=[], paths=[], target_folders=[str(stale), str(good)])
+        )
+
+    find.assert_called_once_with(home, target_folders=[good])
+    assert str(stale) in caplog.text
+    assert "Skipping" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_pipeline_explicit_paths_ignore_target_folders(tmp_path):
     from unittest.mock import AsyncMock
 
