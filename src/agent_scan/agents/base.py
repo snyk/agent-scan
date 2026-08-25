@@ -479,29 +479,9 @@ class AgentDiscoverer(ABC):
         """
         return list(self.target_folders)
 
-    @staticmethod
-    def _dedupe_folders(folders: Iterator[Path]) -> list[Path]:
-        """Deduplicate folders by literal path while preserving spelling and order."""
-        result: list[Path] = []
-        seen: set[Path] = set()
-        for folder in folders:
-            if folder in seen:
-                continue
-            seen.add(folder)
-            result.append(folder)
-        return result
-
-    def _all_project_folders(self) -> list[Path]:
-        """Return deduplicated roots from the agent's persisted project history."""
-        return self._dedupe_folders(iter(self._discover_project_folders()))
-
-    def _all_target_folders(self) -> list[Path]:
-        """Return deduplicated roots explicitly targeted by this request."""
-        return self._dedupe_folders(iter(self._discover_target_folders()))
-
     def _all_discovery_folders(self) -> list[Path]:
         """Return project roots and non-alias target roots in stable literal order."""
-        projects = self._all_project_folders()
+        projects = self._discover_project_folders()
         resolved_projects: set[Path] = set()
         for project in projects:
             try:
@@ -510,14 +490,16 @@ class AgentDiscoverer(ABC):
                 # Unresolvable paths stay distinct under their literal spelling.
                 resolved_projects.add(project)
         targets: list[Path] = []
-        for target in self._all_target_folders():
+        for target in self._discover_target_folders():
             try:
                 key = target.resolve()
             except (OSError, RuntimeError, ValueError):
                 key = target
             if key not in resolved_projects:
                 targets.append(target)
-        return self._dedupe_folders(iter((*projects, *targets)))
+        # Deduped here because opencode's anchor list is the one consumer that does not go
+        # through _folders_with_ancestors, whose walk already absorbs duplicates.
+        return list(dict.fromkeys((*projects, *targets)))
 
     @staticmethod
     def _folders_with_ancestors(folders: list[Path]) -> list[Path]:

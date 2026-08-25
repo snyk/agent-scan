@@ -8956,9 +8956,8 @@ def test_project_and_target_folders_remain_separate(tmp_path):
 
     discoverer = ClaudeCodeDiscoverer(tmp_path, [explicit])
 
-    assert discoverer._all_project_folders() == [recorded]
+    assert discoverer._discover_project_folders() == [recorded]
     assert discoverer._discover_target_folders() == [explicit]
-    assert discoverer._all_target_folders() == [explicit]
     assert discoverer._all_discovery_folders() == [recorded, explicit]
 
 
@@ -9043,12 +9042,23 @@ def test_all_discovery_folders_dedupes_resolved_paths_and_keeps_recorded_spellin
 
     discoverer = ClaudeCodeDiscoverer(tmp_path, [target])
 
-    assert discoverer._all_project_folders() == [recorded_link]
-    assert discoverer._all_target_folders() == [target]
+    assert discoverer._discover_project_folders() == [recorded_link]
+    assert discoverer._discover_target_folders() == [target]
     assert discoverer._all_discovery_folders() == [recorded_link]
     paths = discoverer._discovery_paths_with_ancestors()
     assert recorded_link in paths
     assert target not in paths
+
+
+def test_all_discovery_folders_dedupes_project_roots_in_first_seen_order(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    discoverer = ClaudeCodeDiscoverer(tmp_path)
+
+    with patch.object(discoverer, "_discover_project_folders", return_value=[first, first, second]):
+        assert discoverer._all_discovery_folders() == [first, second]
 
 
 def test_claude_code_discovers_servers_and_skills_from_target_without_state_entry(tmp_path):
