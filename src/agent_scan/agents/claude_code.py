@@ -197,7 +197,7 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         # Iterate every opened project root *and* its ancestors up to filesystem
         # root, so config in a parent folder (e.g. a monorepo root) is picked up
         # for the sub-projects beneath it.
-        for path in self._project_paths_with_ancestors():
+        for path in self._discovery_paths_with_ancestors():
             key = path.as_posix()
             # Source 1: inline ``projects.<path>.mcpServers`` recorded in ``.claude.json``.
             # For an ancestor this only matches if that ancestor was itself opened
@@ -248,7 +248,7 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         ``PermissionError`` tolerance as :meth:`_discover_global_skill`.
         """
         result: SkillsDirsResult = {}
-        for path in self._project_paths_with_ancestors():
+        for path in self._discovery_paths_with_ancestors():
             for rel in self._project_skills_relative:
                 skills_dir = path / rel
                 entries = self._scan_skills_dir(skills_dir)

@@ -501,7 +501,7 @@ class OpenCodeDiscoverer(AgentDiscoverer):
 
     def _discover_project_mcp_servers(self) -> McpConfigsResult:
         result: McpConfigsResult = {}
-        for project in self._project_paths_with_ancestors():
+        for project in self._discovery_paths_with_ancestors():
             result.update(self._scan_config_dir(project))
         return result
 
@@ -549,7 +549,7 @@ class OpenCodeDiscoverer(AgentDiscoverer):
 
     def _discover_project_skills(self) -> SkillsDirsResult:
         result: SkillsDirsResult = {}
-        for project in self._project_paths_with_ancestors():
+        for project in self._discovery_paths_with_ancestors():
             for rel in self._project_skills_relative:
                 self._record_skills_at(result, project / rel)
         return result
@@ -577,7 +577,7 @@ class OpenCodeDiscoverer(AgentDiscoverer):
         for base in self._global_config_dirs():
             for filename in _CONFIG_FILENAMES:
                 candidates.append(base / filename)
-        for project in self._project_paths_with_ancestors():
+        for project in self._discovery_paths_with_ancestors():
             for filename in _CONFIG_FILENAMES:
                 candidates.append(project / filename)
         managed = self._managed_config_dir()
@@ -613,7 +613,7 @@ class OpenCodeDiscoverer(AgentDiscoverer):
         # opencode's instance dirs (the db ``worktree`` leaves); computed once so
         # the relative-entry resolution below doesn't re-read the SQLite db per
         # candidate config file.
-        worktrees = self._all_project_folders()
+        worktrees = self._all_discovery_folders()
         for config_path in self._iter_candidate_config_files():
             data = self._load_json_file(config_path)
             if not isinstance(data, dict):

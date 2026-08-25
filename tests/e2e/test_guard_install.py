@@ -103,7 +103,7 @@ class TestGuardInstallE2E:
         assert json.loads(discovered["headers"]["X-User"])["identifier"] == "e2e-machine-id"
 
         discover_result = subprocess.run(
-            [*agent_scan_cmd, "guard", "discover"],
+            [*agent_scan_cmd, "guard", "discover", "--client", "claude-code"],
             capture_output=True,
             text=True,
             timeout=60,

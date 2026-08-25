@@ -145,18 +145,19 @@ class AgentDiscoverer(ABC):
 
     name: str = ""
 
-    def __init__(self, home_directory: Path | None, project_folders: list[Path] | None = None) -> None:
+    def __init__(self, home_directory: Path | None, target_folders: list[Path] | None = None) -> None:
         # ``None`` is the own-home sentinel; normalize to ``Path.home()`` so the
         # stored home is always concrete. ``expand_path`` treats ``None`` as
         # "unknown home — don't expand", which would leave a ``~``-prefixed literal
         # (e.g. ``~/.claude``) on an own-home scan whose relocating env var is unset.
         self.home_directory = home_directory if home_directory is not None else Path.home()
-        self.extra_project_folders = list(project_folders or [])
-        # Lazily-populated cache for _project_paths_with_ancestors. A discoverer
-        # serves a single scan (see find_discoverers), so the project list is
-        # stable for its lifetime and the discovery methods that consult it need
-        # not re-walk workspaceStorage / re-read ~/.claude.json each time.
+        self.target_folders = list(target_folders or [])
+        # Lazily-populated caches for recorded project roots and explicit target
+        # roots. A discoverer serves a single scan (see find_discoverers), so both
+        # lists are stable for its lifetime and discovery does not need to re-walk
+        # workspaceStorage / re-read ~/.claude.json each time.
         self._project_paths_cache: list[Path] | None = None
+        self._target_paths_cache: list[Path] | None = None
 
     def _scans_own_home(self) -> bool:
         """True when this discoverer targets the scanning process's own user.
@@ -443,7 +444,7 @@ class AgentDiscoverer(ABC):
                     result[mcp_file.as_posix()] = parsed
         return result
 
-    # --- shared project-folder enumeration (used by both Claude Code and the VSCode family) ---
+    # --- shared project/target-folder enumeration ---
 
     def _discover_project_folders(self) -> list[Path]:
         """Return the project roots this agent has opened.
@@ -455,11 +456,22 @@ class AgentDiscoverer(ABC):
         """
         return []
 
-    def _all_project_folders(self) -> list[Path]:
-        """Return recorded roots then explicit roots, deduped without changing their spelling."""
+    def _discover_target_folders(self) -> list[Path]:
+        """Return explicit roots targeted by the current discovery request.
+
+        Target folders come from request context (for example, a session-start
+        hook's current working directory or workspace roots). They remain
+        separate from the agent's persisted project history returned by
+        :meth:`_discover_project_folders`.
+        """
+        return list(self.target_folders)
+
+    @staticmethod
+    def _dedupe_folders(folders: Iterator[Path]) -> list[Path]:
+        """Deduplicate folders by resolved path while preserving spelling and order."""
         result: list[Path] = []
         seen: set[Path] = set()
-        for folder in (*self._discover_project_folders(), *self.extra_project_folders):
+        for folder in folders:
             try:
                 key = folder.resolve()
             except OSError:
@@ -468,6 +480,35 @@ class AgentDiscoverer(ABC):
                 continue
             seen.add(key)
             result.append(folder)
+        return result
+
+    def _all_project_folders(self) -> list[Path]:
+        """Return deduplicated roots from the agent's persisted project history."""
+        return self._dedupe_folders(iter(self._discover_project_folders()))
+
+    def _all_target_folders(self) -> list[Path]:
+        """Return deduplicated roots explicitly targeted by this request."""
+        return self._dedupe_folders(iter(self._discover_target_folders()))
+
+    def _all_discovery_folders(self) -> list[Path]:
+        """Return project roots then target roots, deduplicated across both sets."""
+        return self._dedupe_folders(iter((*self._all_project_folders(), *self._all_target_folders())))
+
+    @staticmethod
+    def _folders_with_ancestors(folders: list[Path]) -> list[Path]:
+        """Return each folder and its ancestors, preserving first-seen order."""
+        seen: set[Path] = set()
+        result: list[Path] = []
+        for folder in folders:
+            cur = folder
+            while True:
+                if cur not in seen:
+                    seen.add(cur)
+                    result.append(cur)
+                parent = cur.parent
+                if parent == cur:
+                    break
+                cur = parent
         return result
 
     def _project_paths_with_ancestors(self) -> list[Path]:
@@ -481,17 +522,16 @@ class AgentDiscoverer(ABC):
         """
         if self._project_paths_cache is not None:
             return self._project_paths_cache
-        seen: set[Path] = set()
-        result: list[Path] = []
-        for project_path in self._all_project_folders():
-            cur = project_path
-            while True:
-                if cur not in seen:
-                    seen.add(cur)
-                    result.append(cur)
-                parent = cur.parent
-                if parent == cur:
-                    break
-                cur = parent
-        self._project_paths_cache = result
-        return result
+        self._project_paths_cache = self._folders_with_ancestors(self._all_project_folders())
+        return self._project_paths_cache
+
+    def _target_paths_with_ancestors(self) -> list[Path]:
+        """Target roots plus every ancestor up to filesystem root, deduplicated."""
+        if self._target_paths_cache is not None:
+            return self._target_paths_cache
+        self._target_paths_cache = self._folders_with_ancestors(self._all_target_folders())
+        return self._target_paths_cache
+
+    def _discovery_paths_with_ancestors(self) -> list[Path]:
+        """Return project and target paths with ancestors, deduplicated across both."""
+        return self._dedupe_folders(iter((*self._project_paths_with_ancestors(), *self._target_paths_with_ancestors())))
