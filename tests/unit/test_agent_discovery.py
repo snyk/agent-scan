@@ -8170,6 +8170,29 @@ def test_opencode_discoverer_discovers_project_opencode_json(tmp_path):
     assert entries[0][0] == "proj-srv"
 
 
+def test_opencode_discoverer_discovers_project_dot_opencode_config(tmp_path):
+    """A project's ``.opencode/opencode.jsonc`` is a real opencode config location
+    (config.ts step 5) and must be discovered, not just ``<root>/opencode.json``."""
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    project = tmp_path / "repo"
+    (project / ".opencode").mkdir(parents=True)
+    (project / ".opencode" / "opencode.jsonc").write_text(
+        '{"mcp": {"dot-srv": {"type": "local", "command": ["echo", "hi"]}}}'
+    )
+    db_path = tmp_path / ".local" / "share" / "opencode" / "opencode.db"
+    _seed_opencode_db(db_path, [project.as_posix()])
+
+    mcp_configs = OpenCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    keys = [k for k in mcp_configs if k.endswith("/repo/.opencode/opencode.jsonc")]
+    assert len(keys) == 1
+    entries = mcp_configs[keys[0]]
+    assert isinstance(entries, list)
+    assert entries[0][0] == "dot-srv"
+
+
 def test_opencode_discoverer_discovers_project_skills_dir(tmp_path):
     """``<project>/.opencode/skills`` is scanned for each opened project."""
     from agent_scan.agents import OpenCodeDiscoverer

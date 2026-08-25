@@ -250,7 +250,8 @@ class PluginMCPConfigFile(MCPConfig):
 
 
 class OpenCodeConfigFile(MCPConfig):
-    """opencode's ``opencode.json`` ``mcp`` block: ``{"mcp": {name: {type:"local"|"remote", ...}}}``.
+    """opencode's ``opencode.json`` ``mcp`` block: ``{"mcp": {name: {type:"local"|"remote", ...}}}``
+    from https://opencode.ai/config.json.
 
     Translates opencode's per-entry shape into the canonical
     ``StdioServer`` / ``RemoteServer`` types via a ``before`` model validator,
