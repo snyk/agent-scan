@@ -116,7 +116,11 @@ class _LoopbackCallbackServer:
 
     async def callback_handler(self) -> tuple[str, str | None]:
         loop = asyncio.get_event_loop()
-        received = await loop.run_in_executor(None, self._server.callback_received.wait, _CALLBACK_TIMEOUT_SECONDS)
+        received = await loop.run_in_executor(
+            None,
+            self._server.callback_received.wait,  # type: ignore[attr-defined]
+            _CALLBACK_TIMEOUT_SECONDS,
+        )
         if not received:
             raise TimeoutError("Timed out waiting for the OAuth callback")
         result = self._server.oauth_result or {}  # type: ignore[attr-defined]

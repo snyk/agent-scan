@@ -1320,7 +1320,9 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> ScanRespo
     # irrelevant, and --server-type pins the transport so nothing is probed.
     target_name: str | None = getattr(args, "server", None)
     target_url: str | None = getattr(args, "url", None)
-    target_type: str | None = getattr(args, "server_type", None)
+    # argparse restricts --server-type to choices=["http", "sse"] (see
+    # add_target_arguments), so the runtime value always matches the literal.
+    target_type = cast('Literal["sse", "http"] | None', getattr(args, "server_type", None))
     if target_type and not (target_name or target_url):
         rich.print("[bold red]--server-type requires --server <name> or --url <url>.[/bold red]")
         sys.exit(2)
@@ -1350,7 +1352,7 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> ScanRespo
     if target_url:
         # Addressed directly: skip discovery entirely.
         clients_to_inspect = [single_remote_client_to_inspect(target_name, target_url, target_type)]
-        unresolved_paths = []
+        unresolved_paths: list[InspectedPath] = []
         scanned_usernames = [get_username()]
     else:
         clients_to_inspect, unresolved_paths, scanned_usernames = await discover_clients_to_inspect(inspect_args)

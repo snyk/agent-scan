@@ -1270,9 +1270,11 @@ class TestRedactPushKeysInData:
 
 class TestRedactBearerTokens:
     def test_redacts_authorization_bearer(self):
-        text = "SENT: GET /mcp\nAuthorization: Bearer eyJhbGc.aBc-1_2+3/=="
+        # Deliberately not JWT-shaped (no "eyJ..." base64 header lookalike) so this
+        # fixture doesn't itself get flagged as a real bearer token by secret scanners.
+        text = "SENT: GET /mcp\nAuthorization: Bearer NOT-A-REAL.tok-en_val+ue/=="
         out = redact_bearer_tokens(text)
-        assert "eyJhbGc.aBc-1_2+3/==" not in out
+        assert "NOT-A-REAL.tok-en_val+ue/==" not in out
         assert "Bearer **REDACTED**" in out
 
     def test_redacts_lowercase_and_leaves_rest(self):

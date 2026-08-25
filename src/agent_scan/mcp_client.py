@@ -52,9 +52,7 @@ async def _handle_callback_unsupported(auth_code: str, state: str | None) -> tup
     raise NotImplementedError("Interactive OAuth callback is not supported on the scan path")
 
 
-async def _resolve_scan_oauth_provider(
-    url: str, token: TokenAndClientInfo | None
-) -> OAuthClientProvider | None:
+async def _resolve_scan_oauth_provider(url: str, token: TokenAndClientInfo | None) -> OAuthClientProvider | None:
     """Build a store-backed, non-interactive OAuth provider for the scan path.
 
     Looks up (or seeds) the persistent store by normalized URL, proactively
