@@ -8,7 +8,7 @@ Public API: the ``AgentDiscoverer`` abstract base, the concrete discoverers, the
 import logging
 from pathlib import Path
 
-from agent_scan.agents.base import AgentDiscoverer
+from agent_scan.agents.base import AgentDiscoverer, DiscoveryScope
 from agent_scan.agents.claude_code import ClaudeCodeDiscoverer
 from agent_scan.agents.claude_desktop import ClaudeDesktopDiscoverer
 from agent_scan.agents.codex import CodexDiscoverer
@@ -67,6 +67,7 @@ __all__ = [
     "ClaudeDesktopDiscoverer",
     "CodexDiscoverer",
     "CursorDiscoverer",
+    "DiscoveryScope",
     "KiroDiscoverer",
     "OpenCodeDiscoverer",
     "VSCodeDiscoverer",

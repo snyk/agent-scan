@@ -387,7 +387,9 @@ class TestBuildDiscoverHookCommand:
         [("claude-code", "cwd"), ("cursor", "workspace_roots"), ("codex", "cwd")],
     )
     def test_client_payload_fields_match_hook_schemas(self, client, expected_field):
-        assert guard_module._HOOK_CLIENT_TARGET_FOLDER_FIELDS[client] == expected_field
+        from agent_scan.hook_events import HOOK_CLIENTS
+
+        assert HOOK_CLIENTS[client].target_folder_field == expected_field
 
     @pytest.mark.parametrize("client", ["claude-code", "cursor", "codex"])
     def test_builds_quoted_environment_prefix_with_agent_scan_binary(self, client):
@@ -406,10 +408,10 @@ class TestBuildDiscoverHookCommand:
 
         assert "PUSH_KEY='pk'" in command
         assert "REMOTE_HOOKS_BASE_URL='https://api.snyk.io'" in command
-        assert "TENANT_ID='tenant'" in command
+        assert "TENANT_ID=" not in command
         assert "MACHINE_ID='machine'" in command
         assert "AGENT_SCAN_BIN='/opt/Snyk'\"'\"'s bin/snyk-agent-scan'" in command
-        assert command.endswith(f"bash '/x/snyk-agent-guard-discover.sh' --client '{client}'")
+        assert command.endswith(f"bash '/x/snyk-agent-guard-discover.sh' --client '{client}' --scope servers")
         assert _is_agent_scan_command(command)
 
     def test_omits_agent_scan_binary_when_unresolved(self):
@@ -425,7 +427,7 @@ class TestBuildDiscoverHookCommand:
             )
 
         assert "AGENT_SCAN_BIN" not in command
-        assert command.endswith("--client 'cursor'")
+        assert command.endswith("--client 'cursor' --scope servers")
 
     @pytest.mark.parametrize("client", ["claude-code", "cursor", "codex"])
     def test_builds_powershell_command_for_each_client(self, client):
@@ -445,7 +447,7 @@ class TestBuildDiscoverHookCommand:
         assert command == (
             rf"powershell -File 'C:\hooks\snyk-agent-guard-discover.ps1' -Client {client} "
             "-PushKey 'pk' -RemoteUrl 'https://api.snyk.io' -MachineId 'machine''s-id' "
-            r"-AgentScanBin 'C:\Program Files\Snyk\snyk-agent-scan.exe'"
+            r"-AgentScanBin 'C:\Program Files\Snyk\snyk-agent-scan.exe' -Scope servers"
         )
 
     def test_powershell_escapes_single_quotes_in_paths(self):
@@ -654,12 +656,13 @@ class TestDiscoveryHookScriptFiles:
 
         assert discover_script.read_text() == (
             "#!/usr/bin/env bash\nset -euo pipefail\n"
-            '[[ -n "${MACHINE_ID:-}" ]] || exit 1\n'
+            '[[ -n "${MACHINE_ID:-}" ]] || exit 0\n'
             'bin="${AGENT_SCAN_BIN:-snyk-agent-scan}"\n'
             'if ! command -v "$bin" >/dev/null 2>&1; then\n'
             '  bin="snyk-agent-scan"\n'
             "fi\n"
-            'exec "$bin" guard discover "$@" >/dev/null 2>&1\n'
+            '"$bin" guard discover "$@" >/dev/null 2>&1 || true\n'
+            "exit 0\n"
         )
         assert os.access(discover_script, os.X_OK)
 
@@ -706,6 +709,44 @@ class TestDiscoveryHookScriptFiles:
 
         assert result.returncode == 0
         assert marker.read_text().strip() == "guard discover --client claude-code"
+
+    def test_nonzero_discovery_exit_is_swallowed(self, tmp_path):
+        script = Path(guard_module.__file__).parent / "hooks" / "snyk-agent-guard-discover.sh"
+        stub = tmp_path / "snyk-agent-scan"
+        stub.write_text("#!/bin/sh\nexit 1\n")
+        stub.chmod(0o755)
+
+        result = subprocess.run(
+            ["bash", str(script), "--client", "claude-code", "--scope", "servers"],
+            input="{}",
+            text=True,
+            capture_output=True,
+            timeout=5,
+            env={**os.environ, "AGENT_SCAN_BIN": str(stub), "MACHINE_ID": "machine-42"},
+        )
+
+        assert result.returncode == 0
+
+    def test_missing_machine_id_exits_zero_without_invoking_binary(self, tmp_path):
+        script = Path(guard_module.__file__).parent / "hooks" / "snyk-agent-guard-discover.sh"
+        marker = tmp_path / "invoked"
+        stub = tmp_path / "snyk-agent-scan"
+        stub.write_text(f"#!/bin/sh\ntouch '{marker}'\n")
+        stub.chmod(0o755)
+        env = {**os.environ, "AGENT_SCAN_BIN": str(stub)}
+        env.pop("MACHINE_ID", None)
+
+        result = subprocess.run(
+            ["bash", str(script), "--client", "claude-code"],
+            input="{}",
+            text=True,
+            capture_output=True,
+            timeout=5,
+            env=env,
+        )
+
+        assert result.returncode == 0
+        assert not marker.exists()
 
     def test_copy_restores_missing_discovery_script_when_forwarder_is_current(self, tmp_path):
         config = tmp_path / "settings.json"
@@ -2427,7 +2468,7 @@ class TestInstallHooksOrchestration:
             self._call(tmp_path, client="claude")
 
         ctx["build_discover"].assert_called_once()
-        ctx["dest"].with_name.assert_called_once_with("snyk-agent-guard-discover.ps1")
+        assert ctx["build_discover"].call_args.args[2] == tmp_path / "hooks" / "snyk-agent-guard-discover.ps1"
         assert ctx["prep_claude"].call_args.kwargs["discover_command"] == "discover-cmd"
 
     def test_codex_json_builds_discovery_hook(self, ctx, tmp_path):
@@ -2445,7 +2486,7 @@ class TestInstallHooksOrchestration:
         ctx["build_discover"].assert_not_called()
         ctx["copy"].assert_called_once_with(config, include_discover=False)
 
-    def test_returns_installed_script_path(self, ctx, tmp_path):
+    def test_install_hooks_returns_none(self, ctx, tmp_path):
         result = _install_hooks(
             "claude",
             "claude-code",
@@ -2459,7 +2500,7 @@ class TestInstallHooksOrchestration:
             "snyk-tok",
             "",
         )
-        assert result == ctx["dest"]
+        assert result is None
 
     # ---------------------------------------------------------------
     # Client routing: each client calls its own prepare + write
@@ -2859,6 +2900,7 @@ class TestSendTestEventHooksScript:
                 "https://api.snyk.io",
                 "claude-code",
                 Path("/fake/script.sh"),
+                machine_id="machine-42",
                 **kwargs,
             )
         return captured["payload"]
@@ -3065,6 +3107,16 @@ class TestDiscoverServersPayload:
         assert args.scan_skills is False
         assert result == guard_module._servers_discovered_entries(clients)
 
+    def test_forwards_discovery_scope(self):
+        from agent_scan.agents import DiscoveryScope
+
+        discover = AsyncMock(return_value=([], [], []))
+
+        with patch("agent_scan.pipelines.discover_clients_to_inspect", discover):
+            guard_module._discover_servers_payload(discovery_scope=DiscoveryScope.SERVERS)
+
+        assert discover.await_args.args[0].discovery_scope is DiscoveryScope.SERVERS
+
     def test_threads_target_folders_to_inspect_args(self):
         discover = AsyncMock(return_value=([], [], []))
 
@@ -3103,7 +3155,12 @@ class TestInvokeHookScript:
         completed = subprocess.CompletedProcess([], 0, stdout="ok", stderr="")
         with patch(f"{_G}.IS_WINDOWS", False), patch("subprocess.run", return_value=completed) as run:
             result = guard_module._invoke_hook_script(
-                PurePosixPath("/hook.sh"), "claude-code", "pk", "https://api.snyk.io", "{}", "machine-42"
+                PurePosixPath("/hook.sh"),
+                "claude-code",
+                "pk",
+                "https://api.snyk.io",
+                "{}",
+                machine_id="machine-42",
             )
 
         assert result == (True, "")
@@ -3111,23 +3168,38 @@ class TestInvokeHookScript:
         assert run.call_args.kwargs["env"]["MACHINE_ID"] == "machine-42"
         assert run.call_args.kwargs["input"] == "{}"
 
-    def test_posix_invocation_omits_machine_id_when_unset(self, monkeypatch):
-        monkeypatch.delenv("MACHINE_ID", raising=False)
+    def test_posix_invocation_overwrites_ambient_machine_id(self, monkeypatch):
+        monkeypatch.setenv("MACHINE_ID", "ambient-machine")
         completed = subprocess.CompletedProcess([], 0, stdout="ok", stderr="")
         with patch(f"{_G}.IS_WINDOWS", False), patch("subprocess.run", return_value=completed) as run:
             result = guard_module._invoke_hook_script(
-                PurePosixPath("/hook.sh"), "cursor", "pk", "https://api.snyk.io", "{}"
+                PurePosixPath("/hook.sh"),
+                "cursor",
+                "pk",
+                "https://api.snyk.io",
+                "{}",
+                machine_id="chosen-machine",
             )
 
         assert result == (True, "")
-        assert "MACHINE_ID" not in run.call_args.kwargs["env"]
+        assert run.call_args.kwargs["env"]["MACHINE_ID"] == "chosen-machine"
 
-    @pytest.mark.parametrize("machine_id, expected_tail", [("", []), ("machine-42", ["-MachineId", "machine-42"])])
-    def test_windows_invocation_machine_id_shape(self, machine_id, expected_tail):
+    def test_empty_machine_id_is_rejected(self):
+        with pytest.raises(ValueError, match="machine ID"):
+            guard_module._invoke_hook_script(
+                Path("/hook.sh"), "cursor", "pk", "https://api.snyk.io", "{}", machine_id="  "
+            )
+
+    def test_windows_invocation_machine_id_shape(self):
         completed = subprocess.CompletedProcess([], 0, stdout="ok", stderr="")
         with patch(f"{_G}.IS_WINDOWS", True), patch("subprocess.run", return_value=completed) as run:
             result = guard_module._invoke_hook_script(
-                Path("C:/hook.ps1"), "codex", "pk", "https://api.snyk.io", "{}", machine_id
+                Path("C:/hook.ps1"),
+                "codex",
+                "pk",
+                "https://api.snyk.io",
+                "{}",
+                machine_id="machine-42",
             )
 
         assert result == (True, "")
@@ -3141,15 +3213,33 @@ class TestInvokeHookScript:
             "pk",
             "-RemoteUrl",
             "https://api.snyk.io",
-            *expected_tail,
+            "-MachineId",
+            "machine-42",
         ]
         assert run.call_args.kwargs["env"] is None
 
     def test_nonzero_exit_returns_stderr(self):
         completed = subprocess.CompletedProcess([], 7, stdout="", stderr="bad request\n")
         with patch(f"{_G}.IS_WINDOWS", False), patch("subprocess.run", return_value=completed):
-            result = guard_module._invoke_hook_script(Path("/hook.sh"), "cursor", "pk", "url", "{}")
+            result = guard_module._invoke_hook_script(
+                Path("/hook.sh"), "cursor", "pk", "url", "{}", machine_id="machine-42"
+            )
         assert result == (False, "bad request")
+
+
+def test_run_with_timeout_signals_and_joins_cooperative_worker():
+    cancel = threading.Event()
+    stopped = threading.Event()
+
+    def worker():
+        cancel.wait()
+        stopped.set()
+
+    with pytest.raises(TimeoutError, match="timed out"):
+        guard_module._run_with_timeout(worker, 0.01, cancel=cancel)
+
+    assert cancel.is_set()
+    assert stopped.wait(0.2)
 
 
 class TestSendServersDiscoveredEvent:
@@ -3274,7 +3364,7 @@ class TestSendServersDiscoveredEvent:
         import asyncio
         import time as test_time
 
-        async def slow_discovery(_inspect_args):
+        async def slow_discovery(_inspect_args, *, cancel=None):
             await asyncio.sleep(0.5)
             return [], [], []
 
@@ -3333,7 +3423,24 @@ class TestGuardDiscoverCli:
         args = run.call_args.args[0]
         assert args.guard_command == "discover"
         assert args.url == "https://hooks.example"
+        assert args.scope == "all"
         assert not hasattr(args, "file")
+
+    @pytest.mark.parametrize("scope", ["servers", "skills", "all"])
+    def test_parses_discovery_scope(self, scope, monkeypatch):
+        from agent_scan import cli
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["agent-scan", "guard", "discover", "--client", "claude-code", "--scope", scope],
+        )
+        with patch(f"{_G}.run_guard", return_value=0) as run:
+            with pytest.raises(SystemExit) as exc:
+                cli.main()
+
+        assert exc.value.code == 0
+        assert run.call_args.args[0].scope == scope
 
     def test_rejects_removed_file_option(self, monkeypatch):
         from agent_scan import cli
@@ -3392,6 +3499,7 @@ class TestRunDiscover:
             "guard_command": "discover",
             "url": url,
             "client": "claude-code",
+            "scope": "all",
         }
         values.update(overrides)
         return SimpleNamespace(**values)
@@ -3507,7 +3615,7 @@ class TestRunDiscover:
 
         assert result == 0
         stdin.read.assert_called_once_with(1024 * 1024)
-        discover.assert_called_once_with(["/session/project"])
+        discover.assert_called_once_with(["/session/project"], discovery_scope="all")
         assert json.loads(send.call_args.args[3])["session_id"] == "session"
 
     def test_hook_stdin_reads_cwd_for_codex(self, tmp_path, monkeypatch):
@@ -3529,7 +3637,7 @@ class TestRunDiscover:
 
         assert result == 0
         stdin.read.assert_called_once_with(1024 * 1024)
-        discover.assert_called_once_with(["/session/project"])
+        discover.assert_called_once_with(["/session/project"], discovery_scope="all")
         assert json.loads(send.call_args.args[3])["session_id"] == "session"
 
     def test_hook_stdin_accepts_workspace_roots_list(self, tmp_path, monkeypatch):
@@ -3550,7 +3658,7 @@ class TestRunDiscover:
             result = guard_module.run_guard(self._args(config, client="cursor"))
 
         assert result == 0
-        discover.assert_called_once_with(["/workspace/one", "/workspace/two"])
+        discover.assert_called_once_with(["/workspace/one", "/workspace/two"], discovery_scope="all")
         assert send.call_args.args[:3] == ("https://api.snyk.io", "cursor", "env-pk")
         assert json.loads(send.call_args.args[3])["conversation_id"] == "conversation"
 
@@ -3575,7 +3683,7 @@ class TestRunDiscover:
             )
 
         assert result == 0
-        discover.assert_called_once_with([])
+        discover.assert_called_once_with([], discovery_scope="all")
         assert json.loads(send.call_args.args[3])["session_id"] == "session-start-server-discovery"
 
     def test_tty_stdin_is_not_read(self, tmp_path, monkeypatch):
@@ -3596,7 +3704,7 @@ class TestRunDiscover:
 
         assert result == 0
         stdin.read.assert_not_called()
-        discover.assert_called_once_with([])
+        discover.assert_called_once_with([], discovery_scope="all")
 
     def test_pipe_that_never_closes_does_not_block_discovery(self, tmp_path, monkeypatch):
         import time as test_time

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+from email.message import Message
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from urllib.error import HTTPError, URLError
@@ -53,7 +54,7 @@ def test_rejects_missing_machine_identifier_without_request():
 @pytest.mark.parametrize(
     "error, expected",
     [
-        (HTTPError("https://api.snyk.io", 403, "Forbidden", None, None), "HTTP 403"),
+        (HTTPError("https://api.snyk.io", 403, "Forbidden", Message(), None), "HTTP 403"),
         (URLError("offline"), "offline"),
         (TimeoutError("timed out"), "timed out"),
     ],
@@ -64,6 +65,15 @@ def test_reports_http_and_network_failures(error, expected):
 
     assert ok is False
     assert expected in detail
+
+
+def test_http_404_is_reported_from_urlopen_exception_path():
+    error = HTTPError("https://api.snyk.io", 404, "Not Found", Message(), None)
+
+    with patch("agent_scan.hook_events.urlopen", side_effect=error):
+        result = send_hook_event("https://api.snyk.io", "claude-code", "push-key", "{}", "machine-1")
+
+    assert result == (False, "HTTP 404")
 
 
 def test_rejects_unknown_client_without_request():

@@ -11,6 +11,7 @@ import re
 import shutil
 import stat
 import sys
+import threading
 import time
 from importlib import resources as importlib_resources
 from pathlib import Path
@@ -19,7 +20,8 @@ from urllib.parse import urlparse
 
 import rich
 
-from agent_scan.hook_events import send_hook_event
+from agent_scan.agents import DiscoveryScope
+from agent_scan.hook_events import HOOK_CLIENTS, send_hook_event
 from agent_scan.pushkeys import (
     GuardEnabledAccessDeniedError,
     _is_localhost,
@@ -42,16 +44,6 @@ _T = TypeVar("_T")
 # ---------------------------------------------------------------------------
 
 ALL_CLIENTS = ["claude", "cursor", "codex"]
-_HOOK_CLIENT_TARGET_FOLDER_FIELDS = {
-    "claude-code": "cwd",
-    "cursor": "workspace_roots",
-    "codex": "cwd",
-}
-_HOOK_CLIENT_SESSION_FIELDS = {
-    "claude-code": "session_id",
-    "cursor": "conversation_id",
-    "codex": "session_id",
-}
 DEFAULT_REMOTE_URL = "https://api.snyk.io"
 _DETECTION_RE = re.compile(
     r"PUSH_KEY=.*snyk-agent-guard"
@@ -279,7 +271,6 @@ def _run_install(args) -> None:
 
     minted = not headless  # True if we minted the key in this run
 
-    installed_any = False
     first_installed_client: str | None = None
     try:
         for c in clients:
@@ -298,10 +289,9 @@ def _run_install(args) -> None:
             )
             if first_installed_client is None:
                 first_installed_client = _hook_client_name(c)
-            installed_any = True
     except BaseException:
         if minted:
-            if installed_any:
+            if first_installed_client is not None:
                 rich.print(
                     "[yellow]Warning:[/yellow] Installation partially completed. "
                     "The push key is still active for already-configured clients. "
@@ -315,10 +305,12 @@ def _run_install(args) -> None:
         _send_servers_discovered_event(push_key, url, first_installed_client, machine_id)
 
 
-def _run_with_timeout(func: Callable[[], _T], timeout: float) -> _T:
-    """Run ``func`` on a daemon thread; raise ``TimeoutError`` if it outlives ``timeout``."""
-    import threading
-
+def _run_with_timeout(
+    func: Callable[[], _T],
+    timeout: float,
+    cancel: threading.Event | None = None,
+) -> _T:
+    """Run ``func`` on a daemon thread and signal cooperative cancellation on timeout."""
     result: list[_T] = []
     error: list[BaseException] = []
 
@@ -332,6 +324,9 @@ def _run_with_timeout(func: Callable[[], _T], timeout: float) -> _T:
     thread.start()
     thread.join(timeout)
     if thread.is_alive():
+        if cancel is not None:
+            cancel.set()
+            thread.join(0.1)
         raise TimeoutError(f"timed out after {timeout:g}s")
     if error:
         raise error[0]
@@ -352,7 +347,7 @@ def _discovery_timeout_seconds() -> float:
 
 
 def _read_hook_payload() -> str:
-    """Read hook JSON from stdin without allowing an open stream to hang discovery."""
+    """Read hook JSON with a timeout; a blocked stdin read cannot be cancelled cooperatively."""
     stream = sys.stdin
     try:
         if stream is None or stream.isatty():
@@ -380,29 +375,19 @@ def _run_discover(args) -> int:
 
     target_folders: list[str] = []
     session_id = ""
-    target_folder_payload_field = _HOOK_CLIENT_TARGET_FOLDER_FIELDS.get(hook_client)
-    session_payload_field = _HOOK_CLIENT_SESSION_FIELDS.get(hook_client)
-    if target_folder_payload_field or session_payload_field:
-        try:
-            hook_payload = json.loads(_read_hook_payload())
-            target_folder = (
-                hook_payload.get(target_folder_payload_field)
-                if isinstance(hook_payload, dict) and target_folder_payload_field
-                else None
-            )
-            if isinstance(target_folder, str) and target_folder:
-                target_folders.append(target_folder)
-            elif isinstance(target_folder, list):
-                target_folders.extend(folder for folder in target_folder if isinstance(folder, str) and folder)
-            raw_session_id = (
-                hook_payload.get(session_payload_field)
-                if isinstance(hook_payload, dict) and session_payload_field
-                else None
-            )
-            if isinstance(raw_session_id, str) and raw_session_id:
-                session_id = raw_session_id
-        except Exception:
-            pass
+    client = HOOK_CLIENTS[hook_client]
+    try:
+        hook_payload = json.loads(_read_hook_payload())
+        target_folder = hook_payload.get(client.target_folder_field) if isinstance(hook_payload, dict) else None
+        if isinstance(target_folder, str) and target_folder:
+            target_folders.append(target_folder)
+        elif isinstance(target_folder, list):
+            target_folders.extend(folder for folder in target_folder if isinstance(folder, str) and folder)
+        raw_session_id = hook_payload.get(client.session_field) if isinstance(hook_payload, dict) else None
+        if isinstance(raw_session_id, str) and raw_session_id:
+            session_id = raw_session_id
+    except Exception:
+        pass
 
     success = _send_servers_discovered_event(
         push_key,
@@ -412,6 +397,7 @@ def _run_discover(args) -> int:
         event_name="SessionStartServerDiscovery",
         session_marker=session_id or "session-start-server-discovery",
         target_folders=target_folders,
+        discovery_scope=getattr(args, "scope", DiscoveryScope.ALL),
     )
     return 0 if success else 1
 
@@ -482,6 +468,11 @@ def _detect_existing_install(client: str, config_path: Path) -> dict | None:
     return _detect_codex_install(config_path)
 
 
+def _discover_script_path(config_path: Path) -> Path:
+    name = "snyk-agent-guard-discover.ps1" if IS_WINDOWS else "snyk-agent-guard-discover.sh"
+    return config_path.parent / "hooks" / name
+
+
 def _install_hooks(
     client: str,
     hook_client: str,
@@ -494,15 +485,14 @@ def _install_hooks(
     tenant_id: str,
     snyk_token: str,
     machine_id: str,
-) -> Path:
+) -> None:
     """Post-mint install steps.  Extracted so _run_install can revoke on failure."""
     existing_info = _detect_existing_install(client, config_path)
     old_push_key = existing_info.get("auth_value", "") if existing_info else ""
     push_key_changed = bool(old_push_key) and old_push_key != push_key
 
     is_codex_requirements = _is_codex_requirements_toml(config_path)
-    discover_script_name = "snyk-agent-guard-discover.ps1" if IS_WINDOWS else "snyk-agent-guard-discover.sh"
-    discover_script_path = config_path.parent / "hooks" / discover_script_name
+    discover_script_path = _discover_script_path(config_path)
     discover_script_existed = discover_script_path.exists()
     (
         dest_path,
@@ -523,11 +513,10 @@ def _install_hooks(
     )
     discover_command = None
     if not is_codex_requirements:
-        installed_discover_script_path = dest_path.with_name(discover_script_name)
         discover_command = _build_discover_hook_command(
             push_key,
             url,
-            installed_discover_script_path,
+            discover_script_path,
             tenant_id=tenant_id,
             machine_id=machine_id,
             hook_client=hook_client,
@@ -575,7 +564,6 @@ def _install_hooks(
     rich.print(f"   Remote URL: [dim]{url}[/dim]")
     rich.print(f"   Push Key:   [yellow]{_mask_key(push_key)}[/yellow]")
     rich.print()
-    return dest_path
 
 
 def _prepare_claude_config(
@@ -1197,7 +1185,11 @@ def _servers_discovered_entries(clients_to_inspect: list[ClientToInspect]) -> li
     return [request.model_dump(mode="json") for request in build_scan_request(inspected_paths).scan_path_requests]
 
 
-def _discover_servers_payload(target_folders: list[str] | None = None) -> list[dict]:
+def _discover_servers_payload(
+    target_folders: list[str] | None = None,
+    *,
+    discovery_scope: DiscoveryScope = DiscoveryScope.ALL,
+) -> list[dict]:
     import asyncio
 
     from agent_scan import pipelines
@@ -1207,11 +1199,14 @@ def _discover_servers_payload(target_folders: list[str] | None = None) -> list[d
         timeout=0,
         tokens=[],
         paths=[],
+        discovery_scope=discovery_scope,
         target_folders=target_folders or [],
     )
+    cancel = threading.Event()
     clients_to_inspect, _, _ = _run_with_timeout(
-        lambda: asyncio.run(pipelines.discover_clients_to_inspect(inspect_args)),
+        lambda: asyncio.run(pipelines.discover_clients_to_inspect(inspect_args, cancel=cancel)),
         _discovery_timeout_seconds(),
+        cancel=cancel,
     )
     return _servers_discovered_entries(clients_to_inspect)
 
@@ -1222,9 +1217,13 @@ def _invoke_hook_script(
     push_key: str,
     url: str,
     payload: str,
-    machine_id: str = "",
+    *,
+    machine_id: str,
 ) -> tuple[bool, str]:
     import subprocess
+
+    if not machine_id.strip():
+        raise ValueError("machine ID is required")
 
     if IS_WINDOWS:
         cmd = [
@@ -1237,9 +1236,9 @@ def _invoke_hook_script(
             push_key,
             "-RemoteUrl",
             url,
+            "-MachineId",
+            machine_id,
         ]
-        if machine_id:
-            cmd.extend(["-MachineId", machine_id])
         env = None
     else:
         cmd = ["bash", str(script_path), "--client", hook_client]
@@ -1247,9 +1246,8 @@ def _invoke_hook_script(
             **os.environ,
             "PUSH_KEY": push_key,
             "REMOTE_HOOKS_BASE_URL": url,
+            "MACHINE_ID": machine_id,
         }
-        if machine_id:
-            env["MACHINE_ID"] = machine_id
 
     try:
         result = subprocess.run(
@@ -1283,14 +1281,13 @@ def _send_test_event(
     new_checksum: str | None = None,
     discover_current_checksum: str | None = None,
     discover_new_checksum: str | None = None,
-    machine_id: str = "",
+    machine_id: str,
 ) -> bool:
     """Send a test hooksConfigured event by invoking the hook script. Returns True on success."""
+    if not machine_id.strip():
+        raise ValueError("machine ID is required")
     payload_dict: dict = {"hook_event_name": "hooksConfigured"}
-    if hook_client == "claude-code" or hook_client == "codex":
-        payload_dict["session_id"] = "hooks-setup"
-    else:
-        payload_dict["conversation_id"] = "hooks-setup"
+    payload_dict[HOOK_CLIENTS[hook_client].session_field] = "hooks-setup"
     payload_dict["first_install"] = first_install
     payload_dict["push_key_changed"] = push_key_changed
     if not first_install:
@@ -1313,7 +1310,14 @@ def _send_test_event(
     redact_push_keys_in_data(payload_dict)
     payload = json.dumps(payload_dict)
 
-    ok, detail = _invoke_hook_script(script_path, hook_client, push_key, url, payload, machine_id)
+    ok, detail = _invoke_hook_script(
+        script_path,
+        hook_client,
+        push_key,
+        url,
+        payload,
+        machine_id=machine_id,
+    )
     if ok:
         rich.print("[green]\u2713[/green]  Test event sent  [green]\u2192 OK[/green]")
         return True
@@ -1330,11 +1334,12 @@ def _send_servers_discovered_event(
     event_name: str = "serversDiscovered",
     session_marker: str = "hooks-setup",
     target_folders: list[str] | None = None,
+    discovery_scope: DiscoveryScope = DiscoveryScope.ALL,
 ) -> bool:
     rich.print("[dim]Discovering MCP servers...[/dim]")
     started = time.monotonic()
     try:
-        servers = _discover_servers_payload(target_folders)
+        servers = _discover_servers_payload(target_folders, discovery_scope=discovery_scope)
     except Exception as e:
         rich.print(f"[yellow]Warning:[/yellow] Could not discover MCP servers: {e}")
         return False
@@ -1345,10 +1350,7 @@ def _send_servers_discovered_event(
         "servers": servers,
         "discovery_duration_ms": duration_ms,
     }
-    if hook_client == "claude-code" or hook_client == "codex":
-        payload_dict["session_id"] = session_marker
-    else:
-        payload_dict["conversation_id"] = session_marker
+    payload_dict[HOOK_CLIENTS[hook_client].session_field] = session_marker
     redact_push_keys_in_data(payload_dict)
     payload = json.dumps(payload_dict)
 
@@ -1642,8 +1644,6 @@ def _build_discover_hook_command(
         f"PUSH_KEY={_shell_quote(push_key)}",
         f"REMOTE_HOOKS_BASE_URL={_shell_quote(url)}",
     ]
-    if tenant_id:
-        parts.append(f"TENANT_ID={_shell_quote(tenant_id)}")
     if machine_id:
         parts.append(f"MACHINE_ID={_shell_quote(machine_id)}")
     agent_scan_bin = _agent_scan_bin()
@@ -1651,6 +1651,7 @@ def _build_discover_hook_command(
         parts.append(f"AGENT_SCAN_BIN={_shell_quote(agent_scan_bin)}")
     parts.append(f"bash {_shell_quote(script_path.as_posix())}")
     parts.append(f"--client {_shell_quote(hook_client)}")
+    parts.append("--scope servers")
     return " ".join(parts)
 
 
@@ -1672,6 +1673,7 @@ def _build_discover_hook_command_powershell(
     agent_scan_bin = _agent_scan_bin()
     if agent_scan_bin is not None:
         command += f" -AgentScanBin {_ps_quote(agent_scan_bin)}"
+    command += " -Scope servers"
     return command
 
 
@@ -1755,9 +1757,8 @@ def _copy_hook_script(config_path: Path, *, include_discover: bool = True) -> _H
     discover_new_checksum: str | None = None
     discover_updated = False
     if include_discover:
-        discover_name = "snyk-agent-guard-discover.ps1" if IS_WINDOWS else "snyk-agent-guard-discover.sh"
-        discover_source = hook_pkg.joinpath(discover_name)
-        discover_dest = dest_dir / discover_name
+        discover_dest = _discover_script_path(config_path)
+        discover_source = hook_pkg.joinpath(discover_dest.name)
         discover_content = discover_source.read_bytes()
         discover_new_checksum = hashlib.sha256(discover_content).hexdigest()
         discover_existing_content: bytes | None = None
