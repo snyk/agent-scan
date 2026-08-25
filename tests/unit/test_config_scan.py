@@ -178,6 +178,127 @@ async def test_vscode_settings_file_with_empty_mcp():
     assert len(servers) == 0
 
 
+class TestOpenCodeExplicitPath:
+    """Regression: an opencode ``opencode.json{,c}`` passed as an explicit path
+    must parse via ``scan_mcp_config_file`` instead of falling through to
+    ``UnknownMCPConfig`` (which greedily matches any ``{"mcp": {...}}`` and
+    yields zero servers -> the X004 "no mcp servers or skills found" report)."""
+
+    @pytest.mark.asyncio
+    async def test_local_server_parsed_not_unknown(self, tmp_path):
+        from agent_scan.models import OpenCodeConfigFile
+
+        config = tmp_path / "opencode.jsonc"
+        # Mirrors the real user report: jsonc with $schema, array command,
+        # trailing commas, and type "local".
+        config.write_text(
+            "{\n"
+            '  "$schema": "https://opencode.ai/config.json",\n'
+            '  "mcp": {\n'
+            '    "panda-css": {\n'
+            '      "command": ["pnpx", "-y", "@pandacss/mcp", "--config", "./panda.config.ts"],\n'
+            '      "type": "local",\n'
+            "    },\n"
+            "  },\n"
+            "}"
+        )
+
+        mcp_config = await scan_mcp_config_file(str(config))
+        assert isinstance(mcp_config, OpenCodeConfigFile)
+        servers = mcp_config.get_servers()
+        assert "panda-css" in servers
+        assert isinstance(servers["panda-css"], StdioServer)
+        assert servers["panda-css"].command == "pnpx"
+        assert servers["panda-css"].args == ["-y", "@pandacss/mcp", "--config", "./panda.config.ts"]
+
+    @pytest.mark.asyncio
+    async def test_remote_server_parsed_not_unknown(self, tmp_path):
+        from agent_scan.models import OpenCodeConfigFile
+
+        config = tmp_path / "opencode.json"
+        config.write_text('{"mcp": {"jira": {"type": "remote", "url": "https://jira.example.com/mcp"}}}')
+
+        mcp_config = await scan_mcp_config_file(str(config))
+        assert isinstance(mcp_config, OpenCodeConfigFile)
+        servers = mcp_config.get_servers()
+        assert "jira" in servers
+        assert isinstance(servers["jira"], RemoteServer)
+        assert servers["jira"].url == "https://jira.example.com/mcp"
+
+    @pytest.mark.asyncio
+    async def test_disabled_entry_dropped(self, tmp_path):
+        config = tmp_path / "opencode.json"
+        config.write_text(
+            '{"mcp": {"jira": {"type": "remote", "url": "https://jira.example.com/mcp", "enabled": false}}}'
+        )
+
+        mcp_config = await scan_mcp_config_file(str(config))
+        assert "jira" not in mcp_config.get_servers()
+
+    @pytest.mark.asyncio
+    async def test_mixed_entries_keep_enabled_drop_disabled(self, tmp_path):
+        """Ordering guard: with local + remote + a disabled entry side by side,
+        both enabled servers survive and only the disabled one is dropped — i.e.
+        OpenCodeConfigFile wins over UnknownMCPConfig without dropping siblings."""
+        config = tmp_path / "opencode.json"
+        config.write_text(
+            "{"
+            '  "mcp": {'
+            '    "local-srv": {"type": "local", "command": ["echo", "hi"]},'
+            '    "remote-srv": {"type": "remote", "url": "https://example.com/mcp"},'
+            '    "off-srv": {"type": "local", "command": ["echo"], "enabled": false}'
+            "  }"
+            "}"
+        )
+
+        mcp_config = await scan_mcp_config_file(str(config))
+        servers = mcp_config.get_servers()
+        assert set(servers) == {"local-srv", "remote-srv"}
+        assert isinstance(servers["local-srv"], StdioServer)
+        assert isinstance(servers["remote-srv"], RemoteServer)
+
+    @pytest.mark.asyncio
+    async def test_opencode_config_not_unknown_mcp_config(self, tmp_path):
+        """Explicit ordering assertion against the X004 failure mode: an opencode
+        config with a top-level ``mcp`` dict must NOT resolve to UnknownMCPConfig
+        (which would emit 'no mcp servers or skills found')."""
+        config = tmp_path / "opencode.jsonc"
+        config.write_text('{"mcp": {"srv": {"type": "local", "command": ["echo"]}}}')
+
+        mcp_config = await scan_mcp_config_file(str(config))
+        assert not isinstance(mcp_config, UnknownMCPConfig)
+        assert "srv" in mcp_config.get_servers()
+
+    @pytest.mark.asyncio
+    async def test_non_opencode_file_with_mcp_key_not_stolen(self, tmp_path):
+        """OpenCodeConfigFile must NOT steal a non-opencode file that merely has a
+        dict ``mcp`` key (e.g. a VSCode settings.json with ``"mcp": {}``); it must
+        still resolve to UnknownMCPConfig so the format is reported as unknown."""
+        from agent_scan.models import OpenCodeConfigFile
+
+        config = tmp_path / "settings.json"  # NOT opencode.json{,c}, no opencode $schema
+        config.write_text('{"chat.mcp.gallery.enabled": true, "mcp": {}}')
+
+        mcp_config = await scan_mcp_config_file(str(config))
+        assert isinstance(mcp_config, UnknownMCPConfig)
+        assert not isinstance(mcp_config, OpenCodeConfigFile)
+
+    @pytest.mark.asyncio
+    async def test_opencode_recognized_by_schema_when_renamed(self, tmp_path):
+        """A file not named opencode.json{,c} but declaring the opencode ``$schema``
+        is still parsed as opencode (schema-based gating)."""
+        from agent_scan.models import OpenCodeConfigFile
+
+        config = tmp_path / "custom-config.json"
+        config.write_text(
+            '{"$schema": "https://opencode.ai/config.json", "mcp": {"srv": {"type": "local", "command": ["echo"]}}}'
+        )
+
+        mcp_config = await scan_mcp_config_file(str(config))
+        assert isinstance(mcp_config, OpenCodeConfigFile)
+        assert "srv" in mcp_config.get_servers()
+
+
 class TestServerUrlAliasParsing:
     @pytest.mark.asyncio
     async def test_server_url_field_parsed_as_remote_server(self, tmp_path):

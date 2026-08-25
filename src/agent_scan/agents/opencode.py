@@ -38,7 +38,9 @@ class OpenCodeDiscoverer(AgentDiscoverer):
       backwards-compat spelling (https://opencode.ai/docs/config: "Singular
       names (e.g., ``agent/``) are also supported for backwards compatibility").
     * Project — for every project root in ``_discovery_paths_with_ancestors``
-      (and its ancestors): ``<root>/opencode.{json,jsonc}`` plus
+      (and its ancestors): ``<root>/opencode.{json,jsonc}`` *and*
+      ``<root>/.opencode/opencode.{json,jsonc}`` (both are real opencode config
+      locations — see :meth:`_project_config_bases`) plus
       ``<root>/.opencode/{skills,skill}``.
     * Managed — per-OS system-wide ``opencode.{json,jsonc}`` (and skill dirs)
       under ``/Library/Application Support/opencode`` (macOS), ``/etc/opencode``
@@ -493,6 +495,19 @@ class OpenCodeDiscoverer(AgentDiscoverer):
             result[path.as_posix()] = parsed
         return result
 
+    def _project_config_bases(self, project: Path) -> tuple[Path, ...]:
+        """Every dir under an opened project root that may hold an ``opencode.{json,jsonc}``.
+
+        opencode loads a project's config from both the project root
+        (``<root>/opencode.{json,jsonc}``) *and* the project's ``.opencode``
+        directory (``<root>/.opencode/opencode.{json,jsonc}``) — see opencode's
+        ``config.ts`` loader: step 4 walks up for ``opencode.json{,c}`` and step
+        5 walks up for ``.opencode`` dirs, loading ``opencode.json{,c}`` from each.
+        The scanner previously only looked at the root, so a project whose MCP
+        block lives in ``.opencode/opencode.jsonc`` was invisible in discovery.
+        """
+        return (project, project / ".opencode")
+
     def _discover_global_mcp_servers(self) -> McpConfigsResult:
         result: McpConfigsResult = {}
         for base in self._global_config_dirs():
@@ -502,7 +517,8 @@ class OpenCodeDiscoverer(AgentDiscoverer):
     def _discover_project_mcp_servers(self) -> McpConfigsResult:
         result: McpConfigsResult = {}
         for project in self._discovery_paths_with_ancestors():
-            result.update(self._scan_config_dir(project))
+            for base in self._project_config_bases(project):
+                result.update(self._scan_config_dir(base))
         return result
 
     def _discover_managed_mcp_servers(self) -> McpConfigsResult:
@@ -578,8 +594,9 @@ class OpenCodeDiscoverer(AgentDiscoverer):
             for filename in _CONFIG_FILENAMES:
                 candidates.append(base / filename)
         for project in self._discovery_paths_with_ancestors():
-            for filename in _CONFIG_FILENAMES:
-                candidates.append(project / filename)
+            for base in self._project_config_bases(project):
+                for filename in _CONFIG_FILENAMES:
+                    candidates.append(base / filename)
         managed = self._managed_config_dir()
         if managed is not None:
             for filename in _CONFIG_FILENAMES:

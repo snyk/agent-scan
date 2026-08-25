@@ -22,6 +22,7 @@ from agent_scan.models import (
     ConfigWithoutMCP,
     FileTokenStorage,
     MCPConfig,
+    OpenCodeConfigFile,
     PluginMCPConfigFile,
     RemoteServer,
     ServerSignature,
@@ -340,6 +341,16 @@ async def scan_mcp_config_file(path: str) -> MCPConfig:
             VSCodeConfigFile,  # used by vscode settings.json
             VSCodeMCPConfig,  # used by vscode mcp.json
             PluginMCPConfigFile,  # flat {name: serverConfig} in plugin .mcp.json
+        ]
+        # OpenCodeConfigFile matches ANY object with a dict-valued mcp key,
+        # including non-opencode files that merely carry an (often empty) mcp
+        # block.
+        schema = config.get("$schema") if isinstance(config, dict) else None
+        if os.path.basename(path) in ("opencode.json", "opencode.jsonc") or (
+            isinstance(schema, str) and "opencode.ai/config" in schema
+        ):
+            models.append(OpenCodeConfigFile)  # opencode.json{,c}: top-level {"mcp": {name: {type, ...}}}
+        models += [
             UnknownMCPConfig,  # used by unknown config files
             ConfigWithoutMCP,  # used by config files without MCP
         ]

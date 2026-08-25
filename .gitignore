@@ -60,3 +60,7 @@ npm/package.json
 .coverage.*
 htmlcov/
 coverage.xml
+
+# opencode config files
+opencode.json
+opencode.jsonc
