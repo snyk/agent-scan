@@ -9,6 +9,7 @@ This module provides functions to redact sensitive data like:
 - File paths in tracebacks
 """
 
+import functools
 import logging
 import re
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -135,6 +136,32 @@ def _get_cached_plugins() -> list:
     return _CACHED_PLUGINS
 
 
+def _partition_plugins(plugins: list) -> tuple[list, list]:
+    """Split *plugins* into ``(format_detectors, entropy_detectors)``.
+
+    The two families need different handling in the scan loops, so we sort them
+    once here. ``entropy_detectors`` are the ``HighEntropyStringsPlugin``
+    subclasses; ``format_detectors`` are the rest (AWS, GitHub, etc.). Doing this
+    split once means the hot loops can just iterate the family they need, instead
+    of calling ``isinstance`` on every plugin for every token which is slow and
+    adds up over a large scan.
+    """
+    entropy = [p for p in plugins if isinstance(p, HighEntropyStringsPlugin)]
+    formats = [p for p in plugins if not isinstance(p, HighEntropyStringsPlugin)]
+    return formats, entropy
+
+
+# Process-wide cache of the partitioned plugin lists (see _get_cached_plugins).
+_CACHED_PLUGINS_SPLIT: tuple[list, list] | None = None
+
+
+def _get_cached_plugins_split() -> tuple[list, list]:
+    global _CACHED_PLUGINS_SPLIT
+    if _CACHED_PLUGINS_SPLIT is None:
+        _CACHED_PLUGINS_SPLIT = _partition_plugins(_get_cached_plugins())
+    return _CACHED_PLUGINS_SPLIT
+
+
 def _redaction_marker(plugin_name: str) -> str:
     """Format the redaction marker for a triggering detect-secrets plugin.
 
@@ -221,23 +248,24 @@ def _could_be_secret(value: str) -> bool:
     )
 
 
-def _detect_secret_in_plugins(value: str, plugins: list) -> str | None:
-    """Two-pass scan of ``value`` against an already-built ``plugins`` list.
+def _detect_secret_in_plugins(value: str, format_plugins: list, entropy_plugins: list) -> str | None:
+    """Two-pass scan of ``value`` against pre-partitioned plugin lists.
 
     Each plugin family gets the input format it expects:
 
-    1. Named-format detectors (``AWSKeyDetector``, ``GitHubTokenDetector``,
-       etc.) match self-contained format patterns and work on the raw
-       value directly.
-    2. ``HighEntropyStringsPlugin`` subclasses default to scanning quoted
-       string literals (``(['"])(token)(\\1)``); they receive the value
-       wrapped as ``"<value>"``, ``'<value>'``, or ``"<escaped>"`` so
-       their regex tokenizes the whole value, then the entropy ``limit``
-       filter is applied.
+    1. ``format_plugins`` -- named-format detectors (``AWSKeyDetector``,
+       ``GitHubTokenDetector``, etc.) match self-contained format patterns and
+       work on the raw value directly.
+    2. ``entropy_plugins`` -- ``HighEntropyStringsPlugin`` subclasses default to
+       scanning quoted string literals (``(['"])(token)(\\1)``); they receive the
+       value wrapped as ``"<value>"``, ``'<value>'``, or ``"<escaped>"`` so their
+       regex tokenizes the whole value, then the entropy ``limit`` filter applies.
 
-    The caller is responsible for holding an active
-    ``transient_settings(_DETECT_SECRETS_CONFIG)`` context that ``plugins``
-    was built under.
+    Callers pass the split from :func:`_partition_plugins` (usually the cached
+    :func:`_get_cached_plugins_split`) so the per-value hot loop does zero
+    ``isinstance`` work. The caller is responsible for holding an active
+    ``transient_settings(_DETECT_SECRETS_CONFIG)`` context the plugins were built
+    under.
     """
     # Cheap pre-filter: skip the full plugin battery for values that provably
     # match nothing (see :func:`_could_be_secret`). Conservative -- never
@@ -245,16 +273,12 @@ def _detect_secret_in_plugins(value: str, plugins: list) -> str | None:
     if not _could_be_secret(value):
         return None
     # Pass 1: format-based named detectors on the bare value.
-    for plugin in plugins:
-        if isinstance(plugin, HighEntropyStringsPlugin):
-            continue
+    for plugin in format_plugins:
         if plugin.analyze_line(filename="adhoc", line=value, line_number=1):
             return type(plugin).__name__
     # Pass 2: entropy plugins on the quote-wrapped value.
     wrapped = _wrap_for_entropy(value)
-    for plugin in plugins:
-        if not isinstance(plugin, HighEntropyStringsPlugin):
-            continue
+    for plugin in entropy_plugins:
         if plugin.analyze_line(filename="adhoc", line=wrapped, line_number=1):
             return type(plugin).__name__
     return None
@@ -279,9 +303,21 @@ def _detect_secret(value: str, plugins: list | None = None) -> str | None:
     if not value:
         return None
     if plugins is not None:
-        return _detect_secret_in_plugins(value, plugins)
+        return _detect_secret_in_plugins(value, *_partition_plugins(plugins))
     with transient_settings(_DETECT_SECRETS_CONFIG):
-        return _detect_secret_in_plugins(value, list(get_plugins()))
+        return _detect_secret_in_plugins(value, *_partition_plugins(list(get_plugins())))
+
+
+@functools.lru_cache(maxsize=200_000)
+def _detect_secret_cached(value: str) -> str | None:
+    """Cache _detect_secret_in_plugins results by token value.
+
+    Skill text repeats the same tokens (prose words, punctuation, keywords)
+    thousands of times per run. Detection depends only on the token and the
+    fixed plugin set (_get_cached_plugins), so the result is the same
+    every time caching by value skips the repeated work without changing output.
+    """
+    return _detect_secret_in_plugins(value, *_get_cached_plugins_split())
 
 
 def _detect_keyword(prev_normalized: str, curr_raw: str) -> str | None:
@@ -513,7 +549,7 @@ def _unwrapped_token_core(token: str) -> str | None:
 _TOKEN_SPLIT_DELIMS = re.compile(r"[/:.,;@?&#|\\]")
 
 
-def _redact_secrets_in_line(line: str, plugins: list) -> str:
+def _redact_secrets_in_line(line: str, entropy_plugins: list) -> str:
     """Redact secret-bearing substrings within a single line of free text.
 
     Reuses the detect-secrets plugin set in two complementary passes that each
@@ -545,9 +581,7 @@ def _redact_secrets_in_line(line: str, plugins: list) -> str:
     replacements: dict[str, str] = {}
 
     # Pass 1: high-entropy detectors on the raw line (catches quoted literals).
-    for plugin in plugins:
-        if not isinstance(plugin, HighEntropyStringsPlugin):
-            continue
+    for plugin in entropy_plugins:
         for secret in plugin.analyze_line(filename="adhoc", line=line, line_number=1) or []:
             value = getattr(secret, "secret_value", None)
             if value:
@@ -566,7 +600,7 @@ def _redact_secrets_in_line(line: str, plugins: list) -> str:
             if candidate in replacements:
                 handled = True
                 break
-            plugin_name = _detect_secret(candidate, plugins)
+            plugin_name = _detect_secret_cached(candidate)
             if plugin_name is not None:
                 replacements[candidate] = _redaction_marker(plugin_name)
                 handled = True
@@ -581,7 +615,7 @@ def _redact_secrets_in_line(line: str, plugins: list) -> str:
         for segment in _TOKEN_SPLIT_DELIMS.split(token):
             if not segment or segment in replacements:
                 continue
-            plugin_name = _detect_secret(segment, plugins)
+            plugin_name = _detect_secret_cached(segment)
             if plugin_name is not None:
                 replacements[segment] = _redaction_marker(plugin_name)
 
@@ -610,8 +644,8 @@ def redact_text(text: str | None) -> str | None:
     """
     if not text:
         return text
-    plugins = _get_cached_plugins()
-    return "\n".join(_redact_secrets_in_line(line, plugins) for line in text.split("\n"))
+    _, entropy_plugins = _get_cached_plugins_split()
+    return "\n".join(_redact_secrets_in_line(line, entropy_plugins) for line in text.split("\n"))
 
 
 def redact_error_text(text: str | None) -> str | None:
