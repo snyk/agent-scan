@@ -11,6 +11,7 @@ import pytest
 
 from agent_scan.hook_events import _HOOK_REQUEST_TIMEOUT_SECONDS, send_hook_event
 from agent_scan.hook_version import HOOK_VERSION
+from agent_scan.version import version_info
 
 
 class _FakeResponse:
@@ -71,7 +72,7 @@ def test_sends_existing_hook_wire_contract(client):
     headers = post["headers"]
     assert headers["Content-Type"] == "text/plain"
     assert headers["X-Client-Id"] == "push-key"
-    assert "Agent Scan v" in headers["User-Agent"]
+    assert headers["User-Agent"] == f"snyk/agent-scan Agent Scan v{version_info}"
     assert json.loads(headers["X-User"]) == {
         "hostname": "host-1",
         "username": "user-1",
