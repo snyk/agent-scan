@@ -30,6 +30,7 @@ from agent_scan.agents.base import (
     SkillsDirsResult,
     _walk_under_depth,
 )
+from agent_scan.client_paths import resolve_user_client_dir
 from agent_scan.models import (
     ClaudeConfigFile,
     CouldNotParseMCPConfig,
@@ -380,11 +381,11 @@ class CodexDiscoverer(AgentDiscoverer):
         only on an own-home scan — under ``--scan-all-users`` the scanner can't know
         another user's env. Mirrors ``ClaudeCodeDiscoverer``'s ``CLAUDE_CONFIG_DIR``.
         """
-        if self._scans_own_home():
-            codex_home = os.environ.get("CODEX_HOME")
-            if codex_home:
-                return Path(codex_home)
-        return expand_path(Path(self._install_path), self.home_directory)
+        return resolve_user_client_dir(
+            "codex",
+            home_directory=self.home_directory,
+            honor_environment=self._scans_own_home(),
+        )
 
     def _user_config_toml(self) -> dict | CouldNotParseMCPConfig | None:
         """Read and TOML-decode ``<codex_home>/config.toml`` (``None`` if missing/empty,

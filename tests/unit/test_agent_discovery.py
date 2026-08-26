@@ -4942,6 +4942,20 @@ def test_claude_code_honors_claude_config_dir_on_own_home_scan(tmp_path, monkeyp
     assert mcp_configs[keys[0]][0][0] == "relocated"
 
 
+def test_claude_code_expands_tilde_in_claude_config_dir(tmp_path, monkeypatch):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    cfg = tmp_path / "custom-claude"
+    cfg.mkdir()
+    (cfg / ".claude.json").write_text('{"mcpServers": {"relocated": {"command": "r"}}}')
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "~/custom-claude")
+
+    mcp_configs = ClaudeCodeDiscoverer(None).discover_mcp_servers()
+
+    assert (cfg / ".claude.json").as_posix() in mcp_configs
+
+
 def test_claude_code_ignores_claude_config_dir_when_home_passed(tmp_path, monkeypatch):
     """Under multi-user scans (an explicit home is passed) the scanning
     process's CLAUDE_CONFIG_DIR must NOT relocate the target user's config."""
@@ -6514,6 +6528,20 @@ def test_codex_discoverer_honors_codex_home_on_own_home_scan(tmp_path, monkeypat
     keys = [k for k in mcp_configs if k.endswith("/custom-codex/config.toml")]
     assert len(keys) == 1
     assert mcp_configs[keys[0]][0][0] == "relocated"
+
+
+def test_codex_discoverer_expands_tilde_in_codex_home(tmp_path, monkeypatch):
+    from agent_scan.agents import CodexDiscoverer
+
+    cfg = tmp_path / "custom-codex"
+    cfg.mkdir()
+    (cfg / "config.toml").write_text('[mcp_servers.relocated]\ncommand = "r"\n')
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CODEX_HOME", "~/custom-codex")
+
+    mcp_configs = CodexDiscoverer(None).discover_mcp_servers()
+
+    assert (cfg / "config.toml").as_posix() in mcp_configs
 
 
 def test_codex_discoverer_ignores_codex_home_when_home_passed(tmp_path, monkeypatch):
