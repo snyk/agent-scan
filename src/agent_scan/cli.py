@@ -233,15 +233,11 @@ def explicitly_provided_dests(parser: argparse.ArgumentParser, argv: list[str]) 
     Return the set of argument ``dest`` names the user passed explicitly on the
     command line.
 
-    We scan the raw ``argv`` rather than reading the parsed namespace because argparse
+    We inspect the raw ``argv`` rather than the parsed namespace because argparse
     cannot distinguish "flag omitted" (dest holds its default) from "flag passed
     with a value equal to its default". Both ``--flag value`` and ``--flag=value``
-    spellings are recognized, as are the two option strings of a BooleanOptionalAction
-    (``--skills`` / ``--no-skills`` both map to ``skills``).
-
-    An option string reused across subcommands must resolve to the same dest, since
-    this map is flat and carries no notion of which subcommand is active. A test in
-    tests/unit/test_cli_config_file.py enforces that invariant over the real parser.
+    spellings are recognized, as are the two option strings of a
+    BooleanOptionalAction (``--skills`` / ``--no-skills`` both map to ``skills``).
     """
     option_to_dest: dict[str, str] = {}
     for action in _iter_all_actions(parser):
