@@ -228,38 +228,23 @@ def _iter_all_actions(parser: argparse.ArgumentParser):
             yield action
 
 
-def _iter_active_actions(parser: argparse.ArgumentParser, args: argparse.Namespace):
-    """Yield actions from the subparser path argparse already resolved into ``args``.
-
-    Each ``add_subparsers`` call names a dest (``command``, ``guard_command``), so the
-    selected subcommand can be read straight off the namespace instead of re-walking
-    argv. An unset dest means that level was not reached, and the walk stops there.
-    """
-    for action in parser._actions:
-        if isinstance(action, argparse._SubParsersAction):
-            selected = getattr(args, action.dest, None)
-            chosen = action.choices.get(selected) if isinstance(selected, str) else None
-            if chosen is not None:
-                yield from _iter_active_actions(chosen, args)
-        else:
-            yield action
-
-
-def explicitly_provided_dests(parser: argparse.ArgumentParser, args: argparse.Namespace, argv: list[str]) -> set[str]:
+def explicitly_provided_dests(parser: argparse.ArgumentParser, argv: list[str]) -> set[str]:
     """
     Return the set of argument ``dest`` names the user passed explicitly on the
     command line.
 
     We scan the raw ``argv`` rather than reading the parsed namespace because argparse
     cannot distinguish "flag omitted" (dest holds its default) from "flag passed
-    with a value equal to its default". ``args`` is used only to know which subparser
-    is active, which is what disambiguates an option string defined on more than one
-    subcommand. Both ``--flag value`` and ``--flag=value`` spellings are recognized,
-    as are the two option strings of a BooleanOptionalAction (``--skills`` /
-    ``--no-skills`` both map to ``skills``).
+    with a value equal to its default". Both ``--flag value`` and ``--flag=value``
+    spellings are recognized, as are the two option strings of a BooleanOptionalAction
+    (``--skills`` / ``--no-skills`` both map to ``skills``).
+
+    An option string reused across subcommands must resolve to the same dest, since
+    this map is flat and carries no notion of which subcommand is active. A test in
+    tests/unit/test_cli_config_file.py enforces that invariant over the real parser.
     """
     option_to_dest: dict[str, str] = {}
-    for action in _iter_active_actions(parser, args):
+    for action in _iter_all_actions(parser):
         for option in action.option_strings:
             option_to_dest[option] = action.dest
 
@@ -436,7 +421,7 @@ def apply_config_file(parser: argparse.ArgumentParser, args: argparse.Namespace,
         return
 
     config = load_config_file(config_path)
-    explicit = explicitly_provided_dests(parser, args, argv)
+    explicit = explicitly_provided_dests(parser, argv)
 
     # The positional ``files`` list has no option string, so treat any positional
     # value present on the CLI as an explicit override of the YAML ``files``.
@@ -966,15 +951,11 @@ def main():
     )
     guard_install_parser.add_argument(
         "--machine-id",
-        "--control-identifier",
         dest="machine_id",
         type=str,
         default=None,
         metavar="ID",
-        help=(
-            "Required non-anonymous identifier for this machine, sent as the X-User identifier on hook events "
-            "(accepts --control-identifier for symmetry with scan)"
-        ),
+        help="Required non-anonymous identifier for this machine, sent as the X-User identifier on hook events",
     )
     guard_install_parser.add_argument(
         "--test",
