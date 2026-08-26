@@ -1,4 +1,5 @@
 import io
+import logging
 import os
 import subprocess
 import sys
@@ -10,6 +11,7 @@ from agent_scan import utils as utils_module
 from agent_scan.models import CommandParsingError, rebalance_command_args
 from agent_scan.utils import (
     calculate_distance,
+    expand_env_vars,
     get_readable_home_directories,
     get_relative_path,
     suppress_stdout,
@@ -608,3 +610,51 @@ class TestGetReadableHomeDirectoriesWindows:
 
         usernames = {u for _p, u in result}
         assert usernames == {"wsl_alice"}, f"WSL homes must still surface when CIM query fails; got {usernames}"
+
+
+class TestExpandEnvVars:
+    def test_none_input_returns_none(self):
+        assert expand_env_vars(None) is None
+
+    def test_empty_dict_returns_empty_dict(self):
+        assert expand_env_vars({}) == {}
+
+    def test_value_without_placeholder_is_unchanged(self):
+        result = expand_env_vars({"FOO": "plain-value"})
+        assert result == {"FOO": "plain-value"}
+
+    def test_substitutes_var_from_environment(self, monkeypatch):
+        monkeypatch.setenv("AUTH_HEADER", "Bearer secret-token")
+        result = expand_env_vars({"AUTH_HEADER": "${AUTH_HEADER}"})
+        assert result == {"AUTH_HEADER": "Bearer secret-token"}
+
+    def test_substitutes_var_with_different_name_than_key(self, monkeypatch):
+        """The child env-var key need not match the placeholder name."""
+        monkeypatch.setenv("MY_SECRET", "the-real-value")
+        result = expand_env_vars({"FOO_TOKEN": "${MY_SECRET}"})
+        assert result == {"FOO_TOKEN": "the-real-value"}
+
+    def test_substitutes_multiple_placeholders_in_one_value(self, monkeypatch):
+        monkeypatch.setenv("PREFIX", "Bearer ")
+        monkeypatch.setenv("SUFFIX", "-token")
+        result = expand_env_vars({"AUTH": "${PREFIX}abc${SUFFIX}"})
+        assert result == {"AUTH": "Bearer abc-token"}
+
+    def test_missing_var_is_left_unexpanded_and_warns(self, monkeypatch, caplog):
+        monkeypatch.delenv("DOES_NOT_EXIST", raising=False)
+        with caplog.at_level(logging.WARNING):
+            result = expand_env_vars({"AUTH_HEADER": "${DOES_NOT_EXIST}"})
+        assert result == {"AUTH_HEADER": "${DOES_NOT_EXIST}"}
+        assert "DOES_NOT_EXIST" in caplog.text
+
+    def test_does_not_mutate_input_dict(self, monkeypatch):
+        monkeypatch.setenv("AUTH_HEADER", "resolved")
+        original = {"AUTH_HEADER": "${AUTH_HEADER}"}
+        result = expand_env_vars(original)
+        assert original == {"AUTH_HEADER": "${AUTH_HEADER}"}
+        assert result == {"AUTH_HEADER": "resolved"}
+
+    def test_non_variable_dollar_sign_is_left_alone(self):
+        """A bare '$' or a name that doesn't look like ${IDENTIFIER} is not touched."""
+        result = expand_env_vars({"PRICE": "$5.00 (${) not a var"})
+        assert result == {"PRICE": "$5.00 (${) not a var"}
