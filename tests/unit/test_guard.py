@@ -480,8 +480,9 @@ class TestBuildDiscoverHookCommand:
 
 class TestHookInvocationRenderers:
     def test_render_argv_posix_returns_unquoted_argv_and_merged_environment(self):
+        script_path = Path("/hooks/snyk-agent-guard.sh")
         invocation = guard_module._HookInvocation(
-            script_path=Path("/hooks/snyk-agent-guard.sh"),
+            script_path=script_path,
             hook_client="claude-code",
             push_key="pk'raw",
             url="https://example.test/hook's",
@@ -491,7 +492,8 @@ class TestHookInvocationRenderers:
         with patch.dict(os.environ, {"EXISTING": "value"}, clear=True), patch(f"{_G}.IS_WINDOWS", False):
             argv, env = guard_module._render_argv(invocation)
 
-        assert argv == ["bash", "/hooks/snyk-agent-guard.sh", "--client", "claude-code"]
+        # str(Path) follows the host flavour, so compare against it rather than a hardcoded separator
+        assert argv == ["bash", str(script_path), "--client", "claude-code"]
         assert env == {
             "EXISTING": "value",
             "PUSH_KEY": "pk'raw",
@@ -528,8 +530,9 @@ class TestHookInvocationRenderers:
 
     def test_render_argv_posix_carries_discovery_fields(self):
         """The discovery trampoline forwards ``"$@"`` to ``guard discover``, so scope travels in argv."""
+        script_path = Path("/hooks/snyk-agent-guard-discover.sh")
         invocation = guard_module._HookInvocation(
-            script_path=Path("/hooks/snyk-agent-guard-discover.sh"),
+            script_path=script_path,
             hook_client="cursor",
             push_key="pk",
             url="https://api.snyk.io",
@@ -545,7 +548,7 @@ class TestHookInvocationRenderers:
 
         assert argv == [
             "bash",
-            "/hooks/snyk-agent-guard-discover.sh",
+            str(script_path),
             "--client",
             "cursor",
             "--scope",
