@@ -423,7 +423,11 @@ def _prepare_client_config(
         )
     elif client == "codex":
         if _is_codex_requirements_toml(config_path):
-            prepared_content, hooks_diff = _prepare_codex_managed_config(command, config_path)
+            prepared_content, hooks_diff = _prepare_codex_managed_config(
+                command,
+                config_path,
+                discover_command=discover_command,
+            )
         else:
             prepared_config, hooks_diff, preserved = _prepare_codex_config(
                 command, config_path, discover_command=discover_command
@@ -488,10 +492,9 @@ def _install_hooks(
     old_push_key = existing_info.get("auth_value", "") if existing_info else ""
     push_key_changed = bool(old_push_key) and old_push_key != push_key
 
-    is_codex_requirements = _is_codex_requirements_toml(config_path)
     agent_scan_bin = _agent_scan_bin()
-    install_discovery = not is_codex_requirements and agent_scan_bin is not None
-    if not is_codex_requirements and agent_scan_bin is None:
+    install_discovery = agent_scan_bin is not None
+    if agent_scan_bin is None:
         rich.print(
             "[yellow]Warning:[/yellow] AGENT_SCAN_BIN is not set; "
             "the session-start discovery hook will not be installed"
@@ -745,7 +748,12 @@ def _codex_managed_dirs(config_path: Path) -> tuple[str, str]:
     return managed_dir, windows_managed_dir
 
 
-def _render_codex_requirements_toml(command: str, config_path: Path) -> str:
+def _render_codex_requirements_toml(
+    command: str,
+    config_path: Path,
+    *,
+    discover_command: str | None = None,
+) -> str:
     """Generate the requirements.toml content for managed Codex hooks."""
     managed_dir, windows_managed_dir = _codex_managed_dirs(config_path)
     lines = [
@@ -764,35 +772,67 @@ def _render_codex_requirements_toml(command: str, config_path: Path) -> str:
         lines.append('type = "command"')
         lines.append(f'command = "{escaped}"')
         lines.append("")
+    if discover_command:
+        escaped_discover = discover_command.replace("\\", "\\\\").replace('"', '\\"')
+        lines.append("[[hooks.SessionStart]]")
+        lines.append("[[hooks.SessionStart.hooks]]")
+        lines.append('type = "command"')
+        lines.append(f'command = "{escaped_discover}"')
+        lines.append("async = true")
+        lines.append("")
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
-def _prepare_codex_managed_config(command: str, path: Path) -> tuple[str, dict]:
+def _prepare_codex_managed_config(
+    command: str,
+    path: Path,
+    *,
+    discover_command: str | None = None,
+) -> tuple[str, dict]:
     """Build new Codex managed TOML content and compute diff, without writing.
 
     Returns (new_content, hooks_diff).
     """
-    new_content = _render_codex_requirements_toml(command, path)
+    new_content = _render_codex_requirements_toml(
+        command,
+        path,
+        discover_command=discover_command,
+    )
 
     old_events: list[str] = []
-    old_cmd: str | None = None
+    old_guard_command: str | None = None
+    old_discover_command: str | None = None
     if path.exists():
         old_text = path.read_text()
         with contextlib.suppress(UnicodeDecodeError, ValueError):
-            old_events, old_cmd = _parse_codex_requirements_toml(old_text)
+            old_events, old_guard_command, old_discover_command = _parse_codex_requirements_toml(old_text)
 
     old_event_set = set(old_events)
     new_event_set = set(CODEX_HOOK_EVENTS)
 
-    removed = {e: [{"type": "command", "command": command}] for e in sorted(new_event_set - old_event_set)}
-    added = {e: [{"type": "command", "command": old_cmd or ""}] for e in sorted(old_event_set - new_event_set)}
+    def _entries(event: str, guard: str | None, discover: str | None) -> list[dict]:
+        entries: list[dict] = []
+        if guard is not None:
+            entries.append({"type": "command", "command": guard})
+        if event == "SessionStart" and discover is not None:
+            entries.append({"type": "command", "command": discover, "async": True})
+        return entries
+
+    added = {}
     modified = {}
-    if old_cmd is not None and old_cmd != command:
-        expected = [{"type": "command", "command": command}]
-        actual = [{"type": "command", "command": old_cmd}]
-        modified = {
-            e: {"expected_value": expected, "actual_value": actual} for e in sorted(old_event_set & new_event_set)
-        }
+    removed = {}
+    for event in sorted(old_event_set | new_event_set):
+        expected = _entries(event, command, discover_command) if event in new_event_set else []
+        actual = _entries(event, old_guard_command, old_discover_command) if event in old_event_set else []
+        if not actual and expected:
+            removed[event] = expected
+        elif actual and not expected:
+            added[event] = actual
+        elif actual != expected:
+            modified[event] = {
+                "expected_value": expected,
+                "actual_value": actual,
+            }
 
     diff = {"added": added, "modified": modified, "removed": removed}
     return new_content, diff
@@ -810,14 +850,18 @@ def _write_codex_managed_config(content: str, path: Path) -> bool:
     return True
 
 
-def _parse_codex_requirements_toml(text: str) -> tuple[list[str], str | None]:
-    """Extract Snyk Agent Guard events and the first matching command from requirements.toml.
+def _is_discover_hook_command(command: str) -> bool:
+    return bool(re.search(r"\bsnyk-agent-guard-discover(?:\.(?:sh|ps1))?\b", command, re.IGNORECASE))
 
-    Returns (events, command). Only scans hook command lines containing the
-    agent-guard detection marker.
+
+def _parse_codex_requirements_toml(text: str) -> tuple[list[str], str | None, str | None]:
+    """Extract Snyk Agent Guard events, guard command, and discovery command.
+
+    Only scans hook command lines containing the agent-guard detection marker.
     """
     events: list[str] = []
-    found_cmd: str | None = None
+    guard_command: str | None = None
+    discover_command: str | None = None
     current_event: str | None = None
     header_re = re.compile(r"^\[\[hooks\.([A-Za-z]+)(?:\.hooks)?\]\]\s*$")
     command_re = re.compile(r'^command\s*=\s*"((?:[^"\\]|\\.)*)"\s*$')
@@ -830,19 +874,24 @@ def _parse_codex_requirements_toml(text: str) -> tuple[list[str], str | None]:
         m = command_re.match(line)
         if m and current_event:
             cmd = m.group(1).replace("\\\\", "\0").replace('\\"', '"').replace("\0", "\\")
-            if _is_agent_scan_command(cmd) and current_event not in events:
+            if not _is_agent_scan_command(cmd):
+                continue
+            if current_event not in events:
                 events.append(current_event)
-                if found_cmd is None:
-                    found_cmd = cmd
-    return events, found_cmd
+            if _is_discover_hook_command(cmd):
+                if discover_command is None:
+                    discover_command = cmd
+            elif guard_command is None:
+                guard_command = cmd
+    return events, guard_command, discover_command
 
 
 def _detect_codex_managed_install(path: Path) -> dict | None:
     text = path.read_text()
-    events, found_cmd = _parse_codex_requirements_toml(text)
-    if not events or found_cmd is None:
+    events, guard_command, _ = _parse_codex_requirements_toml(text)
+    if not events or guard_command is None:
         return None
-    return _parse_command_info(found_cmd, events)
+    return _parse_command_info(guard_command, events)
 
 
 def _uninstall_codex_managed(path: Path) -> None:
@@ -850,7 +899,7 @@ def _uninstall_codex_managed(path: Path) -> None:
         rich.print("[dim]No requirements.toml found. Nothing to uninstall.[/dim]")
         return
     text = path.read_text()
-    events, _ = _parse_codex_requirements_toml(text)
+    events, _, _ = _parse_codex_requirements_toml(text)
     if not events:
         rich.print("[dim]No Agent Guard hooks found.[/dim]")
         return
