@@ -259,14 +259,16 @@ class TestBuildHookCommand:
         assert "-MachineId 'O''Brien-laptop'" in cmd
 
     def test_powershell_escapes_single_quotes_in_all_literals(self):
+        script_path = Path("C:/Users/O'Brien/hook.ps1")
         cmd = _build_hook_command_powershell(
             "pk'quoted",
             "https://example.com/O'Brien",
-            Path("C:/Users/O'Brien/hook.ps1"),
+            script_path,
             "codex",
         )
 
-        assert "-File 'C:/Users/O''Brien/hook.ps1'" in cmd
+        expected_path = str(script_path).replace("'", "''")
+        assert f"-File '{expected_path}'" in cmd
         assert "-PushKey 'pk''quoted'" in cmd
         assert "-RemoteUrl 'https://example.com/O''Brien'" in cmd
 
@@ -2211,6 +2213,7 @@ class TestCursorStylePowerShellInvocation:
             hook_server,
             script,
             "claude-code",
+            machine_id="machine-42",
         )
         payload = '{"hook_event_name":"test","session_id":"cursor-test"}'
         result = subprocess.run(

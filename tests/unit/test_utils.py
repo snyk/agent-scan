@@ -35,6 +35,15 @@ class TestGetRelativePath:
         result = get_relative_path(r"C:\Users\someone\AppData\Local\config.json")
         assert result == "C:/Users/someone/AppData/Local/config.json"
 
+    def test_windows_home_path_with_mixed_separators(self, monkeypatch):
+        monkeypatch.setattr(
+            os.path,
+            "expanduser",
+            lambda value: r"C:\Users\runneradmin" if value == "~" else value,
+        )
+
+        assert get_relative_path("C:/Users/runneradmin/.claude") == "~/.claude"
+
     def test_empty_path(self):
         result = get_relative_path("")
         assert result == ""
