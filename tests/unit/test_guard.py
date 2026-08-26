@@ -870,7 +870,6 @@ class TestDiscoveryHookScriptFiles:
             'if [[ -x "$AGENT_SCAN_COMMAND" ]]; then\n'
             '  "$AGENT_SCAN_COMMAND" guard discover "$@" >/dev/null 2>&1 || true\n'
             "else\n"
-            "  # TODO: ProdSec needs to review this shell-evaluation path before release.\n"
             '  eval "$AGENT_SCAN_COMMAND guard discover \\"\\$@\\"" >/dev/null 2>&1 || true\n'
             "fi\n"
             "exit 0\n"
