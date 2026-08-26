@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
-import sys
 from typing import NamedTuple
 
 import aiohttp
@@ -83,10 +82,9 @@ def send_hook_event(
     )
     encoded_payload = base64.b64encode(payload.encode()).decode()
     body = f"base64:{encoded_payload}".encode()
-    script_extension = "ps1" if sys.platform == "win32" else "sh"
     url = f"{base_url.rstrip('/')}{client.endpoint}?version={HOOK_VERSION}"
     headers = {
-        "User-Agent": f"snyk/snyk-agent-guard.{script_extension} Agent Scan v{version_info}",
+        "User-Agent": f"snyk/agent-scan Agent Scan v{version_info}",
         "X-User": x_user,
         "Content-Type": "text/plain",
         "X-Client-Id": push_key,
