@@ -2,6 +2,7 @@ import contextlib
 import getpass
 import glob
 import logging
+import ntpath
 import os
 import platform
 import shutil
@@ -63,15 +64,24 @@ logger = logging.getLogger(__name__)
 
 def get_relative_path(path: str) -> str:
     try:
+        original_path = path.replace("\\", "/")
         expanded_path = os.path.expanduser(path).replace("\\", "/")
         home_dir = os.path.expanduser("~").replace("\\", "/").rstrip("/")
-        compared_path = expanded_path.casefold() if sys.platform == "win32" else expanded_path
-        compared_home = home_dir.casefold() if sys.platform == "win32" else home_dir
-        if compared_path == compared_home:
-            return "~"
-        if compared_home and compared_path.startswith(compared_home + "/"):
-            return "~" + expanded_path[len(home_dir) :]
-        return expanded_path
+        if sys.platform == "win32":
+            path_parts = expanded_path.split("/")
+            home_parts = home_dir.split("/")
+            if len(path_parts) >= len(home_parts) and all(
+                ntpath.normcase(path_part) == ntpath.normcase(home_part)
+                for path_part, home_part in zip(path_parts[: len(home_parts)], home_parts, strict=True)
+            ):
+                suffix = "/".join(path_parts[len(home_parts) :])
+                return "~" + (f"/{suffix}" if suffix else "")
+        else:
+            if expanded_path == home_dir:
+                return "~"
+            if home_dir and expanded_path.startswith(home_dir + "/"):
+                return "~" + expanded_path[len(home_dir) :]
+        return original_path
     except Exception:
         return path.replace("\\", "/")
 
