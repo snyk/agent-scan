@@ -33,8 +33,8 @@ if (-not $MachineId) { $MachineId = $env:MACHINE_ID }
 if (-not $MachineId) { exit 0 }
 $env:MACHINE_ID = $MachineId
 
-$bin = if ($AgentScanBin) { $AgentScanBin } elseif ($env:AGENT_SCAN_BIN) { $env:AGENT_SCAN_BIN } else { "snyk-agent-scan" }
-if (-not (Get-Command $bin -ErrorAction SilentlyContinue)) { $bin = "snyk-agent-scan" }
+$bin = if ($AgentScanBin) { $AgentScanBin } elseif ($env:AGENT_SCAN_BIN) { $env:AGENT_SCAN_BIN } else { $null }
+if (-not $bin) { exit 0 }
 
 $arguments = @("guard", "discover", "--client", $Client, "--scope", $Scope)
 

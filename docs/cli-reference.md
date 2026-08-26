@@ -400,7 +400,7 @@ snyk-agent-scan guard uninstall {claude,cursor,codex,all} [OPTIONS]
 | `TENANT_ID` | Tenant UUID alternative to `--tenant-id` |
 | `SNYK_TOKEN` | Required to mint/revoke push keys and verify that Guard is enabled for the tenant |
 | `MACHINE_ID` | Required non-anonymous machine identifier sent with hook events; alternative to `guard install --machine-id` |
-| `AGENT_SCAN_BIN` | Agent Scan executable used by the session-start discovery trampoline |
+| `AGENT_SCAN_BIN` | Optional Agent Scan executable. The session-start discovery hook is installed only when this is set, and its trampoline invokes only this path without a `PATH` lookup. |
 
 ## Environment variables
 
