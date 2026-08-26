@@ -469,9 +469,18 @@ def _detect_existing_install(client: str, config_path: Path) -> dict | None:
     return _detect_codex_install(config_path)
 
 
+def _hooks_dir(config_path: Path) -> Path:
+    return config_path.parent / "hooks"
+
+
+def _forwarder_script_path(config_path: Path) -> Path:
+    name = "snyk-agent-guard.ps1" if IS_WINDOWS else "snyk-agent-guard.sh"
+    return _hooks_dir(config_path) / name
+
+
 def _discover_script_path(config_path: Path) -> Path:
     name = "snyk-agent-guard-discover.ps1" if IS_WINDOWS else "snyk-agent-guard-discover.sh"
-    return config_path.parent / "hooks" / name
+    return _hooks_dir(config_path) / name
 
 
 def _install_hooks(
@@ -501,15 +510,12 @@ def _install_hooks(
         )
     discover_script_path = _discover_script_path(config_path)
     discover_script_existed = discover_script_path.exists()
-    (
-        dest_path,
-        script_existed,
-        script_updated,
-        current_checksum,
-        new_checksum,
-        discover_current_checksum,
-        discover_new_checksum,
-    ) = _copy_hook_script(config_path, include_discover=install_discovery)
+
+    main_script = _copy_hook_script(_forwarder_script_path(config_path))
+    discover_script = _copy_hook_script(discover_script_path) if install_discovery else None
+
+    dest_path = main_script.path
+    script_updated = main_script.updated or bool(discover_script and discover_script.updated)
     command = _build_hook_command(
         push_key,
         url,
@@ -537,7 +543,7 @@ def _install_hooks(
         discover_command=discover_command,
     )
 
-    first_install = not script_existed
+    first_install = not main_script.existed
     config_changed = bool(hooks_diff["added"] or hooks_diff["modified"] or hooks_diff["removed"])
 
     if not _send_test_event(
@@ -549,13 +555,13 @@ def _install_hooks(
         config_changed=config_changed,
         hooks_diff=hooks_diff,
         push_key_changed=push_key_changed,
-        current_checksum=current_checksum,
-        new_checksum=new_checksum,
-        discover_current_checksum=discover_current_checksum,
-        discover_new_checksum=discover_new_checksum,
+        current_checksum=main_script.current_checksum,
+        new_checksum=main_script.new_checksum,
+        discover_current_checksum=discover_script.current_checksum if discover_script else None,
+        discover_new_checksum=discover_script.new_checksum if discover_script else None,
         machine_id=machine_id,
     ):
-        if not script_existed:
+        if not main_script.existed:
             dest_path.unlink(missing_ok=True)
         if not discover_script_existed:
             discover_script_path.unlink(missing_ok=True)
@@ -1762,96 +1768,43 @@ def _compact_events(events: list[str]) -> str:
     return f"({', '.join(events[:show])} + {len(events) - show} more)"
 
 
-class _HookScripts(NamedTuple):
+class _CopiedScript(NamedTuple):
     path: Path
     existed: bool
     updated: bool
     current_checksum: str | None
     new_checksum: str
-    discover_current_checksum: str | None = None
-    discover_new_checksum: str | None = None
 
 
-def _copy_hook_script(config_path: Path, *, include_discover: bool = True) -> _HookScripts:
-    """Copy bundled hook scripts to a hooks/ dir next to the config file.
+def _copy_hook_script(dest: Path) -> _CopiedScript:
+    """Copy the bundled hook script named ``dest.name`` to *dest*.
 
-    Checksums describe both the forwarding script and, when requested, the
-    session-start discovery trampoline.
+    Handles both the forwarding hook and the session-start discovery trampoline;
+    the bundled resource and the destination share a basename.
     """
-    dest_dir = config_path.parent / "hooks"
-
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    script_name = "snyk-agent-guard.ps1" if IS_WINDOWS else "snyk-agent-guard.sh"
-    dest = dest_dir / script_name
-    existed = dest.exists()
-
-    current_checksum: str | None = None
-    if existed:
-        current_checksum = hashlib.sha256(dest.read_bytes()).hexdigest()
-
     from agent_scan.version import version_info
 
-    hook_pkg = importlib_resources.files("agent_scan.hooks")
-    source = hook_pkg.joinpath(script_name)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    source = importlib_resources.files("agent_scan.hooks").joinpath(dest.name)
     new_content = source.read_bytes().replace(b"__AGENT_SCAN_VERSION__", version_info.encode())
     new_checksum = hashlib.sha256(new_content).hexdigest()
 
-    discover_current_checksum: str | None = None
-    discover_new_checksum: str | None = None
-    discover_updated = False
-    if include_discover:
-        discover_dest = _discover_script_path(config_path)
-        discover_source = hook_pkg.joinpath(discover_dest.name)
-        discover_content = discover_source.read_bytes()
-        discover_new_checksum = hashlib.sha256(discover_content).hexdigest()
-        discover_existing_content: bytes | None = None
-        if discover_dest.exists():
-            discover_existing_content = discover_dest.read_bytes()
-            discover_current_checksum = hashlib.sha256(discover_existing_content).hexdigest()
-        if discover_existing_content != discover_content:
-            discover_dest.write_bytes(discover_content)
-            rich.print(f"[green]\u2713[/green]  Copied hook script to [dim]{discover_dest}[/dim]")
-            discover_updated = True
-        if not IS_WINDOWS:
-            discover_dest.chmod(discover_dest.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    current_content = dest.read_bytes() if dest.exists() else None
+    current_checksum = None if current_content is None else hashlib.sha256(current_content).hexdigest()
 
-    if existed and current_checksum == new_checksum:
-        return _HookScripts(
-            dest,
-            existed,
-            discover_updated,
-            current_checksum,
-            new_checksum,
-            discover_current_checksum,
-            discover_new_checksum,
-        )
+    updated = current_content != new_content
+    if updated:
+        dest.write_bytes(new_content)
+        rich.print(f"[green]\u2713[/green]  Copied hook script to [dim]{dest}[/dim]")
+    if not IS_WINDOWS:
+        dest.chmod(dest.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
-    dest.write_bytes(new_content)
-    dest.chmod(dest.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-    rich.print(f"[green]\u2713[/green]  Copied hook script to [dim]{dest}[/dim]")
-    return _HookScripts(
-        dest,
-        existed,
-        True,
-        current_checksum,
-        new_checksum,
-        discover_current_checksum,
-        discover_new_checksum,
-    )
+    return _CopiedScript(dest, current_content is not None, updated, current_checksum, new_checksum)
 
 
 def _remove_hook_script(client: str, config_path: Path) -> None:
-    dest_dir = config_path.parent / "hooks"
-    script_names = (
-        ["snyk-agent-guard.ps1", "snyk-agent-guard-discover.ps1"]
-        if IS_WINDOWS
-        else [
-            "snyk-agent-guard.sh",
-            "snyk-agent-guard-discover.sh",
-        ]
-    )
-    for script_name in script_names:
-        dest = dest_dir / script_name
+    for dest in (_forwarder_script_path(config_path), _discover_script_path(config_path)):
         if dest.exists():
             dest.unlink()
             rich.print(f"[green]\u2713[/green]  Removed hook script [dim]{dest}[/dim]")

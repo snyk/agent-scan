@@ -13,6 +13,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import call as mock_call
 
 import pytest
 
@@ -563,8 +564,8 @@ class TestDiscoveryHookScriptFiles:
     def test_copy_writes_executable_discovery_script_next_to_forwarder(self, tmp_path):
         config = tmp_path / "settings.json"
 
-        main_script, *_ = guard_module._copy_hook_script(config)
-        discover_script = main_script.with_name("snyk-agent-guard-discover.sh")
+        discover_script = guard_module._discover_script_path(config)
+        guard_module._copy_hook_script(discover_script)
 
         assert discover_script.read_text() == (
             "#!/usr/bin/env bash\nset -euo pipefail\n"
@@ -579,17 +580,17 @@ class TestDiscoveryHookScriptFiles:
         import hashlib
 
         config = tmp_path / "settings.json"
-        scripts = guard_module._copy_hook_script(config)
-        discover_script = scripts.path.with_name("snyk-agent-guard-discover.sh")
+        discover_script = guard_module._discover_script_path(config)
+        script = guard_module._copy_hook_script(discover_script)
 
-        assert scripts.discover_current_checksum is None
-        assert scripts.discover_new_checksum == hashlib.sha256(discover_script.read_bytes()).hexdigest()
+        assert script.current_checksum is None
+        assert script.new_checksum == hashlib.sha256(discover_script.read_bytes()).hexdigest()
 
         discover_script.write_text("stale discovery script\n")
-        scripts = guard_module._copy_hook_script(config)
+        script = guard_module._copy_hook_script(discover_script)
 
-        assert scripts.discover_current_checksum == hashlib.sha256(b"stale discovery script\n").hexdigest()
-        assert scripts.discover_new_checksum == hashlib.sha256(discover_script.read_bytes()).hexdigest()
+        assert script.current_checksum == hashlib.sha256(b"stale discovery script\n").hexdigest()
+        assert script.new_checksum == hashlib.sha256(discover_script.read_bytes()).hexdigest()
 
     def test_stale_absolute_binary_does_not_fall_back_to_path(self, tmp_path):
         script = Path(guard_module.__file__).parent / "hooks" / "snyk-agent-guard-discover.sh"
@@ -686,36 +687,46 @@ class TestDiscoveryHookScriptFiles:
 
     def test_copy_restores_missing_discovery_script_when_forwarder_is_current(self, tmp_path):
         config = tmp_path / "settings.json"
-        main_script, *_ = guard_module._copy_hook_script(config)
-        discover_script = main_script.with_name("snyk-agent-guard-discover.sh")
+        guard_module._copy_hook_script(guard_module._forwarder_script_path(config))
+        discover_script = guard_module._discover_script_path(config)
+        guard_module._copy_hook_script(discover_script)
         discover_script.unlink()
 
-        guard_module._copy_hook_script(config)
+        guard_module._copy_hook_script(discover_script)
 
         assert discover_script.exists()
 
     def test_copy_reports_update_when_only_discovery_script_changed(self, tmp_path):
         config = tmp_path / "settings.json"
-        main_script, *_ = guard_module._copy_hook_script(config)
-        main_script.with_name("snyk-agent-guard-discover.sh").unlink()
+        main_script = guard_module._forwarder_script_path(config)
+        discover_script = guard_module._discover_script_path(config)
+        guard_module._copy_hook_script(main_script)
+        guard_module._copy_hook_script(discover_script)
+        discover_script.unlink()
 
-        _, _, was_updated, *_ = guard_module._copy_hook_script(config)
+        copied_discovery = guard_module._copy_hook_script(discover_script)
 
-        assert was_updated is True
+        assert copied_discovery.updated is True
 
     def test_copy_reports_no_update_when_both_scripts_are_current(self, tmp_path):
         config = tmp_path / "settings.json"
-        guard_module._copy_hook_script(config)
+        main_script = guard_module._forwarder_script_path(config)
+        discover_script = guard_module._discover_script_path(config)
+        guard_module._copy_hook_script(main_script)
+        guard_module._copy_hook_script(discover_script)
 
-        _, _, was_updated, *_ = guard_module._copy_hook_script(config)
+        copied_main = guard_module._copy_hook_script(main_script)
+        copied_discovery = guard_module._copy_hook_script(discover_script)
 
-        assert was_updated is False
+        assert copied_main.updated is False
+        assert copied_discovery.updated is False
 
     def test_remove_deletes_both_scripts(self, tmp_path):
         config = tmp_path / "settings.json"
-        main_script, *_ = guard_module._copy_hook_script(config)
-        discover_script = main_script.with_name("snyk-agent-guard-discover.sh")
-        discover_script.write_text("discovery")
+        main_script = guard_module._forwarder_script_path(config)
+        discover_script = guard_module._discover_script_path(config)
+        guard_module._copy_hook_script(main_script)
+        guard_module._copy_hook_script(discover_script)
 
         guard_module._remove_hook_script("claude", config)
 
@@ -733,8 +744,10 @@ class TestDiscoveryHookScriptFiles:
             discover_command=discover_command,
         )
         _write_claude_config(settings, config, preserved)
-        main_script, *_ = guard_module._copy_hook_script(config)
-        discover_script = main_script.with_name("snyk-agent-guard-discover.sh")
+        main_script = guard_module._forwarder_script_path(config)
+        discover_script = guard_module._discover_script_path(config)
+        guard_module._copy_hook_script(main_script)
+        guard_module._copy_hook_script(discover_script)
 
         _run_uninstall(SimpleNamespace(client="claude", file=str(config), managed=False))
 
@@ -748,9 +761,9 @@ class TestWindowsDiscoveryHookScriptFiles:
         config = tmp_path / "settings.json"
 
         with patch(f"{_G}.IS_WINDOWS", True):
-            main_script, *_ = guard_module._copy_hook_script(config)
+            discover_script = guard_module._discover_script_path(config)
+            guard_module._copy_hook_script(discover_script)
 
-        discover_script = main_script.with_name("snyk-agent-guard-discover.ps1")
         assert (
             discover_script.read_bytes()
             == (Path(guard_module.__file__).parent / "hooks" / "snyk-agent-guard-discover.ps1").read_bytes()
@@ -759,20 +772,22 @@ class TestWindowsDiscoveryHookScriptFiles:
     def test_copy_restores_missing_script_and_reports_update(self, tmp_path):
         config = tmp_path / "settings.json"
         with patch(f"{_G}.IS_WINDOWS", True):
-            main_script, *_ = guard_module._copy_hook_script(config)
-            discover_script = main_script.with_name("snyk-agent-guard-discover.ps1")
+            discover_script = guard_module._discover_script_path(config)
+            guard_module._copy_hook_script(discover_script)
             discover_script.unlink()
 
-            _, _, was_updated, *_ = guard_module._copy_hook_script(config)
+            copied_discovery = guard_module._copy_hook_script(discover_script)
 
         assert discover_script.exists()
-        assert was_updated is True
+        assert copied_discovery.updated is True
 
     def test_remove_deletes_both_scripts(self, tmp_path):
         config = tmp_path / "settings.json"
         with patch(f"{_G}.IS_WINDOWS", True):
-            main_script, *_ = guard_module._copy_hook_script(config)
-            discover_script = main_script.with_name("snyk-agent-guard-discover.ps1")
+            main_script = guard_module._forwarder_script_path(config)
+            discover_script = guard_module._discover_script_path(config)
+            guard_module._copy_hook_script(main_script)
+            guard_module._copy_hook_script(discover_script)
 
             guard_module._remove_hook_script("claude", config)
 
@@ -2617,6 +2632,8 @@ _PREPARED: dict[str, dict[str, list[object]]] = {"hooks": {"SessionStart": []}}
 
 _CURRENT_CHECKSUM = "a" * 64
 _NEW_CHECKSUM = "b" * 64
+_DISCOVER_CURRENT_CHECKSUM = "c" * 64
+_DISCOVER_NEW_CHECKSUM = "d" * 64
 
 
 class TestInstallHooksOrchestration:
@@ -2631,10 +2648,7 @@ class TestInstallHooksOrchestration:
         """
         dest = MagicMock(name="dest_path")
         targets = {
-            "copy": (
-                f"{_G}._copy_hook_script",
-                (dest, True, False, _CURRENT_CHECKSUM, _NEW_CHECKSUM, None, None),
-            ),
+            "copy": (f"{_G}._copy_hook_script", _NO_RETURN_VALUE),
             "agent_scan_bin": (f"{_G}._agent_scan_bin", "/usr/local/bin/snyk-agent-scan"),
             "build": (f"{_G}._build_hook_command", "test-cmd"),
             "build_discover": (f"{_G}._build_discover_hook_command", "discover-cmd"),
@@ -2653,11 +2667,32 @@ class TestInstallHooksOrchestration:
             "rich": (f"{_G}.rich", _NO_RETURN_VALUE),
         }
         active = {}
-        m = {"dest": dest}
+        m = {
+            "dest": dest,
+            "main_script": guard_module._CopiedScript(
+                dest,
+                True,
+                False,
+                _CURRENT_CHECKSUM,
+                _NEW_CHECKSUM,
+            ),
+            "discover_script": guard_module._CopiedScript(
+                MagicMock(name="discover_dest_path"),
+                True,
+                False,
+                _DISCOVER_CURRENT_CHECKSUM,
+                _DISCOVER_NEW_CHECKSUM,
+            ),
+        }
         for key, (target, rv) in targets.items():
             p = patch(target) if rv is _NO_RETURN_VALUE else patch(target, return_value=rv)
             active[key] = p
             m[key] = p.start()
+
+        def copy_script(script_dest):
+            return m["discover_script"] if "discover" in script_dest.name else m["main_script"]
+
+        m["copy"].side_effect = copy_script
         yield m
         for p in active.values():
             p.stop()
@@ -2693,12 +2728,15 @@ class TestInstallHooksOrchestration:
         return [c.args[0] for c in ctx["rich"].print.call_args_list if c.args]
 
     # ---------------------------------------------------------------
-    # _copy_hook_script receives only config_path
+    # _copy_hook_script receives one destination path per script
     # ---------------------------------------------------------------
 
     def test_copy_hook_script_includes_discovery_for_regular_config(self, ctx, tmp_path):
         config = self._call(tmp_path, client="claude", config_exists=True)
-        ctx["copy"].assert_called_once_with(config, include_discover=True)
+        assert ctx["copy"].call_args_list == [
+            mock_call(guard_module._forwarder_script_path(config)),
+            mock_call(guard_module._discover_script_path(config)),
+        ]
 
     def test_machine_id_forwarded_to_command_and_test_event(self, ctx, tmp_path):
         self._call(tmp_path, machine_id="machine-42")
@@ -2746,7 +2784,10 @@ class TestInstallHooksOrchestration:
         config = self._call(tmp_path, client="codex", hook_client="codex")
 
         ctx["build_discover"].assert_called_once()
-        ctx["copy"].assert_called_once_with(config, include_discover=True)
+        assert ctx["copy"].call_args_list == [
+            mock_call(guard_module._forwarder_script_path(config)),
+            mock_call(guard_module._discover_script_path(config)),
+        ]
         assert ctx["prep_codex_managed"].call_args.kwargs["discover_command"] == "discover-cmd"
 
     def test_unset_agent_scan_bin_skips_discovery_without_aborting(self, ctx, tmp_path):
@@ -2754,7 +2795,7 @@ class TestInstallHooksOrchestration:
 
         config = self._call(tmp_path, client="claude")
 
-        ctx["copy"].assert_called_once_with(config, include_discover=False)
+        ctx["copy"].assert_called_once_with(guard_module._forwarder_script_path(config))
         ctx["build_discover"].assert_not_called()
         assert ctx["prep_claude"].call_args.kwargs["discover_command"] is None
 
@@ -2884,7 +2925,7 @@ class TestInstallHooksOrchestration:
 
     def test_test_event_sent_when_script_new(self, ctx, tmp_path):
         """first_install=True because script did not exist prior."""
-        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM, None, None)
+        ctx["main_script"] = guard_module._CopiedScript(ctx["dest"], False, True, None, _NEW_CHECKSUM)
         self._call(tmp_path, config_exists=True)
         ctx["test_event"].assert_called_once()
         _, kwargs = ctx["test_event"].call_args
@@ -2904,7 +2945,7 @@ class TestInstallHooksOrchestration:
 
     def test_test_event_receives_diff(self, ctx, tmp_path):
         ctx["prep_claude"].return_value = (_PREPARED, _DIFF_REMOVED, 0)
-        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM, None, None)
+        ctx["main_script"] = guard_module._CopiedScript(ctx["dest"], False, True, None, _NEW_CHECKSUM)
         self._call(tmp_path)
         ctx["test_event"].assert_called_once_with(
             "pk-test",
@@ -2917,14 +2958,14 @@ class TestInstallHooksOrchestration:
             push_key_changed=False,
             current_checksum=None,
             new_checksum=_NEW_CHECKSUM,
-            discover_current_checksum=None,
-            discover_new_checksum=None,
+            discover_current_checksum=_DISCOVER_CURRENT_CHECKSUM,
+            discover_new_checksum=_DISCOVER_NEW_CHECKSUM,
             machine_id="",
         )
 
     def test_test_event_receives_empty_diff(self, ctx, tmp_path):
         ctx["prep_claude"].return_value = (_PREPARED, _DIFF_EMPTY, 0)
-        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM, None, None)
+        ctx["main_script"] = guard_module._CopiedScript(ctx["dest"], False, True, None, _NEW_CHECKSUM)
         self._call(tmp_path)
         ctx["test_event"].assert_called_once_with(
             "pk-test",
@@ -2937,8 +2978,8 @@ class TestInstallHooksOrchestration:
             push_key_changed=False,
             current_checksum=None,
             new_checksum=_NEW_CHECKSUM,
-            discover_current_checksum=None,
-            discover_new_checksum=None,
+            discover_current_checksum=_DISCOVER_CURRENT_CHECKSUM,
+            discover_new_checksum=_DISCOVER_NEW_CHECKSUM,
             machine_id="",
         )
 
@@ -2956,14 +2997,14 @@ class TestInstallHooksOrchestration:
             push_key_changed=False,
             current_checksum=_CURRENT_CHECKSUM,
             new_checksum=_NEW_CHECKSUM,
-            discover_current_checksum=None,
-            discover_new_checksum=None,
+            discover_current_checksum=_DISCOVER_CURRENT_CHECKSUM,
+            discover_new_checksum=_DISCOVER_NEW_CHECKSUM,
             machine_id="",
         )
 
     def test_test_event_push_key_changed(self, ctx, tmp_path):
         ctx["detect_existing"].return_value = {"auth_value": "old-push-key"}
-        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM, None, None)
+        ctx["main_script"] = guard_module._CopiedScript(ctx["dest"], False, True, None, _NEW_CHECKSUM)
         self._call(tmp_path)
         ctx["test_event"].assert_called_once_with(
             "pk-test",
@@ -2976,14 +3017,14 @@ class TestInstallHooksOrchestration:
             push_key_changed=True,
             current_checksum=None,
             new_checksum=_NEW_CHECKSUM,
-            discover_current_checksum=None,
-            discover_new_checksum=None,
+            discover_current_checksum=_DISCOVER_CURRENT_CHECKSUM,
+            discover_new_checksum=_DISCOVER_NEW_CHECKSUM,
             machine_id="",
         )
 
     def test_test_event_push_key_unchanged(self, ctx, tmp_path):
         ctx["detect_existing"].return_value = {"auth_value": "pk-test"}
-        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM, None, None)
+        ctx["main_script"] = guard_module._CopiedScript(ctx["dest"], False, True, None, _NEW_CHECKSUM)
         self._call(tmp_path)
         ctx["test_event"].assert_called_once_with(
             "pk-test",
@@ -2996,8 +3037,8 @@ class TestInstallHooksOrchestration:
             push_key_changed=False,
             current_checksum=None,
             new_checksum=_NEW_CHECKSUM,
-            discover_current_checksum=None,
-            discover_new_checksum=None,
+            discover_current_checksum=_DISCOVER_CURRENT_CHECKSUM,
+            discover_new_checksum=_DISCOVER_NEW_CHECKSUM,
             machine_id="",
         )
 
@@ -3007,7 +3048,7 @@ class TestInstallHooksOrchestration:
 
     def test_test_event_checksums_first_install(self, ctx, tmp_path):
         """First install: current_checksum is None, new_checksum is populated."""
-        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM, None, None)
+        ctx["main_script"] = guard_module._CopiedScript(ctx["dest"], False, True, None, _NEW_CHECKSUM)
         self._call(tmp_path)
         _, kwargs = ctx["test_event"].call_args
         assert kwargs["current_checksum"] is None
@@ -3021,12 +3062,10 @@ class TestInstallHooksOrchestration:
         assert kwargs["new_checksum"] == _NEW_CHECKSUM
 
     def test_test_event_receives_discovery_script_checksums(self, ctx, tmp_path):
-        ctx["copy"].return_value = (
-            ctx["dest"],
+        ctx["discover_script"] = guard_module._CopiedScript(
+            MagicMock(name="discover_dest_path"),
             True,
             False,
-            _CURRENT_CHECKSUM,
-            _NEW_CHECKSUM,
             "discover-current",
             "discover-new",
         )
@@ -3053,14 +3092,14 @@ class TestInstallHooksOrchestration:
         ctx["revoke"].assert_not_called()
 
     def test_test_event_failure_no_revoke_when_not_minted(self, ctx, tmp_path):
-        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM, None, None)
+        ctx["main_script"] = guard_module._CopiedScript(ctx["dest"], False, True, None, _NEW_CHECKSUM)
         ctx["test_event"].return_value = False
         with pytest.raises(SystemExit):
             self._call(tmp_path, minted=False, config_exists=True)
         ctx["revoke"].assert_not_called()
 
     def test_test_event_failure_cleans_new_script(self, ctx, tmp_path):
-        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM, None, None)
+        ctx["main_script"] = guard_module._CopiedScript(ctx["dest"], False, True, None, _NEW_CHECKSUM)
         ctx["test_event"].return_value = False
         with pytest.raises(SystemExit):
             self._call(tmp_path)
@@ -3072,11 +3111,18 @@ class TestInstallHooksOrchestration:
         )
         discover_script = tmp_path / "hooks" / discover_script_name
 
-        def copy_scripts(_config_path, *, include_discover):
-            assert include_discover is True
+        def copy_scripts(dest):
+            if "discover" not in dest.name:
+                return ctx["main_script"]
             discover_script.parent.mkdir(parents=True)
             discover_script.write_text("#!/bin/sh\n")
-            return ctx["dest"], False, True, None, _NEW_CHECKSUM, None, None
+            return guard_module._CopiedScript(
+                discover_script,
+                False,
+                True,
+                None,
+                _DISCOVER_NEW_CHECKSUM,
+            )
 
         ctx["copy"].side_effect = copy_scripts
         ctx["test_event"].return_value = False
@@ -3093,7 +3139,7 @@ class TestInstallHooksOrchestration:
         discover_script = tmp_path / "hooks" / discover_script_name
         discover_script.parent.mkdir(parents=True)
         discover_script.write_text("existing\n")
-        ctx["copy"].return_value = (ctx["dest"], False, True, None, _NEW_CHECKSUM, None, None)
+        ctx["main_script"] = guard_module._CopiedScript(ctx["dest"], False, True, None, _NEW_CHECKSUM)
         ctx["test_event"].return_value = False
 
         with pytest.raises(SystemExit):
@@ -3102,14 +3148,12 @@ class TestInstallHooksOrchestration:
         assert discover_script.read_text() == "existing\n"
 
     def test_test_event_failure_keeps_existing_script(self, ctx, tmp_path):
-        ctx["copy"].return_value = (
+        ctx["main_script"] = guard_module._CopiedScript(
             ctx["dest"],
             True,
             False,
             _CURRENT_CHECKSUM,
             _NEW_CHECKSUM,
-            None,
-            None,
         )
         ctx["test_event"].return_value = False
         with pytest.raises(SystemExit):
@@ -3168,17 +3212,23 @@ class TestInstallHooksOrchestration:
         assert any("hooks installed" in m for m in self._print_messages(ctx))
 
     def test_status_installed_when_script_updated(self, ctx, tmp_path):
-        ctx["copy"].return_value = (
+        ctx["main_script"] = guard_module._CopiedScript(
             ctx["dest"],
             True,
             True,
             _CURRENT_CHECKSUM,
             _NEW_CHECKSUM,
-            None,
-            None,
         )
         ctx["write_claude"].return_value = False
         self._call(tmp_path, config_exists=True)
+        assert any("hooks installed" in m for m in self._print_messages(ctx))
+
+    def test_status_installed_when_discovery_script_updated(self, ctx, tmp_path):
+        ctx["discover_script"] = ctx["discover_script"]._replace(updated=True)
+        ctx["write_claude"].return_value = False
+
+        self._call(tmp_path, config_exists=True)
+
         assert any("hooks installed" in m for m in self._print_messages(ctx))
 
     def test_status_installed_when_minted(self, ctx, tmp_path):
