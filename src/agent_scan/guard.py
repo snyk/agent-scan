@@ -1287,29 +1287,15 @@ def _invoke_hook_script(
     if not machine_id.strip():
         raise ValueError("machine ID is required")
 
-    if IS_WINDOWS:
-        cmd = [
-            "powershell",
-            "-File",
-            str(script_path),
-            "-Client",
-            hook_client,
-            "-PushKey",
-            push_key,
-            "-RemoteUrl",
-            url,
-            "-MachineId",
-            machine_id,
-        ]
-        env = None
-    else:
-        cmd = ["bash", str(script_path), "--client", hook_client]
-        env = {
-            **os.environ,
-            "PUSH_KEY": push_key,
-            "REMOTE_HOOKS_BASE_URL": url,
-            "MACHINE_ID": machine_id,
-        }
+    cmd, env = _render_argv(
+        _HookInvocation(
+            script_path=script_path,
+            hook_client=hook_client,
+            push_key=push_key,
+            url=url,
+            machine_id=machine_id,
+        )
+    )
 
     try:
         result = subprocess.run(
@@ -1636,6 +1622,98 @@ def _revoke_after_failure(url: str, tenant_id: str, snyk_token: str, push_key: s
         rich.print(f"[yellow]Warning:[/yellow] Could not revoke push key: {e}")
 
 
+class _HookInvocation(NamedTuple):
+    """What a hook script needs, independent of how the values are handed over."""
+
+    script_path: Path
+    hook_client: str
+    push_key: str
+    url: str
+    machine_id: str = ""
+    tenant_id: str = ""
+    agent_scan_bin: str = ""
+    scope: str = ""
+    quote_client: bool = False
+
+
+def _render_posix_command(invocation: _HookInvocation) -> str:
+    parts = [
+        f"PUSH_KEY={_shell_quote(invocation.push_key)}",
+        f"REMOTE_HOOKS_BASE_URL={_shell_quote(invocation.url)}",
+    ]
+    if invocation.tenant_id:
+        parts.append(f"TENANT_ID={_shell_quote(invocation.tenant_id)}")
+    if invocation.machine_id:
+        parts.append(f"MACHINE_ID={_shell_quote(invocation.machine_id)}")
+    if invocation.agent_scan_bin:
+        parts.append(f"AGENT_SCAN_BIN={_shell_quote(invocation.agent_scan_bin)}")
+    parts.append(f"bash {_shell_quote(invocation.script_path.as_posix())}")
+    client = _shell_quote(invocation.hook_client) if invocation.quote_client else invocation.hook_client
+    parts.append(f"--client {client}")
+    if invocation.scope:
+        parts.append(f"--scope {invocation.scope}")
+    return " ".join(parts)
+
+
+def _render_powershell_command(invocation: _HookInvocation) -> str:
+    parts = [
+        "powershell",
+        "-File",
+        _ps_quote(str(invocation.script_path)),
+        "-Client",
+        invocation.hook_client,
+        "-PushKey",
+        _ps_quote(invocation.push_key),
+        "-RemoteUrl",
+        _ps_quote(invocation.url),
+    ]
+    if invocation.machine_id:
+        parts.extend(["-MachineId", _ps_quote(invocation.machine_id)])
+    if invocation.agent_scan_bin:
+        parts.extend(["-AgentScanBin", _ps_quote(invocation.agent_scan_bin)])
+    if invocation.scope:
+        parts.extend(["-Scope", invocation.scope])
+    return " ".join(parts)
+
+
+def _render_argv(invocation: _HookInvocation) -> tuple[list[str], dict[str, str] | None]:
+    if IS_WINDOWS:
+        argv = [
+            "powershell",
+            "-File",
+            str(invocation.script_path),
+            "-Client",
+            invocation.hook_client,
+            "-PushKey",
+            invocation.push_key,
+            "-RemoteUrl",
+            invocation.url,
+        ]
+        if invocation.machine_id:
+            argv.extend(["-MachineId", invocation.machine_id])
+        if invocation.agent_scan_bin:
+            argv.extend(["-AgentScanBin", invocation.agent_scan_bin])
+        if invocation.scope:
+            argv.extend(["-Scope", invocation.scope])
+        return argv, None
+
+    env = {
+        **os.environ,
+        "PUSH_KEY": invocation.push_key,
+        "REMOTE_HOOKS_BASE_URL": invocation.url,
+    }
+    if invocation.tenant_id:
+        env["TENANT_ID"] = invocation.tenant_id
+    if invocation.machine_id:
+        env["MACHINE_ID"] = invocation.machine_id
+    if invocation.agent_scan_bin:
+        env["AGENT_SCAN_BIN"] = invocation.agent_scan_bin
+    argv = ["bash", str(invocation.script_path), "--client", invocation.hook_client]
+    if invocation.scope:
+        argv.extend(["--scope", invocation.scope])
+    return argv, env
+
+
 def _build_hook_command(
     push_key: str,
     url: str,
@@ -1645,26 +1723,17 @@ def _build_hook_command(
     tenant_id: str = "",
     machine_id: str = "",
 ) -> str:
+    invocation = _HookInvocation(
+        script_path=script_path,
+        hook_client=hook_client,
+        push_key=push_key,
+        url=url,
+        machine_id=machine_id,
+        tenant_id=tenant_id,
+    )
     if IS_WINDOWS:
-        return _build_hook_command_powershell(
-            push_key,
-            url,
-            script_path,
-            hook_client,
-            tenant_id=tenant_id,
-            machine_id=machine_id,
-        )
-    parts = [
-        f"PUSH_KEY={_shell_quote(push_key)}",
-        f"REMOTE_HOOKS_BASE_URL={_shell_quote(url)}",
-    ]
-    if tenant_id:
-        parts.append(f"TENANT_ID={_shell_quote(tenant_id)}")
-    if machine_id:
-        parts.append(f"MACHINE_ID={_shell_quote(machine_id)}")
-    parts.append(f"bash {_shell_quote(script_path.as_posix())}")
-    parts.append(f"--client {hook_client}")
-    return " ".join(parts)
+        return _render_powershell_command(invocation)
+    return _render_posix_command(invocation)
 
 
 def _agent_scan_bin() -> str | None:
@@ -1682,48 +1751,19 @@ def _build_discover_hook_command(
     tenant_id: str = "",
     machine_id: str = "",
 ) -> str:
-    if IS_WINDOWS:
-        return _build_discover_hook_command_powershell(
-            push_key,
-            url,
-            script_path,
-            hook_client,
-            agent_scan_bin=agent_scan_bin,
-            tenant_id=tenant_id,
-            machine_id=machine_id,
-        )
-    parts = [
-        f"PUSH_KEY={_shell_quote(push_key)}",
-        f"REMOTE_HOOKS_BASE_URL={_shell_quote(url)}",
-    ]
-    if machine_id:
-        parts.append(f"MACHINE_ID={_shell_quote(machine_id)}")
-    parts.append(f"AGENT_SCAN_BIN={_shell_quote(agent_scan_bin)}")
-    parts.append(f"bash {_shell_quote(script_path.as_posix())}")
-    parts.append(f"--client {_shell_quote(hook_client)}")
-    parts.append("--scope servers")
-    return " ".join(parts)
-
-
-def _build_discover_hook_command_powershell(
-    push_key: str,
-    url: str,
-    script_path: Path,
-    hook_client: str,
-    *,
-    agent_scan_bin: str,
-    tenant_id: str = "",
-    machine_id: str = "",
-) -> str:
-    command = (
-        f"powershell -File {_ps_quote(str(script_path))} -Client {hook_client} "
-        f"-PushKey {_ps_quote(push_key)} -RemoteUrl {_ps_quote(url)}"
+    invocation = _HookInvocation(
+        script_path=script_path,
+        hook_client=hook_client,
+        push_key=push_key,
+        url=url,
+        machine_id=machine_id,
+        agent_scan_bin=agent_scan_bin,
+        scope="servers",
+        quote_client=True,
     )
-    if machine_id:
-        command += f" -MachineId {_ps_quote(machine_id)}"
-    command += f" -AgentScanBin {_ps_quote(agent_scan_bin)}"
-    command += " -Scope servers"
-    return command
+    if IS_WINDOWS:
+        return _render_powershell_command(invocation)
+    return _render_posix_command(invocation)
 
 
 def _build_hook_command_powershell(
@@ -1735,13 +1775,15 @@ def _build_hook_command_powershell(
     tenant_id: str = "",
     machine_id: str = "",
 ) -> str:
-    command = (
-        f"powershell -File {_ps_quote(str(script_path))} -Client {hook_client} "
-        f"-PushKey {_ps_quote(push_key)} -RemoteUrl {_ps_quote(url)}"
+    return _render_powershell_command(
+        _HookInvocation(
+            script_path=script_path,
+            hook_client=hook_client,
+            push_key=push_key,
+            url=url,
+            machine_id=machine_id,
+        )
     )
-    if machine_id:
-        command += f" -MachineId {_ps_quote(machine_id)}"
-    return command
 
 
 def _shell_quote(s: str) -> str:
