@@ -17,7 +17,7 @@ from mcp.types import (
 )
 from pytest_lazy_fixtures import lf
 
-from agent_scan.mcp_client import _check_server_pass, check_server, scan_mcp_config_file
+from agent_scan.mcp_client import _check_server_pass, check_server, get_client, scan_mcp_config_file
 from agent_scan.models import RemoteServer, StdioServer
 from agent_scan.utils import resolve_command_and_args
 
@@ -99,6 +99,35 @@ async def test_check_server_mocked(mock_stdio_client):
     assert len(signature.prompts) == 2
     assert len(signature.resources) == 1
     assert len(signature.tools) == 3
+
+
+@pytest.mark.asyncio
+@patch("agent_scan.mcp_client.stdio_client")
+async def test_get_client_expands_env_placeholders_for_stdio_server(mock_stdio_client, monkeypatch):
+    """get_client() must pass the EXPANDED env to StdioServerParameters, not
+    the literal ${VAR} placeholder from the parsed config."""
+    monkeypatch.setenv("AUTH_HEADER", "Bearer real-secret-value")
+
+    mock_read = AsyncMock()
+    mock_write = AsyncMock()
+    mock_client = AsyncMock()
+    mock_client.__aenter__.return_value = (mock_read, mock_write)
+    mock_stdio_client.return_value = mock_client
+
+    server = StdioServer(
+        command="npx",
+        args=["-y", "mcp-remote@0.3.0", "https://example.com/mcp", "--header", "Authorization:${AUTH_HEADER}"],
+        env={"AUTH_HEADER": "${AUTH_HEADER}"},
+    )
+
+    async with get_client(server, timeout=5):
+        pass
+
+    assert mock_stdio_client.call_count == 1
+    called_params = mock_stdio_client.call_args.args[0]
+    assert called_params.env == {"AUTH_HEADER": "Bearer real-secret-value"}
+    # The parsed model itself must be untouched -- still the literal placeholder.
+    assert server.env == {"AUTH_HEADER": "${AUTH_HEADER}"}
 
 
 @pytest.mark.parametrize(

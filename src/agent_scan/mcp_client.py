@@ -38,7 +38,7 @@ from agent_scan.oauth_store import (
     ensure_fresh_token,
 )
 from agent_scan.traffic_capture import PipeStderrCapture, TrafficCapture, capturing_client
-from agent_scan.utils import resolve_command_and_args
+from agent_scan.utils import expand_env_vars, resolve_command_and_args
 
 # Set up logger for this module
 logger = logging.getLogger(__name__)
@@ -148,7 +148,7 @@ async def get_client(
         server_params = StdioServerParameters(
             command=command,
             args=args,
-            env=server_config.env,
+            env=expand_env_vars(server_config.env),
         )
         # Create stderr capture with real pipe if traffic capture is enabled.
         # When streaming is requested, the capture also forwards each line to
