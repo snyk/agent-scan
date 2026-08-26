@@ -251,7 +251,7 @@ class TestExtractEnvFromCmd:
             "discover",
             False,
             "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' MACHINE_ID='machine' "
-            "AGENT_SCAN_BIN='/usr/local/bin/snyk-agent-scan' bash '/x/snyk-agent-guard-discover.sh' "
+            "AGENT_SCAN_COMMAND='/usr/local/bin/snyk-agent-scan' bash '/x/snyk-agent-guard-discover.sh' "
             "--client 'claude-code' --scope servers",
         ),
         (
@@ -259,7 +259,7 @@ class TestExtractEnvFromCmd:
             True,
             "powershell -File 'C:\\hooks\\snyk-agent-guard-discover.ps1' -Client claude-code -PushKey 'pk' "
             "-RemoteUrl 'https://api.snyk.io' -MachineId 'machine' "
-            "-AgentScanBin 'C:\\Program Files\\Snyk\\snyk-agent-scan.exe' -Scope servers",
+            "-AgentScanCommand 'C:\\Program Files\\Snyk\\snyk-agent-scan.exe' -Scope servers",
         ),
     ],
 )
@@ -288,7 +288,7 @@ def test_build_hook_command_preserves_exact_output(variant, is_windows, expected
                 "https://api.snyk.io",
                 script_path,
                 "claude-code",
-                agent_scan_bin=(
+                agent_scan_command=(
                     r"C:\Program Files\Snyk\snyk-agent-scan.exe" if is_windows else "/usr/local/bin/snyk-agent-scan"
                 ),
                 tenant_id="tenant",
@@ -377,22 +377,22 @@ class TestBuildHookCommand:
             assert _extract_env_from_cmd(cmd, "TENANT_ID") == "t-1"
 
 
-class TestAgentScanBin:
+class TestAgentScanCommand:
     def test_uses_environment_value(self, monkeypatch):
-        monkeypatch.setenv("AGENT_SCAN_BIN", "custom agent scan")
+        monkeypatch.setenv("AGENT_SCAN_COMMAND", "cd /repo; uv run -m src.agent_scan.cli")
 
-        assert guard_module._agent_scan_bin() == "custom agent scan"
+        assert guard_module._agent_scan_command() == "cd /repo; uv run -m src.agent_scan.cli"
 
     def test_returns_none_when_environment_unset(self, monkeypatch):
-        monkeypatch.delenv("AGENT_SCAN_BIN", raising=False)
+        monkeypatch.delenv("AGENT_SCAN_COMMAND", raising=False)
 
-        assert guard_module._agent_scan_bin() is None
+        assert guard_module._agent_scan_command() is None
 
     @pytest.mark.parametrize("value", ["", "   "])
     def test_returns_none_when_environment_value_is_blank(self, monkeypatch, value):
-        monkeypatch.setenv("AGENT_SCAN_BIN", value)
+        monkeypatch.setenv("AGENT_SCAN_COMMAND", value)
 
-        assert guard_module._agent_scan_bin() is None
+        assert guard_module._agent_scan_command() is None
 
 
 class TestBuildDiscoverHookCommand:
@@ -406,14 +406,14 @@ class TestBuildDiscoverHookCommand:
         assert HOOK_CLIENTS[client].target_folder_field == expected_field
 
     @pytest.mark.parametrize("client", ["claude-code", "cursor", "codex"])
-    def test_builds_quoted_environment_prefix_with_agent_scan_binary(self, client):
+    def test_builds_quoted_environment_prefix_with_agent_scan_command(self, client):
         with patch(f"{_G}.IS_WINDOWS", False):
             command = guard_module._build_discover_hook_command(
                 "pk",
                 "https://api.snyk.io",
                 Path("/x/snyk-agent-guard-discover.sh"),
                 client,
-                agent_scan_bin="/opt/Snyk's bin/snyk-agent-scan",
+                agent_scan_command="/opt/Snyk's bin/snyk-agent-scan",
                 tenant_id="tenant",
                 machine_id="machine",
             )
@@ -422,7 +422,7 @@ class TestBuildDiscoverHookCommand:
         assert "REMOTE_HOOKS_BASE_URL='https://api.snyk.io'" in command
         assert "TENANT_ID=" not in command
         assert "MACHINE_ID='machine'" in command
-        assert "AGENT_SCAN_BIN='/opt/Snyk'\"'\"'s bin/snyk-agent-scan'" in command
+        assert "AGENT_SCAN_COMMAND='/opt/Snyk'\"'\"'s bin/snyk-agent-scan'" in command
         assert command.endswith(f"bash '/x/snyk-agent-guard-discover.sh' --client '{client}' --scope servers")
         assert _is_agent_scan_command(command)
 
@@ -434,7 +434,7 @@ class TestBuildDiscoverHookCommand:
                 "https://api.snyk.io",
                 Path(r"C:\hooks\snyk-agent-guard-discover.ps1"),
                 client,
-                agent_scan_bin=r"C:\Program Files\Snyk\snyk-agent-scan.exe",
+                agent_scan_command=r"C:\Program Files\Snyk\snyk-agent-scan.exe",
                 tenant_id="ignored",
                 machine_id="machine's-id",
             )
@@ -442,7 +442,7 @@ class TestBuildDiscoverHookCommand:
         assert command == (
             rf"powershell -File 'C:\hooks\snyk-agent-guard-discover.ps1' -Client {client} "
             "-PushKey 'pk' -RemoteUrl 'https://api.snyk.io' -MachineId 'machine''s-id' "
-            r"-AgentScanBin 'C:\Program Files\Snyk\snyk-agent-scan.exe' -Scope servers"
+            r"-AgentScanCommand 'C:\Program Files\Snyk\snyk-agent-scan.exe' -Scope servers"
         )
 
     def test_powershell_escapes_single_quotes_in_paths(self):
@@ -452,11 +452,31 @@ class TestBuildDiscoverHookCommand:
                 "https://api.snyk.io",
                 Path(r"C:\Users\O'Brien\discover.ps1"),
                 "claude-code",
-                agent_scan_bin=r"C:\Users\O'Brien\snyk-agent-scan.exe",
+                agent_scan_command=r"C:\Users\O'Brien\snyk-agent-scan.exe",
             )
 
         assert r"-File 'C:\Users\O''Brien\discover.ps1'" in command
-        assert r"-AgentScanBin 'C:\Users\O''Brien\snyk-agent-scan.exe'" in command
+        assert r"-AgentScanCommand 'C:\Users\O''Brien\snyk-agent-scan.exe'" in command
+
+    @pytest.mark.parametrize(
+        "is_windows, expected",
+        [
+            (False, "AGENT_SCAN_COMMAND='cd /repo; uv run -m src.agent_scan.cli'"),
+            (True, "-AgentScanCommand 'cd /repo; uv run -m src.agent_scan.cli'"),
+        ],
+    )
+    def test_preserves_multi_word_shell_command(self, is_windows, expected):
+        script = Path(r"C:\hooks\snyk-agent-guard-discover.ps1" if is_windows else "/hooks/discover.sh")
+        with patch(f"{_G}.IS_WINDOWS", is_windows):
+            command = guard_module._build_discover_hook_command(
+                "pk",
+                "https://api.snyk.io",
+                script,
+                "claude-code",
+                agent_scan_command="cd /repo; uv run -m src.agent_scan.cli",
+            )
+
+        assert expected in command
 
 
 class TestHookInvocationRenderers:
@@ -516,7 +536,7 @@ class TestHookInvocationRenderers:
             url="https://api.snyk.io",
             machine_id="machine",
             tenant_id="tenant",
-            agent_scan_bin="/opt/Snyk's bin/snyk-agent-scan",
+            agent_scan_command="/opt/Snyk's bin/snyk-agent-scan",
             scope="servers",
             quote_client=True,
         )
@@ -538,7 +558,7 @@ class TestHookInvocationRenderers:
             "REMOTE_HOOKS_BASE_URL": "https://api.snyk.io",
             "TENANT_ID": "tenant",
             "MACHINE_ID": "machine",
-            "AGENT_SCAN_BIN": "/opt/Snyk's bin/snyk-agent-scan",
+            "AGENT_SCAN_COMMAND": "/opt/Snyk's bin/snyk-agent-scan",
         }
 
     def test_render_argv_windows_carries_discovery_fields(self):
@@ -549,7 +569,7 @@ class TestHookInvocationRenderers:
             url="https://api.snyk.io",
             machine_id="machine",
             tenant_id="tenant",
-            agent_scan_bin=r"C:\Program Files\Snyk\snyk-agent-scan.exe",
+            agent_scan_command=r"C:\Program Files\Snyk\snyk-agent-scan.exe",
             scope="servers",
         )
 
@@ -568,7 +588,7 @@ class TestHookInvocationRenderers:
             "https://api.snyk.io",
             "-MachineId",
             "machine",
-            "-AgentScanBin",
+            "-AgentScanCommand",
             r"C:\Program Files\Snyk\snyk-agent-scan.exe",
             "-Scope",
             "servers",
@@ -846,8 +866,13 @@ class TestDiscoveryHookScriptFiles:
         assert discover_script.read_text() == (
             "#!/usr/bin/env bash\nset -euo pipefail\n"
             '[[ -n "${MACHINE_ID:-}" ]] || exit 0\n'
-            '[[ -n "${AGENT_SCAN_BIN:-}" ]] || exit 0\n'
-            '"$AGENT_SCAN_BIN" guard discover "$@" >/dev/null 2>&1 || true\n'
+            '[[ -n "${AGENT_SCAN_COMMAND:-}" ]] || exit 0\n'
+            'if [[ -x "$AGENT_SCAN_COMMAND" ]]; then\n'
+            '  "$AGENT_SCAN_COMMAND" guard discover "$@" >/dev/null 2>&1 || true\n'
+            "else\n"
+            "  # TODO: ProdSec needs to review this shell-evaluation path before release.\n"
+            '  eval "$AGENT_SCAN_COMMAND guard discover \\"\\$@\\"" >/dev/null 2>&1 || true\n'
+            "fi\n"
             "exit 0\n"
         )
         assert os.access(discover_script, os.X_OK)
@@ -868,7 +893,7 @@ class TestDiscoveryHookScriptFiles:
         assert script.current_checksum == hashlib.sha256(b"stale discovery script\n").hexdigest()
         assert script.new_checksum == hashlib.sha256(discover_script.read_bytes()).hexdigest()
 
-    def test_stale_absolute_binary_does_not_fall_back_to_path(self, tmp_path):
+    def test_stale_absolute_command_does_not_fall_back_to_path(self, tmp_path):
         script = Path(guard_module.__file__).parent / "hooks" / "snyk-agent-guard-discover.sh"
         bin_dir = tmp_path / "bin"
         bin_dir.mkdir()
@@ -878,7 +903,7 @@ class TestDiscoveryHookScriptFiles:
         stub.chmod(0o755)
         env = {
             **os.environ,
-            "AGENT_SCAN_BIN": str(tmp_path / "deleted" / "snyk-agent-scan"),
+            "AGENT_SCAN_COMMAND": str(tmp_path / "deleted" / "snyk-agent-scan"),
             "MACHINE_ID": "machine-42",
             "MARKER": str(marker),
             "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
@@ -896,7 +921,7 @@ class TestDiscoveryHookScriptFiles:
         assert result.returncode == 0
         assert not marker.exists()
 
-    def test_unset_binary_does_not_fall_back_to_path(self, tmp_path):
+    def test_unset_command_does_not_fall_back_to_path(self, tmp_path):
         script = Path(guard_module.__file__).parent / "hooks" / "snyk-agent-guard-discover.sh"
         bin_dir = tmp_path / "bin"
         bin_dir.mkdir()
@@ -909,7 +934,7 @@ class TestDiscoveryHookScriptFiles:
             "MACHINE_ID": "machine-42",
             "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
         }
-        env.pop("AGENT_SCAN_BIN", None)
+        env.pop("AGENT_SCAN_COMMAND", None)
 
         result = subprocess.run(
             ["bash", str(script), "--client", "claude-code"],
@@ -923,6 +948,80 @@ class TestDiscoveryHookScriptFiles:
         assert result.returncode == 0
         assert not marker.exists()
 
+    def test_multi_word_command_receives_prefix_and_hook_arguments(self, tmp_path):
+        script = Path(guard_module.__file__).parent / "hooks" / "snyk-agent-guard-discover.sh"
+        marker = tmp_path / "invoked"
+        stub = tmp_path / "runner"
+        stub.write_text('#!/bin/sh\nprintf "%s\\n" "$*" > "$MARKER"\n')
+        stub.chmod(0o755)
+
+        result = subprocess.run(
+            ["bash", str(script), "--client", "claude-code", "--scope", "servers"],
+            input="{}",
+            text=True,
+            capture_output=True,
+            timeout=5,
+            env={
+                **os.environ,
+                "AGENT_SCAN_COMMAND": f"{stub} arg1",
+                "MACHINE_ID": "machine-42",
+                "MARKER": str(marker),
+            },
+        )
+
+        assert result.returncode == 0
+        assert marker.read_text() == "arg1 guard discover --client claude-code --scope servers\n"
+
+    def test_shell_syntax_command_runs_from_requested_directory(self, tmp_path):
+        script = Path(guard_module.__file__).parent / "hooks" / "snyk-agent-guard-discover.sh"
+        marker = tmp_path / "invoked"
+        stub = tmp_path / "runner"
+        stub.write_text('#!/bin/sh\nprintf "%s\\n" "$*" > "$MARKER"\n')
+        stub.chmod(0o755)
+
+        result = subprocess.run(
+            ["bash", str(script), "--client", "cursor", "--scope", "servers"],
+            input="{}",
+            text=True,
+            capture_output=True,
+            timeout=5,
+            env={
+                **os.environ,
+                "AGENT_SCAN_COMMAND": f"cd {_shell_quote(str(tmp_path))}; ./runner",
+                "MACHINE_ID": "machine-42",
+                "MARKER": str(marker),
+            },
+        )
+
+        assert result.returncode == 0
+        assert marker.read_text() == "guard discover --client cursor --scope servers\n"
+
+    def test_executable_path_with_spaces_is_invoked_verbatim(self, tmp_path):
+        script = Path(guard_module.__file__).parent / "hooks" / "snyk-agent-guard-discover.sh"
+        marker = tmp_path / "invoked"
+        stub_dir = tmp_path / "dir with spaces"
+        stub_dir.mkdir()
+        stub = stub_dir / "runner"
+        stub.write_text('#!/bin/sh\nprintf "%s\\n" "$*" > "$MARKER"\n')
+        stub.chmod(0o755)
+
+        result = subprocess.run(
+            ["bash", str(script), "--client", "codex", "--scope", "servers"],
+            input="{}",
+            text=True,
+            capture_output=True,
+            timeout=5,
+            env={
+                **os.environ,
+                "AGENT_SCAN_COMMAND": str(stub),
+                "MACHINE_ID": "machine-42",
+                "MARKER": str(marker),
+            },
+        )
+
+        assert result.returncode == 0
+        assert marker.read_text() == "guard discover --client codex --scope servers\n"
+
     def test_nonzero_discovery_exit_is_swallowed(self, tmp_path):
         script = Path(guard_module.__file__).parent / "hooks" / "snyk-agent-guard-discover.sh"
         stub = tmp_path / "snyk-agent-scan"
@@ -935,18 +1034,18 @@ class TestDiscoveryHookScriptFiles:
             text=True,
             capture_output=True,
             timeout=5,
-            env={**os.environ, "AGENT_SCAN_BIN": str(stub), "MACHINE_ID": "machine-42"},
+            env={**os.environ, "AGENT_SCAN_COMMAND": str(stub), "MACHINE_ID": "machine-42"},
         )
 
         assert result.returncode == 0
 
-    def test_missing_machine_id_exits_zero_without_invoking_binary(self, tmp_path):
+    def test_missing_machine_id_exits_zero_without_invoking_command(self, tmp_path):
         script = Path(guard_module.__file__).parent / "hooks" / "snyk-agent-guard-discover.sh"
         marker = tmp_path / "invoked"
         stub = tmp_path / "snyk-agent-scan"
         stub.write_text(f"#!/bin/sh\ntouch '{marker}'\n")
         stub.chmod(0o755)
-        env = {**os.environ, "AGENT_SCAN_BIN": str(stub)}
+        env = {**os.environ, "AGENT_SCAN_COMMAND": str(stub)}
         env.pop("MACHINE_ID", None)
 
         result = subprocess.run(
@@ -1922,7 +2021,7 @@ CODEX_AGENT_SCAN_CMD = (
 )
 CODEX_DISCOVER_CMD = (
     "PUSH_KEY='pk-discover' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' "
-    "AGENT_SCAN_BIN='/usr/local/bin/snyk-agent-scan' "
+    "AGENT_SCAN_COMMAND='/usr/local/bin/snyk-agent-scan' "
     "bash '/home/u/.codex/hooks/snyk-agent-guard-discover.sh' --client codex --scope servers"
 )
 
@@ -2468,7 +2567,7 @@ class TestCodexManagedRequirementsToml:
             patch(f"{_G}.IS_WINDOWS", False),
             patch(f"{_G}._send_test_event", return_value=True),
             patch(f"{_G}.rich"),
-            patch.dict(os.environ, {"AGENT_SCAN_BIN": "/usr/local/bin/snyk-agent-scan"}),
+            patch.dict(os.environ, {"AGENT_SCAN_COMMAND": "/usr/local/bin/snyk-agent-scan"}),
         ):
             _install_hooks(
                 "codex",
@@ -2489,9 +2588,9 @@ class TestCodexManagedRequirementsToml:
         text = path.read_text()
         assert text.count("[[hooks.SessionStart]]") == 2
         assert "snyk-agent-guard-discover.sh" in text
-        assert "AGENT_SCAN_BIN='/usr/local/bin/snyk-agent-scan'" in text
+        assert "AGENT_SCAN_COMMAND='/usr/local/bin/snyk-agent-scan'" in text
 
-    def test_guard_install_without_agent_scan_bin_warns_and_removes_stale_discovery_script(self, tmp_path):
+    def test_guard_install_without_agent_scan_command_warns_and_removes_stale_discovery_script(self, tmp_path):
         path = tmp_path / "requirements.toml"
         discover_script = tmp_path / "hooks" / "snyk-agent-guard-discover.sh"
         discover_script.parent.mkdir(parents=True)
@@ -2499,7 +2598,7 @@ class TestCodexManagedRequirementsToml:
 
         with (
             patch(f"{_G}.IS_WINDOWS", False),
-            patch(f"{_G}._agent_scan_bin", return_value=None),
+            patch(f"{_G}._agent_scan_command", return_value=None),
             patch(f"{_G}._send_test_event", return_value=True),
             patch(f"{_G}.rich") as rich,
         ):
@@ -2519,7 +2618,7 @@ class TestCodexManagedRequirementsToml:
 
         assert not discover_script.exists()
         assert "snyk-agent-guard-discover" not in path.read_text()
-        assert any("AGENT_SCAN_BIN is not set" in call.args[0] for call in rich.print.call_args_list if call.args)
+        assert any("AGENT_SCAN_COMMAND is not set" in call.args[0] for call in rich.print.call_args_list if call.args)
 
     def test_detect_after_install(self, tmp_path):
         install, _, detect, _ = self._import_managed_helpers()
@@ -2871,7 +2970,7 @@ class TestPowerShellDiscoveryHookScript:
 
         result = self._run(
             script,
-            ["-AgentScanBin", str(stub), "-MachineId", "machine-42"],
+            ["-AgentScanCommand", str(stub), "-MachineId", "machine-42"],
             {**os.environ, "MARKER": str(marker)},
             payload=payload,
         )
@@ -2888,26 +2987,26 @@ class TestPowerShellDiscoveryHookScript:
 
         result = self._run(
             script,
-            ["-AgentScanBin", str(stub), "-MachineId", "machine-42"],
+            ["-AgentScanCommand", str(stub), "-MachineId", "machine-42"],
             dict(os.environ),
         )
 
         assert result.returncode == 0
         assert result.stderr == ""
 
-    def test_missing_machine_id_exits_zero_without_invoking_binary(self, tmp_path):
+    def test_missing_machine_id_exits_zero_without_invoking_command(self, tmp_path):
         script = _get_script_path("snyk-agent-guard-discover.ps1")
         marker = tmp_path / "invoked"
         stub = self._recording_stub(tmp_path, marker)
         env = {**os.environ, "MARKER": str(marker)}
         env.pop("MACHINE_ID", None)
 
-        result = self._run(script, ["-AgentScanBin", str(stub)], env)
+        result = self._run(script, ["-AgentScanCommand", str(stub)], env)
 
         assert result.returncode == 0
         assert not marker.exists()
 
-    def test_stale_absolute_binary_does_not_fall_back_to_path(self, tmp_path):
+    def test_stale_absolute_command_does_not_fall_back_to_path(self, tmp_path):
         script = _get_script_path("snyk-agent-guard-discover.ps1")
         bin_dir = tmp_path / "bin"
         bin_dir.mkdir()
@@ -2921,14 +3020,14 @@ class TestPowerShellDiscoveryHookScript:
 
         result = self._run(
             script,
-            ["-AgentScanBin", str(tmp_path / "deleted" / "snyk-agent-scan.exe"), "-MachineId", "machine-42"],
+            ["-AgentScanCommand", str(tmp_path / "deleted" / "snyk-agent-scan.exe"), "-MachineId", "machine-42"],
             env,
         )
 
         assert result.returncode == 0, result.stderr
         assert not marker.exists()
 
-    def test_unset_binary_does_not_fall_back_to_path(self, tmp_path):
+    def test_unset_command_does_not_fall_back_to_path(self, tmp_path):
         script = _get_script_path("snyk-agent-guard-discover.ps1")
         bin_dir = tmp_path / "bin"
         bin_dir.mkdir()
@@ -2940,7 +3039,7 @@ class TestPowerShellDiscoveryHookScript:
             "MACHINE_ID": "machine-42",
             "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
         }
-        env.pop("AGENT_SCAN_BIN", None)
+        env.pop("AGENT_SCAN_COMMAND", None)
 
         result = self._run(script, [], env)
 
@@ -3386,7 +3485,7 @@ class TestInstallHooksOrchestration:
         dest = MagicMock(name="dest_path")
         targets = {
             "copy": (f"{_G}._copy_hook_script", _NO_RETURN_VALUE),
-            "agent_scan_bin": (f"{_G}._agent_scan_bin", "/usr/local/bin/snyk-agent-scan"),
+            "agent_scan_command": (f"{_G}._agent_scan_command", "/usr/local/bin/snyk-agent-scan"),
             "build": (f"{_G}._build_hook_command", "test-cmd"),
             "build_discover": (f"{_G}._build_discover_hook_command", "discover-cmd"),
             "prep_claude": (f"{_G}._prepare_claude_config", (_PREPARED, _DIFF_REMOVED, 0)),
@@ -3484,7 +3583,7 @@ class TestInstallHooksOrchestration:
 
         ctx["build_discover"].assert_called_once()
         assert ctx["build_discover"].call_args.kwargs == {
-            "agent_scan_bin": "/usr/local/bin/snyk-agent-scan",
+            "agent_scan_command": "/usr/local/bin/snyk-agent-scan",
             "tenant_id": "tid-1",
             "machine_id": "machine-42",
             "hook_client": "claude-code",
@@ -3525,8 +3624,8 @@ class TestInstallHooksOrchestration:
         ]
         assert ctx["prep_codex_managed"].call_args.kwargs["discover_command"] == "discover-cmd"
 
-    def test_unset_agent_scan_bin_skips_discovery_without_aborting(self, ctx, tmp_path):
-        ctx["agent_scan_bin"].return_value = None
+    def test_unset_agent_scan_command_skips_discovery_without_aborting(self, ctx, tmp_path):
+        ctx["agent_scan_command"].return_value = None
 
         config = self._call(tmp_path, client="claude")
 
@@ -3538,19 +3637,19 @@ class TestInstallHooksOrchestration:
         "client, hook_client",
         [("claude", "claude-code"), ("cursor", "cursor"), ("codex", "codex")],
     )
-    def test_unset_agent_scan_bin_warns_once_per_client(self, ctx, tmp_path, client, hook_client):
-        ctx["agent_scan_bin"].return_value = None
+    def test_unset_agent_scan_command_warns_once_per_client(self, ctx, tmp_path, client, hook_client):
+        ctx["agent_scan_command"].return_value = None
 
         self._call(tmp_path, client=client, hook_client=hook_client)
 
-        warnings = [message for message in self._print_messages(ctx) if "AGENT_SCAN_BIN is not set" in message]
+        warnings = [message for message in self._print_messages(ctx) if "AGENT_SCAN_COMMAND is not set" in message]
         assert warnings == [
-            "[yellow]Warning:[/yellow] AGENT_SCAN_BIN is not set; "
+            "[yellow]Warning:[/yellow] AGENT_SCAN_COMMAND is not set; "
             "the session-start discovery hook will not be installed"
         ]
 
-    def test_unset_agent_scan_bin_removes_stale_script_after_config_write(self, ctx, tmp_path):
-        ctx["agent_scan_bin"].return_value = None
+    def test_unset_agent_scan_command_removes_stale_script_after_config_write(self, ctx, tmp_path):
+        ctx["agent_scan_command"].return_value = None
         discover_script = guard_module._discover_script_path(tmp_path / "config.json")
         discover_script.parent.mkdir(parents=True)
         discover_script.write_text("stale\n")
@@ -3566,8 +3665,8 @@ class TestInstallHooksOrchestration:
         assert not discover_script.exists()
         assert any("Removed stale hook script" in message for message in self._print_messages(ctx))
 
-    def test_unset_agent_scan_bin_keeps_stale_script_when_test_event_fails(self, ctx, tmp_path):
-        ctx["agent_scan_bin"].return_value = None
+    def test_unset_agent_scan_command_keeps_stale_script_when_test_event_fails(self, ctx, tmp_path):
+        ctx["agent_scan_command"].return_value = None
         ctx["test_event"].return_value = False
         discover_script = guard_module._discover_script_path(tmp_path / "config.json")
         discover_script.parent.mkdir(parents=True)

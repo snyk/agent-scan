@@ -18,7 +18,7 @@ param(
     [string]$MachineId,
 
     [Parameter(Mandatory=$false)]
-    [string]$AgentScanBin,
+    [string]$AgentScanCommand,
 
     [Parameter(Mandatory=$false)]
     [ValidateSet("servers","skills","all")]
@@ -33,8 +33,8 @@ if (-not $MachineId) { $MachineId = $env:MACHINE_ID }
 if (-not $MachineId) { exit 0 }
 $env:MACHINE_ID = $MachineId
 
-$bin = if ($AgentScanBin) { $AgentScanBin } elseif ($env:AGENT_SCAN_BIN) { $env:AGENT_SCAN_BIN } else { $null }
-if (-not $bin) { exit 0 }
+$cmd = if ($AgentScanCommand) { $AgentScanCommand } elseif ($env:AGENT_SCAN_COMMAND) { $env:AGENT_SCAN_COMMAND } else { $null }
+if (-not $cmd) { exit 0 }
 
 $arguments = @("guard", "discover", "--client", $Client, "--scope", $Scope)
 
@@ -43,7 +43,12 @@ $arguments = @("guard", "discover", "--client", $Client, "--scope", $Scope)
 # cap -- matching snyk-agent-guard-discover.sh, which never touches fd 0. Reading it
 # here instead would block forever on an agent that keeps the pipe open.
 try {
-    & $bin @arguments *> $null
+    if (Test-Path -LiteralPath $cmd -PathType Leaf) {
+        & $cmd @arguments *> $null
+    } else {
+        # TODO: ProdSec needs to review this shell-evaluation path before release.
+        Invoke-Expression "$cmd $($arguments -join ' ')" *> $null
+    }
 } catch {
     # Session-start discovery is best-effort telemetry.
 }

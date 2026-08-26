@@ -201,6 +201,7 @@ def _run_install(args) -> None:
     if not tenant_id:
         tenant_id = (os.environ.get("TENANT_ID", "") or "").strip()
     managed: bool = getattr(args, "managed", False)
+    # for the release i'll create a new PR to add hostname as default for machine_id but i'll make it separate to be clear. machine_id needs to be mandatory if we want to reliably identify the servers
     machine_id = (getattr(args, "machine_id", None) or os.environ.get("MACHINE_ID", "") or "").strip()
     if not machine_id:
         rich.print("[bold red]Error:[/bold red] --machine-id is required (or set the MACHINE_ID environment variable).")
@@ -302,8 +303,6 @@ def _run_install(args) -> None:
         raise
 
     if first_installed_client is not None:
-        # ``_servers_discovered_entries`` never emits skills, so requesting them here
-        # would walk every skills dir only to discard the result.
         _send_servers_discovered_event(
             push_key,
             url,
@@ -495,11 +494,11 @@ def _install_hooks(
     old_push_key = existing_info.get("auth_value", "") if existing_info else ""
     push_key_changed = bool(old_push_key) and old_push_key != push_key
 
-    agent_scan_bin = _agent_scan_bin()
-    install_discovery = agent_scan_bin is not None
-    if agent_scan_bin is None:
+    agent_scan_command = _agent_scan_command()
+    install_discovery = agent_scan_command is not None
+    if agent_scan_command is None:
         rich.print(
-            "[yellow]Warning:[/yellow] AGENT_SCAN_BIN is not set; "
+            "[yellow]Warning:[/yellow] AGENT_SCAN_COMMAND is not set; "
             "the session-start discovery hook will not be installed"
         )
     discover_script_path = _discover_script_path(config_path)
@@ -520,12 +519,12 @@ def _install_hooks(
     )
     discover_command = None
     if install_discovery:
-        assert agent_scan_bin is not None
+        assert agent_scan_command is not None
         discover_command = _build_discover_hook_command(
             push_key,
             url,
             discover_script_path,
-            agent_scan_bin=agent_scan_bin,
+            agent_scan_command=agent_scan_command,
             tenant_id=tenant_id,
             machine_id=machine_id,
             hook_client=hook_client,
@@ -773,6 +772,13 @@ def _prepare_codex_managed_config(
     """Build new Codex managed TOML content and compute diff, without writing.
 
     Returns (new_content, hooks_diff).
+
+    Unlike the JSON clients, this rewrites requirements.toml wholesale: the
+    content is rendered from scratch, so any hooks, features or tables we do
+    not own are dropped on write. They are also absent from the returned diff,
+    because _parse_codex_requirements_toml only reports commands that match
+    _is_agent_scan_command. _write_codex_managed_config backs the old file up
+    first, so the discarded entries stay recoverable on disk.
     """
     new_content = _render_codex_requirements_toml(
         command,
@@ -1528,7 +1534,7 @@ class _HookInvocation(NamedTuple):
     url: str
     machine_id: str = ""
     tenant_id: str = ""
-    agent_scan_bin: str = ""
+    agent_scan_command: str = ""
     scope: str = ""
     quote_client: bool = False
 
@@ -1542,8 +1548,8 @@ def _render_posix_command(invocation: _HookInvocation) -> str:
         parts.append(f"TENANT_ID={_shell_quote(invocation.tenant_id)}")
     if invocation.machine_id:
         parts.append(f"MACHINE_ID={_shell_quote(invocation.machine_id)}")
-    if invocation.agent_scan_bin:
-        parts.append(f"AGENT_SCAN_BIN={_shell_quote(invocation.agent_scan_bin)}")
+    if invocation.agent_scan_command:
+        parts.append(f"AGENT_SCAN_COMMAND={_shell_quote(invocation.agent_scan_command)}")
     parts.append(f"bash {_shell_quote(invocation.script_path.as_posix())}")
     client = _shell_quote(invocation.hook_client) if invocation.quote_client else invocation.hook_client
     parts.append(f"--client {client}")
@@ -1566,8 +1572,8 @@ def _render_powershell_command(invocation: _HookInvocation) -> str:
     ]
     if invocation.machine_id:
         parts.extend(["-MachineId", _ps_quote(invocation.machine_id)])
-    if invocation.agent_scan_bin:
-        parts.extend(["-AgentScanBin", _ps_quote(invocation.agent_scan_bin)])
+    if invocation.agent_scan_command:
+        parts.extend(["-AgentScanCommand", _ps_quote(invocation.agent_scan_command)])
     if invocation.scope:
         parts.extend(["-Scope", invocation.scope])
     return " ".join(parts)
@@ -1588,8 +1594,8 @@ def _render_argv(invocation: _HookInvocation) -> tuple[list[str], dict[str, str]
         ]
         if invocation.machine_id:
             argv.extend(["-MachineId", invocation.machine_id])
-        if invocation.agent_scan_bin:
-            argv.extend(["-AgentScanBin", invocation.agent_scan_bin])
+        if invocation.agent_scan_command:
+            argv.extend(["-AgentScanCommand", invocation.agent_scan_command])
         if invocation.scope:
             argv.extend(["-Scope", invocation.scope])
         return argv, None
@@ -1603,8 +1609,8 @@ def _render_argv(invocation: _HookInvocation) -> tuple[list[str], dict[str, str]
         env["TENANT_ID"] = invocation.tenant_id
     if invocation.machine_id:
         env["MACHINE_ID"] = invocation.machine_id
-    if invocation.agent_scan_bin:
-        env["AGENT_SCAN_BIN"] = invocation.agent_scan_bin
+    if invocation.agent_scan_command:
+        env["AGENT_SCAN_COMMAND"] = invocation.agent_scan_command
     argv = ["bash", str(invocation.script_path), "--client", invocation.hook_client]
     if invocation.scope:
         argv.extend(["--scope", invocation.scope])
@@ -1633,9 +1639,9 @@ def _build_hook_command(
     return _render_posix_command(invocation)
 
 
-def _agent_scan_bin() -> str | None:
-    """The configured binary the session-start hook should invoke, if any."""
-    return os.environ.get("AGENT_SCAN_BIN", "").strip() or None
+def _agent_scan_command() -> str | None:
+    """The configured command the session-start hook should invoke, if any."""
+    return os.environ.get("AGENT_SCAN_COMMAND", "").strip() or None
 
 
 def _build_discover_hook_command(
@@ -1644,7 +1650,7 @@ def _build_discover_hook_command(
     script_path: Path,
     hook_client: str,
     *,
-    agent_scan_bin: str,
+    agent_scan_command: str,
     tenant_id: str = "",
     machine_id: str = "",
 ) -> str:
@@ -1654,7 +1660,7 @@ def _build_discover_hook_command(
         push_key=push_key,
         url=url,
         machine_id=machine_id,
-        agent_scan_bin=agent_scan_bin,
+        agent_scan_command=agent_scan_command,
         scope="servers",
         quote_client=True,
     )
