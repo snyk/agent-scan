@@ -1601,21 +1601,8 @@ def _build_hook_command(
 
 
 def _agent_scan_bin() -> str | None:
-    if "AGENT_SCAN_BIN" in os.environ:
-        return os.environ["AGENT_SCAN_BIN"]
-    if getattr(sys, "frozen", False):
-        return str(Path(sys.executable).resolve())
-
-    names = ("snyk-agent-scan.exe", "snyk-agent-scan") if IS_WINDOWS else ("snyk-agent-scan",)
-    invoked_path = Path(sys.argv[0])
-    if invoked_path.name in names and invoked_path.is_file() and os.access(invoked_path, os.X_OK):
-        return str(invoked_path.resolve())
-
-    for name in names:
-        console_script = Path(sys.executable).parent / name
-        if console_script.is_file() and os.access(console_script, os.X_OK):
-            return str(console_script.resolve())
-    return None
+    """The binary the session-start hook should invoke, or None to let it use PATH."""
+    return os.environ.get("AGENT_SCAN_BIN")
 
 
 def _build_discover_hook_command(
