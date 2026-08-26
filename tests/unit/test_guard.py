@@ -297,88 +297,13 @@ class TestBuildHookCommand:
 
 
 class TestAgentScanBin:
-    def test_environment_override_wins(self, monkeypatch):
+    def test_uses_environment_value(self, monkeypatch):
         monkeypatch.setenv("AGENT_SCAN_BIN", "custom agent scan")
-        monkeypatch.setattr(sys, "frozen", True, raising=False)
-        monkeypatch.setattr(sys, "executable", "/ignored/frozen-binary")
 
         assert guard_module._agent_scan_bin() == "custom agent scan"
 
-    def test_frozen_binary_uses_resolved_executable(self, tmp_path, monkeypatch):
-        executable = tmp_path / "dist" / "agent-scan"
+    def test_returns_none_when_environment_unset(self, monkeypatch):
         monkeypatch.delenv("AGENT_SCAN_BIN", raising=False)
-        monkeypatch.setattr(sys, "frozen", True, raising=False)
-        monkeypatch.setattr(sys, "executable", str(executable))
-
-        assert guard_module._agent_scan_bin() == str(executable.resolve())
-
-    def test_console_script_uses_resolved_argv_zero(self, tmp_path, monkeypatch):
-        executable = tmp_path / "snyk-agent-scan"
-        executable.write_text("#!/bin/sh\n")
-        executable.chmod(0o755)
-        monkeypatch.delenv("AGENT_SCAN_BIN", raising=False)
-        monkeypatch.setattr(sys, "frozen", False, raising=False)
-        monkeypatch.setattr(sys, "argv", [str(executable)])
-        monkeypatch.setattr(sys, "executable", str(tmp_path / "python"))
-
-        assert guard_module._agent_scan_bin() == str(executable.resolve())
-
-    def test_venv_console_script_sibling_is_used_for_dev_invocation(self, tmp_path, monkeypatch):
-        bin_dir = tmp_path / "bin"
-        bin_dir.mkdir()
-        executable = bin_dir / "snyk-agent-scan"
-        executable.write_text("#!/bin/sh\n")
-        executable.chmod(0o755)
-        monkeypatch.delenv("AGENT_SCAN_BIN", raising=False)
-        monkeypatch.setattr(sys, "frozen", False, raising=False)
-        monkeypatch.setattr(sys, "argv", [str(tmp_path / "src" / "agent_scan" / "cli.py")])
-        monkeypatch.setattr(sys, "executable", str(bin_dir / "python"))
-
-        assert guard_module._agent_scan_bin() == str(executable.resolve())
-
-    def test_windows_console_script_uses_resolved_argv_zero(self, tmp_path, monkeypatch):
-        executable = tmp_path / "snyk-agent-scan.exe"
-        executable.write_text("binary")
-        executable.chmod(0o755)
-        monkeypatch.delenv("AGENT_SCAN_BIN", raising=False)
-        monkeypatch.setattr(sys, "frozen", False, raising=False)
-        monkeypatch.setattr(sys, "argv", [str(executable)])
-        monkeypatch.setattr(sys, "executable", str(tmp_path / "python.exe"))
-
-        with patch(f"{_G}.IS_WINDOWS", True):
-            assert guard_module._agent_scan_bin() == str(executable.resolve())
-
-    def test_windows_venv_console_script_sibling_is_used(self, tmp_path, monkeypatch):
-        scripts_dir = tmp_path / "Scripts"
-        scripts_dir.mkdir()
-        executable = scripts_dir / "snyk-agent-scan.exe"
-        executable.write_text("binary")
-        executable.chmod(0o755)
-        monkeypatch.delenv("AGENT_SCAN_BIN", raising=False)
-        monkeypatch.setattr(sys, "frozen", False, raising=False)
-        monkeypatch.setattr(sys, "argv", [str(tmp_path / "src" / "agent_scan" / "cli.py")])
-        monkeypatch.setattr(sys, "executable", str(scripts_dir / "python.exe"))
-
-        with patch(f"{_G}.IS_WINDOWS", True):
-            assert guard_module._agent_scan_bin() == str(executable.resolve())
-
-    def test_posix_refuses_windows_console_script_name(self, tmp_path, monkeypatch):
-        executable = tmp_path / "snyk-agent-scan.exe"
-        executable.write_text("binary")
-        executable.chmod(0o755)
-        monkeypatch.delenv("AGENT_SCAN_BIN", raising=False)
-        monkeypatch.setattr(sys, "frozen", False, raising=False)
-        monkeypatch.setattr(sys, "argv", [str(executable)])
-        monkeypatch.setattr(sys, "executable", str(tmp_path / "python"))
-
-        with patch(f"{_G}.IS_WINDOWS", False):
-            assert guard_module._agent_scan_bin() is None
-
-    def test_returns_none_when_no_executable_matches(self, tmp_path, monkeypatch):
-        monkeypatch.delenv("AGENT_SCAN_BIN", raising=False)
-        monkeypatch.setattr(sys, "frozen", False, raising=False)
-        monkeypatch.setattr(sys, "argv", [str(tmp_path / "cli.py")])
-        monkeypatch.setattr(sys, "executable", str(tmp_path / "bin" / "python"))
 
         assert guard_module._agent_scan_bin() is None
 
