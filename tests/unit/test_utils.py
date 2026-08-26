@@ -41,8 +41,28 @@ class TestGetRelativePath:
             "expanduser",
             lambda value: r"C:\Users\runneradmin" if value == "~" else value,
         )
+        monkeypatch.setattr(utils_module.sys, "platform", "win32")
 
-        assert get_relative_path("C:/Users/runneradmin/.claude") == "~/.claude"
+        assert get_relative_path("c:/USERS/RUNNERADMIN/.claude") == "~/.claude"
+
+    def test_outside_home_tilde_spelling_is_preserved(self, monkeypatch):
+        monkeypatch.setattr(
+            os.path,
+            "expanduser",
+            lambda value: "/home/alice" if value == "~" else "/home/bob/mcp.json",
+        )
+
+        assert get_relative_path("~bob/mcp.json") == "~bob/mcp.json"
+
+    def test_windows_unicode_fold_does_not_alias_home(self, monkeypatch):
+        monkeypatch.setattr(
+            os.path,
+            "expanduser",
+            lambda value: "C:/Users/ss" if value == "~" else value,
+        )
+        monkeypatch.setattr(utils_module.sys, "platform", "win32")
+
+        assert get_relative_path("C:/Users/ß/secret") == "C:/Users/ß/secret"
 
     def test_empty_path(self):
         result = get_relative_path("")
