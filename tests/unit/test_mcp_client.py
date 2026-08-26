@@ -150,6 +150,35 @@ async def test_streamable_http_client_does_not_follow_redirects():
     assert make_http_client.call_args.kwargs["follow_redirects"] is False
 
 
+@pytest.mark.asyncio
+@patch("agent_scan.mcp_client.stdio_client")
+async def test_get_client_expands_env_placeholders_for_stdio_server(mock_stdio_client, monkeypatch):
+    """get_client() must pass the EXPANDED env to StdioServerParameters, not
+    the literal ${VAR} placeholder from the parsed config."""
+    monkeypatch.setenv("AUTH_HEADER", "Bearer real-secret-value")
+
+    mock_read = AsyncMock()
+    mock_write = AsyncMock()
+    mock_client = AsyncMock()
+    mock_client.__aenter__.return_value = (mock_read, mock_write)
+    mock_stdio_client.return_value = mock_client
+
+    server = StdioServer(
+        command="npx",
+        args=["-y", "mcp-remote@0.3.0", "https://example.com/mcp", "--header", "Authorization:${AUTH_HEADER}"],
+        env={"AUTH_HEADER": "${AUTH_HEADER}"},
+    )
+
+    async with get_client(server, timeout=5):
+        pass
+
+    assert mock_stdio_client.call_count == 1
+    called_params = mock_stdio_client.call_args.args[0]
+    assert called_params.env == {"AUTH_HEADER": "Bearer real-secret-value"}
+    # The parsed model itself must be untouched -- still the literal placeholder.
+    assert server.env == {"AUTH_HEADER": "${AUTH_HEADER}"}
+
+
 @pytest.mark.parametrize(
     "input_url",
     [
