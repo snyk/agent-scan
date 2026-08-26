@@ -932,7 +932,6 @@ def _uninstall_single_client(client: str, args, managed: bool) -> None:
         _uninstall_hooks(
             config_path,
             filter_hooks=_filter_cursor_hooks if client == "cursor" else _filter_claude_hooks,
-            missing_label="settings.json" if client == "claude" else "hooks.json",
             prune_empty_hooks=client != "cursor",
         )
 
@@ -969,11 +968,10 @@ def _uninstall_hooks(
     path: Path,
     *,
     filter_hooks: Callable[[dict], dict],
-    missing_label: str,
     prune_empty_hooks: bool,
 ) -> None:
     if not path.exists():
-        rich.print(f"[dim]No {missing_label} found. Nothing to uninstall.[/dim]")
+        rich.print(f"[dim]No {path.name} found. Nothing to uninstall.[/dim]")
         return
 
     data = _read_json_or_empty(path)

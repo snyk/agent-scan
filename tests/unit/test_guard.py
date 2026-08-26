@@ -123,7 +123,6 @@ def _uninstall_test_client(client: str, path: Path) -> None:
     _uninstall_hooks(
         path,
         filter_hooks=_filter_cursor_hooks if client == "cursor" else _filter_claude_hooks,
-        missing_label="settings.json" if client == "claude" else "hooks.json",
         prune_empty_hooks=client != "cursor",
     )
 
@@ -2341,6 +2340,13 @@ class TestUninstallHooks:
             "cursor": CURSOR_HOOK_EVENTS,
             "codex": CODEX_HOOK_EVENTS,
         }[client]
+
+    @pytest.mark.parametrize("client", ["claude", "cursor", "codex"])
+    @pytest.mark.parametrize("filename", ["settings.json", "managed-settings.json", "custom.json"])
+    def test_missing_file_message_names_the_actual_file(self, tmp_path, capsys, client, filename):
+        _uninstall_test_client(client, tmp_path / filename)
+
+        assert f"No {filename} found. Nothing to uninstall." in capsys.readouterr().out
 
     @pytest.mark.parametrize("client", ["claude", "cursor", "codex"])
     def test_overwrites_existing_backup(self, tmp_path, client):
