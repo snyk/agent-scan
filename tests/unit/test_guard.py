@@ -58,13 +58,9 @@ from agent_scan.guard import (
     _run_uninstall,
     _send_test_event,
     _shell_quote,
-    _uninstall_claude,
-    _uninstall_codex,
-    _uninstall_cursor,
-    _write_claude_config,
-    _write_codex_config,
+    _uninstall_hooks,
     _write_codex_managed_config,
-    _write_cursor_config,
+    _write_config,
 )
 from agent_scan.models import ClientToInspect, InspectedPath, InspectedServer, RemoteServer, StdioServer
 from agent_scan.models.errors import CouldNotParseMCPConfig, FileNotFoundConfig
@@ -105,22 +101,40 @@ def _write(path: Path, data) -> None:
 
 def _setup_claude_hooks(cmd: str, path: Path) -> None:
     settings, _, preserved = _prepare_claude_config(cmd, path)
-    _write_claude_config(settings, path, preserved)
+    _write_config(settings, path, preserved)
 
 
 def _setup_cursor_hooks(cmd: str, path: Path) -> None:
     data, _, preserved = _prepare_cursor_config(cmd, path)
-    _write_cursor_config(data, path, preserved)
+    _write_config(data, path, preserved)
 
 
 def _setup_codex_hooks(cmd: str, path: Path) -> None:
     data, _, preserved = _prepare_codex_config(cmd, path)
-    _write_codex_config(data, path, preserved)
+    _write_config(data, path, preserved)
 
 
 def _setup_codex_managed_hooks(cmd: str, path: Path) -> None:
     content, _ = _prepare_codex_managed_config(cmd, path)
     _write_codex_managed_config(content, path)
+
+
+def _uninstall_test_client(client: str, path: Path) -> None:
+    _uninstall_hooks(
+        path,
+        filter_hooks=_filter_cursor_hooks if client == "cursor" else _filter_claude_hooks,
+        missing_label="settings.json" if client == "claude" else "hooks.json",
+        prune_empty_hooks=client != "cursor",
+    )
+
+
+def _detect_test_client(client: str, path: Path) -> dict | None:
+    detect = {
+        "claude": _detect_claude_install,
+        "cursor": _detect_cursor_install,
+        "codex": _detect_codex_install,
+    }[client]
+    return detect(path)
 
 
 # ===================================================================
@@ -632,7 +646,7 @@ class TestPrepareClaudeDiscoveryHook:
             path,
             discover_command=self.discover_command,
         )
-        _write_claude_config(settings, path, preserved)
+        _write_config(settings, path, preserved)
 
         _, diff, _ = _prepare_claude_config(
             AGENT_SCAN_CMD,
@@ -673,7 +687,7 @@ class TestPrepareCursorDiscoveryHook:
             path,
             discover_command=self.discover_command,
         )
-        _write_cursor_config(data, path, preserved)
+        _write_config(data, path, preserved)
 
         _, diff, _ = _prepare_cursor_config(
             AGENT_SCAN_CMD,
@@ -690,9 +704,9 @@ class TestPrepareCursorDiscoveryHook:
             path,
             discover_command=self.discover_command,
         )
-        _write_cursor_config(data, path, preserved)
+        _write_config(data, path, preserved)
 
-        _uninstall_cursor(path)
+        _uninstall_test_client("cursor", path)
 
         assert not any(
             self.discover_command == entry.get("command")
@@ -733,7 +747,7 @@ class TestPrepareCodexDiscoveryHook:
             path,
             discover_command=self.discover_command,
         )
-        _write_codex_config(data, path, preserved)
+        _write_config(data, path, preserved)
 
         _, diff, _ = _prepare_codex_config(
             AGENT_SCAN_CMD,
@@ -750,11 +764,75 @@ class TestPrepareCodexDiscoveryHook:
             path,
             discover_command=self.discover_command,
         )
-        _write_codex_config(data, path, preserved)
+        _write_config(data, path, preserved)
 
-        _uninstall_codex(path)
+        _uninstall_test_client("codex", path)
 
         assert "hooks" not in json.loads(path.read_text())
+
+
+class TestWriteConfig:
+    def test_unknown_client_rejected(self, tmp_path):
+        with pytest.raises(ValueError, match="Unknown client: unknown"):
+            guard_module._write_client_config("unknown", tmp_path / "hooks.json", {}, None, 0)
+
+    def test_returns_false_and_prints_nothing_when_content_unchanged(self, tmp_path, capsys):
+        path = tmp_path / "hooks.json"
+        config = {"hooks": {}}
+        assert _write_config(config, path, 0) is True
+        capsys.readouterr()
+
+        assert _write_config(config, path, 0) is False
+
+        assert capsys.readouterr().out == ""
+        assert not Path(f"{path}.backup").exists()
+
+    def test_returns_true_and_backs_up_when_content_changed(self, tmp_path, capsys):
+        path = tmp_path / "hooks.json"
+        original = {"version": 1}
+        updated = {"version": 1, "hooks": {}}
+        assert _write_config(original, path, 0) is True
+        capsys.readouterr()
+
+        assert _write_config(updated, path, 0) is True
+
+        backup = Path(f"{path}.backup")
+        assert json.loads(backup.read_text()) == original
+        assert json.loads(path.read_text()) == updated
+        output = capsys.readouterr().out
+        assert "Backed up" in output
+        assert "Written" in output
+
+    def test_creates_parent_directory_when_missing(self, tmp_path):
+        path = tmp_path / "missing" / "nested" / "hooks.json"
+
+        assert _write_config({"hooks": {}}, path, 0) is True
+
+        assert json.loads(path.read_text()) == {"hooks": {}}
+
+    def test_preserved_note_omitted_when_zero(self, tmp_path, capsys):
+        _write_config({"hooks": {}}, tmp_path / "hooks.json", 0)
+
+        output = capsys.readouterr().out
+        assert "Written" in output
+        assert "other hook(s) preserved" not in output
+
+    def test_preserved_note_included_when_nonzero(self, tmp_path, capsys):
+        _write_config({"hooks": {}}, tmp_path / "hooks.json", 2)
+
+        assert "(2 other hook(s) preserved)" in capsys.readouterr().out
+
+    def test_codex_managed_writer_is_not_routed_through_write_config(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        with (
+            patch(f"{_G}._write_config") as write,
+            patch(f"{_G}._write_codex_managed_config", return_value=True) as write_managed,
+        ):
+            result = guard_module._write_client_config("codex", path, None, "toml-content", 2)
+
+        assert result is True
+        write.assert_not_called()
+        write_managed.assert_called_once_with("toml-content", path)
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX discovery script")
@@ -941,7 +1019,7 @@ class TestDiscoveryHookScriptFiles:
             config,
             discover_command=discover_command,
         )
-        _write_claude_config(settings, config, preserved)
+        _write_config(settings, config, preserved)
         main_script = guard_module._forwarder_script_path(config)
         discover_script = guard_module._discover_script_path(config)
         guard_module._copy_hook_script(main_script)
@@ -1015,12 +1093,12 @@ class TestParseCommandInfo:
 class TestUninstallClaude:
     def test_missing_file(self, tmp_path):
         path = tmp_path / "settings.json"
-        _uninstall_claude(path)  # should not raise
+        _uninstall_test_client("claude", path)  # should not raise
 
     def test_no_hooks_key(self, tmp_path):
         path = tmp_path / "settings.json"
         _write(path, {"allowedTools": ["Bash"]})
-        _uninstall_claude(path)
+        _uninstall_test_client("claude", path)
 
         data = json.loads(path.read_text())
         assert data == {"allowedTools": ["Bash"]}
@@ -1028,7 +1106,7 @@ class TestUninstallClaude:
     def test_no_agent_scan_hooks(self, tmp_path):
         path = tmp_path / "settings.json"
         _write(path, {"hooks": {"PreToolUse": [_claude_group(OTHER_CMD, "*")]}})
-        _uninstall_claude(path)
+        _uninstall_test_client("claude", path)
 
         data = json.loads(path.read_text())
         assert len(data["hooks"]["PreToolUse"]) == 1
@@ -1047,7 +1125,7 @@ class TestUninstallClaude:
                 }
             },
         )
-        _uninstall_claude(path)
+        _uninstall_test_client("claude", path)
 
         data = json.loads(path.read_text())
         # PreToolUse keeps the other hook
@@ -1066,7 +1144,7 @@ class TestUninstallClaude:
                 }
             },
         )
-        _uninstall_claude(path)
+        _uninstall_test_client("claude", path)
 
         data = json.loads(path.read_text())
         assert "hooks" not in data
@@ -1084,7 +1162,7 @@ class TestUninstallClaude:
                 }
             },
         )
-        _uninstall_claude(path)
+        _uninstall_test_client("claude", path)
 
         data = json.loads(path.read_text())
         assert len(data["hooks"]["PreToolUse"]) == 1
@@ -1094,7 +1172,7 @@ class TestUninstallClaude:
         path = tmp_path / "settings.json"
         original = {"hooks": {"Stop": [_claude_group(AGENT_SCAN_CMD)]}}
         _write(path, original)
-        _uninstall_claude(path)
+        _uninstall_test_client("claude", path)
 
         backup = Path(str(path) + ".backup")
         assert backup.exists()
@@ -1105,7 +1183,7 @@ class TestUninstallClaude:
         path = tmp_path / "settings.json"
         _write(path, {"allowedTools": ["Bash"]})
         _setup_claude_hooks(AGENT_SCAN_CMD, path)
-        _uninstall_claude(path)
+        _uninstall_test_client("claude", path)
 
         data = json.loads(path.read_text())
         assert "hooks" not in data
@@ -1211,12 +1289,12 @@ CURSOR_AGENTGUARD_CMD = (
 class TestUninstallCursor:
     def test_missing_file(self, tmp_path):
         path = tmp_path / "hooks.json"
-        _uninstall_cursor(path)  # should not raise
+        _uninstall_test_client("cursor", path)  # should not raise
 
     def test_no_hooks_key(self, tmp_path):
         path = tmp_path / "hooks.json"
         _write(path, {"version": 1})
-        _uninstall_cursor(path)
+        _uninstall_test_client("cursor", path)
 
         data = json.loads(path.read_text())
         assert data == {"version": 1}
@@ -1224,7 +1302,7 @@ class TestUninstallCursor:
     def test_no_agent_scan_hooks(self, tmp_path):
         path = tmp_path / "hooks.json"
         _write(path, {"version": 1, "hooks": {"stop": [_cursor_entry(CURSOR_OTHER_CMD)]}})
-        _uninstall_cursor(path)
+        _uninstall_test_client("cursor", path)
 
         data = json.loads(path.read_text())
         assert len(data["hooks"]["stop"]) == 1
@@ -1244,7 +1322,7 @@ class TestUninstallCursor:
                 },
             },
         )
-        _uninstall_cursor(path)
+        _uninstall_test_client("cursor", path)
 
         data = json.loads(path.read_text())
         assert len(data["hooks"]["stop"]) == 1
@@ -1254,7 +1332,7 @@ class TestUninstallCursor:
     def test_leaves_empty_hooks_when_all_removed(self, tmp_path):
         path = tmp_path / "hooks.json"
         _write(path, {"version": 1, "hooks": {"stop": [_cursor_entry(CURSOR_AGENT_SCAN_CMD)]}})
-        _uninstall_cursor(path)
+        _uninstall_test_client("cursor", path)
 
         data = json.loads(path.read_text())
         assert data["hooks"] == {}
@@ -1273,7 +1351,7 @@ class TestUninstallCursor:
                 },
             },
         )
-        _uninstall_cursor(path)
+        _uninstall_test_client("cursor", path)
 
         data = json.loads(path.read_text())
         assert len(data["hooks"]["stop"]) == 1
@@ -1283,7 +1361,7 @@ class TestUninstallCursor:
         path = tmp_path / "hooks.json"
         original = {"version": 1, "hooks": {"stop": [_cursor_entry(CURSOR_AGENT_SCAN_CMD)]}}
         _write(path, original)
-        _uninstall_cursor(path)
+        _uninstall_test_client("cursor", path)
 
         backup = Path(str(path) + ".backup")
         assert backup.exists()
@@ -1292,7 +1370,7 @@ class TestUninstallCursor:
     def test_full_install_then_uninstall(self, tmp_path):
         path = tmp_path / "hooks.json"
         _setup_cursor_hooks(CURSOR_AGENT_SCAN_CMD, path)
-        _uninstall_cursor(path)
+        _uninstall_test_client("cursor", path)
 
         data = json.loads(path.read_text())
         assert data["hooks"] == {}
@@ -1540,7 +1618,7 @@ class TestManagedInstallClaude:
     def test_uninstall_from_managed_path(self, tmp_path):
         path = tmp_path / "managed-settings.json"
         _setup_claude_hooks(AGENT_SCAN_CMD, path)
-        _uninstall_claude(path)
+        _uninstall_test_client("claude", path)
 
         data = json.loads(path.read_text())
         assert "hooks" not in data
@@ -1568,7 +1646,7 @@ class TestManagedInstallCursor:
     def test_uninstall_from_managed_path(self, tmp_path):
         path = tmp_path / "hooks.json"
         _setup_cursor_hooks(CURSOR_AGENT_SCAN_CMD, path)
-        _uninstall_cursor(path)
+        _uninstall_test_client("cursor", path)
 
         data = json.loads(path.read_text())
         assert data["hooks"] == {}
@@ -1604,6 +1682,17 @@ class TestPermissionDeniedStatus:
         finally:
             path.chmod(0o644)
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="chmod has no effect on Windows")
+    def test_detect_codex_raises_on_unreadable(self, tmp_path):
+        path = tmp_path / "hooks.json"
+        _write(path, {"hooks": {"PreToolUse": [_claude_group(CODEX_AGENT_SCAN_CMD)]}})
+        path.chmod(0o000)
+        try:
+            with pytest.raises(PermissionError):
+                _detect_codex_install(path)
+        finally:
+            path.chmod(0o644)
+
     def test_print_client_status_permission_denied(self, tmp_path, capsys):
         _print_client_status("Claude Code", tmp_path / "managed-settings.json", _PERMISSION_DENIED)
         output = capsys.readouterr().out
@@ -1626,6 +1715,125 @@ class TestPermissionDeniedStatus:
         _print_client_status("Claude Code", tmp_path / "settings.json", info)
         output = capsys.readouterr().out
         assert "INSTALLED" in output
+
+
+class TestRunStatus:
+    @staticmethod
+    def _info() -> dict:
+        return {
+            "host": "guard.example",
+            "auth_type": "pushkey",
+            "auth_value": "pk-1234567890",
+            "tenant_id": "tid-1",
+            "url": "https://guard.example",
+            "events": ["PreToolUse", "Stop"],
+        }
+
+    def test_prints_user_then_managed_sections_in_client_order(self, capsys):
+        with (
+            patch(f"{_G}._detect_claude_install", return_value=None),
+            patch(f"{_G}._detect_cursor_install", return_value=None),
+            patch(f"{_G}._detect_codex_install", return_value=None),
+        ):
+            guard_module._run_status()
+
+        output = capsys.readouterr().out
+        expected_paths = [
+            CLAUDE_SETTINGS_PATH,
+            CURSOR_HOOKS_PATH,
+            CODEX_HOOKS_PATH,
+            CLAUDE_MANAGED_SETTINGS_PATH,
+            CURSOR_MANAGED_HOOKS_PATH,
+            CODEX_MANAGED_HOOKS_PATH,
+        ]
+        positions = [output.index(str(path)) for path in expected_paths]
+        assert positions == sorted(positions)
+        assert output.index("User-level hooks:") < positions[0]
+        assert positions[2] < output.index("Managed hooks:") < positions[3]
+        lines = output.splitlines()
+        assert sum(line.startswith("Claude Code   ") for line in lines) == 2
+        assert sum(line.startswith("Cursor   ") for line in lines) == 2
+        assert sum(line.startswith("Codex   ") for line in lines) == 2
+
+    def test_all_not_installed(self, capsys):
+        with (
+            patch(f"{_G}._detect_claude_install", return_value=None),
+            patch(f"{_G}._detect_cursor_install", return_value=None),
+            patch(f"{_G}._detect_codex_install", return_value=None),
+        ):
+            guard_module._run_status()
+
+        assert capsys.readouterr().out.count("NOT INSTALLED") == 6
+
+    def test_installed_shows_host_masked_key_and_events(self, capsys):
+        with (
+            patch(f"{_G}._detect_claude_install", return_value=self._info()),
+            patch(f"{_G}._detect_cursor_install", return_value=None),
+            patch(f"{_G}._detect_codex_install", return_value=None),
+        ):
+            guard_module._run_status()
+
+        output = capsys.readouterr().out
+        assert "guard.example" in output
+        assert "pk-1...7890" in output
+        assert "(PreToolUse, Stop)" in output
+
+    @pytest.mark.parametrize("client", ["claude", "cursor", "codex"])
+    def test_managed_permission_error_renders_unreadable(self, capsys, client):
+        def detector(name):
+            def detect(*args):
+                if name == client and args:
+                    raise PermissionError("denied")
+                return None
+
+            return detect
+
+        with (
+            patch(f"{_G}._detect_claude_install", side_effect=detector("claude")),
+            patch(f"{_G}._detect_cursor_install", side_effect=detector("cursor")),
+            patch(f"{_G}._detect_codex_install", side_effect=detector("codex")),
+        ):
+            guard_module._run_status()
+
+        assert capsys.readouterr().out.count("UNREADABLE") == 1
+
+    @pytest.mark.parametrize("client", ["claude", "cursor", "codex"])
+    def test_user_level_permission_error_propagates(self, capsys, client):
+        def detector(name):
+            def detect(*_args):
+                if name == client:
+                    raise PermissionError("denied")
+                return None
+
+            return detect
+
+        with (
+            patch(f"{_G}._detect_claude_install", side_effect=detector("claude")),
+            patch(f"{_G}._detect_cursor_install", side_effect=detector("cursor")),
+            patch(f"{_G}._detect_codex_install", side_effect=detector("codex")),
+        ):
+            with pytest.raises(PermissionError, match="denied"):
+                guard_module._run_status()
+            capsys.readouterr()
+
+            result = guard_module.run_guard(SimpleNamespace(guard_command="status"))
+
+        assert result == 1
+        assert "Permission denied: denied" in capsys.readouterr().out
+
+    def test_help_footer_present(self, capsys):
+        with (
+            patch(f"{_G}._detect_claude_install", return_value=None),
+            patch(f"{_G}._detect_cursor_install", return_value=None),
+            patch(f"{_G}._detect_codex_install", return_value=None),
+        ):
+            guard_module._run_status()
+
+        output = capsys.readouterr().out
+        assert "interactive flow (user-level)" in output
+        assert "managed flow" in output
+        assert "headless flow (MDM)" in output
+        assert "guard uninstall <client>" in output
 
 
 # ===================================================================
@@ -1721,7 +1929,23 @@ CODEX_DISCOVER_CMD = (
 
 class TestUninstallCodex:
     def test_missing_file(self, tmp_path):
-        _uninstall_codex(tmp_path / "hooks.json")  # should not raise
+        _uninstall_test_client("codex", tmp_path / "hooks.json")  # should not raise
+
+    def test_no_hooks_key(self, tmp_path):
+        path = tmp_path / "hooks.json"
+        _write(path, {"allowedTools": ["Bash"]})
+        _uninstall_test_client("codex", path)
+
+        data = json.loads(path.read_text())
+        assert data == {"allowedTools": ["Bash"]}
+
+    def test_no_agent_scan_hooks(self, tmp_path):
+        path = tmp_path / "hooks.json"
+        _write(path, {"hooks": {"PreToolUse": [_claude_group(OTHER_CMD)]}})
+        _uninstall_test_client("codex", path)
+
+        data = json.loads(path.read_text())
+        assert len(data["hooks"]["PreToolUse"]) == 1
 
     def test_removes_only_agent_scan(self, tmp_path):
         path = tmp_path / "hooks.json"
@@ -1734,7 +1958,7 @@ class TestUninstallCodex:
                 }
             },
         )
-        _uninstall_codex(path)
+        _uninstall_test_client("codex", path)
 
         data = json.loads(path.read_text())
         assert len(data["hooks"]["PreToolUse"]) == 1
@@ -1744,16 +1968,45 @@ class TestUninstallCodex:
     def test_removes_hooks_key_when_empty(self, tmp_path):
         path = tmp_path / "hooks.json"
         _write(path, {"hooks": {"PreToolUse": [_claude_group(CODEX_AGENT_SCAN_CMD)]}})
-        _uninstall_codex(path)
+        _uninstall_test_client("codex", path)
 
         data = json.loads(path.read_text())
         assert "hooks" not in data
+
+    def test_preserves_agentguard(self, tmp_path):
+        path = tmp_path / "hooks.json"
+        _write(
+            path,
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        _claude_group(AGENTGUARD_CMD),
+                        _claude_group(CODEX_AGENT_SCAN_CMD),
+                    ],
+                }
+            },
+        )
+        _uninstall_test_client("codex", path)
+
+        data = json.loads(path.read_text())
+        assert len(data["hooks"]["PreToolUse"]) == 1
+        assert data["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == AGENTGUARD_CMD
+
+    def test_backup_created(self, tmp_path):
+        path = tmp_path / "hooks.json"
+        original = {"hooks": {"Stop": [_claude_group(CODEX_AGENT_SCAN_CMD)]}}
+        _write(path, original)
+        _uninstall_test_client("codex", path)
+
+        backup = Path(str(path) + ".backup")
+        assert backup.exists()
+        assert json.loads(backup.read_text()) == original
 
     def test_full_install_then_uninstall(self, tmp_path):
         path = tmp_path / "hooks.json"
         _write(path, {"unrelated": True})
         _setup_codex_hooks(CODEX_AGENT_SCAN_CMD, path)
-        _uninstall_codex(path)
+        _uninstall_test_client("codex", path)
 
         data = json.loads(path.read_text())
         assert "hooks" not in data
@@ -1763,6 +2016,11 @@ class TestUninstallCodex:
 class TestDetectCodex:
     def test_missing_file(self, tmp_path):
         assert _detect_codex_install(tmp_path / "nope.json") is None
+
+    def test_empty_file(self, tmp_path):
+        path = tmp_path / "hooks.json"
+        _write(path, {})
+        assert _detect_codex_install(path) is None
 
     def test_no_hooks_key(self, tmp_path):
         path = tmp_path / "hooks.json"
@@ -1785,6 +2043,287 @@ class TestDetectCodex:
         assert info["tenant_id"] == "tid-1"
         assert info["host"] == "api.snyk.io"
         assert set(info["events"]) == set(CODEX_HOOK_EVENTS)
+
+    def test_detects_partial_install(self, tmp_path):
+        """Only some events have our hooks."""
+        path = tmp_path / "hooks.json"
+        _write(
+            path,
+            {
+                "hooks": {
+                    "PreToolUse": [_claude_group(CODEX_AGENT_SCAN_CMD)],
+                    "Stop": [_claude_group(CODEX_AGENT_SCAN_CMD)],
+                }
+            },
+        )
+        info = _detect_codex_install(path)
+        assert info is not None
+        assert info["events"] == ["PreToolUse", "Stop"]
+
+    def test_ignores_agentguard(self, tmp_path):
+        path = tmp_path / "hooks.json"
+        _write(path, {"hooks": {"PreToolUse": [_claude_group(AGENTGUARD_CMD)]}})
+        assert _detect_codex_install(path) is None
+
+    def test_detects_among_other_hooks(self, tmp_path):
+        path = tmp_path / "hooks.json"
+        _write(
+            path,
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        _claude_group(AGENTGUARD_CMD),
+                        _claude_group(CODEX_AGENT_SCAN_CMD),
+                    ],
+                }
+            },
+        )
+        info = _detect_codex_install(path)
+        assert info is not None
+        assert info["events"] == ["PreToolUse"]
+
+    def test_invalid_json(self, tmp_path):
+        path = tmp_path / "hooks.json"
+        path.write_text("not json at all")
+        with pytest.raises(json.JSONDecodeError):
+            _detect_codex_install(path)
+
+
+class TestDetectInstall:
+    @staticmethod
+    def _events(client: str) -> list[str]:
+        return {
+            "claude": CLAUDE_HOOK_EVENTS,
+            "cursor": CURSOR_HOOK_EVENTS,
+            "codex": CODEX_HOOK_EVENTS,
+        }[client]
+
+    @staticmethod
+    def _entries(client: str, *commands: str) -> list[dict]:
+        if client == "cursor":
+            return [_cursor_entry(command) for command in commands]
+        return [_claude_group(command) for command in commands]
+
+    @pytest.mark.parametrize("client", ["claude", "cursor", "codex"])
+    def test_events_follow_constant_order_not_file_order(self, tmp_path, client):
+        first, last = self._events(client)[0], self._events(client)[-1]
+        path = tmp_path / "hooks.json"
+        _write(
+            path,
+            {
+                "hooks": {
+                    last: self._entries(client, CODEX_AGENT_SCAN_CMD),
+                    first: self._entries(client, CODEX_AGENT_SCAN_CMD),
+                }
+            },
+        )
+
+        info = _detect_test_client(client, path)
+
+        assert info is not None
+        assert info["events"] == [first, last]
+
+    @pytest.mark.parametrize("client", ["claude", "cursor", "codex"])
+    def test_event_listed_once_when_multiple_commands_match(self, tmp_path, client):
+        event = self._events(client)[0]
+        path = tmp_path / "hooks.json"
+        _write(path, {"hooks": {event: self._entries(client, CODEX_AGENT_SCAN_CMD, CODEX_DISCOVER_CMD)}})
+
+        info = _detect_test_client(client, path)
+
+        assert info is not None
+        assert info["events"] == [event]
+
+    @pytest.mark.parametrize("client", ["claude", "cursor", "codex"])
+    def test_first_match_in_constant_order_supplies_parsed_command(self, tmp_path, client):
+        first, last = self._events(client)[0], self._events(client)[-1]
+        first_command = (
+            "PUSH_KEY='pk-first' REMOTE_HOOKS_BASE_URL='https://first.example' "
+            "bash '/x/snyk-agent-guard.sh' --client test"
+        )
+        later_discovery_command = (
+            "PUSH_KEY='pk-later' REMOTE_HOOKS_BASE_URL='https://later.example' "
+            "bash '/x/snyk-agent-guard-discover.sh' --client test --scope servers"
+        )
+        path = tmp_path / "hooks.json"
+        _write(
+            path,
+            {
+                "hooks": {
+                    last: self._entries(client, later_discovery_command),
+                    first: self._entries(client, first_command),
+                }
+            },
+        )
+
+        info = _detect_test_client(client, path)
+
+        assert info is not None
+        assert info["auth_value"] == "pk-first"
+        assert info["host"] == "first.example"
+
+    @pytest.mark.parametrize("client", ["claude", "cursor", "codex"])
+    def test_group_without_hooks_key(self, tmp_path, client):
+        event = self._events(client)[0]
+        path = tmp_path / "hooks.json"
+        _write(path, {"hooks": {event: [{"type": "command"}]}})
+
+        assert _detect_test_client(client, path) is None
+
+    @pytest.mark.parametrize("client", ["claude", "cursor", "codex"])
+    def test_entry_without_command_key(self, tmp_path, client):
+        event = self._events(client)[0]
+        entries = [{"hooks": [{"type": "command"}]}] if client != "cursor" else [{"other": True}]
+        path = tmp_path / "hooks.json"
+        _write(path, {"hooks": {event: entries}})
+
+        assert _detect_test_client(client, path) is None
+
+    @pytest.mark.parametrize("client", ["claude", "cursor", "codex"])
+    @pytest.mark.parametrize("entry", ["string", None])
+    def test_non_dict_entry_in_event_list(self, tmp_path, client, entry):
+        event = self._events(client)[0]
+        path = tmp_path / "hooks.json"
+        _write(path, {"hooks": {event: [entry]}})
+
+        with pytest.raises(AttributeError):
+            _detect_test_client(client, path)
+
+    @pytest.mark.parametrize("client", ["claude", "cursor", "codex"])
+    def test_unknown_events_ignored(self, tmp_path, client):
+        path = tmp_path / "hooks.json"
+        _write(path, {"hooks": {"CustomEvent": self._entries(client, CODEX_AGENT_SCAN_CMD)}})
+
+        assert _detect_test_client(client, path) is None
+
+    def test_claude_shaped_file_read_by_cursor_detector_returns_none(self, tmp_path):
+        path = tmp_path / "hooks.json"
+        _write(path, {"hooks": {"stop": [_claude_group(CODEX_AGENT_SCAN_CMD)]}})
+
+        assert _detect_cursor_install(path) is None
+
+    @pytest.mark.parametrize("client", ["claude", "cursor", "codex"])
+    def test_permission_error_propagates(self, tmp_path, client):
+        path = tmp_path / "hooks.json"
+        _write(path, {})
+        with patch(f"{_G}._read_json_or_empty", side_effect=PermissionError("denied")):
+            with pytest.raises(PermissionError, match="denied"):
+                _detect_test_client(client, path)
+
+
+class TestUninstallHooks:
+    @staticmethod
+    def _event_and_entry(client: str, command: str) -> tuple[str, dict]:
+        if client == "cursor":
+            return "stop", _cursor_entry(command)
+        return "Stop", _claude_group(command)
+
+    @pytest.mark.parametrize("client", ["claude", "cursor", "codex"])
+    def test_removes_both_forwarder_and_discover_commands(self, tmp_path, capsys, client):
+        path = tmp_path / ("settings.json" if client == "claude" else "hooks.json")
+        prepare = {
+            "claude": _prepare_claude_config,
+            "cursor": _prepare_cursor_config,
+            "codex": _prepare_codex_config,
+        }[client]
+        config, _, preserved = prepare(CODEX_AGENT_SCAN_CMD, path, discover_command=CODEX_DISCOVER_CMD)
+        _write_config(config, path, preserved)
+        capsys.readouterr()
+
+        _uninstall_test_client(client, path)
+
+        expected_removed = len(self._events_for(client)) + 1
+        assert f"Removed {expected_removed} Agent Guard hook(s)" in capsys.readouterr().out
+
+    @staticmethod
+    def _events_for(client: str) -> list[str]:
+        return {
+            "claude": CLAUDE_HOOK_EVENTS,
+            "cursor": CURSOR_HOOK_EVENTS,
+            "codex": CODEX_HOOK_EVENTS,
+        }[client]
+
+    @pytest.mark.parametrize("client", ["claude", "cursor", "codex"])
+    def test_overwrites_existing_backup(self, tmp_path, client):
+        event, entry = self._event_and_entry(client, CODEX_AGENT_SCAN_CMD)
+        path = tmp_path / ("settings.json" if client == "claude" else "hooks.json")
+        original = {"hooks": {event: [entry]}, "current": True}
+        _write(path, original)
+        backup = Path(f"{path}.backup")
+        backup.write_text("stale backup")
+
+        _uninstall_test_client(client, path)
+
+        assert json.loads(backup.read_text()) == original
+
+    @pytest.mark.parametrize("client", ["claude", "cursor", "codex"])
+    def test_no_backup_when_nothing_matched(self, tmp_path, client):
+        event, entry = self._event_and_entry(client, OTHER_CMD)
+        path = tmp_path / ("settings.json" if client == "claude" else "hooks.json")
+        _write(path, {"hooks": {event: [entry]}})
+
+        _uninstall_test_client(client, path)
+
+        assert not Path(f"{path}.backup").exists()
+
+    @pytest.mark.parametrize("client", ["claude", "cursor", "codex"])
+    @pytest.mark.parametrize("entry", ["string", None])
+    def test_survives_non_dict_entries_in_hook_list(self, tmp_path, client, entry):
+        event, _ = self._event_and_entry(client, OTHER_CMD)
+        path = tmp_path / ("settings.json" if client == "claude" else "hooks.json")
+        original = {"hooks": {event: [entry]}}
+        _write(path, original)
+
+        with pytest.raises(AttributeError):
+            _uninstall_test_client(client, path)
+
+        assert json.loads(path.read_text()) == original
+        assert not Path(f"{path}.backup").exists()
+
+    @pytest.mark.parametrize("client", ["claude", "cursor", "codex"])
+    @pytest.mark.parametrize("hooks", [[], "x"])
+    def test_hooks_value_not_a_dict(self, tmp_path, client, hooks):
+        path = tmp_path / ("settings.json" if client == "claude" else "hooks.json")
+        _write(path, {"hooks": hooks})
+
+        with pytest.raises(AttributeError):
+            _uninstall_test_client(client, path)
+
+    def test_codex_toml_path_routes_to_managed_uninstall(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        args = SimpleNamespace(file=str(path))
+        with (
+            patch(f"{_G}._detect_existing_install", return_value=None),
+            patch(f"{_G}._uninstall_hooks") as uninstall,
+            patch(f"{_G}._uninstall_codex_managed") as uninstall_managed,
+            patch(f"{_G}._remove_hook_script"),
+            patch(f"{_G}.rich"),
+        ):
+            guard_module._uninstall_single_client("codex", args, managed=True)
+
+        uninstall.assert_not_called()
+        uninstall_managed.assert_called_once_with(path)
+
+    @pytest.mark.parametrize("client", ["claude", "cursor", "codex"])
+    def test_preserves_unknown_events(self, tmp_path, client):
+        known_event, guard_entry = self._event_and_entry(client, CODEX_AGENT_SCAN_CMD)
+        _, foreign_entry = self._event_and_entry(client, OTHER_CMD)
+        path = tmp_path / ("settings.json" if client == "claude" else "hooks.json")
+        _write(
+            path,
+            {
+                "hooks": {
+                    known_event: [guard_entry],
+                    "CustomEvent": [foreign_entry],
+                }
+            },
+        )
+
+        _uninstall_test_client(client, path)
+
+        data = json.loads(path.read_text())
+        assert known_event not in data["hooks"]
+        assert data["hooks"]["CustomEvent"] == [foreign_entry]
 
 
 # ===================================================================
@@ -2857,9 +3396,7 @@ class TestInstallHooksOrchestration:
             "is_toml": (f"{_G}._is_codex_requirements_toml", False),
             "detect_existing": (f"{_G}._detect_existing_install", None),
             "test_event": (f"{_G}._send_test_event", True),
-            "write_claude": (f"{_G}._write_claude_config", True),
-            "write_cursor": (f"{_G}._write_cursor_config", True),
-            "write_codex": (f"{_G}._write_codex_config", True),
+            "write": (f"{_G}._write_config", True),
             "write_codex_managed": (f"{_G}._write_codex_managed_config", True),
             "revoke": (f"{_G}._revoke_after_failure", _NO_RETURN_VALUE),
             "rich": (f"{_G}.rich", _NO_RETURN_VALUE),
@@ -3022,7 +3559,7 @@ class TestInstallHooksOrchestration:
             assert discover_script.exists()
             return True
 
-        ctx["write_claude"].side_effect = assert_stale_script_still_exists
+        ctx["write"].side_effect = assert_stale_script_still_exists
 
         self._call(tmp_path, client="claude")
 
@@ -3058,26 +3595,26 @@ class TestInstallHooksOrchestration:
         assert result is None
 
     # ---------------------------------------------------------------
-    # Client routing: each client calls its own prepare + write
+    # Client routing: each client calls its own prepare + the shared writer
     # ---------------------------------------------------------------
 
     def test_claude_routes_to_claude_functions(self, ctx, tmp_path):
         self._call(tmp_path, client="claude", config_exists=True)
         ctx["prep_claude"].assert_called_once()
-        ctx["write_claude"].assert_called_once()
+        ctx["write"].assert_called_once()
         ctx["prep_cursor"].assert_not_called()
         ctx["prep_codex"].assert_not_called()
 
     def test_cursor_routes_to_cursor_functions(self, ctx, tmp_path):
         self._call(tmp_path, client="cursor", hook_client="cursor", config_exists=True)
         ctx["prep_cursor"].assert_called_once()
-        ctx["write_cursor"].assert_called_once()
+        ctx["write"].assert_called_once()
         ctx["prep_claude"].assert_not_called()
 
     def test_codex_json_routes_to_codex_functions(self, ctx, tmp_path):
         self._call(tmp_path, client="codex", hook_client="codex", config_exists=True)
         ctx["prep_codex"].assert_called_once()
-        ctx["write_codex"].assert_called_once()
+        ctx["write"].assert_called_once()
         ctx["prep_codex_managed"].assert_not_called()
 
     def test_codex_managed_routes_to_toml_functions(self, ctx, tmp_path):
@@ -3086,7 +3623,7 @@ class TestInstallHooksOrchestration:
         ctx["prep_codex_managed"].assert_called_once()
         ctx["write_codex_managed"].assert_called_once()
         ctx["prep_codex"].assert_not_called()
-        ctx["write_codex"].assert_not_called()
+        ctx["write"].assert_not_called()
 
     # ---------------------------------------------------------------
     # Detection: config_changed derived from diff
@@ -3362,9 +3899,7 @@ class TestInstallHooksOrchestration:
         ctx["test_event"].return_value = False
         with pytest.raises(SystemExit):
             self._call(tmp_path, minted=True, config_exists=True)
-        ctx["write_claude"].assert_not_called()
-        ctx["write_cursor"].assert_not_called()
-        ctx["write_codex"].assert_not_called()
+        ctx["write"].assert_not_called()
         ctx["write_codex_managed"].assert_not_called()
 
     # ---------------------------------------------------------------
@@ -3375,19 +3910,19 @@ class TestInstallHooksOrchestration:
         prepared = {"hooks": {"PreToolUse": [{"test": True}]}}
         ctx["prep_claude"].return_value = (prepared, _DIFF_REMOVED, 2)
         config = self._call(tmp_path, config_exists=True)
-        ctx["write_claude"].assert_called_once_with(prepared, config, 2)
+        ctx["write"].assert_called_once_with(prepared, config, 2)
 
     def test_write_receives_prepared_cursor_config(self, ctx, tmp_path):
         prepared = {"version": 1, "hooks": {"stop": [{"command": "x"}]}}
         ctx["prep_cursor"].return_value = (prepared, _DIFF_REMOVED, 1)
         config = self._call(tmp_path, client="cursor", hook_client="cursor", config_exists=True)
-        ctx["write_cursor"].assert_called_once_with(prepared, config, 1)
+        ctx["write"].assert_called_once_with(prepared, config, 1)
 
     def test_write_receives_prepared_codex_config(self, ctx, tmp_path):
         prepared = {"hooks": {"Stop": [{"hooks": []}]}}
         ctx["prep_codex"].return_value = (prepared, _DIFF_REMOVED, 3)
         config = self._call(tmp_path, client="codex", hook_client="codex", config_exists=True)
-        ctx["write_codex"].assert_called_once_with(prepared, config, 3)
+        ctx["write"].assert_called_once_with(prepared, config, 3)
 
     def test_write_receives_prepared_codex_managed_content(self, ctx, tmp_path):
         ctx["is_toml"].return_value = True
@@ -3398,14 +3933,14 @@ class TestInstallHooksOrchestration:
     def test_config_written_after_test_event(self, ctx, tmp_path):
         self._call(tmp_path, config_exists=True, minted=False)
         ctx["test_event"].assert_called_once()
-        ctx["write_claude"].assert_called_once()
+        ctx["write"].assert_called_once()
 
     # ---------------------------------------------------------------
     # Status output
     # ---------------------------------------------------------------
 
     def test_status_installed_when_config_written(self, ctx, tmp_path):
-        ctx["write_claude"].return_value = True
+        ctx["write"].return_value = True
         self._call(tmp_path, config_exists=True)
         assert any("hooks installed" in m for m in self._print_messages(ctx))
 
@@ -3417,25 +3952,25 @@ class TestInstallHooksOrchestration:
             _CURRENT_CHECKSUM,
             _NEW_CHECKSUM,
         )
-        ctx["write_claude"].return_value = False
+        ctx["write"].return_value = False
         self._call(tmp_path, config_exists=True)
         assert any("hooks installed" in m for m in self._print_messages(ctx))
 
     def test_status_installed_when_discovery_script_updated(self, ctx, tmp_path):
         ctx["discover_script"] = ctx["discover_script"]._replace(updated=True)
-        ctx["write_claude"].return_value = False
+        ctx["write"].return_value = False
 
         self._call(tmp_path, config_exists=True)
 
         assert any("hooks installed" in m for m in self._print_messages(ctx))
 
     def test_status_installed_when_minted(self, ctx, tmp_path):
-        ctx["write_claude"].return_value = False
+        ctx["write"].return_value = False
         self._call(tmp_path, minted=True, config_exists=True)
         assert any("hooks installed" in m for m in self._print_messages(ctx))
 
     def test_status_up_to_date_when_nothing_changed(self, ctx, tmp_path):
-        ctx["write_claude"].return_value = False
+        ctx["write"].return_value = False
         self._call(tmp_path, minted=False, config_exists=True)
         assert any("up to date" in m for m in self._print_messages(ctx))
 
@@ -5007,7 +5542,7 @@ class TestUninstallPreservesCustomHooks:
                 }
             },
         )
-        _uninstall_claude(path)
+        _uninstall_test_client("claude", path)
 
         data = json.loads(path.read_text())
         assert len(data["hooks"]["PreToolUse"]) == 1
@@ -5032,7 +5567,7 @@ class TestUninstallPreservesCustomHooks:
                 },
             },
         )
-        _uninstall_cursor(path)
+        _uninstall_test_client("cursor", path)
 
         data = json.loads(path.read_text())
         assert len(data["hooks"]["stop"]) == 1
@@ -5056,7 +5591,7 @@ class TestUninstallPreservesCustomHooks:
                 }
             },
         )
-        _uninstall_codex(path)
+        _uninstall_test_client("codex", path)
 
         data = json.loads(path.read_text())
         assert len(data["hooks"]["PreToolUse"]) == 1
