@@ -53,7 +53,7 @@ class TestGuardInstallE2E:
     """
 
     @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
-    def test_guard_install_claude(self, agent_scan_cmd, tmp_path, fake_hook_server):
+    def test_guard_install_claude(self, agent_scan_cmd, agent_scan_bin, tmp_path, fake_hook_server):
         config_file = tmp_path / "settings.json"
         result = subprocess.run(
             [
@@ -71,7 +71,7 @@ class TestGuardInstallE2E:
             capture_output=True,
             text=True,
             timeout=60,
-            env={**os.environ, "PUSH_KEY": "test-pk-e2e"},
+            env={**os.environ, "PUSH_KEY": "test-pk-e2e", "AGENT_SCAN_BIN": str(agent_scan_bin)},
         )
         assert result.returncode == 0, f"guard install failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
 
@@ -125,7 +125,7 @@ class TestGuardInstallE2E:
         assert session_discovery["body"]["discovery_duration_ms"] >= 0
 
     @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
-    def test_guard_install_cursor(self, agent_scan_cmd, tmp_path, fake_hook_server):
+    def test_guard_install_cursor(self, agent_scan_cmd, agent_scan_bin, tmp_path, fake_hook_server):
         config_file = tmp_path / "hooks.json"
         result = subprocess.run(
             [
@@ -143,7 +143,7 @@ class TestGuardInstallE2E:
             capture_output=True,
             text=True,
             timeout=60,
-            env={**os.environ, "PUSH_KEY": "test-pk-e2e"},
+            env={**os.environ, "PUSH_KEY": "test-pk-e2e", "AGENT_SCAN_BIN": str(agent_scan_bin)},
         )
         assert result.returncode == 0, f"guard install failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
 
@@ -185,7 +185,7 @@ class TestGuardInstallE2E:
         assert session_discovery["body"]["discovery_duration_ms"] >= 0
 
     @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
-    def test_guard_install_codex(self, agent_scan_cmd, tmp_path, fake_hook_server):
+    def test_guard_install_codex(self, agent_scan_cmd, agent_scan_bin, tmp_path, fake_hook_server):
         config_file = tmp_path / "hooks.json"
         result = subprocess.run(
             [
@@ -203,7 +203,7 @@ class TestGuardInstallE2E:
             capture_output=True,
             text=True,
             timeout=60,
-            env={**os.environ, "PUSH_KEY": "test-pk-e2e"},
+            env={**os.environ, "PUSH_KEY": "test-pk-e2e", "AGENT_SCAN_BIN": str(agent_scan_bin)},
         )
         assert result.returncode == 0, f"guard install failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
 

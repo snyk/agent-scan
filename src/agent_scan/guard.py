@@ -489,6 +489,13 @@ def _install_hooks(
     push_key_changed = bool(old_push_key) and old_push_key != push_key
 
     is_codex_requirements = _is_codex_requirements_toml(config_path)
+    agent_scan_bin = _agent_scan_bin()
+    install_discovery = not is_codex_requirements and agent_scan_bin is not None
+    if not is_codex_requirements and agent_scan_bin is None:
+        rich.print(
+            "[yellow]Warning:[/yellow] AGENT_SCAN_BIN is not set; "
+            "the session-start discovery hook will not be installed"
+        )
     discover_script_path = _discover_script_path(config_path)
     discover_script_existed = discover_script_path.exists()
     (
@@ -499,7 +506,7 @@ def _install_hooks(
         new_checksum,
         discover_current_checksum,
         discover_new_checksum,
-    ) = _copy_hook_script(config_path, include_discover=not is_codex_requirements)
+    ) = _copy_hook_script(config_path, include_discover=install_discovery)
     command = _build_hook_command(
         push_key,
         url,
@@ -509,11 +516,13 @@ def _install_hooks(
         machine_id=machine_id,
     )
     discover_command = None
-    if not is_codex_requirements:
+    if install_discovery:
+        assert agent_scan_bin is not None
         discover_command = _build_discover_hook_command(
             push_key,
             url,
             discover_script_path,
+            agent_scan_bin=agent_scan_bin,
             tenant_id=tenant_id,
             machine_id=machine_id,
             hook_client=hook_client,
@@ -551,6 +560,9 @@ def _install_hooks(
         raise SystemExit(1)
 
     config_written = _write_client_config(client, config_path, prepared_config, prepared_content, preserved)
+    if not install_discovery and discover_script_path.exists():
+        discover_script_path.unlink()
+        rich.print(f"[green]✓[/green]  Removed stale hook script [dim]{discover_script_path}[/dim]")
 
     if script_updated or config_written or minted:
         rich.print(f"[green]\u2713[/green]  {scope.title()} hooks installed for [bold]{label}[/bold]")
@@ -1601,8 +1613,8 @@ def _build_hook_command(
 
 
 def _agent_scan_bin() -> str | None:
-    """The binary the session-start hook should invoke, or None to let it use PATH."""
-    return os.environ.get("AGENT_SCAN_BIN")
+    """The configured binary the session-start hook should invoke, if any."""
+    return os.environ.get("AGENT_SCAN_BIN", "").strip() or None
 
 
 def _build_discover_hook_command(
@@ -1611,6 +1623,7 @@ def _build_discover_hook_command(
     script_path: Path,
     hook_client: str,
     *,
+    agent_scan_bin: str,
     tenant_id: str = "",
     machine_id: str = "",
 ) -> str:
@@ -1620,6 +1633,7 @@ def _build_discover_hook_command(
             url,
             script_path,
             hook_client,
+            agent_scan_bin=agent_scan_bin,
             tenant_id=tenant_id,
             machine_id=machine_id,
         )
@@ -1629,9 +1643,7 @@ def _build_discover_hook_command(
     ]
     if machine_id:
         parts.append(f"MACHINE_ID={_shell_quote(machine_id)}")
-    agent_scan_bin = _agent_scan_bin()
-    if agent_scan_bin is not None:
-        parts.append(f"AGENT_SCAN_BIN={_shell_quote(agent_scan_bin)}")
+    parts.append(f"AGENT_SCAN_BIN={_shell_quote(agent_scan_bin)}")
     parts.append(f"bash {_shell_quote(script_path.as_posix())}")
     parts.append(f"--client {_shell_quote(hook_client)}")
     parts.append("--scope servers")
@@ -1644,6 +1656,7 @@ def _build_discover_hook_command_powershell(
     script_path: Path,
     hook_client: str,
     *,
+    agent_scan_bin: str,
     tenant_id: str = "",
     machine_id: str = "",
 ) -> str:
@@ -1653,9 +1666,7 @@ def _build_discover_hook_command_powershell(
     )
     if machine_id:
         command += f" -MachineId {_ps_quote(machine_id)}"
-    agent_scan_bin = _agent_scan_bin()
-    if agent_scan_bin is not None:
-        command += f" -AgentScanBin {_ps_quote(agent_scan_bin)}"
+    command += f" -AgentScanBin {_ps_quote(agent_scan_bin)}"
     command += " -Scope servers"
     return command
 
