@@ -839,7 +839,8 @@ class TestWriteConfig:
     def test_preserved_note_included_when_nonzero(self, tmp_path, capsys):
         _write_config({"hooks": {}}, tmp_path / "hooks.json", 2)
 
-        assert "(2 other hook(s) preserved)" in capsys.readouterr().out
+        # rich soft-wraps the line at the terminal width, so collapse whitespace first
+        assert "(2 other hook(s) preserved)" in " ".join(capsys.readouterr().out.split())
 
     def test_codex_managed_writer_is_not_routed_through_write_config(self, tmp_path):
         path = tmp_path / "requirements.toml"
