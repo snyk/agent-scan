@@ -647,6 +647,13 @@ class TestExpandEnvVars:
         assert result == {"AUTH_HEADER": "${DOES_NOT_EXIST}"}
         assert "DOES_NOT_EXIST" in caplog.text
 
+    def test_empty_env_var_is_treated_as_unset(self, monkeypatch, caplog):
+        monkeypatch.setenv("AUTH_HEADER", "")
+        with caplog.at_level(logging.WARNING):
+            result = expand_env_vars({"AUTH_HEADER": "${AUTH_HEADER}"})
+        assert result == {"AUTH_HEADER": "${AUTH_HEADER}"}
+        assert "AUTH_HEADER" in caplog.text
+
     def test_does_not_mutate_input_dict(self, monkeypatch):
         monkeypatch.setenv("AUTH_HEADER", "resolved")
         original = {"AUTH_HEADER": "${AUTH_HEADER}"}
