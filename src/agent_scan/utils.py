@@ -252,20 +252,19 @@ _ENV_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 def expand_env_vars(env: dict[str, str] | None) -> dict[str, str] | None:
-    """Substitute ``${NAME}`` references in stdio-server env values with the
-    *scanning process's own* environment variables.
+    """Substitute ${NAME} references in stdio-server env values with the
+    scanning process's own environment variables.
 
-    Lets a config commit a placeholder like ``{"AUTH_HEADER": "${AUTH_HEADER}"}``
+    Lets a config commit a placeholder like {"AUTH_HEADER": "${AUTH_HEADER}"}
     instead of a real secret: the real value is resolved only here, at spawn
     time, from whichever shell is running the scan, and the result is never
     written back onto the parsed config -- callers must treat the return
     value as a throwaway dict for immediate use, not something to persist.
 
-    A ``${NAME}`` reference to a variable that isn't set in the scanning
+    A ${NAME} reference to a variable that isn't set in the scanning
     process's environment is left unexpanded (and logged as a warning)
     rather than silently substituted with an empty string, so a missing
-    credential fails loudly -- and visibly, in ``--verbose`` output -- rather
-    than connecting with a blank header.
+    credential fails loudly rather than connecting with a blank header.
     """
     if env is None:
         return None
@@ -276,7 +275,7 @@ def expand_env_vars(env: dict[str, str] | None) -> dict[str, str] | None:
         if value is None:
             logger.warning(
                 f"Env var '{name}' referenced in a server config's env block but not set in "
-                f"the scanning environment; leaving '${{{name}}}' unexpanded"
+                f"the scanning environment; leaving '{match.group(0)}' unexpanded"
             )
             return match.group(0)
         return value
