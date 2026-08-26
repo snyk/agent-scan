@@ -32,7 +32,7 @@ from agent_scan.pushkeys import (
 from agent_scan.redact import redact_push_keys, redact_push_keys_in_data
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Iterable
 
     from agent_scan.models import ClientToInspect
 
@@ -444,20 +444,14 @@ def _write_client_config(
     prepared_content: str | None,
     preserved: int,
 ) -> bool:
-    """Dispatch to the client-specific config writing function."""
-    if client == "claude":
-        assert prepared_config is not None
-        return _write_claude_config(prepared_config, config_path, preserved)
-    if client == "cursor":
-        assert prepared_config is not None
-        return _write_cursor_config(prepared_config, config_path, preserved)
-    if client == "codex":
-        if _is_codex_requirements_toml(config_path):
-            assert prepared_content is not None
-            return _write_codex_managed_config(prepared_content, config_path)
-        assert prepared_config is not None
-        return _write_codex_config(prepared_config, config_path, preserved)
-    raise ValueError(f"Unknown client: {client}")
+    """Write prepared config using JSON, except for managed Codex TOML."""
+    if client not in ALL_CLIENTS:
+        raise ValueError(f"Unknown client: {client}")
+    if client == "codex" and _is_codex_requirements_toml(config_path):
+        assert prepared_content is not None
+        return _write_codex_managed_config(prepared_content, config_path)
+    assert prepared_config is not None
+    return _write_config(prepared_config, config_path, preserved)
 
 
 def _detect_existing_install(client: str, config_path: Path) -> dict | None:
@@ -632,12 +626,11 @@ def _prepare_claude_config(
     return settings, diff, preserved
 
 
-def _write_claude_config(settings: dict, path: Path, preserved: int) -> bool:
-    """Write Claude settings to disk. Returns True if file changed."""
-    if not _write_json_if_changed(path, settings):
+def _write_config(config: dict, path: Path, preserved: int) -> bool:
+    """Write a client config to disk. Returns True if the file changed."""
+    if not _write_json_if_changed(path, config):
         return False
-    note = _preserved_note(preserved)
-    rich.print(f"[green]\u2713[/green]  Written [dim]{path}[/dim]{note}")
+    rich.print(f"[green]\u2713[/green]  Written [dim]{path}[/dim]{_preserved_note(preserved)}")
     return True
 
 
@@ -678,15 +671,6 @@ def _prepare_cursor_config(
     return data, diff, preserved
 
 
-def _write_cursor_config(data: dict, path: Path, preserved: int) -> bool:
-    """Write Cursor config to disk. Returns True if file changed."""
-    if not _write_json_if_changed(path, data):
-        return False
-    note = _preserved_note(preserved)
-    rich.print(f"[green]\u2713[/green]  Written [dim]{path}[/dim]{note}")
-    return True
-
-
 def _prepare_codex_config(
     command: str,
     path: Path,
@@ -722,15 +706,6 @@ def _prepare_codex_config(
     data["hooks"] = hooks
     diff = _compute_hooks_diff(old_hooks, hooks)
     return data, diff, preserved
-
-
-def _write_codex_config(data: dict, path: Path, preserved: int) -> bool:
-    """Write Codex config to disk. Returns True if file changed."""
-    if not _write_json_if_changed(path, data):
-        return False
-    note = _preserved_note(preserved)
-    rich.print(f"[green]✓[/green]  Written [dim]{path}[/dim]{note}")
-    return True
 
 
 def _is_codex_requirements_toml(path: Path) -> bool:
@@ -945,15 +920,15 @@ def _uninstall_single_client(client: str, args, managed: bool) -> None:
     info = _detect_existing_install(client, config_path)
 
     # Remove hooks from config
-    if client == "claude":
-        _uninstall_claude(config_path)
-    elif client == "cursor":
-        _uninstall_cursor(config_path)
-    elif client == "codex":
-        if _is_codex_requirements_toml(config_path):
-            _uninstall_codex_managed(config_path)
-        else:
-            _uninstall_codex(config_path)
+    if client == "codex" and _is_codex_requirements_toml(config_path):
+        _uninstall_codex_managed(config_path)
+    elif client in ALL_CLIENTS:
+        _uninstall_hooks(
+            config_path,
+            filter_hooks=_filter_cursor_hooks if client == "cursor" else _filter_claude_hooks,
+            missing_label="settings.json" if client == "claude" else "hooks.json",
+            prune_empty_hooks=client != "cursor",
+        )
 
     # Remove hook script
     _remove_hook_script(client, config_path)
@@ -984,43 +959,22 @@ def _try_revoke_push_key(info: dict, label: str) -> None:
         rich.print(f"[yellow]Warning:[/yellow] Could not revoke push key: {e}")
 
 
-def _uninstall_claude(path: Path) -> None:
+def _uninstall_hooks(
+    path: Path,
+    *,
+    filter_hooks: Callable[[dict], dict],
+    missing_label: str,
+    prune_empty_hooks: bool,
+) -> None:
     if not path.exists():
-        rich.print("[dim]No settings.json found. Nothing to uninstall.[/dim]")
-        return
-
-    settings = _read_json_or_empty(path)
-    hooks = settings.get("hooks", {})
-
-    total_before = sum(len(groups) for groups in hooks.values())
-    filtered = _filter_claude_hooks(hooks)
-    total_after = sum(len(groups) for groups in filtered.values())
-
-    removed = total_before - total_after
-    if removed == 0:
-        rich.print("[dim]No Agent Guard hooks found.[/dim]")
-        return
-
-    _backup_file(path)
-    if filtered:
-        settings["hooks"] = filtered
-    else:
-        settings.pop("hooks", None)
-    _write_json(path, settings)
-    rich.print(f"[green]\u2713[/green]  Removed {removed} Agent Guard hook(s){_preserved_note(total_after)}")
-
-
-def _uninstall_codex(path: Path) -> None:
-    """Codex uses the Claude-shaped hooks.json, so reuse the Claude filter."""
-    if not path.exists():
-        rich.print("[dim]No hooks.json found. Nothing to uninstall.[/dim]")
+        rich.print(f"[dim]No {missing_label} found. Nothing to uninstall.[/dim]")
         return
 
     data = _read_json_or_empty(path)
     hooks = data.get("hooks", {})
 
     total_before = sum(len(groups) for groups in hooks.values())
-    filtered = _filter_claude_hooks(hooks)
+    filtered = filter_hooks(hooks)
     total_after = sum(len(groups) for groups in filtered.values())
 
     removed = total_before - total_after
@@ -1029,33 +983,10 @@ def _uninstall_codex(path: Path) -> None:
         return
 
     _backup_file(path)
-    if filtered:
+    if filtered or not prune_empty_hooks:
         data["hooks"] = filtered
     else:
         data.pop("hooks", None)
-    _write_json(path, data)
-    rich.print(f"[green]✓[/green]  Removed {removed} Agent Guard hook(s){_preserved_note(total_after)}")
-
-
-def _uninstall_cursor(path: Path) -> None:
-    if not path.exists():
-        rich.print("[dim]No hooks.json found. Nothing to uninstall.[/dim]")
-        return
-
-    data = _read_json_or_empty(path)
-    hooks = data.get("hooks", {})
-
-    total_before = sum(len(entries) for entries in hooks.values())
-    filtered = _filter_cursor_hooks(hooks)
-    total_after = sum(len(entries) for entries in filtered.values())
-
-    removed = total_before - total_after
-    if removed == 0:
-        rich.print("[dim]No Agent Guard hooks found.[/dim]")
-        return
-
-    _backup_file(path)
-    data["hooks"] = filtered
     _write_json(path, data)
     rich.print(f"[green]\u2713[/green]  Removed {removed} Agent Guard hook(s){_preserved_note(total_after)}")
 
@@ -1066,36 +997,26 @@ def _uninstall_cursor(path: Path) -> None:
 
 
 def _run_status() -> None:
+    clients = (
+        ("Claude Code", CLAUDE_SETTINGS_PATH, CLAUDE_MANAGED_SETTINGS_PATH, _detect_claude_install),
+        ("Cursor", CURSOR_HOOKS_PATH, CURSOR_MANAGED_HOOKS_PATH, _detect_cursor_install),
+        ("Codex", CODEX_HOOKS_PATH, CODEX_MANAGED_HOOKS_PATH, _detect_codex_install),
+    )
+
     rich.print("[bold]User-level hooks:[/bold]")
-    _print_client_status("Claude Code", CLAUDE_SETTINGS_PATH, _detect_claude_install())
-    rich.print()
-    _print_client_status("Cursor", CURSOR_HOOKS_PATH, _detect_cursor_install())
-    rich.print()
-    _print_client_status("Codex", CODEX_HOOKS_PATH, _detect_codex_install())
-    rich.print()
+    for label, user_path, _, detect in clients:
+        _print_client_status(label, user_path, detect())
+        rich.print()
 
     rich.print("[bold]Managed hooks:[/bold]")
-    claude_managed_info: dict | str | None
-    try:
-        claude_managed_info = _detect_claude_install(CLAUDE_MANAGED_SETTINGS_PATH)
-    except PermissionError:
-        claude_managed_info = _PERMISSION_DENIED
-    _print_client_status("Claude Code", CLAUDE_MANAGED_SETTINGS_PATH, claude_managed_info)
-    rich.print()
-    cursor_managed_info: dict | str | None
-    try:
-        cursor_managed_info = _detect_cursor_install(CURSOR_MANAGED_HOOKS_PATH)
-    except PermissionError:
-        cursor_managed_info = _PERMISSION_DENIED
-    _print_client_status("Cursor", CURSOR_MANAGED_HOOKS_PATH, cursor_managed_info)
-    rich.print()
-    codex_managed_info: dict | str | None
-    try:
-        codex_managed_info = _detect_codex_install(CODEX_MANAGED_HOOKS_PATH)
-    except PermissionError:
-        codex_managed_info = _PERMISSION_DENIED
-    _print_client_status("Codex", CODEX_MANAGED_HOOKS_PATH, codex_managed_info)
-    rich.print()
+    for label, _, managed_path, detect in clients:
+        info: dict | str | None
+        try:
+            info = detect(managed_path)
+        except PermissionError:
+            info = _PERMISSION_DENIED
+        _print_client_status(label, managed_path, info)
+        rich.print()
 
     rich.print("[dim]# interactive flow (user-level)[/dim]")
     rich.print("[dim]snyk-agent-scan guard install <client> --machine-id <machine-id>[/dim]")
@@ -1134,76 +1055,52 @@ def _print_client_status(label: str, path: Path, info: dict | str | None) -> Non
 
 
 def _detect_claude_install(path: Path = CLAUDE_SETTINGS_PATH) -> dict | None:
-    if not path.exists():
-        return None
-    settings = _read_json_or_empty(path)
-    hooks = settings.get("hooks", {})
-
-    events = []
-    found_cmd = None
-    for event in CLAUDE_HOOK_EVENTS:
-        for group in hooks.get(event, []):
-            for h in group.get("hooks", []):
-                if _is_agent_scan_command(h.get("command", "")):
-                    events.append(event)
-                    if found_cmd is None:
-                        found_cmd = h["command"]
-                    break
-            else:
-                continue
-            break
-
-    if not events or found_cmd is None:
-        return None
-    return _parse_command_info(found_cmd, events)
+    return _detect_install(path, CLAUDE_HOOK_EVENTS, _grouped_hook_commands)
 
 
 def _detect_codex_install(path: Path = CODEX_HOOKS_PATH) -> dict | None:
+    if _is_codex_requirements_toml(path):
+        if not path.exists():
+            return None
+        return _detect_codex_managed_install(path)
+    return _detect_install(path, CODEX_HOOK_EVENTS, _grouped_hook_commands)
+
+
+def _detect_cursor_install(path: Path = CURSOR_HOOKS_PATH) -> dict | None:
+    return _detect_install(path, CURSOR_HOOK_EVENTS, _flat_hook_commands)
+
+
+def _grouped_hook_commands(group: dict) -> Iterable[str]:
+    return (hook.get("command", "") for hook in group.get("hooks", []))
+
+
+def _flat_hook_commands(entry: dict) -> Iterable[str]:
+    return (entry.get("command", ""),)
+
+
+def _detect_install(path: Path, events: list[str], commands: Callable[[dict], Iterable[str]]) -> dict | None:
     if not path.exists():
         return None
-    if _is_codex_requirements_toml(path):
-        return _detect_codex_managed_install(path)
     data = _read_json_or_empty(path)
     hooks = data.get("hooks", {})
 
-    events = []
+    installed_events = []
     found_cmd = None
-    for event in CODEX_HOOK_EVENTS:
-        for group in hooks.get(event, []):
-            for h in group.get("hooks", []):
-                if _is_agent_scan_command(h.get("command", "")):
-                    events.append(event)
+    for event in events:
+        for entry in hooks.get(event, []):
+            for command in commands(entry):
+                if _is_agent_scan_command(command):
+                    installed_events.append(event)
                     if found_cmd is None:
-                        found_cmd = h["command"]
+                        found_cmd = command
                     break
             else:
                 continue
             break
 
-    if not events or found_cmd is None:
+    if not installed_events or found_cmd is None:
         return None
-    return _parse_command_info(found_cmd, events)
-
-
-def _detect_cursor_install(path: Path = CURSOR_HOOKS_PATH) -> dict | None:
-    if not path.exists():
-        return None
-    data = _read_json_or_empty(path)
-    hooks = data.get("hooks", {})
-
-    events = []
-    found_cmd = None
-    for event in CURSOR_HOOK_EVENTS:
-        for entry in hooks.get(event, []):
-            if _is_agent_scan_command(entry.get("command", "")):
-                events.append(event)
-                if found_cmd is None:
-                    found_cmd = entry["command"]
-                break
-
-    if not events or found_cmd is None:
-        return None
-    return _parse_command_info(found_cmd, events)
+    return _parse_command_info(found_cmd, installed_events)
 
 
 # ---------------------------------------------------------------------------
