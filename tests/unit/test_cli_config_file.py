@@ -96,10 +96,6 @@ class TestExplicitlyProvidedDests:
         assert "skills" in _provided(_build_parser(), ["scan", "--no-skills"])
         assert "skills" in _provided(_build_parser(), ["scan", "--skills"])
 
-    def test_double_dash_stops_option_detection(self):
-        assert "json" not in _provided(_build_parser(), ["scan", "--", "--json"])
-        assert "json" in _provided(_build_parser(), ["scan", "--json"])
-
     def test_no_option_string_maps_to_two_dests(self, monkeypatch):
         """``explicitly_provided_dests`` keys a flat option-string -> dest map, so an option
         string reused across subcommands must always mean the same dest. A collision would

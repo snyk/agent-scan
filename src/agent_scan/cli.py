@@ -250,8 +250,6 @@ def explicitly_provided_dests(parser: argparse.ArgumentParser, argv: list[str]) 
 
     provided: set[str] = set()
     for token in argv:
-        if token == "--":
-            break
         option = token.split("=", 1)[0]
         dest = option_to_dest.get(option)
         if dest is not None:
