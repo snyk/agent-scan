@@ -218,6 +218,72 @@ class TestExtractEnvFromCmd:
         assert _extract_env_from_cmd(cmd, "TENANT_ID") == "tid-1"
 
 
+@pytest.mark.parametrize(
+    "variant,is_windows,expected",
+    [
+        (
+            "main",
+            False,
+            "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' TENANT_ID='tenant' "
+            "MACHINE_ID='machine' bash '/x/snyk-agent-guard.sh' --client claude-code",
+        ),
+        (
+            "main",
+            True,
+            "powershell -File 'C:\\hooks\\snyk-agent-guard.ps1' -Client claude-code -PushKey 'pk' "
+            "-RemoteUrl 'https://api.snyk.io' -MachineId 'machine'",
+        ),
+        (
+            "discover",
+            False,
+            "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' MACHINE_ID='machine' "
+            "AGENT_SCAN_BIN='/usr/local/bin/snyk-agent-scan' bash '/x/snyk-agent-guard-discover.sh' "
+            "--client 'claude-code' --scope servers",
+        ),
+        (
+            "discover",
+            True,
+            "powershell -File 'C:\\hooks\\snyk-agent-guard-discover.ps1' -Client claude-code -PushKey 'pk' "
+            "-RemoteUrl 'https://api.snyk.io' -MachineId 'machine' "
+            "-AgentScanBin 'C:\\Program Files\\Snyk\\snyk-agent-scan.exe' -Scope servers",
+        ),
+    ],
+)
+def test_build_hook_command_preserves_exact_output(variant, is_windows, expected):
+    script_path = Path(
+        r"C:\hooks\snyk-agent-guard.ps1"
+        if is_windows and variant == "main"
+        else r"C:\hooks\snyk-agent-guard-discover.ps1"
+        if is_windows
+        else f"/x/snyk-agent-guard{'-discover' if variant == 'discover' else ''}.sh"
+    )
+
+    with patch(f"{_G}.IS_WINDOWS", is_windows):
+        if variant == "main":
+            command = _build_hook_command(
+                "pk",
+                "https://api.snyk.io",
+                script_path,
+                "claude-code",
+                tenant_id="tenant",
+                machine_id="machine",
+            )
+        else:
+            command = guard_module._build_discover_hook_command(
+                "pk",
+                "https://api.snyk.io",
+                script_path,
+                "claude-code",
+                agent_scan_bin=(
+                    r"C:\Program Files\Snyk\snyk-agent-scan.exe" if is_windows else "/usr/local/bin/snyk-agent-scan"
+                ),
+                tenant_id="tenant",
+                machine_id="machine",
+            )
+
+    assert command == expected
+
+
 class TestBuildHookCommand:
     @pytest.mark.skipif(sys.platform == "win32", reason="bash command format")
     def test_without_tenant_bash(self):
@@ -377,6 +443,138 @@ class TestBuildDiscoverHookCommand:
 
         assert r"-File 'C:\Users\O''Brien\discover.ps1'" in command
         assert r"-AgentScanBin 'C:\Users\O''Brien\snyk-agent-scan.exe'" in command
+
+
+class TestHookInvocationRenderers:
+    def test_render_argv_posix_returns_unquoted_argv_and_merged_environment(self):
+        invocation = guard_module._HookInvocation(
+            script_path=Path("/hooks/snyk-agent-guard.sh"),
+            hook_client="claude-code",
+            push_key="pk'raw",
+            url="https://example.test/hook's",
+            machine_id="machine'raw",
+        )
+
+        with patch.dict(os.environ, {"EXISTING": "value"}, clear=True), patch(f"{_G}.IS_WINDOWS", False):
+            argv, env = guard_module._render_argv(invocation)
+
+        assert argv == ["bash", "/hooks/snyk-agent-guard.sh", "--client", "claude-code"]
+        assert env == {
+            "EXISTING": "value",
+            "PUSH_KEY": "pk'raw",
+            "REMOTE_HOOKS_BASE_URL": "https://example.test/hook's",
+            "MACHINE_ID": "machine'raw",
+        }
+
+    def test_render_argv_windows_returns_unquoted_argv_without_environment(self):
+        invocation = guard_module._HookInvocation(
+            script_path=Path(r"C:\hooks\snyk-agent-guard.ps1"),
+            hook_client="codex",
+            push_key="pk'raw",
+            url="https://example.test/hook's",
+            machine_id="machine'raw",
+        )
+
+        with patch(f"{_G}.IS_WINDOWS", True):
+            argv, env = guard_module._render_argv(invocation)
+
+        assert argv == [
+            "powershell",
+            "-File",
+            str(Path(r"C:\hooks\snyk-agent-guard.ps1")),
+            "-Client",
+            "codex",
+            "-PushKey",
+            "pk'raw",
+            "-RemoteUrl",
+            "https://example.test/hook's",
+            "-MachineId",
+            "machine'raw",
+        ]
+        assert env is None
+
+    def test_render_argv_posix_carries_discovery_fields(self):
+        """The discovery trampoline forwards ``"$@"`` to ``guard discover``, so scope travels in argv."""
+        invocation = guard_module._HookInvocation(
+            script_path=Path("/hooks/snyk-agent-guard-discover.sh"),
+            hook_client="cursor",
+            push_key="pk",
+            url="https://api.snyk.io",
+            machine_id="machine",
+            tenant_id="tenant",
+            agent_scan_bin="/opt/Snyk's bin/snyk-agent-scan",
+            scope="servers",
+            quote_client=True,
+        )
+
+        with patch.dict(os.environ, {"EXISTING": "value"}, clear=True), patch(f"{_G}.IS_WINDOWS", False):
+            argv, env = guard_module._render_argv(invocation)
+
+        assert argv == [
+            "bash",
+            "/hooks/snyk-agent-guard-discover.sh",
+            "--client",
+            "cursor",
+            "--scope",
+            "servers",
+        ]
+        assert env == {
+            "EXISTING": "value",
+            "PUSH_KEY": "pk",
+            "REMOTE_HOOKS_BASE_URL": "https://api.snyk.io",
+            "TENANT_ID": "tenant",
+            "MACHINE_ID": "machine",
+            "AGENT_SCAN_BIN": "/opt/Snyk's bin/snyk-agent-scan",
+        }
+
+    def test_render_argv_windows_carries_discovery_fields(self):
+        invocation = guard_module._HookInvocation(
+            script_path=Path(r"C:\hooks\snyk-agent-guard-discover.ps1"),
+            hook_client="codex",
+            push_key="pk",
+            url="https://api.snyk.io",
+            machine_id="machine",
+            tenant_id="tenant",
+            agent_scan_bin=r"C:\Program Files\Snyk\snyk-agent-scan.exe",
+            scope="servers",
+        )
+
+        with patch(f"{_G}.IS_WINDOWS", True):
+            argv, env = guard_module._render_argv(invocation)
+
+        assert argv == [
+            "powershell",
+            "-File",
+            str(Path(r"C:\hooks\snyk-agent-guard-discover.ps1")),
+            "-Client",
+            "codex",
+            "-PushKey",
+            "pk",
+            "-RemoteUrl",
+            "https://api.snyk.io",
+            "-MachineId",
+            "machine",
+            "-AgentScanBin",
+            r"C:\Program Files\Snyk\snyk-agent-scan.exe",
+            "-Scope",
+            "servers",
+        ]
+        assert env is None
+
+    def test_render_posix_command_skips_empty_optional_fields(self):
+        invocation = guard_module._HookInvocation(
+            script_path=Path("/hooks/snyk-agent-guard.sh"),
+            hook_client="claude-code",
+            push_key="pk",
+            url="https://api.snyk.io",
+        )
+
+        command = guard_module._render_posix_command(invocation)
+
+        assert command == (
+            "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' "
+            "bash '/hooks/snyk-agent-guard.sh' --client claude-code"
+        )
 
 
 class TestPrepareClaudeDiscoveryHook:
