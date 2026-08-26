@@ -1499,6 +1499,11 @@ CODEX_AGENT_SCAN_CMD = (
     "PUSH_KEY='pk-codex' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' "
     "TENANT_ID='tid-1' bash '/home/u/.codex/hooks/snyk-agent-guard.sh' --client codex"
 )
+CODEX_DISCOVER_CMD = (
+    "PUSH_KEY='pk-discover' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' "
+    "AGENT_SCAN_BIN='/usr/local/bin/snyk-agent-scan' "
+    "bash '/home/u/.codex/hooks/snyk-agent-guard-discover.sh' --client codex --scope servers"
+)
 
 
 class TestUninstallCodex:
@@ -1582,8 +1587,12 @@ class TestCodexManagedRequirementsToml:
             _uninstall_codex_managed,
         )
 
-        def _install(command, path, _script=None):
-            content, _ = _prepare_codex_managed_config(command, path)
+        def _install(command, path, _script=None, *, discover_command=None):
+            content, _ = _prepare_codex_managed_config(
+                command,
+                path,
+                discover_command=discover_command,
+            )
             return _write_codex_managed_config(content, path)
 
         return (
@@ -1606,6 +1615,83 @@ class TestCodexManagedRequirementsToml:
             assert f"[[hooks.{event}]]" in content
             assert f"[[hooks.{event}.hooks]]" in content
 
+    def test_render_adds_async_discovery_group_only_to_session_start(self, tmp_path):
+        _, _, _, render = self._import_managed_helpers()
+
+        content = render(
+            CODEX_AGENT_SCAN_CMD,
+            tmp_path / "requirements.toml",
+            discover_command=CODEX_DISCOVER_CMD,
+        )
+
+        assert content.count("[[hooks.SessionStart]]") == 2
+        assert CODEX_DISCOVER_CMD in content
+        assert f'command = "{CODEX_DISCOVER_CMD}"\nasync = true' in content
+        for event in set(CODEX_HOOK_EVENTS) - {"SessionStart"}:
+            assert content.count(f"[[hooks.{event}]]") == 1
+
+    def test_render_none_preserves_existing_output(self, tmp_path):
+        _, _, _, render = self._import_managed_helpers()
+        path = tmp_path / "requirements.toml"
+        if IS_WINDOWS:
+            managed_dir = "/etc/codex/hooks"
+            windows_managed_dir = str(tmp_path / "hooks")
+        else:
+            managed_dir = (tmp_path / "hooks").as_posix()
+            windows_managed_dir = r"C:\ProgramData\OpenAI\Codex\hooks"
+        expected_lines = [
+            "[features]",
+            "hooks = true",
+            "",
+            "[hooks]",
+            f'managed_dir = "{managed_dir}"',
+            f"windows_managed_dir = '{windows_managed_dir}'",
+            "",
+        ]
+        for event in CODEX_HOOK_EVENTS:
+            expected_lines.extend(
+                [
+                    f"[[hooks.{event}]]",
+                    f"[[hooks.{event}.hooks]]",
+                    'type = "command"',
+                    f'command = "{CODEX_AGENT_SCAN_CMD}"',
+                    "",
+                ]
+            )
+
+        assert render(CODEX_AGENT_SCAN_CMD, path, discover_command=None) == "\n".join(expected_lines).rstrip() + "\n"
+
+    def test_rendered_discovery_toml_is_valid(self, tmp_path):
+        tomllib = pytest.importorskip("tomllib")
+        _, _, _, render = self._import_managed_helpers()
+
+        parsed = tomllib.loads(
+            render(
+                CODEX_AGENT_SCAN_CMD,
+                tmp_path / "requirements.toml",
+                discover_command=CODEX_DISCOVER_CMD,
+            )
+        )
+
+        assert len(parsed["hooks"]["SessionStart"]) == 2
+        assert parsed["hooks"]["SessionStart"][1]["hooks"] == [
+            {"type": "command", "command": CODEX_DISCOVER_CMD, "async": True}
+        ]
+
+    def test_render_parse_round_trip_splits_guard_and_discovery_commands(self, tmp_path):
+        _, _, _, render = self._import_managed_helpers()
+        content = render(
+            CODEX_AGENT_SCAN_CMD,
+            tmp_path / "requirements.toml",
+            discover_command=CODEX_DISCOVER_CMD,
+        )
+
+        events, guard_command, discover_command = _parse_codex_requirements_toml(content)
+
+        assert events == CODEX_HOOK_EVENTS
+        assert guard_command == CODEX_AGENT_SCAN_CMD
+        assert discover_command == CODEX_DISCOVER_CMD
+
     def test_install_writes_toml(self, tmp_path):
         install, _, _, _ = self._import_managed_helpers()
         path = tmp_path / "requirements.toml"
@@ -1623,7 +1709,7 @@ class TestCodexManagedRequirementsToml:
         install(CODEX_AGENT_SCAN_CMD, path, script)
         assert install(CODEX_AGENT_SCAN_CMD, path, script) is False
 
-    def test_guard_install_does_not_write_orphan_discovery_script(self, tmp_path):
+    def test_guard_install_writes_discovery_script_and_toml_entry(self, tmp_path):
         path = tmp_path / "requirements.toml"
 
         with (
@@ -1647,7 +1733,41 @@ class TestCodexManagedRequirementsToml:
             )
 
         assert (tmp_path / "hooks" / "snyk-agent-guard.sh").exists()
-        assert not (tmp_path / "hooks" / "snyk-agent-guard-discover.sh").exists()
+        assert (tmp_path / "hooks" / "snyk-agent-guard-discover.sh").exists()
+        text = path.read_text()
+        assert text.count("[[hooks.SessionStart]]") == 2
+        assert "snyk-agent-guard-discover.sh" in text
+        assert "AGENT_SCAN_BIN='/usr/local/bin/snyk-agent-scan'" in text
+
+    def test_guard_install_without_agent_scan_bin_warns_and_removes_stale_discovery_script(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        discover_script = tmp_path / "hooks" / "snyk-agent-guard-discover.sh"
+        discover_script.parent.mkdir(parents=True)
+        discover_script.write_text("stale\n")
+
+        with (
+            patch(f"{_G}.IS_WINDOWS", False),
+            patch(f"{_G}._agent_scan_bin", return_value=None),
+            patch(f"{_G}._send_test_event", return_value=True),
+            patch(f"{_G}.rich") as rich,
+        ):
+            _install_hooks(
+                "codex",
+                "codex",
+                "pk-test",
+                "https://api.snyk.io",
+                path,
+                "managed",
+                "Codex",
+                False,
+                "tid-1",
+                "snyk-token",
+                "machine-42",
+            )
+
+        assert not discover_script.exists()
+        assert "snyk-agent-guard-discover" not in path.read_text()
+        assert any("AGENT_SCAN_BIN is not set" in call.args[0] for call in rich.print.call_args_list if call.args)
 
     def test_detect_after_install(self, tmp_path):
         install, _, detect, _ = self._import_managed_helpers()
@@ -1660,6 +1780,64 @@ class TestCodexManagedRequirementsToml:
         assert info["auth_value"] == "pk-codex"
         assert info["tenant_id"] == "tid-1"
         assert set(info["events"]) == set(CODEX_HOOK_EVENTS)
+
+    def test_detect_uses_guard_command_when_discovery_block_is_first(self, tmp_path):
+        _, _, detect, _ = self._import_managed_helpers()
+        path = tmp_path / "requirements.toml"
+        path.write_text(
+            "[[hooks.SessionStart]]\n"
+            "[[hooks.SessionStart.hooks]]\n"
+            'type = "command"\n'
+            f'command = "{CODEX_DISCOVER_CMD}"\n'
+            "async = true\n\n"
+            "[[hooks.PreToolUse]]\n"
+            "[[hooks.PreToolUse.hooks]]\n"
+            'type = "command"\n'
+            f'command = "{CODEX_AGENT_SCAN_CMD}"\n'
+        )
+
+        info = detect(path)
+
+        assert info is not None
+        assert info["auth_value"] == "pk-codex"
+        assert info["tenant_id"] == "tid-1"
+
+    def test_prepare_with_same_commands_is_idempotent(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        content, _ = _prepare_codex_managed_config(
+            CODEX_AGENT_SCAN_CMD,
+            path,
+            discover_command=CODEX_DISCOVER_CMD,
+        )
+        path.write_text(content)
+
+        _, diff = _prepare_codex_managed_config(
+            CODEX_AGENT_SCAN_CMD,
+            path,
+            discover_command=CODEX_DISCOVER_CMD,
+        )
+
+        assert diff == {"added": {}, "modified": {}, "removed": {}}
+
+    def test_prepare_marks_discover_only_change_as_session_start_modified(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        content, _ = _prepare_codex_managed_config(
+            CODEX_AGENT_SCAN_CMD,
+            path,
+            discover_command=CODEX_DISCOVER_CMD,
+        )
+        path.write_text(content)
+        new_discover_command = CODEX_DISCOVER_CMD.replace("/usr/local/bin", "/opt/snyk/bin")
+
+        _, diff = _prepare_codex_managed_config(
+            CODEX_AGENT_SCAN_CMD,
+            path,
+            discover_command=new_discover_command,
+        )
+
+        assert set(diff["modified"]) == {"SessionStart"}
+        assert diff["modified"]["SessionStart"]["expected_value"][1]["command"] == new_discover_command
+        assert diff["modified"]["SessionStart"]["actual_value"][1]["command"] == CODEX_DISCOVER_CMD
 
     def test_detect_dispatches_via_extension(self, tmp_path):
         install, _, _, _ = self._import_managed_helpers()
@@ -1690,9 +1868,26 @@ class TestCodexManagedRequirementsToml:
             'type = "command"\n'
             "command = \"PUSH_KEY='pk' bash 'C:\\\\Users\\\\me\\\\hooks\\\\snyk-agent-guard.sh' --client codex\"\n"
         )
-        events, cmd = _parse_codex_requirements_toml(toml)
+        events, cmd, discover_cmd = _parse_codex_requirements_toml(toml)
         assert "PreToolUse" in events
         assert "C:\\Users\\me\\hooks\\snyk-agent-guard.sh" in cmd
+        assert discover_cmd is None
+
+    def test_discovery_backslash_path_round_trips(self, tmp_path):
+        _, _, _, render = self._import_managed_helpers()
+        discover_command = CODEX_DISCOVER_CMD.replace(
+            "bash '/home/u/.codex/hooks/snyk-agent-guard-discover.sh'",
+            r"bash 'C:\ProgramData\OpenAI\Codex\hooks\snyk-agent-guard-discover.sh'",
+        )
+
+        content = render(
+            CODEX_AGENT_SCAN_CMD,
+            tmp_path / "requirements.toml",
+            discover_command=discover_command,
+        )
+        _, _, parsed_discover = _parse_codex_requirements_toml(content)
+
+        assert parsed_discover == discover_command
 
     def test_prepare_survives_unparseable_existing_toml(self, tmp_path):
         path = tmp_path / "requirements.toml"
@@ -2545,13 +2740,14 @@ class TestInstallHooksOrchestration:
         assert ctx["build_discover"].call_args.kwargs["hook_client"] == "codex"
         assert ctx["prep_codex"].call_args.kwargs["discover_command"] == "discover-cmd"
 
-    def test_codex_managed_does_not_build_discovery_hook(self, ctx, tmp_path):
+    def test_codex_managed_builds_discovery_hook(self, ctx, tmp_path):
         ctx["is_toml"].return_value = True
 
         config = self._call(tmp_path, client="codex", hook_client="codex")
 
-        ctx["build_discover"].assert_not_called()
-        ctx["copy"].assert_called_once_with(config, include_discover=False)
+        ctx["build_discover"].assert_called_once()
+        ctx["copy"].assert_called_once_with(config, include_discover=True)
+        assert ctx["prep_codex_managed"].call_args.kwargs["discover_command"] == "discover-cmd"
 
     def test_unset_agent_scan_bin_skips_discovery_without_aborting(self, ctx, tmp_path):
         ctx["agent_scan_bin"].return_value = None
