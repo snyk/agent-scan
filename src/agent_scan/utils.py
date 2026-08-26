@@ -63,11 +63,15 @@ logger = logging.getLogger(__name__)
 
 def get_relative_path(path: str) -> str:
     try:
-        expanded_path = os.path.expanduser(path)
-        home_dir = os.path.expanduser("~")
-        result = "~" + expanded_path[len(home_dir) :] if expanded_path.startswith(home_dir) else path
-        # Normalize to forward slashes for consistent display across platforms.
-        return result.replace("\\", "/")
+        expanded_path = os.path.expanduser(path).replace("\\", "/")
+        home_dir = os.path.expanduser("~").replace("\\", "/").rstrip("/")
+        compared_path = expanded_path.casefold() if sys.platform == "win32" else expanded_path
+        compared_home = home_dir.casefold() if sys.platform == "win32" else home_dir
+        if compared_path == compared_home:
+            return "~"
+        if compared_home and compared_path.startswith(compared_home + "/"):
+            return "~" + expanded_path[len(home_dir) :]
+        return expanded_path
     except Exception:
         return path.replace("\\", "/")
 
