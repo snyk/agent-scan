@@ -46,7 +46,6 @@ try {
     if (Test-Path -LiteralPath $cmd -PathType Leaf) {
         & $cmd @arguments *> $null
     } else {
-        # TODO: ProdSec needs to review this shell-evaluation path before release.
         Invoke-Expression "$cmd $($arguments -join ' ')" *> $null
     }
 } catch {
