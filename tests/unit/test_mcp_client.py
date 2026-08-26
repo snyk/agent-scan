@@ -126,6 +126,7 @@ async def test_get_client_expands_env_placeholders_for_stdio_server(mock_stdio_c
     assert mock_stdio_client.call_count == 1
     called_params = mock_stdio_client.call_args.args[0]
     assert called_params.env == {"AUTH_HEADER": "Bearer real-secret-value"}
+    assert called_params.args == server.args
     # The parsed model itself must be untouched -- still the literal placeholder.
     assert server.env == {"AUTH_HEADER": "${AUTH_HEADER}"}
 
