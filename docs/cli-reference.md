@@ -361,7 +361,7 @@ Installation also configures a fire-and-forget session-start hook that reports d
 | --- | --- | --- | --- |
 | `--url URL` | string | `https://api.snyk.io` | Remote hook base URL for the Snyk API environment. |
 | `--tenant-id ID` | string | — | Snyk tenant UUID. Required when minting a push key; unnecessary when `PUSH_KEY` is set. |
-| `--machine-id ID`, `--control-identifier ID` | string | — | Required non-anonymous machine identifier sent in the `X-User` header's `identifier` field. May instead be set with `MACHINE_ID`. |
+| `--machine-id ID` | string | — | Required non-anonymous machine identifier sent in the `X-User` header's `identifier` field. May instead be set with `MACHINE_ID`. |
 | `--file PATH` | string | — | Override the client configuration path. |
 | `--managed` | boolean | `false` | Install in the admin/MDM-managed configuration rather than the user configuration. |
 | `--test` | boolean | `false` | **Deprecated/no-op.** |

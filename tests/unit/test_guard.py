@@ -3515,17 +3515,33 @@ class TestSendServersDiscoveredEvent:
 
 
 class TestGuardInstallMachineIdCli:
-    @pytest.mark.parametrize("flag", ["--machine-id", "--control-identifier"])
-    def test_guard_install_accepts_machine_id_aliases(self, flag, monkeypatch):
+    def test_guard_install_accepts_machine_id(self, monkeypatch):
         from agent_scan import cli
 
-        monkeypatch.setattr(sys, "argv", ["agent-scan", "guard", "install", "claude", flag, "machine-42"])
+        monkeypatch.setattr(sys, "argv", ["agent-scan", "guard", "install", "claude", "--machine-id", "machine-42"])
         with patch(f"{_G}.run_guard", return_value=0) as run:
             with pytest.raises(SystemExit) as exc:
                 cli.main()
 
         assert exc.value.code == 0
         assert run.call_args.args[0].machine_id == "machine-42"
+
+    def test_guard_install_rejects_control_identifier(self, monkeypatch):
+        """--machine-id is the only spelling here; --control-identifier belongs to scan's
+        control-server blocks, where it means a different dest."""
+        from agent_scan import cli
+
+        monkeypatch.setattr(
+            sys, "argv", ["agent-scan", "guard", "install", "claude", "--control-identifier", "machine-42"]
+        )
+        # Patched so a regression that re-accepts the flag fails the assertion below
+        # instead of running a real install against the developer's own config.
+        with patch(f"{_G}.run_guard", return_value=0) as run:
+            with pytest.raises(SystemExit) as exc:
+                cli.main()
+
+        assert exc.value.code == 2
+        run.assert_not_called()
 
 
 class TestGuardDiscoverCli:

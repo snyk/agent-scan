@@ -2,13 +2,16 @@
 complete-replacement semantics for block/list arguments."""
 
 import argparse
+import sys
 
 import pytest
 
+from agent_scan import cli
 from agent_scan.cli import (
     _coerce_config_value,
     _effective_identifier,
     _effective_push_key,
+    _iter_all_actions,
     apply_config_file,
     control_servers_from_config,
     explicitly_provided_dests,
@@ -42,8 +45,8 @@ def _parse(argv: list[str]) -> tuple[argparse.ArgumentParser, argparse.Namespace
 
 
 def _provided(parser: argparse.ArgumentParser, argv: list[str]) -> set[str]:
-    """Let argparse resolve the subparser path, then ask which dests were explicit."""
-    return explicitly_provided_dests(parser, parser.parse_args(argv), argv)
+    """Ask which dests ``argv`` set explicitly."""
+    return explicitly_provided_dests(parser, argv)
 
 
 def _write_yaml(tmp_path, text: str) -> str:
@@ -97,59 +100,26 @@ class TestExplicitlyProvidedDests:
         assert "json" not in _provided(_build_parser(), ["scan", "--", "--json"])
         assert "json" in _provided(_build_parser(), ["scan", "--json"])
 
-    def test_uses_destination_from_active_subparser_when_option_aliases_collide(self):
-        parser = _build_parser()
-        subparsers = next(action for action in parser._actions if isinstance(action, argparse._SubParsersAction))
-        guard_parser = subparsers.add_parser("guard", allow_abbrev=False)
-        guard_subparsers = guard_parser.add_subparsers(dest="guard_command")
-        guard_install_parser = guard_subparsers.add_parser("install", allow_abbrev=False)
-        guard_install_parser.add_argument("--machine-id", "--control-identifier", dest="machine_id", default=None)
+    def test_no_option_string_maps_to_two_dests(self, monkeypatch):
+        """``explicitly_provided_dests`` keys a flat option-string -> dest map, so an option
+        string reused across subcommands must always mean the same dest. A collision would
+        make the map order-dependent and silently misreport which flags were explicit."""
+        captured: list[argparse.ArgumentParser] = []
 
-        provided = _provided(
-            parser,
-            ["scan", "--control-server", "https://example.com", "--control-identifier", "legacy-id"],
-        )
+        def capture(self, *args, **kwargs):
+            captured.append(self)
+            raise SystemExit(0)
 
-        assert "control_identifier" in provided
-        assert "machine_id" not in provided
+        monkeypatch.setattr(sys, "argv", ["agent-scan", "scan"])
+        monkeypatch.setattr(argparse.ArgumentParser, "parse_args", capture)
+        with pytest.raises(SystemExit):
+            cli.main()
 
-    def test_uses_destination_from_nested_subparser(self):
-        """The same alias resolves to guard install's dest when that is the active path."""
-        parser = _build_parser()
-        subparsers = next(action for action in parser._actions if isinstance(action, argparse._SubParsersAction))
-        guard_parser = subparsers.add_parser("guard", allow_abbrev=False)
-        guard_subparsers = guard_parser.add_subparsers(dest="guard_command")
-        guard_install_parser = guard_subparsers.add_parser("install", allow_abbrev=False)
-        guard_install_parser.add_argument("client")
-        guard_install_parser.add_argument("--machine-id", "--control-identifier", dest="machine_id", default=None)
-
-        provided = _provided(parser, ["guard", "install", "claude", "--control-identifier", "m1"])
-
-        assert "machine_id" in provided
-        assert "control_identifier" not in provided
-
-    def test_root_option_value_is_not_mistaken_for_subcommand(self):
-        parser = argparse.ArgumentParser(allow_abbrev=False)
-        parser.add_argument("--config-file")
-        subparsers = parser.add_subparsers(dest="command")
-        scan_parser = subparsers.add_parser("scan", allow_abbrev=False)
-        scan_parser.add_argument("--control-identifier")
-        guard_parser = subparsers.add_parser("guard", allow_abbrev=False)
-        guard_subparsers = guard_parser.add_subparsers(dest="guard_command")
-        guard_subparsers.add_parser("install", allow_abbrev=False)
-
-        provided = _provided(parser, ["--config-file", "guard", "scan", "--control-identifier", "x"])
-
-        assert "control_identifier" in provided
-
-    def test_no_subcommand_yields_only_root_options(self):
-        """A namespace whose subparser dest is unset must not crash the action walk."""
-        parser = _build_parser()
-        parser.add_argument("--top-level")
-
-        provided = explicitly_provided_dests(parser, parser.parse_args([]), ["--top-level", "x"])
-
-        assert provided == {"top_level"}
+        seen: dict[str, str] = {}
+        for action in _iter_all_actions(captured[0]):
+            for option in action.option_strings:
+                previous = seen.setdefault(option, action.dest)
+                assert previous == action.dest, f"{option} maps to both {previous!r} and {action.dest!r}"
 
 
 class TestAbbreviationDisabled:
