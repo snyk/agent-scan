@@ -619,8 +619,10 @@ class TestRedactText:
         # Force a rebuild for this test regardless of what earlier tests in
         # this process already primed, so the "once" assertion below is
         # meaningful rather than trivially satisfied by the cache already
-        # being warm.
+        # being warm. Both the plugin list and its partitioned form are cached,
+        # so reset both -- otherwise the warm split short-circuits the rebuild.
         monkeypatch.setattr(redact_mod, "_CACHED_PLUGINS", None)
+        monkeypatch.setattr(redact_mod, "_CACHED_PLUGINS_SPLIT", None)
 
         real_transient_settings = redact_mod.transient_settings
         entries = 0

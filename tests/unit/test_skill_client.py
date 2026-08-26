@@ -264,7 +264,11 @@ def _collect_skill_files_in_subprocess(skill_path: Path) -> subprocess.Completed
         ],
         capture_output=True,
         text=True,
-        timeout=2,
+        # Guards against a real hang (symlink cycle / blocking FIFO open), not a
+        # perf budget: the child cold-starts a fresh interpreter and imports
+        # detect_secrets, which can take >2s on a loaded CI runner. Kept well
+        # above that import cost so a genuine hang still fails fast.
+        timeout=10,
         check=False,
     )
 
