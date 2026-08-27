@@ -974,7 +974,7 @@ def main():
         "discover",
         allow_abbrev=False,
         help=(
-            "Run MCP server discovery and send a SessionStartServerDiscovery event directly to Agent Monitor "
+            "Run MCP server discovery and send a sessionStartServerDiscovery event directly to Agent Monitor "
             "(used by the async session-start hooks that guard install configures)"
         ),
     )

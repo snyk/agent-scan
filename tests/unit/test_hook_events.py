@@ -54,7 +54,7 @@ def _patch_session(session: _FakeSession):
 @pytest.mark.parametrize("client", ["claude-code", "cursor", "codex"])
 def test_sends_existing_hook_wire_contract(client):
     session = _FakeSession()
-    payload = '{"hook_event_name":"serversDiscovered"}'
+    payload = '{"hook_event_name":"hooksConfiguredServerDiscovery"}'
 
     with (
         patch("agent_scan.hook_events.get_hostname", return_value="host-1"),
