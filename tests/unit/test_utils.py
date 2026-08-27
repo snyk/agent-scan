@@ -13,7 +13,26 @@ from agent_scan.utils import (
     get_readable_home_directories,
     get_relative_path,
     suppress_stdout,
+    toml_escape,
+    toml_unescape,
 )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "\b\t\n\f\r",
+        "\x00\x1f\x7f",
+        "Grüezi, 世界",
+        "\\\\\\",
+        'embedded "quotes"',
+    ],
+)
+def test_toml_escape_and_unescape_are_exact_inverses(value):
+    rendered = toml_escape(value)
+
+    assert toml_unescape(rendered[1:-1]) == value
 
 
 class TestGetRelativePath:

@@ -40,6 +40,7 @@ from agent_scan.pushkeys import (
     revoke_push_key,
 )
 from agent_scan.redact import redact_push_keys, redact_push_keys_in_data
+from agent_scan.utils import toml_escape, toml_unescape
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -752,21 +753,21 @@ def _render_codex_requirements_toml(
         "hooks = true",
         "",
         "[hooks]",
-        f"managed_dir = {_toml_basic_string(managed_dir)}",
-        f"windows_managed_dir = {_toml_basic_string(windows_managed_dir)}",
+        f"managed_dir = {toml_escape(managed_dir)}",
+        f"windows_managed_dir = {toml_escape(windows_managed_dir)}",
         "",
     ]
     for event in CODEX_HOOK_EVENTS:
         lines.append(f"[[hooks.{event}]]")
         lines.append(f"[[hooks.{event}.hooks]]")
         lines.append('type = "command"')
-        lines.append(f"command = {_toml_basic_string(command)}")
+        lines.append(f"command = {toml_escape(command)}")
         lines.append("")
     if discover_command:
         lines.append("[[hooks.SessionStart]]")
         lines.append("[[hooks.SessionStart.hooks]]")
         lines.append('type = "command"')
-        lines.append(f"command = {_toml_basic_string(discover_command)}")
+        lines.append(f"command = {toml_escape(discover_command)}")
         lines.append("async = true")
         lines.append("")
     content = "\n".join(lines).rstrip("\n") + "\n"
@@ -875,7 +876,7 @@ def _parse_codex_requirements_toml(text: str) -> tuple[list[str], str | None, st
             continue
         m = command_re.match(line)
         if m and current_event:
-            cmd = _toml_unescape(m.group(1))
+            cmd = toml_unescape(m.group(1))
             if not _is_agent_scan_command(cmd):
                 continue
             if current_event not in events:
@@ -1704,75 +1705,6 @@ def _build_hook_command_powershell(
 
 def _shell_quote(s: str) -> str:
     return "'" + s.replace("'", "'\"'\"'") + "'"
-
-
-def _toml_basic_string(value: str) -> str:
-    """Return a TOML basic string containing *value*."""
-    escapes = {
-        "\\": "\\\\",
-        '"': '\\"',
-        "\b": "\\b",
-        "\t": "\\t",
-        "\n": "\\n",
-        "\f": "\\f",
-        "\r": "\\r",
-    }
-    rendered: list[str] = ['"']
-    for char in value:
-        if char in escapes:
-            rendered.append(escapes[char])
-        elif ord(char) < 0x20 or ord(char) == 0x7F:
-            rendered.append(f"\\u{ord(char):04X}")
-        else:
-            rendered.append(char)
-    rendered.append('"')
-    return "".join(rendered)
-
-
-def _toml_unescape(value: str) -> str:
-    """Decode TOML basic-string escapes while preserving unknown escapes."""
-    escapes = {
-        "b": "\b",
-        "t": "\t",
-        "n": "\n",
-        "f": "\f",
-        "r": "\r",
-        '"': '"',
-        "\\": "\\",
-    }
-    unescaped: list[str] = []
-    index = 0
-    while index < len(value):
-        char = value[index]
-        if char != "\\":
-            unescaped.append(char)
-            index += 1
-            continue
-        if index + 1 == len(value):
-            unescaped.append("\\")
-            break
-
-        escape = value[index + 1]
-        if escape in escapes:
-            unescaped.append(escapes[escape])
-            index += 2
-            continue
-        if escape in {"u", "U"}:
-            width = 4 if escape == "u" else 8
-            end = index + 2 + width
-            codepoint = value[index + 2 : end]
-            if len(codepoint) == width and all(char in "0123456789abcdefABCDEF" for char in codepoint):
-                try:
-                    unescaped.append(chr(int(codepoint, 16)))
-                except ValueError:
-                    pass
-                else:
-                    index = end
-                    continue
-
-        unescaped.extend(("\\", escape))
-        index += 2
-    return "".join(unescaped)
 
 
 def _ps_quote(s: str) -> str:

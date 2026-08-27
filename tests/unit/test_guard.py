@@ -2640,22 +2640,6 @@ class TestCodexManagedRequirementsToml:
 
         assert diff == {"added": {}, "modified": {}, "removed": {}}
 
-    @pytest.mark.parametrize(
-        "value",
-        [
-            "",
-            "\b\t\n\f\r",
-            "\x00\x1f\x7f",
-            "Grüezi, 世界",
-            "\\\\\\",
-            'embedded "quotes"',
-        ],
-    )
-    def test_toml_basic_string_and_unescape_are_exact_inverses(self, value):
-        rendered = guard_module._toml_basic_string(value)
-
-        assert guard_module._toml_unescape(rendered[1:-1]) == value
-
     def test_install_writes_toml(self, tmp_path):
         install, _, _, _ = self._import_managed_helpers()
         path = tmp_path / "requirements.toml"
