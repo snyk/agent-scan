@@ -20,6 +20,16 @@ from urllib.parse import urlparse
 
 import rich
 
+# ``tomllib`` is stdlib from 3.11; fall back to the ``tomli`` backport on 3.10,
+# else skip the generated TOML self-check rather than failing import.
+try:
+    import tomllib  # type: ignore[import-not-found]
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 lacks stdlib TOML
+    try:
+        import tomli as tomllib  # type: ignore[no-redef]
+    except ModuleNotFoundError:
+        tomllib = None  # type: ignore[assignment]
+
 from agent_scan.agents import DiscoveryScope
 from agent_scan.hook_events import HOOK_CLIENTS, send_hook_event
 from agent_scan.pushkeys import (
@@ -47,7 +57,8 @@ ALL_CLIENTS = ["claude", "cursor", "codex"]
 DEFAULT_REMOTE_URL = "https://api.snyk.io"
 _DETECTION_RE = re.compile(
     r"PUSH_KEY=.*snyk-agent-guard"
-    r"|snyk-agent-guard.*-PushKey\b"
+    r"|snyk-agent-guard.*-PushKey\b",
+    re.DOTALL,
 )
 _PERMISSION_DENIED = "__permission_denied__"
 _STDIN_READ_TIMEOUT_SECONDS = 5.0
@@ -741,26 +752,30 @@ def _render_codex_requirements_toml(
         "hooks = true",
         "",
         "[hooks]",
-        f'managed_dir = "{managed_dir}"',
-        f"windows_managed_dir = '{windows_managed_dir}'",
+        f"managed_dir = {_toml_basic_string(managed_dir)}",
+        f"windows_managed_dir = {_toml_basic_string(windows_managed_dir)}",
         "",
     ]
-    escaped = command.replace("\\", "\\\\").replace('"', '\\"')
     for event in CODEX_HOOK_EVENTS:
         lines.append(f"[[hooks.{event}]]")
         lines.append(f"[[hooks.{event}.hooks]]")
         lines.append('type = "command"')
-        lines.append(f'command = "{escaped}"')
+        lines.append(f"command = {_toml_basic_string(command)}")
         lines.append("")
     if discover_command:
-        escaped_discover = discover_command.replace("\\", "\\\\").replace('"', '\\"')
         lines.append("[[hooks.SessionStart]]")
         lines.append("[[hooks.SessionStart.hooks]]")
         lines.append('type = "command"')
-        lines.append(f'command = "{escaped_discover}"')
+        lines.append(f"command = {_toml_basic_string(discover_command)}")
         lines.append("async = true")
         lines.append("")
-    return "\n".join(lines).rstrip("\n") + "\n"
+    content = "\n".join(lines).rstrip("\n") + "\n"
+    if tomllib is not None:  # pragma: no branch - available on supported installs
+        try:
+            tomllib.loads(content)
+        except ValueError as exc:
+            raise ValueError("Generated requirements.toml is invalid") from exc
+    return content
 
 
 def _prepare_codex_managed_config(
@@ -860,7 +875,7 @@ def _parse_codex_requirements_toml(text: str) -> tuple[list[str], str | None, st
             continue
         m = command_re.match(line)
         if m and current_event:
-            cmd = m.group(1).replace("\\\\", "\0").replace('\\"', '"').replace("\0", "\\")
+            cmd = _toml_unescape(m.group(1))
             if not _is_agent_scan_command(cmd):
                 continue
             if current_event not in events:
@@ -1689,6 +1704,75 @@ def _build_hook_command_powershell(
 
 def _shell_quote(s: str) -> str:
     return "'" + s.replace("'", "'\"'\"'") + "'"
+
+
+def _toml_basic_string(value: str) -> str:
+    """Return a TOML basic string containing *value*."""
+    escapes = {
+        "\\": "\\\\",
+        '"': '\\"',
+        "\b": "\\b",
+        "\t": "\\t",
+        "\n": "\\n",
+        "\f": "\\f",
+        "\r": "\\r",
+    }
+    rendered: list[str] = ['"']
+    for char in value:
+        if char in escapes:
+            rendered.append(escapes[char])
+        elif ord(char) < 0x20 or ord(char) == 0x7F:
+            rendered.append(f"\\u{ord(char):04X}")
+        else:
+            rendered.append(char)
+    rendered.append('"')
+    return "".join(rendered)
+
+
+def _toml_unescape(value: str) -> str:
+    """Decode TOML basic-string escapes while preserving unknown escapes."""
+    escapes = {
+        "b": "\b",
+        "t": "\t",
+        "n": "\n",
+        "f": "\f",
+        "r": "\r",
+        '"': '"',
+        "\\": "\\",
+    }
+    unescaped: list[str] = []
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if char != "\\":
+            unescaped.append(char)
+            index += 1
+            continue
+        if index + 1 == len(value):
+            unescaped.append("\\")
+            break
+
+        escape = value[index + 1]
+        if escape in escapes:
+            unescaped.append(escapes[escape])
+            index += 2
+            continue
+        if escape in {"u", "U"}:
+            width = 4 if escape == "u" else 8
+            end = index + 2 + width
+            codepoint = value[index + 2 : end]
+            if len(codepoint) == width and all(char in "0123456789abcdefABCDEF" for char in codepoint):
+                try:
+                    unescaped.append(chr(int(codepoint, 16)))
+                except ValueError:
+                    pass
+                else:
+                    index = end
+                    continue
+
+        unescaped.extend(("\\", escape))
+        index += 2
+    return "".join(unescaped)
 
 
 def _ps_quote(s: str) -> str:

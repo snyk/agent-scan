@@ -2504,8 +2504,8 @@ class TestCodexManagedRequirementsToml:
             "hooks = true",
             "",
             "[hooks]",
-            f'managed_dir = "{managed_dir}"',
-            f"windows_managed_dir = '{windows_managed_dir}'",
+            f"managed_dir = {json.dumps(managed_dir)}",
+            f"windows_managed_dir = {json.dumps(windows_managed_dir)}",
             "",
         ]
         for event in CODEX_HOOK_EVENTS:
@@ -2538,6 +2538,47 @@ class TestCodexManagedRequirementsToml:
             {"type": "command", "command": CODEX_DISCOVER_CMD, "async": True}
         ]
 
+    def test_rendered_guard_command_with_controls_round_trips_through_tomllib(self, tmp_path):
+        tomllib = pytest.importorskip("tomllib")
+        _, _, _, render = self._import_managed_helpers()
+        guard_command = CODEX_AGENT_SCAN_CMD.replace(
+            "TENANT_ID='tid-1'",
+            "TENANT_ID='tid-1\n\t\"quoted\" C:\\hooks'",
+        )
+
+        parsed = tomllib.loads(render(guard_command, tmp_path / "requirements.toml"))
+
+        assert parsed["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == guard_command
+
+    def test_rendered_discovery_command_with_controls_round_trips_through_tomllib(self, tmp_path):
+        tomllib = pytest.importorskip("tomllib")
+        _, _, _, render = self._import_managed_helpers()
+        discover_command = CODEX_DISCOVER_CMD.replace(
+            "AGENT_SCAN_COMMAND='/usr/local/bin/snyk-agent-scan'",
+            "AGENT_SCAN_COMMAND='snyk-agent-scan\n\t\"quoted\" C:\\hooks'",
+        )
+
+        parsed = tomllib.loads(
+            render(
+                CODEX_AGENT_SCAN_CMD,
+                tmp_path / "requirements.toml",
+                discover_command=discover_command,
+            )
+        )
+
+        assert parsed["hooks"]["SessionStart"][1]["hooks"][0]["command"] == discover_command
+
+    def test_rendered_managed_directories_round_trip_quotes_and_backslashes(self, tmp_path):
+        tomllib = pytest.importorskip("tomllib")
+        _, _, _, render = self._import_managed_helpers()
+        path = tmp_path / 'O\'Brien "QA"' / "requirements.toml"
+        expected_managed_dir, expected_windows_managed_dir = guard_module._codex_managed_dirs(path)
+
+        parsed = tomllib.loads(render(CODEX_AGENT_SCAN_CMD, path))
+
+        assert parsed["hooks"]["managed_dir"] == expected_managed_dir
+        assert parsed["hooks"]["windows_managed_dir"] == expected_windows_managed_dir
+
     def test_render_parse_round_trip_splits_guard_and_discovery_commands(self, tmp_path):
         _, _, _, render = self._import_managed_helpers()
         content = render(
@@ -2551,6 +2592,69 @@ class TestCodexManagedRequirementsToml:
         assert events == CODEX_HOOK_EVENTS
         assert guard_command == CODEX_AGENT_SCAN_CMD
         assert discover_command == CODEX_DISCOVER_CMD
+
+    def test_render_parse_round_trip_preserves_control_characters(self, tmp_path):
+        _, _, _, render = self._import_managed_helpers()
+        guard_command = CODEX_AGENT_SCAN_CMD.replace(
+            "TENANT_ID='tid-1'",
+            "TENANT_ID='tid-1\b\t\n\f\r\x00\x1f\x7f\"\\'",
+        )
+        discover_command = CODEX_DISCOVER_CMD.replace(
+            "AGENT_SCAN_COMMAND='/usr/local/bin/snyk-agent-scan'",
+            "AGENT_SCAN_COMMAND='snyk-agent-scan\b\t\n\f\r\x00\x1f\x7f\"\\'",
+        )
+
+        content = render(
+            guard_command,
+            tmp_path / "requirements.toml",
+            discover_command=discover_command,
+        )
+
+        events, parsed_guard, parsed_discover = _parse_codex_requirements_toml(content)
+        assert events == CODEX_HOOK_EVENTS
+        assert parsed_guard == guard_command
+        assert parsed_discover == discover_command
+
+    def test_write_then_prepare_same_control_commands_has_no_modified_diff(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        guard_command = CODEX_AGENT_SCAN_CMD.replace(
+            "TENANT_ID='tid-1'",
+            "TENANT_ID='tid-1\b\t\n\f\r\x00\x1f\x7f\"\\'",
+        )
+        discover_command = CODEX_DISCOVER_CMD.replace(
+            "AGENT_SCAN_COMMAND='/usr/local/bin/snyk-agent-scan'",
+            "AGENT_SCAN_COMMAND='snyk-agent-scan\b\t\n\f\r\x00\x1f\x7f\"\\'",
+        )
+        content, _ = _prepare_codex_managed_config(
+            guard_command,
+            path,
+            discover_command=discover_command,
+        )
+        _write_codex_managed_config(content, path)
+
+        _, diff = _prepare_codex_managed_config(
+            guard_command,
+            path,
+            discover_command=discover_command,
+        )
+
+        assert diff == {"added": {}, "modified": {}, "removed": {}}
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "",
+            "\b\t\n\f\r",
+            "\x00\x1f\x7f",
+            "Grüezi, 世界",
+            "\\\\\\",
+            'embedded "quotes"',
+        ],
+    )
+    def test_toml_basic_string_and_unescape_are_exact_inverses(self, value):
+        rendered = guard_module._toml_basic_string(value)
+
+        assert guard_module._toml_unescape(rendered[1:-1]) == value
 
     def test_install_writes_toml(self, tmp_path):
         install, _, _, _ = self._import_managed_helpers()
