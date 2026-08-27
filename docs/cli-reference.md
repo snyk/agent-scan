@@ -355,7 +355,8 @@ snyk-agent-scan guard
 snyk-agent-scan guard install {claude,cursor,codex,all} [OPTIONS]
 ```
 
-Installation also configures a fire-and-forget session-start hook that reports discovered MCP servers.
+After configuring the hooks, installation sends a `hooksConfiguredServerDiscovery` event. It also configures a
+fire-and-forget session-start hook that reports discovered MCP servers with a `sessionStartServerDiscovery` event.
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -373,8 +374,8 @@ snyk-agent-scan guard discover [OPTIONS]
 ```
 
 This internal command is invoked by the SessionStart hook configured by `guard install`. It reads the current target
-folder(s) from the selected client's hook payload, discovers MCP servers locally, and sends the resulting event directly
-to Agent Monitor; it is not normally run by hand.
+folder(s) from the selected client's hook payload, discovers MCP servers locally, and sends the resulting
+`sessionStartServerDiscovery` event directly to Agent Monitor; it is not normally run by hand.
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |

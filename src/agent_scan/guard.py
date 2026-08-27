@@ -402,7 +402,7 @@ def _run_discover(args) -> int:
         url,
         hook_client,
         machine_id,
-        event_name="SessionStartServerDiscovery",
+        event_name="sessionStartServerDiscovery",
         session_marker=session_id or "session-start-server-discovery",
         target_folders=target_folders,
         discovery_scope=getattr(args, "scope", DiscoveryScope.ALL),
@@ -1296,12 +1296,17 @@ def _send_servers_discovered_event(
     hook_client: str,
     machine_id: str,
     *,
-    event_name: str = "serversDiscovered",
+    event_name: str = "hooksConfiguredServerDiscovery",
     session_marker: str = "hooks-setup",
     target_folders: list[str] | None = None,
     discovery_scope: DiscoveryScope = DiscoveryScope.ALL,
     max_retries: int = 1,
 ) -> bool:
+    """Discover MCP servers and send an install- or session-scoped discovery event.
+
+    The default event follows ``hooksConfigured`` during installation. Session-start
+    callers override it with ``sessionStartServerDiscovery``.
+    """
     rich.print("[dim]Discovering MCP servers...[/dim]")
     started = time.monotonic()
     try:

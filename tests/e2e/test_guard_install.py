@@ -93,7 +93,7 @@ class TestGuardInstallE2E:
         assert ("-ConfigFile" if os.name == "nt" else "--file") not in discover_command
         assert [request["body"]["hook_event_name"] for request in _FakeHookServer.requests] == [
             "hooksConfigured",
-            "serversDiscovered",
+            "hooksConfiguredServerDiscovery",
         ]
         discovered = _FakeHookServer.requests[1]
         assert discovered["body"]["session_id"] == "hooks-setup"
@@ -118,7 +118,7 @@ class TestGuardInstallE2E:
             f"guard discover failed:\nstdout: {discover_result.stdout}\nstderr: {discover_result.stderr}"
         )
         session_discovery = _FakeHookServer.requests[-1]
-        assert session_discovery["body"]["hook_event_name"] == "SessionStartServerDiscovery"
+        assert session_discovery["body"]["hook_event_name"] == "sessionStartServerDiscovery"
         assert session_discovery["body"]["session_id"] == "session-start-server-discovery"
         assert isinstance(session_discovery["body"]["servers"], list)
         assert isinstance(session_discovery["body"]["discovery_duration_ms"], int)
@@ -177,7 +177,7 @@ class TestGuardInstallE2E:
             f"guard discover failed:\nstdout: {discover_result.stdout}\nstderr: {discover_result.stderr}"
         )
         session_discovery = _FakeHookServer.requests[-1]
-        assert session_discovery["body"]["hook_event_name"] == "SessionStartServerDiscovery"
+        assert session_discovery["body"]["hook_event_name"] == "sessionStartServerDiscovery"
         assert session_discovery["body"]["conversation_id"] == "e2e-conversation"
         assert "session_id" not in session_discovery["body"]
         assert isinstance(session_discovery["body"]["servers"], list)
@@ -239,7 +239,7 @@ class TestGuardInstallE2E:
             f"guard discover failed:\nstdout: {discover_result.stdout}\nstderr: {discover_result.stderr}"
         )
         session_discovery = _FakeHookServer.requests[-1]
-        assert session_discovery["body"]["hook_event_name"] == "SessionStartServerDiscovery"
+        assert session_discovery["body"]["hook_event_name"] == "sessionStartServerDiscovery"
         assert session_discovery["body"]["session_id"] == "e2e"
         assert isinstance(session_discovery["body"]["servers"], list)
         assert isinstance(session_discovery["body"]["discovery_duration_ms"], int)

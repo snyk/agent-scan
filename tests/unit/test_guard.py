@@ -2884,7 +2884,7 @@ class TestBashHookScript:
         script = _get_script_path("snyk-agent-guard.sh")
         payload = json.dumps(
             {
-                "hook_event_name": "serversDiscovered",
+                "hook_event_name": "hooksConfiguredServerDiscovery",
                 "session_id": "s1",
                 "servers": ["x" * (1024 * 1024)],
             }
@@ -4552,7 +4552,7 @@ class TestSendServersDiscoveredEvent:
 
         assert ok is True
         payload = captured["payload"]
-        assert payload["hook_event_name"] == "serversDiscovered"
+        assert payload["hook_event_name"] == "hooksConfiguredServerDiscovery"
         assert payload[id_key] == "hooks-setup"
         assert ({"session_id", "conversation_id"} - {id_key}).isdisjoint(payload)
         assert payload["servers"][0]["command"] == "PUSH_KEY='**REDACTED**'"
@@ -4586,12 +4586,12 @@ class TestSendServersDiscoveredEvent:
                 "https://api.snyk.io",
                 "claude-code",
                 "machine-42",
-                event_name="SessionStartServerDiscovery",
+                event_name="sessionStartServerDiscovery",
                 session_marker="session-start-server-discovery",
             )
 
         assert ok is True
-        assert captured["payload"]["hook_event_name"] == "SessionStartServerDiscovery"
+        assert captured["payload"]["hook_event_name"] == "sessionStartServerDiscovery"
         assert captured["payload"]["session_id"] == "session-start-server-discovery"
 
     def test_payload_includes_discovery_duration_ms_from_monotonic_clock(self):
@@ -4825,7 +4825,7 @@ class TestRunDiscover:
         assert isinstance(duration, int)
         assert duration >= 0
         assert captured["payload"] == {
-            "hook_event_name": "SessionStartServerDiscovery",
+            "hook_event_name": "sessionStartServerDiscovery",
             "servers": [],
             "session_id": "session-start-server-discovery",
         }
