@@ -80,6 +80,27 @@ def test_sends_existing_hook_wire_contract(client):
     }
 
 
+@pytest.mark.parametrize(
+    "base_url, expected_base_url",
+    [
+        ("localhost", "http://localhost"),
+        ("localhost:8000/", "http://localhost:8000"),
+        ("127.0.0.1:8000", "http://127.0.0.1:8000"),
+        ("localhost:8000/proxy/https://upstream", "http://localhost:8000/proxy/https://upstream"),
+    ],
+)
+def test_send_hook_event_defaults_scheme_less_base_url_to_http(base_url, expected_base_url):
+    session = _FakeSession()
+
+    with _patch_session(session):
+        result = send_hook_event(base_url, "claude-code", "push-key", "{}", "machine-1")
+
+    assert result == (True, "")
+    assert session.posts[0]["url"] == (
+        f"{expected_base_url}/hidden/agent-monitor/hooks/claude-code?version={HOOK_VERSION}"
+    )
+
+
 def test_uses_the_shared_backend_session_factory():
     """Hook events must ride the same connector as the analysis path (certifi + extra CAs)."""
     session = _FakeSession()

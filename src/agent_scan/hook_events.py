@@ -82,6 +82,9 @@ def send_hook_event(
     )
     encoded_payload = base64.b64encode(payload.encode()).decode()
     body = f"base64:{encoded_payload}".encode()
+    if not base_url.lower().startswith(("http://", "https://")):
+        # Match curl's handling in the hook scripts: a URL without a scheme defaults to HTTP.
+        base_url = f"http://{base_url}"
     url = f"{base_url.rstrip('/')}{client.endpoint}?version={HOOK_VERSION}"
     headers = {
         "User-Agent": f"snyk/agent-scan Agent Scan v{version_info}",
