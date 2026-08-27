@@ -62,6 +62,75 @@ def ensure_unicode_console() -> None:
 logger = logging.getLogger(__name__)
 
 
+def toml_escape(value: str) -> str:
+    """Return a TOML basic string containing *value*."""
+    escapes = {
+        "\\": "\\\\",
+        '"': '\\"',
+        "\b": "\\b",
+        "\t": "\\t",
+        "\n": "\\n",
+        "\f": "\\f",
+        "\r": "\\r",
+    }
+    rendered: list[str] = ['"']
+    for char in value:
+        if char in escapes:
+            rendered.append(escapes[char])
+        elif ord(char) < 0x20 or ord(char) == 0x7F:
+            rendered.append(f"\\u{ord(char):04X}")
+        else:
+            rendered.append(char)
+    rendered.append('"')
+    return "".join(rendered)
+
+
+def toml_unescape(value: str) -> str:
+    """Decode TOML basic-string escapes while preserving unknown escapes."""
+    escapes = {
+        "b": "\b",
+        "t": "\t",
+        "n": "\n",
+        "f": "\f",
+        "r": "\r",
+        '"': '"',
+        "\\": "\\",
+    }
+    unescaped: list[str] = []
+    index = 0
+    while index < len(value):
+        char = value[index]
+        if char != "\\":
+            unescaped.append(char)
+            index += 1
+            continue
+        if index + 1 == len(value):
+            unescaped.append("\\")
+            break
+
+        escape = value[index + 1]
+        if escape in escapes:
+            unescaped.append(escapes[escape])
+            index += 2
+            continue
+        if escape in {"u", "U"}:
+            width = 4 if escape == "u" else 8
+            end = index + 2 + width
+            codepoint = value[index + 2 : end]
+            if len(codepoint) == width and all(char in "0123456789abcdefABCDEF" for char in codepoint):
+                try:
+                    unescaped.append(chr(int(codepoint, 16)))
+                except ValueError:
+                    pass
+                else:
+                    index = end
+                    continue
+
+        unescaped.extend(("\\", escape))
+        index += 2
+    return "".join(unescaped)
+
+
 def get_relative_path(path: str) -> str:
     try:
         original_path = path.replace("\\", "/")
