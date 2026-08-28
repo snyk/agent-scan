@@ -126,7 +126,7 @@ async def get_client(
         sse_oauth_provider = await _resolve_scan_oauth_provider(server_config.url, token)
         client_cm = sse_client(
             url=server_config.url,
-            headers=server_config.headers,
+            headers=expand_env_vars(server_config.headers),
             # env=server_config.env, #Not supported by MCP yet, but present in vscode
             timeout=timeout,
             auth=sse_oauth_provider,
@@ -137,7 +137,7 @@ async def get_client(
         )
         client_cm = streamablehttp_client_without_session(
             url=server_config.url,
-            headers=server_config.headers,
+            headers=expand_env_vars(server_config.headers),
             timeout=timeout or 60,
             token=token,
         )

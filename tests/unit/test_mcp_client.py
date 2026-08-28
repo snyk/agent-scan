@@ -131,6 +131,64 @@ async def test_get_client_expands_env_placeholders_for_stdio_server(mock_stdio_c
     assert server.env == {"AUTH_HEADER": "${AUTH_HEADER}"}
 
 
+@pytest.mark.asyncio
+@patch("agent_scan.mcp_client.streamablehttp_client_without_session")
+async def test_get_client_expands_env_placeholders_for_remote_http_server(mock_streamable_client, monkeypatch):
+    """get_client() must pass the EXPANDED headers to the HTTP transport, not
+    the literal ${VAR} placeholder from the parsed config."""
+    monkeypatch.setenv("LINEAR_API_TOKEN", "real-secret-value")
+
+    mock_read = AsyncMock()
+    mock_write = AsyncMock()
+    mock_client = AsyncMock()
+    mock_client.__aenter__.return_value = (mock_read, mock_write)
+    mock_streamable_client.return_value = mock_client
+
+    server = RemoteServer(
+        url="https://example.com/mcp",
+        type="http",
+        headers={"Authorization": "Bearer ${LINEAR_API_TOKEN}"},
+    )
+
+    async with get_client(server, timeout=5):
+        pass
+
+    assert mock_streamable_client.call_count == 1
+    called_kwargs = mock_streamable_client.call_args.kwargs
+    assert called_kwargs["headers"] == {"Authorization": "Bearer real-secret-value"}
+    # The parsed model itself must be untouched -- still the literal placeholder.
+    assert server.headers == {"Authorization": "Bearer ${LINEAR_API_TOKEN}"}
+
+
+@pytest.mark.asyncio
+@patch("agent_scan.mcp_client.sse_client")
+async def test_get_client_expands_env_placeholders_for_remote_sse_server(mock_sse_client, monkeypatch):
+    """get_client() must pass the EXPANDED headers to the SSE transport, not
+    the literal ${VAR} placeholder from the parsed config."""
+    monkeypatch.setenv("LINEAR_API_TOKEN", "real-secret-value")
+
+    mock_read = AsyncMock()
+    mock_write = AsyncMock()
+    mock_client = AsyncMock()
+    mock_client.__aenter__.return_value = (mock_read, mock_write)
+    mock_sse_client.return_value = mock_client
+
+    server = RemoteServer(
+        url="https://example.com/sse",
+        type="sse",
+        headers={"Authorization": "Bearer ${LINEAR_API_TOKEN}"},
+    )
+
+    async with get_client(server, timeout=5):
+        pass
+
+    assert mock_sse_client.call_count == 1
+    called_kwargs = mock_sse_client.call_args.kwargs
+    assert called_kwargs["headers"] == {"Authorization": "Bearer real-secret-value"}
+    # The parsed model itself must be untouched -- still the literal placeholder.
+    assert server.headers == {"Authorization": "Bearer ${LINEAR_API_TOKEN}"}
+
+
 @pytest.mark.parametrize(
     "input_url",
     [
