@@ -213,11 +213,16 @@ def _run_install(args) -> None:
     if not tenant_id:
         tenant_id = (os.environ.get("TENANT_ID", "") or "").strip()
     managed: bool = getattr(args, "managed", False)
-    # for the release i'll create a new PR to add hostname as default for machine_id but i'll make it separate to be clear. machine_id needs to be mandatory if we want to reliably identify the servers
     machine_id = (getattr(args, "machine_id", None) or os.environ.get("MACHINE_ID", "") or "").strip()
     if not machine_id:
-        rich.print("[bold red]Error:[/bold red] --machine-id is required (or set the MACHINE_ID environment variable).")
-        sys.exit(1)
+        # Temporary compatibility fallback until ADS Installer supplies MACHINE_ID.
+        from agent_scan.utils import get_hostname
+
+        machine_id = get_hostname()
+        rich.print(
+            "[yellow]Warning:[/yellow] MACHINE_ID is not set; temporarily using the hostname. "
+            "MACHINE_ID will become mandatory once ADS Installer is updated."
+        )
 
     clients = ALL_CLIENTS if client == "all" else [client]
 
@@ -506,9 +511,15 @@ def _install_hooks(
     old_push_key = existing_info.get("auth_value", "") if existing_info else ""
     push_key_changed = bool(old_push_key) and old_push_key != push_key
 
+    configured_agent_scan_command = os.environ.get("AGENT_SCAN_COMMAND", "").strip()
     agent_scan_command = _agent_scan_command()
     install_discovery = agent_scan_command is not None
-    if agent_scan_command is None:
+    if not configured_agent_scan_command and agent_scan_command is not None:
+        rich.print(
+            "[yellow]Warning:[/yellow] AGENT_SCAN_COMMAND is not set; temporarily using the current "
+            "Agent Scan executable. AGENT_SCAN_COMMAND will become mandatory once ADS Installer is updated."
+        )
+    elif agent_scan_command is None:
         rich.print(
             "[yellow]Warning:[/yellow] AGENT_SCAN_COMMAND is not set; "
             "the session-start discovery hook will not be installed"
@@ -1659,8 +1670,20 @@ def _build_hook_command(
 
 
 def _agent_scan_command() -> str | None:
-    """The configured command the session-start hook should invoke, if any."""
-    return os.environ.get("AGENT_SCAN_COMMAND", "").strip() or None
+    """Return the configured command or infer this Agent Scan executable."""
+    configured = os.environ.get("AGENT_SCAN_COMMAND", "").strip()
+    if configured:
+        return configured
+
+    # Temporary compatibility fallback until ADS Installer supplies AGENT_SCAN_COMMAND.
+    if getattr(sys, "frozen", False):
+        return str(Path(sys.executable).absolute())
+
+    executable_name = "snyk-agent-scan.exe" if IS_WINDOWS else "snyk-agent-scan"
+    console_script = Path(sys.executable).parent / executable_name
+    if console_script.is_file() and os.access(console_script, os.X_OK):
+        return str(console_script.absolute())
+    return None
 
 
 def _build_discover_hook_command(
