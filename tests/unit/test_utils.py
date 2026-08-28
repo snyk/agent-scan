@@ -13,7 +13,26 @@ from agent_scan.utils import (
     get_readable_home_directories,
     get_relative_path,
     suppress_stdout,
+    toml_escape,
+    toml_unescape,
 )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        "\b\t\n\f\r",
+        "\x00\x1f\x7f",
+        "Grüezi, 世界",
+        "\\\\\\",
+        'embedded "quotes"',
+    ],
+)
+def test_toml_escape_and_unescape_are_exact_inverses(value):
+    rendered = toml_escape(value)
+
+    assert toml_unescape(rendered[1:-1]) == value
 
 
 class TestGetRelativePath:
@@ -34,6 +53,35 @@ class TestGetRelativePath:
     def test_windows_path_outside_home_uses_forward_slashes(self):
         result = get_relative_path(r"C:\Users\someone\AppData\Local\config.json")
         assert result == "C:/Users/someone/AppData/Local/config.json"
+
+    def test_windows_home_path_with_mixed_separators(self, monkeypatch):
+        monkeypatch.setattr(
+            os.path,
+            "expanduser",
+            lambda value: r"C:\Users\runneradmin" if value == "~" else value,
+        )
+        monkeypatch.setattr(utils_module.sys, "platform", "win32")
+
+        assert get_relative_path("c:/USERS/RUNNERADMIN/.claude") == "~/.claude"
+
+    def test_outside_home_tilde_spelling_is_preserved(self, monkeypatch):
+        monkeypatch.setattr(
+            os.path,
+            "expanduser",
+            lambda value: "/home/alice" if value == "~" else "/home/bob/mcp.json",
+        )
+
+        assert get_relative_path("~bob/mcp.json") == "~bob/mcp.json"
+
+    def test_windows_unicode_fold_does_not_alias_home(self, monkeypatch):
+        monkeypatch.setattr(
+            os.path,
+            "expanduser",
+            lambda value: "C:/Users/ss" if value == "~" else value,
+        )
+        monkeypatch.setattr(utils_module.sys, "platform", "win32")
+
+        assert get_relative_path("C:/Users/ß/secret") == "C:/Users/ß/secret"
 
     def test_empty_path(self):
         result = get_relative_path("")

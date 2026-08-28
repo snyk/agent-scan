@@ -2,13 +2,16 @@
 complete-replacement semantics for block/list arguments."""
 
 import argparse
+import sys
 
 import pytest
 
+from agent_scan import cli
 from agent_scan.cli import (
     _coerce_config_value,
     _effective_identifier,
     _effective_push_key,
+    _iter_all_actions,
     apply_config_file,
     control_servers_from_config,
     explicitly_provided_dests,
@@ -39,6 +42,11 @@ def _parse(argv: list[str]) -> tuple[argparse.ArgumentParser, argparse.Namespace
     args = parser.parse_args(argv)
     args.control_servers = parse_control_servers(argv)
     return parser, args
+
+
+def _provided(parser: argparse.ArgumentParser, argv: list[str]) -> set[str]:
+    """Ask which dests ``argv`` set explicitly."""
+    return explicitly_provided_dests(parser, argv)
 
 
 def _write_yaml(tmp_path, text: str) -> str:
@@ -76,21 +84,38 @@ class TestLoadConfigFile:
 
 class TestExplicitlyProvidedDests:
     def test_detects_passed_flags_only(self):
-        parser = _build_parser()
-        provided = explicitly_provided_dests(parser, ["scan", "--server-timeout", "5", "--json"])
+        provided = _provided(_build_parser(), ["scan", "--server-timeout", "5", "--json"])
         assert "server_timeout" in provided
         assert "json" in provided
         assert "verbose" not in provided
 
     def test_detects_equals_form(self):
-        parser = _build_parser()
-        provided = explicitly_provided_dests(parser, ["scan", "--server-timeout=5"])
-        assert "server_timeout" in provided
+        assert "server_timeout" in _provided(_build_parser(), ["scan", "--server-timeout=5"])
 
     def test_boolean_optional_both_spellings_map_to_same_dest(self):
-        parser = _build_parser()
-        assert "skills" in explicitly_provided_dests(parser, ["scan", "--no-skills"])
-        assert "skills" in explicitly_provided_dests(parser, ["scan", "--skills"])
+        assert "skills" in _provided(_build_parser(), ["scan", "--no-skills"])
+        assert "skills" in _provided(_build_parser(), ["scan", "--skills"])
+
+    def test_no_option_string_maps_to_two_dests(self, monkeypatch):
+        """``explicitly_provided_dests`` keys a flat option-string -> dest map, so an option
+        string reused across subcommands must always mean the same dest. A collision would
+        make the map order-dependent and silently misreport which flags were explicit."""
+        captured: list[argparse.ArgumentParser] = []
+
+        def capture(self, *args, **kwargs):
+            captured.append(self)
+            raise SystemExit(0)
+
+        monkeypatch.setattr(sys, "argv", ["agent-scan", "scan"])
+        monkeypatch.setattr(argparse.ArgumentParser, "parse_args", capture)
+        with pytest.raises(SystemExit):
+            cli.main()
+
+        seen: dict[str, str] = {}
+        for action in _iter_all_actions(captured[0]):
+            for option in action.option_strings:
+                previous = seen.setdefault(option, action.dest)
+                assert previous == action.dest, f"{option} maps to both {previous!r} and {action.dest!r}"
 
 
 class TestAbbreviationDisabled:

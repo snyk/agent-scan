@@ -50,9 +50,22 @@ def _ensure_unicode_console():
     ensure_unicode_console()
 
 
+@pytest.fixture(autouse=True)
+def _clear_agent_scan_command(monkeypatch):
+    """Keep session-start discovery opt-in unless a test enables it explicitly."""
+    monkeypatch.delenv("AGENT_SCAN_COMMAND", raising=False)
+
+
 def _get_binary_path() -> Path:
     """Path to the PyInstaller-built mcp-scan binary."""
     return REPO_ROOT / "dist" / ("agent-scan.exe" if sys.platform == "win32" else "agent-scan")
+
+
+@pytest.fixture
+def agent_scan_command() -> Path:
+    """Path to the virtual environment's Agent Scan console script."""
+    executable = "snyk-agent-scan.exe" if sys.platform == "win32" else "snyk-agent-scan"
+    return Path(sys.executable).parent / executable
 
 
 def _build_binary() -> None:

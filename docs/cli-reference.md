@@ -345,7 +345,7 @@ snyk-agent-scan scan --config-file agent-scan.yaml \
 Manage [Agent Guard](https://evo.ai.snyk.io) hooks for Claude Code, Cursor, and Codex:
 
 ```bash
-snyk-agent-scan guard [install|uninstall] [OPTIONS]
+snyk-agent-scan guard [install|uninstall|discover] [OPTIONS]
 snyk-agent-scan guard
 ```
 
@@ -355,13 +355,33 @@ snyk-agent-scan guard
 snyk-agent-scan guard install {claude,cursor,codex,all} [OPTIONS]
 ```
 
+After configuring the hooks, installation sends a `hooksConfiguredServerDiscovery` event. It also configures a
+fire-and-forget session-start hook that reports discovered MCP servers with a `sessionStartServerDiscovery` event.
+
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
 | `--url URL` | string | `https://api.snyk.io` | Remote hook base URL for the Snyk API environment. |
 | `--tenant-id ID` | string | — | Snyk tenant UUID. Required when minting a push key; unnecessary when `PUSH_KEY` is set. |
+| `--machine-id ID` | string | — | Required non-anonymous machine identifier sent in the `X-User` header's `identifier` field. May instead be set with `MACHINE_ID`. |
 | `--file PATH` | string | — | Override the client configuration path. |
 | `--managed` | boolean | `false` | Install in the admin/MDM-managed configuration rather than the user configuration. |
 | `--test` | boolean | `false` | **Deprecated/no-op.** |
+
+### `guard discover`
+
+```bash
+snyk-agent-scan guard discover [OPTIONS]
+```
+
+This internal command is invoked by the SessionStart hook configured by `guard install`. It reads the current target
+folder(s) from the selected client's hook payload, discovers MCP servers locally, and sends the resulting
+`sessionStartServerDiscovery` event directly to Agent Monitor; it is not normally run by hand.
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--url URL` | string | `https://api.snyk.io` | Remote hook base URL for the Snyk API environment. |
+| `--client {claude-code,cursor,codex}` | string | required | Hook client whose target-folder payload and endpoint conventions should be used. |
+| `--scope {servers,skills,all}` | string | `all` | Discovery data to collect. The session-start hook installed by `guard install` passes `servers`, because the event it sends carries MCP servers only. |
 
 ### `guard uninstall`
 
@@ -381,6 +401,8 @@ snyk-agent-scan guard uninstall {claude,cursor,codex,all} [OPTIONS]
 | `PUSH_KEY` | Pre-provisioned push key; skips minting when set |
 | `TENANT_ID` | Tenant UUID alternative to `--tenant-id` |
 | `SNYK_TOKEN` | Required to mint/revoke push keys and verify that Guard is enabled for the tenant |
+| `MACHINE_ID` | Required non-anonymous machine identifier sent with hook events; alternative to `guard install --machine-id` |
+| `AGENT_SCAN_COMMAND` | Optional Agent Scan command invoked by the session-start discovery hook, with the hook arguments appended. The hook is installed only when this is set. A value that is not an existing executable file is run as a shell command. |
 
 ## Environment variables
 
@@ -502,10 +524,10 @@ snyk agent-scan --experimental ~/.claude/skills
 snyk-agent-scan guard
 
 # Install for all supported clients
-SNYK_TOKEN=... snyk-agent-scan guard install all --tenant-id "<tenant-uuid>"
+SNYK_TOKEN=... snyk-agent-scan guard install all --tenant-id "<tenant-uuid>" --machine-id "<machine-id>"
 
 # Install through an MDM-managed configuration
-PUSH_KEY=... snyk-agent-scan guard install cursor --managed
+PUSH_KEY=... snyk-agent-scan guard install cursor --managed --machine-id "<machine-id>"
 
 # Uninstall
 snyk-agent-scan guard uninstall all

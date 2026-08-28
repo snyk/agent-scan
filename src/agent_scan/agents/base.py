@@ -13,6 +13,7 @@ import os
 import traceback
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
+from enum import Enum
 from pathlib import Path
 
 import pyjson5
@@ -42,6 +43,13 @@ SkillsDirsResult = dict[str, list[DiscoveredSkill] | FileNotFoundConfig]
 # ``_parse_settings_mcp_gated``): parsed servers, a parse failure, or ``None``
 # when the file is absent/empty/not-MCP.
 McpScanResult = list[tuple[str, StdioServer | RemoteServer]] | CouldNotParseMCPConfig | None
+
+
+class DiscoveryScope(str, Enum):
+    SERVERS = "servers"
+    SKILLS = "skills"
+    ALL = "all"
+
 
 # Cap traversal into ``~/.claude/plugins/{cache,repos}``
 _MAX_PLUGIN_RGLOB_DEPTH = 10
@@ -145,17 +153,19 @@ class AgentDiscoverer(ABC):
 
     name: str = ""
 
-    def __init__(self, home_directory: Path | None) -> None:
+    def __init__(self, home_directory: Path | None, target_folders: list[Path] | None = None) -> None:
         # ``None`` is the own-home sentinel; normalize to ``Path.home()`` so the
         # stored home is always concrete. ``expand_path`` treats ``None`` as
         # "unknown home — don't expand", which would leave a ``~``-prefixed literal
         # (e.g. ``~/.claude``) on an own-home scan whose relocating env var is unset.
         self.home_directory = home_directory if home_directory is not None else Path.home()
-        # Lazily-populated cache for _project_paths_with_ancestors. A discoverer
-        # serves a single scan (see find_discoverers), so the project list is
-        # stable for its lifetime and the discovery methods that consult it need
-        # not re-walk workspaceStorage / re-read ~/.claude.json each time.
-        self._project_paths_cache: list[Path] | None = None
+        self.target_folders = list(target_folders or [])
+        # Lazily-populated cache of the discovery roots (recorded project roots plus
+        # explicit target roots) with their ancestors. A discoverer serves a single
+        # scan (see find_discoverers), so the list is stable for its lifetime and
+        # discovery does not need to re-walk workspaceStorage / re-read
+        # ~/.claude.json each time.
+        self._discovery_paths_cache: list[Path] | None = None
 
     def _scans_own_home(self) -> bool:
         """True when this discoverer targets the scanning process's own user.
@@ -185,7 +195,11 @@ class AgentDiscoverer(ABC):
         try:
             resolved_home = self.home_directory.resolve()
             return any(resolved_home == candidate.resolve() for candidate in candidates)
-        except OSError:
+        except (OSError, RuntimeError, ValueError):
+            # Fail closed: an unresolvable path is not proof of own-home, and this gate
+            # decides whether *this* process's relocating env vars apply to it. Catching
+            # more than OSError only widens what maps to that same safe answer -- letting
+            # anything else escape here would abort the whole discovery.
             return False
 
     def __init_subclass__(cls, *, abstract: bool = False, **kwargs: object) -> None:
@@ -214,13 +228,14 @@ class AgentDiscoverer(ABC):
     def discover_skills(self) -> SkillsDirsResult:
         """List the agent's skills, keyed by absolute skills-dir path."""
 
-    def discover(self) -> ClientToInspect | None:
+    def discover(self, scope: DiscoveryScope = DiscoveryScope.ALL) -> ClientToInspect | None:
         """Assemble a ClientToInspect, or None when the agent isn't installed."""
         client_path = self.client_exists()
         if client_path is None:
             return None
-        mcp_configs = self.discover_mcp_servers()
-        skills_dirs = self.discover_skills()
+        scope = DiscoveryScope(scope)
+        mcp_configs = self.discover_mcp_servers() if scope in (DiscoveryScope.SERVERS, DiscoveryScope.ALL) else {}
+        skills_dirs = self.discover_skills() if scope in (DiscoveryScope.SKILLS, DiscoveryScope.ALL) else {}
         return ClientToInspect(
             name=self.name,
             client_path=client_path,
@@ -442,7 +457,7 @@ class AgentDiscoverer(ABC):
                     result[mcp_file.as_posix()] = parsed
         return result
 
-    # --- shared project-folder enumeration (used by both Claude Code and the VSCode family) ---
+    # --- shared project/target-folder enumeration ---
 
     def _discover_project_folders(self) -> list[Path]:
         """Return the project roots this agent has opened.
@@ -454,21 +469,45 @@ class AgentDiscoverer(ABC):
         """
         return []
 
-    def _project_paths_with_ancestors(self) -> list[Path]:
-        """Project roots plus every ancestor up to filesystem root, deduplicated.
+    def _discover_target_folders(self) -> list[Path]:
+        """Return explicit roots targeted by the current discovery request.
 
-        Walking up lets project-scope MCP and skills discovery pick up config
-        living in any parent folder of an opened project (e.g. a monorepo root
-        that contains many project subdirectories).
-
-        The result is cached for the discoverer's lifetime.
+        Target folders come from request context (for example, a session-start
+        hook's current working directory or workspace roots). They remain
+        separate from the agent's persisted project history returned by
+        :meth:`_discover_project_folders`.
         """
-        if self._project_paths_cache is not None:
-            return self._project_paths_cache
+        return list(self.target_folders)
+
+    def _all_discovery_folders(self) -> list[Path]:
+        """Return project roots and non-alias target roots in stable literal order."""
+        projects = self._discover_project_folders()
+        resolved_projects: set[Path] = set()
+        for project in projects:
+            try:
+                resolved_projects.add(project.resolve())
+            except (OSError, RuntimeError, ValueError):
+                # Unresolvable paths stay distinct under their literal spelling.
+                resolved_projects.add(project)
+        targets: list[Path] = []
+        for target in self._discover_target_folders():
+            try:
+                key = target.resolve()
+            except (OSError, RuntimeError, ValueError):
+                key = target
+            if key not in resolved_projects:
+                targets.append(target)
+        # Deduped here because opencode's anchor list is the one consumer that does not go
+        # through _folders_with_ancestors, whose walk already absorbs duplicates.
+        return list(dict.fromkeys((*projects, *targets)))
+
+    @staticmethod
+    def _folders_with_ancestors(folders: list[Path]) -> list[Path]:
+        """Return each folder and its ancestors, preserving first-seen order."""
         seen: set[Path] = set()
         result: list[Path] = []
-        for project_path in self._discover_project_folders():
-            cur = project_path
+        for folder in folders:
+            cur = folder
             while True:
                 if cur not in seen:
                     seen.add(cur)
@@ -477,5 +516,18 @@ class AgentDiscoverer(ABC):
                 if parent == cur:
                     break
                 cur = parent
-        self._project_paths_cache = result
         return result
+
+    def _discovery_paths_with_ancestors(self) -> list[Path]:
+        """Project and target roots plus every ancestor, deduplicated across both.
+
+        Walking up lets project-scope MCP and skills discovery pick up config living
+        in any parent folder of an opened project (e.g. a monorepo root that contains
+        many project subdirectories).
+
+        The result is cached for the discoverer's lifetime.
+        """
+        if self._discovery_paths_cache is not None:
+            return self._discovery_paths_cache
+        self._discovery_paths_cache = self._folders_with_ancestors(self._all_discovery_folders())
+        return self._discovery_paths_cache

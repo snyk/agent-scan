@@ -302,7 +302,7 @@ class CodexDiscoverer(AgentDiscoverer):
         absolute path, so an ancestor equal to ``codex_home`` dedups in the merge.
         """
         result: McpConfigsResult = {}
-        for path in self._project_paths_with_ancestors():
+        for path in self._discovery_paths_with_ancestors():
             config_path = path / ".codex" / self._config_filename
             result.update(self._mcp_servers_from_data(self._load_toml_file(config_path), config_path))
         return result
@@ -366,7 +366,7 @@ class CodexDiscoverer(AgentDiscoverer):
     def _discover_project_skills(self) -> SkillsDirsResult:
         """Scan ``<project>/.agents/skills`` for every registered project and ancestor."""
         result: SkillsDirsResult = {}
-        for path in self._project_paths_with_ancestors():
+        for path in self._discovery_paths_with_ancestors():
             skills_dir = path / ".agents" / "skills"
             entries = self._scan_skills_dir(skills_dir)
             if entries is not None:

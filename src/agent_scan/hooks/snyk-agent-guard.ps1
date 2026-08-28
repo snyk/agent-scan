@@ -18,7 +18,10 @@ param(
     [string]$PushKey,
 
     [Parameter(Mandatory=$false)]
-    [string]$RemoteUrl
+    [string]$RemoteUrl,
+
+    [Parameter(Mandatory=$false)]
+    [string]$MachineId
 )
 
 $ErrorActionPreference = "Stop"
@@ -43,6 +46,12 @@ if (-not $PushKey) {
 if (-not $RemoteUrl) { $RemoteUrl = $env:REMOTE_HOOKS_BASE_URL }
 if (-not $RemoteUrl) {
     Write-Error "REMOTE_HOOKS_BASE_URL is required (pass -RemoteUrl or set env var)"
+    exit 1
+}
+
+if (-not $MachineId) { $MachineId = $env:MACHINE_ID }
+if (-not $MachineId) {
+    Write-Error "MACHINE_ID is required (pass -MachineId or set env var)"
     exit 1
 }
 
@@ -89,7 +98,7 @@ function JsonEscape($s) {
 }
 
 $xUser = '{{"hostname":"{0}","username":"{1}","identifier":"{2}"}}' -f `
-    (JsonEscape $hostname), (JsonEscape $username), (JsonEscape $hostname)
+    (JsonEscape $hostname), (JsonEscape $username), (JsonEscape $MachineId)
 
 # Execute request
 try {

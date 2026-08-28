@@ -21,6 +21,7 @@ import yaml
 from pydantic import ValidationError
 from rich.logging import RichHandler
 
+from agent_scan.agents import DiscoveryScope
 from agent_scan.consent import collect_consent
 from agent_scan.models import (
     FAILURE_CATEGORY_TO_CODE,
@@ -943,6 +944,14 @@ def main():
         help="Snyk tenant ID (required when minting a push key; not needed if PUSH_KEY is set)",
     )
     guard_install_parser.add_argument(
+        "--machine-id",
+        dest="machine_id",
+        type=str,
+        default=None,
+        metavar="ID",
+        help="Required non-anonymous identifier for this machine, sent as the X-User identifier on hook events",
+    )
+    guard_install_parser.add_argument(
         "--test",
         action="store_true",
         default=False,
@@ -961,6 +970,34 @@ def main():
         help="Install hooks to the managed (admin/MDM) config path instead of the user-level path",
     )
 
+    guard_discover_parser = guard_subparsers.add_parser(
+        "discover",
+        allow_abbrev=False,
+        help=(
+            "Run MCP server discovery and send a sessionStartServerDiscovery event directly to Agent Monitor "
+            "(used by the async session-start hooks that guard install configures)"
+        ),
+    )
+    guard_discover_parser.add_argument(
+        "--url",
+        type=str,
+        default=None,
+        help="Remote hooks base URL (default: REMOTE_HOOKS_BASE_URL or https://api.snyk.io)",
+    )
+    guard_discover_parser.add_argument(
+        "--client",
+        type=str,
+        choices=["claude-code", "cursor", "codex"],
+        required=True,
+        metavar="CLIENT",
+        help=("Required; read the selected agent's hook JSON payload from stdin and include its target folders"),
+    )
+    guard_discover_parser.add_argument(
+        "--scope",
+        choices=[scope.value for scope in DiscoveryScope],
+        default=DiscoveryScope.ALL.value,
+        help="Discovery data to collect (default: all)",
+    )
     guard_uninstall_parser = guard_subparsers.add_parser(
         "uninstall",
         allow_abbrev=False,
@@ -1142,6 +1179,7 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> ScanRespo
         paths=files,
         all_users=scan_all_users,
         scan_skills=scan_skills,
+        discovery_scope=DiscoveryScope.ALL if scan_skills else DiscoveryScope.SERVERS,
     )
 
     # Resolve the MCP server IO flag and the consent flag.

@@ -3,9 +3,9 @@ import logging
 import os
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from agent_scan.agents import find_discoverers
+from agent_scan.agents import DiscoveryScope, find_discoverers
 from agent_scan.direct_scanner import direct_scan_to_server_config, is_direct_scan
 from agent_scan.inspect import (
     get_mcp_config_per_client,
@@ -35,6 +35,8 @@ class InspectArgs(BaseModel):
     paths: list[str]
     all_users: bool = False
     scan_skills: bool = False
+    discovery_scope: DiscoveryScope = DiscoveryScope.ALL
+    target_folders: list[str] = Field(default_factory=list)
 
 
 class AnalyzeArgs(BaseModel):
@@ -85,9 +87,33 @@ async def discover_clients_to_inspect(
                     )
                 )
     else:
+        target_folders: list[Path] = []
+        seen_target_folders: set[Path] = set()
+        for raw_path in inspect_args.target_folders:
+            target_path = Path(raw_path).expanduser()
+            try:
+                key = target_path.resolve()
+            except (OSError, RuntimeError, ValueError):
+                # Target folders come from untrusted hook-payload JSON, where a NUL byte
+                # raises ValueError; fall back to the literal path so one bad entry cannot
+                # abort the whole discovery.
+                key = target_path
+            if key in seen_target_folders:
+                continue
+            seen_target_folders.add(key)
+            try:
+                exists = key.exists()
+            except (OSError, RuntimeError, ValueError):
+                logger.warning("Skipping inaccessible target folder: %s", target_path)
+                continue
+            if not exists:
+                logger.warning("Skipping non-existent target folder: %s", target_path)
+                continue
+            target_folders.append(target_path)
+
         # Phase A — legacy path. Runs for EVERY well-known client including Claude Code.
         for client in get_well_known_clients():
-            ctis = await get_mcp_config_per_client(client, home_dirs_with_users)
+            ctis = await get_mcp_config_per_client(client, home_dirs_with_users, scope=inspect_args.discovery_scope)
             if ctis:
                 clients_to_inspect.extend(ctis)
             else:
@@ -95,9 +121,9 @@ async def discover_clients_to_inspect(
 
         # Phase B — ABC path. Runs sequentially after Phase A and merges into its output.
         for home_directory, username in home_dirs_with_users:
-            for discoverer in find_discoverers(home_directory):
+            for discoverer in find_discoverers(home_directory, target_folders=target_folders):
                 try:
-                    cti = discoverer.discover()
+                    cti = discoverer.discover(inspect_args.discovery_scope)
                 except Exception:
                     logger.exception("Discoverer %s.discover() raised; skipping", type(discoverer).__name__)
                     continue
