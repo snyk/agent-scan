@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import urlparse, urlsplit, urlunsplit
 
 import httpx
+from cryptography.fernet import Fernet, InvalidToken
 from mcp.client.auth import TokenStorage
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from pydantic import BaseModel, ConfigDict
@@ -103,6 +104,96 @@ def normalize_server_url(url: str) -> str:
     elif path.endswith("/mcp"):
         path = path[: -len("/mcp")]
     return urlunsplit((split.scheme, split.netloc, path.rstrip("/"), split.query, split.fragment))
+
+
+_ENCRYPTED_PREFIX = "enc:v1:"
+_SECRET_TOKEN_FIELDS = ("access_token", "refresh_token")
+
+
+def _get_or_create_key(directory: Path) -> bytes:
+    """Load, or create and persist, the symmetric key that encrypts secret
+    fields in the token store.
+
+    The key lives in a plain file (``store.key``) next to the store it
+    protects, so this does not defend against a process already running as
+    this OS user -- it can read the key file too. It defends against the
+    token leaking on its own: pasted into a bug report, swept up by a naive
+    filesystem secret-scanner, or included in a partial backup that misses
+    the key file.
+    """
+    key_path = directory / "store.key"
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with contextlib.suppress(OSError):
+        os.chmod(directory, 0o700)
+    try:
+        with open(key_path, "rb") as f:
+            return f.read()
+    except FileNotFoundError:
+        pass
+    key = Fernet.generate_key()
+    try:
+        fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    except FileExistsError:
+        # Lost a race with a concurrent process generating the key first.
+        with open(key_path, "rb") as f:
+            return f.read()
+    with os.fdopen(fd, "wb") as f:
+        if hasattr(os, "fchmod"):
+            os.fchmod(f.fileno(), 0o600)
+        f.write(key)
+        f.flush()
+        os.fsync(f.fileno())
+    return key
+
+
+def _encrypt_value(fernet: Fernet, value: str) -> str:
+    return _ENCRYPTED_PREFIX + fernet.encrypt(value.encode()).decode()
+
+
+def _decrypt_value(fernet: Fernet, value: str) -> str | None:
+    """Decrypt one stored value.
+
+    A value with no encryption tag is legacy plaintext, written before this
+    was added; it is returned unchanged, and re-encrypted the next time its
+    entry is written. A tagged value that fails to decrypt (lost or rotated
+    key) returns ``None`` rather than the ciphertext, so a corrupt secret is
+    never mistaken for a real one.
+    """
+    if not value.startswith(_ENCRYPTED_PREFIX):
+        return value
+    try:
+        return fernet.decrypt(value[len(_ENCRYPTED_PREFIX) :].encode()).decode()
+    except InvalidToken:
+        logger.warning("Could not decrypt a stored OAuth secret (lost or rotated key?); treating it as absent")
+        return None
+
+
+def _encrypt_entry(fernet: Fernet, entry: dict) -> dict:
+    entry = dict(entry)
+    if entry.get("client_secret"):
+        entry["client_secret"] = _encrypt_value(fernet, entry["client_secret"])
+    token = entry.get("token")
+    if isinstance(token, dict):
+        token = dict(token)
+        for field in _SECRET_TOKEN_FIELDS:
+            if token.get(field):
+                token[field] = _encrypt_value(fernet, token[field])
+        entry["token"] = token
+    return entry
+
+
+def _decrypt_entry(fernet: Fernet, entry: dict) -> dict:
+    entry = dict(entry)
+    if entry.get("client_secret"):
+        entry["client_secret"] = _decrypt_value(fernet, entry["client_secret"])
+    token = entry.get("token")
+    if isinstance(token, dict):
+        token = dict(token)
+        for field in _SECRET_TOKEN_FIELDS:
+            if token.get(field):
+                token[field] = _decrypt_value(fernet, token[field])
+        entry["token"] = token
+    return entry
 
 
 def _store_path() -> Path:
@@ -200,6 +291,9 @@ class OAuthTokenStore:
 
     # -- disk I/O -----------------------------------------------------------
 
+    def _get_key(self) -> bytes:
+        return _get_or_create_key(self.path.parent)
+
     def _read_raw(self) -> dict[str, dict]:
         try:
             with open(self.path, encoding="utf-8") as f:
@@ -209,7 +303,12 @@ class OAuthTokenStore:
         except (json.JSONDecodeError, OSError):
             logger.warning("OAuth token store at %s is unreadable; treating as empty", self.path)
             return {}
-        return data if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            return {}
+        fernet = Fernet(self._get_key())
+        return {
+            key: (_decrypt_entry(fernet, entry) if isinstance(entry, dict) else entry) for key, entry in data.items()
+        }
 
     def _write_raw(self, data: dict[str, dict]) -> None:
         # Create the directory owner-only from the start; the chmod covers the
@@ -227,6 +326,10 @@ class OAuthTokenStore:
         # it is a symlink, so a symlink planted at the ``.tmp`` path beforehand
         # cannot redirect the write to an arbitrary target. getattr(...) makes
         # this a no-op flag bit on platforms without it.
+        fernet = Fernet(self._get_key())
+        encrypted = {
+            key: (_encrypt_entry(fernet, entry) if isinstance(entry, dict) else entry) for key, entry in data.items()
+        }
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             # os.open's mode argument is masked by umask; fchmod is not, so this
@@ -236,7 +339,7 @@ class OAuthTokenStore:
             # windows-latest); POSIX file modes are meaningless there anyway.
             if hasattr(os, "fchmod"):
                 os.fchmod(f.fileno(), 0o600)
-            json.dump(data, f, indent=2, default=str)
+            json.dump(encrypted, f, indent=2, default=str)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, self.path)
