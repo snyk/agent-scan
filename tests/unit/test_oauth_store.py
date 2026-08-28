@@ -118,6 +118,68 @@ def test_store_roundtrip_and_permissions(tmp_path):
     assert list(data.keys()) == ["https://mcp.linear.app"]
 
 
+def test_store_encrypts_secrets_at_rest(tmp_path):
+    """The access/refresh tokens and client secret must not appear in
+    plaintext in the on-disk file, but a round trip through get() must still
+    return the original values."""
+    path = tmp_path / "store.json"
+    store = OAuthTokenStore(path=path)
+    entry = _entry(token=_token(access="SECRETACCESS", refresh="SECRETREFRESH"))
+    entry.client_secret = "SECRETCLIENT"
+    store.put("https://mcp.linear.app/mcp", entry)
+
+    raw_bytes = path.read_bytes()
+    assert b"SECRETACCESS" not in raw_bytes
+    assert b"SECRETREFRESH" not in raw_bytes
+    assert b"SECRETCLIENT" not in raw_bytes
+
+    got = store.get("https://mcp.linear.app/mcp")
+    assert got.token.access_token == "SECRETACCESS"
+    assert got.token.refresh_token == "SECRETREFRESH"
+    assert got.client_secret == "SECRETCLIENT"
+
+
+def test_store_reads_legacy_plaintext_entries(tmp_path):
+    """An entry written before encryption-at-rest was added (plain strings,
+    no encryption tag) must still be read correctly."""
+    path = tmp_path / "store.json"
+    entry = _entry(token=_token(access="PLAINACCESS", refresh="PLAINREFRESH"))
+    path.write_text(json.dumps({"https://mcp.linear.app": json.loads(entry.model_dump_json())}))
+
+    store = OAuthTokenStore(path=path)
+    got = store.get("https://mcp.linear.app/mcp")
+    assert got.token.access_token == "PLAINACCESS"
+    assert got.token.refresh_token == "PLAINREFRESH"
+
+
+def test_store_migrates_legacy_entry_to_encrypted_on_next_write(tmp_path):
+    """A legacy plaintext entry gets encrypted the next time it is written."""
+    path = tmp_path / "store.json"
+    entry = _entry(token=_token(access="PLAINACCESS", refresh="PLAINREFRESH"))
+    path.write_text(json.dumps({"https://mcp.linear.app": json.loads(entry.model_dump_json())}))
+
+    store = OAuthTokenStore(path=path)
+    store.update_token(
+        "https://mcp.linear.app/mcp", _token(access="PLAINACCESS", refresh="PLAINREFRESH"), expires_at=None
+    )
+
+    assert b"PLAINACCESS" not in path.read_bytes()
+    assert store.get("https://mcp.linear.app/mcp").token.access_token == "PLAINACCESS"
+
+
+def test_store_get_returns_none_when_encryption_key_is_lost(tmp_path):
+    """If the key file is lost/rotated, an undecryptable access token must not
+    be handed back as if it were a real credential."""
+    path = tmp_path / "store.json"
+    store = OAuthTokenStore(path=path)
+    store.put("https://mcp.linear.app/mcp", _entry(token=_token(access="SECRETACCESS")))
+
+    key_path = path.parent / "store.key"
+    key_path.write_bytes(oauth_store.Fernet.generate_key())  # simulate a lost/rotated key
+
+    assert store.get("https://mcp.linear.app/mcp") is None
+
+
 def test_update_token_preserves_refresh_when_omitted(tmp_path):
     store = OAuthTokenStore(path=tmp_path / "store.json")
     store.put("https://mcp.linear.app/mcp", _entry(token=_token(access="old", refresh="orig")))
