@@ -53,8 +53,11 @@ class TestGuardInstallE2E:
     """
 
     @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
-    def test_guard_install_claude(self, agent_scan_cmd, agent_scan_command, tmp_path, fake_hook_server):
+    def test_guard_install_claude(self, agent_scan_cmd, tmp_path, fake_hook_server):
         config_file = tmp_path / "settings.json"
+        install_env = {**os.environ, "PUSH_KEY": "test-pk-e2e"}
+        install_env.pop("AGENT_SCAN_COMMAND", None)
+        install_env.pop("MACHINE_ID", None)
         result = subprocess.run(
             [
                 *agent_scan_cmd,
@@ -65,13 +68,11 @@ class TestGuardInstallE2E:
                 str(config_file),
                 "--url",
                 fake_hook_server,
-                "--machine-id",
-                "e2e-machine-id",
             ],
             capture_output=True,
             text=True,
             timeout=60,
-            env={**os.environ, "PUSH_KEY": "test-pk-e2e", "AGENT_SCAN_COMMAND": str(agent_scan_command)},
+            env=install_env,
         )
         assert result.returncode == 0, f"guard install failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
 
@@ -100,7 +101,8 @@ class TestGuardInstallE2E:
         assert isinstance(discovered["body"]["servers"], list)
         assert isinstance(discovered["body"]["discovery_duration_ms"], int)
         assert discovered["body"]["discovery_duration_ms"] >= 0
-        assert json.loads(discovered["headers"]["X-User"])["identifier"] == "e2e-machine-id"
+        discovered_user = json.loads(discovered["headers"]["X-User"])
+        assert discovered_user["identifier"] == discovered_user["hostname"]
 
         discover_result = subprocess.run(
             [*agent_scan_cmd, "guard", "discover", "--client", "claude-code"],

@@ -379,19 +379,66 @@ class TestBuildHookCommand:
 class TestAgentScanCommand:
     def test_uses_environment_value(self, monkeypatch):
         monkeypatch.setenv("AGENT_SCAN_COMMAND", "cd /repo; uv run -m src.agent_scan.cli")
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
 
         assert guard_module._agent_scan_command() == "cd /repo; uv run -m src.agent_scan.cli"
 
-    def test_returns_none_when_environment_unset(self, monkeypatch):
+    def test_frozen_runtime_uses_absolute_current_executable(self, tmp_path, monkeypatch):
         monkeypatch.delenv("AGENT_SCAN_COMMAND", raising=False)
+        executable = tmp_path / "dist" / "snyk-agent-scan"
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        monkeypatch.setattr(sys, "executable", str(executable))
 
-        assert guard_module._agent_scan_command() is None
+        assert guard_module._agent_scan_command() == str(executable.absolute())
 
     @pytest.mark.parametrize("value", ["", "   "])
-    def test_returns_none_when_environment_value_is_blank(self, monkeypatch, value):
+    def test_blank_environment_value_uses_runtime_fallback(self, tmp_path, monkeypatch, value):
         monkeypatch.setenv("AGENT_SCAN_COMMAND", value)
+        executable = tmp_path / "dist" / "snyk-agent-scan"
+        monkeypatch.setattr(sys, "frozen", True, raising=False)
+        monkeypatch.setattr(sys, "executable", str(executable))
 
-        assert guard_module._agent_scan_command() is None
+        assert guard_module._agent_scan_command() == str(executable.absolute())
+
+    def test_uv_runtime_uses_sibling_console_script(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("AGENT_SCAN_COMMAND", raising=False)
+        bin_dir = tmp_path / ".venv" / "bin"
+        bin_dir.mkdir(parents=True)
+        console_script = bin_dir / "snyk-agent-scan"
+        console_script.write_text("#!/bin/sh\n")
+        console_script.chmod(0o755)
+        monkeypatch.setattr(sys, "frozen", False, raising=False)
+        monkeypatch.setattr(sys, "executable", str(bin_dir / "python"))
+
+        with patch(f"{_G}.IS_WINDOWS", False):
+            command = guard_module._agent_scan_command()
+
+        assert command == str(console_script.absolute())
+
+    def test_windows_uv_runtime_uses_sibling_console_executable(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("AGENT_SCAN_COMMAND", raising=False)
+        scripts_dir = tmp_path / ".venv" / "Scripts"
+        scripts_dir.mkdir(parents=True)
+        console_script = scripts_dir / "snyk-agent-scan.exe"
+        console_script.write_text("binary")
+        console_script.chmod(0o755)
+        monkeypatch.setattr(sys, "frozen", False, raising=False)
+        monkeypatch.setattr(sys, "executable", str(scripts_dir / "python.exe"))
+
+        with patch(f"{_G}.IS_WINDOWS", True):
+            command = guard_module._agent_scan_command()
+
+        assert command == str(console_script.absolute())
+
+    def test_returns_none_when_runtime_cannot_be_resolved(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("AGENT_SCAN_COMMAND", raising=False)
+        monkeypatch.setattr(sys, "frozen", False, raising=False)
+        monkeypatch.setattr(sys, "executable", str(tmp_path / "bin" / "python"))
+
+        with patch(f"{_G}.IS_WINDOWS", False):
+            command = guard_module._agent_scan_command()
+
+        assert command is None
 
 
 class TestBuildDiscoverHookCommand:
@@ -3721,6 +3768,14 @@ class TestInstallHooksOrchestration:
         ]
         assert ctx["prep_codex_managed"].call_args.kwargs["discover_command"] == "discover-cmd"
 
+    def test_inferred_agent_scan_command_warns_that_fallback_is_temporary(self, ctx, tmp_path):
+        self._call(tmp_path, client="claude")
+
+        assert any(
+            "AGENT_SCAN_COMMAND will become mandatory once ADS Installer is updated" in message
+            for message in self._print_messages(ctx)
+        )
+
     def test_unset_agent_scan_command_skips_discovery_without_aborting(self, ctx, tmp_path):
         ctx["agent_scan_command"].return_value = None
 
@@ -5274,19 +5329,30 @@ class TestRunInstallSendsServersDiscovered:
         assert install.call_args.args[-1] == expected
         assert send.call_args.args[-1] == expected
 
-    def test_missing_machine_id_aborts_before_install(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("arg_machine_id, env_machine_id", [(None, None), ("   ", "   ")])
+    def test_missing_machine_id_uses_hostname_for_install_and_send(
+        self, tmp_path, monkeypatch, arg_machine_id, env_machine_id
+    ):
         monkeypatch.setenv("PUSH_KEY", "headless-pk")
-        monkeypatch.delenv("MACHINE_ID", raising=False)
+        if env_machine_id is None:
+            monkeypatch.delenv("MACHINE_ID", raising=False)
+        else:
+            monkeypatch.setenv("MACHINE_ID", env_machine_id)
         with (
-            patch(f"{_G}._install_hooks") as install,
-            patch(f"{_G}._send_servers_discovered_event") as send,
-            pytest.raises(SystemExit) as exc,
+            patch("agent_scan.utils.get_hostname", return_value="fallback-host"),
+            patch(f"{_G}._install_hooks", return_value=Path("/installed/hook.sh")) as install,
+            patch(f"{_G}._send_servers_discovered_event", return_value=True) as send,
+            patch(f"{_G}.rich") as rich_mock,
         ):
-            _run_install(self._args(tmp_path, machine_id=None))
+            _run_install(self._args(tmp_path, machine_id=arg_machine_id))
 
-        assert exc.value.code == 1
-        install.assert_not_called()
-        send.assert_not_called()
+        assert install.call_args.args[-1] == "fallback-host"
+        assert send.call_args.args[-1] == "fallback-host"
+        assert any(
+            "MACHINE_ID will become mandatory once ADS Installer is updated" in call.args[0]
+            for call in rich_mock.print.call_args_list
+            if call.args
+        )
 
     def test_managed_install_sends(self, tmp_path, monkeypatch):
         monkeypatch.setenv("PUSH_KEY", "headless-pk")
