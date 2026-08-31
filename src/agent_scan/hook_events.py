@@ -58,6 +58,8 @@ def send_hook_event(
     machine_id: str,
     *,
     max_retries: int = 1,
+    installation_id: str = "primary",
+    installation_scope: str = "user",
 ) -> tuple[bool, str]:
     """POST a hook event using the same wire contract as the hook scripts.
 
@@ -91,6 +93,8 @@ def send_hook_event(
         "X-User": x_user,
         "Content-Type": "text/plain",
         "X-Client-Id": push_key,
+        "X-Agent-Guard-Installation-Id": installation_id,
+        "X-Agent-Guard-Installation-Scope": installation_scope,
     }
 
     try:

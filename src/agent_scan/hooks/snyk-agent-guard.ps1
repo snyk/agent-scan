@@ -21,7 +21,17 @@ param(
     [string]$RemoteUrl,
 
     [Parameter(Mandatory=$false)]
-    [string]$MachineId
+    [string]$MachineId,
+
+    [Parameter(Mandatory=$false)]
+    [string]$TenantId,
+
+    [Parameter(Mandatory=$false)]
+    [string]$InstallationId,
+
+    [Parameter(Mandatory=$false)]
+    [ValidateSet("user","managed")]
+    [string]$InstallationScope
 )
 
 $ErrorActionPreference = "Stop"
@@ -54,6 +64,9 @@ if (-not $MachineId) {
     Write-Error "MACHINE_ID is required (pass -MachineId or set env var)"
     exit 1
 }
+
+if (-not $InstallationId) { $InstallationId = if ($env:AGENT_GUARD_INSTALLATION_ID) { $env:AGENT_GUARD_INSTALLATION_ID } else { "primary" } }
+if (-not $InstallationScope) { $InstallationScope = if ($env:AGENT_GUARD_INSTALLATION_SCOPE) { $env:AGENT_GUARD_INSTALLATION_SCOPE } else { "user" } }
 
 switch ($Client) {
     "claude-code" {
@@ -107,6 +120,8 @@ try {
         "X-User"       = $xUser
         "Content-Type" = "text/plain"
         "X-Client-Id"  = $PushKey
+        "X-Agent-Guard-Installation-Id" = $InstallationId
+        "X-Agent-Guard-Installation-Scope" = $InstallationScope
     }
     $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($body)
     $response = Invoke-WebRequest -Uri $url -Method POST -Body $bodyBytes -Headers $headers -UseBasicParsing

@@ -72,12 +72,39 @@ def test_sends_existing_hook_wire_contract(client):
     headers = post["headers"]
     assert headers["Content-Type"] == "text/plain"
     assert headers["X-Client-Id"] == "push-key"
+    assert headers["X-Agent-Guard-Installation-Id"] == "primary"
+    assert headers["X-Agent-Guard-Installation-Scope"] == "user"
     assert headers["User-Agent"] == f"snyk/agent-scan Agent Scan v{version_info}"
     assert json.loads(headers["X-User"]) == {
         "hostname": "host-1",
         "username": "user-1",
         "identifier": "machine-1",
     }
+
+
+def test_sends_named_installation_headers_without_changing_x_user():
+    session = _FakeSession()
+
+    with (
+        patch("agent_scan.hook_events.get_hostname", return_value="host-1"),
+        patch("agent_scan.hook_events.get_username", return_value="user-1"),
+        _patch_session(session),
+    ):
+        result = send_hook_event(
+            "https://api.snyk.io",
+            "claude-code",
+            "push-key",
+            "{}",
+            "machine-1",
+            installation_id="team.blue",
+            installation_scope="managed",
+        )
+
+    assert result == (True, "")
+    headers = session.posts[0]["headers"]
+    assert headers["X-Agent-Guard-Installation-Id"] == "team.blue"
+    assert headers["X-Agent-Guard-Installation-Scope"] == "managed"
+    assert json.loads(headers["X-User"])["identifier"] == "machine-1"
 
 
 @pytest.mark.parametrize(

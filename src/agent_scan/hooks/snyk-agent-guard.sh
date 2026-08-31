@@ -89,6 +89,8 @@ hook_main() {
   pushkey="${PUSH_KEY:-${PUSHKEY:-}}"
   [[ -n "$pushkey" ]] || die "PUSH_KEY environment variable is not set"
   [[ -n "${MACHINE_ID:-}" ]] || die "MACHINE_ID environment variable is not set"
+  local installation_id="${AGENT_GUARD_INSTALLATION_ID:-primary}"
+  local installation_scope="${AGENT_GUARD_INSTALLATION_SCOPE:-user}"
 
   # Determine endpoint and user-agent based on client
   local endpoint user_agent
@@ -145,6 +147,8 @@ hook_main() {
     -H "X-User: ${x_user}"
     -H "Content-Type: text/plain"
     -H "X-Client-Id: ${pushkey}"
+    -H "X-Agent-Guard-Installation-Id: ${installation_id}"
+    -H "X-Agent-Guard-Installation-Scope: ${installation_scope}"
     --data-binary @-
   )
 

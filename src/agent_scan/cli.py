@@ -969,6 +969,13 @@ def main():
         default=False,
         help="Install hooks to the managed (admin/MDM) config path instead of the user-level path",
     )
+    guard_install_parser.add_argument(
+        "--installation-id",
+        dest="installation_id",
+        default=None,
+        metavar="ID",
+        help="Agent Guard installation ID (default: primary)",
+    )
 
     guard_discover_parser = guard_subparsers.add_parser(
         "discover",
@@ -998,6 +1005,20 @@ def main():
         default=DiscoveryScope.ALL.value,
         help="Discovery data to collect (default: all)",
     )
+    guard_discover_parser.add_argument(
+        "--installation-id",
+        dest="installation_id",
+        default=None,
+        metavar="ID",
+        help="Agent Guard installation ID (default: primary)",
+    )
+    guard_discover_parser.add_argument(
+        "--installation-scope",
+        dest="installation_scope",
+        choices=["user", "managed"],
+        default=None,
+        help=argparse.SUPPRESS,
+    )
     guard_uninstall_parser = guard_subparsers.add_parser(
         "uninstall",
         allow_abbrev=False,
@@ -1019,6 +1040,21 @@ def main():
         action="store_true",
         default=False,
         help="Uninstall hooks from the managed (admin/MDM) config path instead of the user-level path",
+    )
+    uninstall_installation_group = guard_uninstall_parser.add_mutually_exclusive_group()
+    uninstall_installation_group.add_argument(
+        "--installation-id",
+        dest="installation_id",
+        default=None,
+        metavar="ID",
+        help="Agent Guard installation ID to remove (default: primary)",
+    )
+    uninstall_installation_group.add_argument(
+        "--all-installations-ids",
+        dest="all_installations_ids",
+        action="store_true",
+        default=False,
+        help="Remove every Agent Guard installation from the selected configuration scope",
     )
 
     # Parse arguments (default to 'scan' if no command provided)
