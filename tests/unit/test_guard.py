@@ -1879,9 +1879,9 @@ class TestRunStatus:
 
     def test_prints_user_then_managed_sections_in_client_order(self, capsys):
         with (
-            patch(f"{_G}._detect_claude_install", return_value=None),
-            patch(f"{_G}._detect_cursor_install", return_value=None),
-            patch(f"{_G}._detect_codex_install", return_value=None),
+            patch(f"{_G}._detect_claude_installations", return_value=[]),
+            patch(f"{_G}._detect_cursor_installations", return_value=[]),
+            patch(f"{_G}._detect_codex_installations", return_value=[]),
         ):
             guard_module._run_status()
 
@@ -1905,9 +1905,9 @@ class TestRunStatus:
 
     def test_all_not_installed(self, capsys):
         with (
-            patch(f"{_G}._detect_claude_install", return_value=None),
-            patch(f"{_G}._detect_cursor_install", return_value=None),
-            patch(f"{_G}._detect_codex_install", return_value=None),
+            patch(f"{_G}._detect_claude_installations", return_value=[]),
+            patch(f"{_G}._detect_cursor_installations", return_value=[]),
+            patch(f"{_G}._detect_codex_installations", return_value=[]),
         ):
             guard_module._run_status()
 
@@ -1915,9 +1915,9 @@ class TestRunStatus:
 
     def test_installed_shows_host_masked_key_and_events(self, capsys):
         with (
-            patch(f"{_G}._detect_claude_install", return_value=self._info()),
-            patch(f"{_G}._detect_cursor_install", return_value=None),
-            patch(f"{_G}._detect_codex_install", return_value=None),
+            patch(f"{_G}._detect_claude_installations", return_value=[self._info()]),
+            patch(f"{_G}._detect_cursor_installations", return_value=[]),
+            patch(f"{_G}._detect_codex_installations", return_value=[]),
         ):
             guard_module._run_status()
 
@@ -1926,20 +1926,35 @@ class TestRunStatus:
         assert "pk-1...7890" in output
         assert "(PreToolUse, Stop)" in output
 
+    def test_lists_every_named_installation_with_scope(self, tmp_path, capsys):
+        infos = [
+            {**self._info(), "installation_id": "primary", "installation_scope": "user"},
+            {**self._info(), "installation_id": "team.blue", "installation_scope": "managed"},
+        ]
+
+        _print_client_status("Claude Code", tmp_path / "settings.json", infos)
+
+        output = capsys.readouterr().out
+        assert output.count("INSTALLED") == 2
+        assert "ID: primary" in output
+        assert "ID: team.blue" in output
+        assert "Scope: user" in output
+        assert "Scope: managed" in output
+
     @pytest.mark.parametrize("client", ["claude", "cursor", "codex"])
     def test_managed_permission_error_renders_unreadable(self, capsys, client):
         def detector(name):
-            def detect(*args):
-                if name == client and args:
+            def detect(*_args, **kwargs):
+                if name == client and kwargs.get("scope") == "managed":
                     raise PermissionError("denied")
-                return None
+                return []
 
             return detect
 
         with (
-            patch(f"{_G}._detect_claude_install", side_effect=detector("claude")),
-            patch(f"{_G}._detect_cursor_install", side_effect=detector("cursor")),
-            patch(f"{_G}._detect_codex_install", side_effect=detector("codex")),
+            patch(f"{_G}._detect_claude_installations", side_effect=detector("claude")),
+            patch(f"{_G}._detect_cursor_installations", side_effect=detector("cursor")),
+            patch(f"{_G}._detect_codex_installations", side_effect=detector("codex")),
         ):
             guard_module._run_status()
 
@@ -1948,17 +1963,17 @@ class TestRunStatus:
     @pytest.mark.parametrize("client", ["claude", "cursor", "codex"])
     def test_user_level_permission_error_propagates(self, capsys, client):
         def detector(name):
-            def detect(*_args):
+            def detect(*_args, **_kwargs):
                 if name == client:
                     raise PermissionError("denied")
-                return None
+                return []
 
             return detect
 
         with (
-            patch(f"{_G}._detect_claude_install", side_effect=detector("claude")),
-            patch(f"{_G}._detect_cursor_install", side_effect=detector("cursor")),
-            patch(f"{_G}._detect_codex_install", side_effect=detector("codex")),
+            patch(f"{_G}._detect_claude_installations", side_effect=detector("claude")),
+            patch(f"{_G}._detect_cursor_installations", side_effect=detector("cursor")),
+            patch(f"{_G}._detect_codex_installations", side_effect=detector("codex")),
         ):
             with pytest.raises(PermissionError, match="denied"):
                 guard_module._run_status()
@@ -1971,9 +1986,9 @@ class TestRunStatus:
 
     def test_help_footer_present(self, capsys):
         with (
-            patch(f"{_G}._detect_claude_install", return_value=None),
-            patch(f"{_G}._detect_cursor_install", return_value=None),
-            patch(f"{_G}._detect_codex_install", return_value=None),
+            patch(f"{_G}._detect_claude_installations", return_value=[]),
+            patch(f"{_G}._detect_cursor_installations", return_value=[]),
+            patch(f"{_G}._detect_codex_installations", return_value=[]),
         ):
             guard_module._run_status()
 
@@ -2923,9 +2938,33 @@ class TestBashHookScript:
         assert req is not None
         assert "/hidden/agent-monitor/hooks/claude-code" in req["path"]
         assert req["headers"]["X-Client-Id"] == "test-pk-123"
+        assert req["headers"]["X-Agent-Guard-Installation-Id"] == "primary"
+        assert req["headers"]["X-Agent-Guard-Installation-Scope"] == "user"
         assert req["body"].startswith("base64:")
         decoded = base64.b64decode(req["body"].removeprefix("base64:"))
         assert json.loads(decoded) == json.loads(payload)
+
+    def test_posts_explicit_installation_headers(self, hook_server):
+        script = _get_script_path("snyk-agent-guard.sh")
+        result = subprocess.run(
+            ["bash", str(script), "--client", "claude-code"],
+            input='{"hook_event_name":"test","session_id":"s1"}',
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={
+                "PATH": "/usr/bin:/bin:/usr/local/bin",
+                "PUSH_KEY": "test-pk",
+                "REMOTE_HOOKS_BASE_URL": hook_server,
+                "MACHINE_ID": "machine-42",
+                "AGENT_GUARD_INSTALLATION_ID": "team.blue",
+                "AGENT_GUARD_INSTALLATION_SCOPE": "managed",
+            },
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert _HookHandler.last_request["headers"]["X-Agent-Guard-Installation-Id"] == "team.blue"
+        assert _HookHandler.last_request["headers"]["X-Agent-Guard-Installation-Scope"] == "managed"
 
     def test_posts_large_payload_without_exec_argument_limit(self, hook_server):
         script = _get_script_path("snyk-agent-guard.sh")
@@ -3232,6 +3271,8 @@ class TestPowerShellHookScript:
         assert req is not None
         assert "/hidden/agent-monitor/hooks/claude-code" in req["path"]
         assert req["headers"]["X-Client-Id"] == "test-pk-123"
+        assert req["headers"]["X-Agent-Guard-Installation-Id"] == "primary"
+        assert req["headers"]["X-Agent-Guard-Installation-Scope"] == "user"
         assert req["body"].startswith("base64:")
         decoded = base64.b64decode(req["body"].removeprefix("base64:"))
         assert json.loads(decoded) == json.loads(payload)
@@ -5911,6 +5952,373 @@ class TestRunInstallAll:
         assert mock_install.call_count == len(ALL_CLIENTS)
         called_clients = [c.args[0] for c in mock_install.call_args_list]
         assert called_clients == ALL_CLIENTS
+
+
+# ===================================================================
+# Named Agent Guard installations
+# ===================================================================
+
+
+def _named_guard_command(
+    installation_id: str,
+    *,
+    push_key: str = "shared-pk",
+    scope: str = "user",
+    client: str = "claude-code",
+) -> str:
+    with patch(f"{_G}.IS_WINDOWS", False):
+        return _build_hook_command(
+            push_key,
+            "https://api.snyk.io",
+            Path(f"/tmp/hooks/{installation_id}/snyk-agent-guard.sh"),
+            client,
+            tenant_id="tenant-1",
+            machine_id="machine-1",
+            installation_id=installation_id,
+            installation_scope=scope,
+        )
+
+
+class TestInstallationIdValidation:
+    @pytest.mark.parametrize("installation_id", ["primary", "a", "team.blue", "a_b-c9", "x" * 64])
+    def test_accepts_valid_ids(self, installation_id):
+        assert guard_module._validate_installation_id(installation_id) == installation_id
+
+    @pytest.mark.parametrize(
+        "installation_id",
+        ["", "default", "UPPER", ".leading", "trailing.", "has space", "x" * 65, "con", "com1.logs", "lpt9.x"],
+    )
+    def test_rejects_invalid_reserved_and_device_ids(self, installation_id):
+        with pytest.raises(ValueError):
+            guard_module._validate_installation_id(installation_id)
+
+    def test_install_rejects_invalid_id_before_minting_or_writing(self, tmp_path, monkeypatch):
+        config = tmp_path / "settings.json"
+        monkeypatch.delenv("PUSH_KEY", raising=False)
+        args = SimpleNamespace(
+            client="claude",
+            url="https://api.snyk.io",
+            tenant_id="tenant-1",
+            machine_id="machine-1",
+            file=str(config),
+            managed=False,
+            installation_id="CON",
+        )
+
+        with patch(f"{_G}.mint_push_key") as mint, pytest.raises(ValueError):
+            _run_install(args)
+
+        mint.assert_not_called()
+        assert not config.exists()
+
+
+class TestNamedInstallationCli:
+    @pytest.mark.parametrize("guard_command", ["install", "uninstall"])
+    def test_parses_explicit_installation_id(self, guard_command, monkeypatch):
+        from agent_scan import cli
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["agent-scan", "guard", guard_command, "claude", "--installation-id", "team.blue"],
+        )
+        with patch(f"{_G}.run_guard", return_value=0) as run, pytest.raises(SystemExit) as exc:
+            cli.main()
+
+        assert exc.value.code == 0
+        assert run.call_args.args[0].installation_id == "team.blue"
+
+    def test_uninstall_all_is_mutually_exclusive_with_explicit_id(self, monkeypatch):
+        from agent_scan import cli
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "agent-scan",
+                "guard",
+                "uninstall",
+                "claude",
+                "--installation-id",
+                "blue",
+                "--all-installations-ids",
+            ],
+        )
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+
+        assert exc.value.code == 2
+
+    def test_discover_parses_installation_id(self, monkeypatch):
+        from agent_scan import cli
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "agent-scan",
+                "guard",
+                "discover",
+                "--client",
+                "codex",
+                "--installation-id",
+                "team.blue",
+            ],
+        )
+        with patch(f"{_G}.run_guard", return_value=0) as run, pytest.raises(SystemExit) as exc:
+            cli.main()
+
+        assert exc.value.code == 0
+        assert run.call_args.args[0].installation_id == "team.blue"
+
+    def test_runtime_defaults_to_primary(self):
+        assert guard_module._selected_installation_id(SimpleNamespace(installation_id=None)) == "primary"
+
+
+class TestNamedInstallationConfig:
+    @pytest.mark.parametrize("client", ["claude", "cursor", "codex"])
+    def test_install_and_reinstall_preserve_other_ids(self, tmp_path, client):
+        path = tmp_path / "hooks.json"
+        prepare = {
+            "claude": _prepare_claude_config,
+            "cursor": _prepare_cursor_config,
+            "codex": _prepare_codex_config,
+        }[client]
+        detect = {
+            "claude": guard_module._detect_claude_installations,
+            "cursor": guard_module._detect_cursor_installations,
+            "codex": guard_module._detect_codex_installations,
+        }[client]
+        client_name = "claude-code" if client == "claude" else client
+        primary_key = "a" * 32
+        blue_key = "b" * 32
+        blue_updated_key = "c" * 32
+        primary = _named_guard_command("primary", push_key=primary_key, client=client_name)
+        blue = _named_guard_command("blue", push_key=blue_key, client=client_name)
+        blue_updated = _named_guard_command("blue", push_key=blue_updated_key, client=client_name)
+
+        config, _, preserved = prepare(primary, path, installation_id="primary")
+        _write_config(config, path, preserved)
+        config, _, preserved = prepare(blue, path, installation_id="blue")
+        _write_config(config, path, preserved)
+        config, diff, preserved = prepare(blue_updated, path, installation_id="blue")
+        _write_config(config, path, preserved)
+
+        installations = detect(path)
+        assert [info["installation_id"] for info in installations] == ["primary", "blue"]
+        assert installations[0]["auth_value"] == primary_key
+        assert installations[1]["auth_value"] == blue_updated_key
+        assert diff == {"added": {}, "modified": {}, "removed": {}}
+
+    def test_unmarked_commands_are_primary_and_primary_replacement_keeps_named(self, tmp_path):
+        path = tmp_path / "settings.json"
+        blue = _named_guard_command("blue", push_key="pk-blue")
+        _write(path, {"hooks": {"Stop": [_claude_group(AGENT_SCAN_CMD), _claude_group(blue)]}})
+
+        new_primary = _named_guard_command("primary", push_key="pk-new-primary")
+        config, _, _ = _prepare_claude_config(new_primary, path, installation_id="primary")
+        commands = [group["hooks"][0]["command"] for group in config["hooks"]["Stop"]]
+
+        assert AGENT_SCAN_CMD not in commands
+        assert blue in commands
+        assert new_primary in commands
+
+    def test_scripts_are_scoped_by_installation_id(self, tmp_path):
+        config = tmp_path / "settings.json"
+        assert guard_module._forwarder_script_path(config, "blue") == (
+            tmp_path / "hooks" / "blue" / "snyk-agent-guard.sh"
+        )
+        assert guard_module._discover_script_path(config, "green") == (
+            tmp_path / "hooks" / "green" / "snyk-agent-guard-discover.sh"
+        )
+
+
+class TestNamedCodexManagedConfig:
+    def test_preserves_unrelated_toml_and_orders_installations(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text('[unrelated]\nvalue = "keep"\n')
+        for installation_id in ["zeta", "primary", "alpha"]:
+            command = _named_guard_command(installation_id, client="codex", scope="managed")
+            content, _ = _prepare_codex_managed_config(command, path, installation_id=installation_id)
+            path.write_text(content)
+
+        text = path.read_text()
+        assert '[unrelated]\nvalue = "keep"' in text
+        assert "[features]\nhooks = true" in text
+        assert "[hooks]\nmanaged_dir = " in text
+        positions = [text.index(f"AGENT_GUARD_INSTALLATION_ID='{item}'") for item in ["primary", "alpha", "zeta"]]
+        assert positions == sorted(positions)
+        assert [
+            info["installation_id"] for info in guard_module._detect_codex_installations(path, scope="managed")
+        ] == ["primary", "alpha", "zeta"]
+
+        guard_module._uninstall_codex_managed(path, installation_id="alpha")
+
+        assert '[unrelated]\nvalue = "keep"' in path.read_text()
+        assert [
+            info["installation_id"] for info in guard_module._detect_codex_installations(path, scope="managed")
+        ] == ["primary", "zeta"]
+
+
+class TestNamedInstallationMigration:
+    def test_primary_migration_is_not_first_install_and_removes_legacy_after_success(self, tmp_path):
+        config = tmp_path / "settings.json"
+        _write(config, {"hooks": {"Stop": [_claude_group(AGENT_SCAN_CMD)]}})
+        legacy_main, legacy_discover = guard_module._legacy_script_paths(config)
+        legacy_main.parent.mkdir(parents=True)
+        legacy_main.write_text("legacy-main")
+        legacy_discover.write_text("legacy-discover")
+
+        with (
+            patch(f"{_G}._agent_scan_command", return_value=None),
+            patch(f"{_G}._send_test_event", return_value=True) as send,
+            patch(f"{_G}.rich"),
+        ):
+            _install_hooks(
+                "claude",
+                "claude-code",
+                "pk-new",
+                "https://api.snyk.io",
+                config,
+                "user",
+                "Claude Code",
+                False,
+                "tenant-1",
+                "token",
+                "machine-1",
+                installation_id="primary",
+            )
+
+        assert send.call_args.kwargs["first_install"] is False
+        assert not legacy_main.exists()
+        assert not legacy_discover.exists()
+        assert guard_module._forwarder_script_path(config, "primary").exists()
+
+    def test_failed_primary_migration_keeps_config_and_legacy_scripts(self, tmp_path):
+        config = tmp_path / "settings.json"
+        _write(config, {"hooks": {"Stop": [_claude_group(AGENT_SCAN_CMD)]}})
+        original = config.read_text()
+        legacy_main, legacy_discover = guard_module._legacy_script_paths(config)
+        legacy_main.parent.mkdir(parents=True)
+        legacy_main.write_text("legacy-main")
+        legacy_discover.write_text("legacy-discover")
+
+        with (
+            patch(f"{_G}._agent_scan_command", return_value=None),
+            patch(f"{_G}._send_test_event", return_value=False),
+            patch(f"{_G}.rich"),
+            pytest.raises(SystemExit),
+        ):
+            _install_hooks(
+                "claude",
+                "claude-code",
+                "pk-new",
+                "https://api.snyk.io",
+                config,
+                "user",
+                "Claude Code",
+                False,
+                "tenant-1",
+                "token",
+                "machine-1",
+                installation_id="primary",
+            )
+
+        assert config.read_text() == original
+        assert legacy_main.read_text() == "legacy-main"
+        assert legacy_discover.read_text() == "legacy-discover"
+        assert not guard_module._forwarder_script_path(config, "primary").exists()
+
+
+class TestNamedInstallationUninstall:
+    def _install_shared(self, path: Path) -> None:
+        for installation_id in ["blue", "green"]:
+            command = _named_guard_command(installation_id, push_key="shared-pk")
+            config, _, preserved = _prepare_claude_config(command, path, installation_id=installation_id)
+            _write_config(config, path, preserved)
+
+    def test_targeted_uninstall_retains_shared_key_and_other_installation(self, tmp_path, monkeypatch):
+        path = tmp_path / "settings.json"
+        self._install_shared(path)
+        monkeypatch.setenv("SNYK_TOKEN", "token")
+        args = SimpleNamespace(
+            client="claude",
+            file=str(path),
+            managed=False,
+            installation_id="blue",
+            all_installations_ids=False,
+        )
+        with patch(f"{_G}.revoke_push_key") as revoke:
+            _run_uninstall(args)
+
+        revoke.assert_not_called()
+        assert [info["installation_id"] for info in guard_module._detect_claude_installations(path)] == ["green"]
+
+    def test_remove_all_revokes_shared_key_once(self, tmp_path, monkeypatch):
+        path = tmp_path / "settings.json"
+        self._install_shared(path)
+        monkeypatch.setenv("SNYK_TOKEN", "token")
+        args = SimpleNamespace(
+            client="claude",
+            file=str(path),
+            managed=False,
+            installation_id=None,
+            all_installations_ids=True,
+        )
+        with patch(f"{_G}.revoke_push_key") as revoke:
+            _run_uninstall(args)
+
+        revoke.assert_called_once_with("https://api.snyk.io", "tenant-1", "token", "shared-pk")
+        assert guard_module._detect_claude_installations(path) == []
+
+    def test_client_all_retains_key_referenced_by_another_client(self, tmp_path, monkeypatch):
+        paths = {
+            "claude": tmp_path / "claude.json",
+            "cursor": tmp_path / "cursor.json",
+            "codex": tmp_path / "codex.json",
+        }
+        claude, _, preserved = _prepare_claude_config(
+            _named_guard_command("blue", push_key="shared-pk"),
+            paths["claude"],
+            installation_id="blue",
+        )
+        _write_config(claude, paths["claude"], preserved)
+        cursor, _, preserved = _prepare_cursor_config(
+            _named_guard_command("green", push_key="shared-pk", client="cursor"),
+            paths["cursor"],
+            installation_id="green",
+        )
+        _write_config(cursor, paths["cursor"], preserved)
+        monkeypatch.setenv("SNYK_TOKEN", "token")
+
+        def config_path(client, override=None, managed=False):
+            if override:
+                return Path(override)
+            return (
+                tmp_path / f"managed-{client}.toml"
+                if managed and client == "codex"
+                else (tmp_path / f"managed-{client}.json" if managed else paths[client])
+            )
+
+        args = SimpleNamespace(
+            client="all",
+            file=None,
+            managed=False,
+            installation_id="blue",
+            all_installations_ids=False,
+        )
+        with patch(f"{_G}._config_path", side_effect=config_path), patch(f"{_G}.revoke_push_key") as revoke:
+            _run_uninstall(args)
+
+        revoke.assert_not_called()
+        assert guard_module._detect_claude_installations(paths["claude"]) == []
+        assert [info["installation_id"] for info in guard_module._detect_cursor_installations(paths["cursor"])] == [
+            "green"
+        ]
+
+
+class TestRunInstallAllRemaining:
+    """Remaining install-all cases retained after named-install coverage."""
 
     @patch("agent_scan.guard._install_hooks")
     @patch("agent_scan.guard.mint_push_key", return_value="minted-pk")

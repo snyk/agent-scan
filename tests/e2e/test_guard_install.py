@@ -96,6 +96,11 @@ class TestGuardInstallE2E:
             "hooksConfigured",
             "hooksConfiguredServerDiscovery",
         ]
+        assert all(
+            request["headers"]["X-Agent-Guard-Installation-Id"] == "primary"
+            and request["headers"]["X-Agent-Guard-Installation-Scope"] == "user"
+            for request in _FakeHookServer.requests
+        )
         discovered = _FakeHookServer.requests[1]
         assert discovered["body"]["session_id"] == "hooks-setup"
         assert isinstance(discovered["body"]["servers"], list)
@@ -125,6 +130,51 @@ class TestGuardInstallE2E:
         assert isinstance(session_discovery["body"]["servers"], list)
         assert isinstance(session_discovery["body"]["discovery_duration_ms"], int)
         assert session_discovery["body"]["discovery_duration_ms"] >= 0
+
+    @pytest.mark.parametrize("agent_scan_cmd", ["uv"], indirect=True)
+    def test_two_named_claude_installations_have_separate_entries_and_scripts(
+        self, agent_scan_cmd, agent_scan_command, tmp_path, fake_hook_server
+    ):
+        config_file = tmp_path / "settings.json"
+        env = {
+            **os.environ,
+            "PUSH_KEY": "shared-pk-e2e",
+            "AGENT_SCAN_COMMAND": str(agent_scan_command),
+            "MACHINE_ID": "e2e-machine-id",
+        }
+
+        for installation_id in ["blue", "green"]:
+            result = subprocess.run(
+                [
+                    *agent_scan_cmd,
+                    "guard",
+                    "install",
+                    "claude",
+                    "--file",
+                    str(config_file),
+                    "--url",
+                    fake_hook_server,
+                    "--installation-id",
+                    installation_id,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                env=env,
+            )
+            assert result.returncode == 0, result.stderr
+
+        settings = json.loads(config_file.read_text())
+        assert len(settings["hooks"]["Stop"]) == 2
+        script_name = "snyk-agent-guard.ps1" if os.name == "nt" else "snyk-agent-guard.sh"
+        assert (tmp_path / "hooks" / "blue" / script_name).exists()
+        assert (tmp_path / "hooks" / "green" / script_name).exists()
+        assert [request["headers"]["X-Agent-Guard-Installation-Id"] for request in _FakeHookServer.requests] == [
+            "blue",
+            "blue",
+            "green",
+            "green",
+        ]
 
     @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
     def test_guard_install_cursor(self, agent_scan_cmd, agent_scan_command, tmp_path, fake_hook_server):
