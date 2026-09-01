@@ -37,6 +37,7 @@ from agent_scan.oauth_store import (
     OAuthTokenStore,
     PersistentTokenStorage,
     StoredServerAuth,
+    _reject_redirected_token_exchange,
     ensure_fresh_token,
 )
 from agent_scan.traffic_capture import PipeStderrCapture, TrafficCapture, capturing_client
@@ -87,11 +88,15 @@ def _create_mcp_http_client_without_redirects(
     timeout: httpx.Timeout | float | None = None,
     auth: httpx.Auth | None = None,
 ) -> httpx.AsyncClient:
-    """Create a remote MCP client that never forwards requests across redirects."""
+    """Create a remote MCP client that never forwards requests across redirects.
+
+    The response hook additionally turns a redirected OAuth token exchange (which the MCP SDK issues
+    internally through this client on a 401) into an explicit error instead of a bare 3xx.
+    """
     return httpx.AsyncClient(
         auth=auth,
         follow_redirects=False,
-        event_hooks={"request": [_guard_mcp_destination]},
+        event_hooks={"request": [_guard_mcp_destination], "response": [_reject_redirected_token_exchange]},
         headers=headers,
         timeout=timeout,
     )

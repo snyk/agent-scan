@@ -36,7 +36,14 @@ from mcp.client.sse import sse_client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
 
-from agent_scan.oauth_store import OAuthTokenStore, StoredServerAuth, _strip_transport_suffix, normalize_server_url
+from agent_scan.oauth_store import (
+    OAuthTokenStore,
+    StoredServerAuth,
+    _reject_redirected_token_exchange,
+    _strip_transport_suffix,
+    mcp_http_client_with_redirect_guard,
+    normalize_server_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -234,11 +241,18 @@ def _transport_strategy(url: str) -> list[tuple[str, str]]:
 async def _connect_once(kind: str, attempt_url: str, provider: OAuthClientProvider, timeout: float) -> None:
     """Open one MCP session through the auth provider, triggering the flow on 401."""
     if kind == "sse":
-        async with sse_client(url=attempt_url, auth=provider, timeout=timeout) as (read, write):
+        async with sse_client(
+            url=attempt_url, auth=provider, timeout=timeout, httpx_client_factory=mcp_http_client_with_redirect_guard
+        ) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
     else:
-        async with httpx.AsyncClient(auth=provider, follow_redirects=True, timeout=timeout) as client:
+        async with httpx.AsyncClient(
+            auth=provider,
+            follow_redirects=True,
+            timeout=timeout,
+            event_hooks={"response": [_reject_redirected_token_exchange]},
+        ) as client:
             async with streamable_http_client(url=attempt_url, http_client=client) as (read, write, _):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
