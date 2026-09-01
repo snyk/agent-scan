@@ -22,7 +22,15 @@ dependencies = [
     "mcp[cli]==1.28.1",
     "regex>=2026.2.19",
     "detect-secrets>=1.5.0",
-    "cryptography>=42.0.0",
+    # <49: the project stopped publishing macOS x86_64 wheels at 49.0.0. Above
+    # that floor, `uv`/pip fall back to building from source there, which links
+    # dynamically against the build host's system OpenSSL (e.g. Homebrew's) --
+    # not the vendored OpenSSL prebuilt wheels ship. On the PyInstaller-built
+    # binary this crashes at import with "Symbol not found: _SSL_get0_group_name"
+    # because the bundled libssl.dylib doesn't match what the dynamically-linked
+    # _rust.abi3.so expects. Verified via `uv pip install --python-platform
+    # x86_64-apple-darwin`: no wheel for 49.0.0+, wheel present through 48.0.1.
+    "cryptography>=42.0.0,<49",
     # TOML decoder for the Codex discoverer on Python 3.10 (stdlib ``tomllib`` is
     # 3.11+). Declared directly so the ``tomli`` fallback in ``agents/codex.py`` is
     # guaranteed under ``requires-python>=3.10`` rather than relying on a transitive.
