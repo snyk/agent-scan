@@ -125,8 +125,7 @@ async def _reject_redirected_token_exchange(response: httpx.Response) -> None:
     body = request.read()
     if b"grant_type=refresh_token" in body or b"grant_type=authorization_code" in body:
         raise TokenExchangeRedirected(
-            f"refusing to follow a {response.status_code} redirect on an OAuth token exchange request to "
-            f"{request.url}"
+            f"refusing to follow a {response.status_code} redirect on an OAuth token exchange request to {request.url}"
         )
 
 
