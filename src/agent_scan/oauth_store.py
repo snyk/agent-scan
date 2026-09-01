@@ -40,6 +40,7 @@ from urllib.parse import urlparse, urlsplit, urlunsplit
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
 from mcp.client.auth import TokenStorage
+from mcp.shared._httpx_utils import create_mcp_http_client
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from pydantic import BaseModel, ConfigDict
 
@@ -85,6 +86,70 @@ def is_secure_token_url(url: str) -> bool:
     if parsed.scheme == "https":
         return True
     return parsed.scheme == "http" and _is_loopback_host((parsed.hostname or "").lower())
+
+
+class TokenExchangeRedirected(Exception):
+    """A 3xx response tried to redirect an OAuth token-exchange request."""
+
+
+async def _reject_redirected_token_exchange(response: httpx.Response) -> None:
+    """httpx response event hook: refuse to follow a redirect on an OAuth token exchange.
+
+    The scan and mcp-auth connection paths give the MCP SDK's
+    ``OAuthClientProvider`` an ``httpx.AsyncClient`` with ``follow_redirects=True``
+    -- required for ordinary MCP traffic, some of which legitimately redirects.
+    But that same client is what the SDK uses for its *own* internal token
+    refresh and authorization-code exchange (``mcp.client.auth.oauth2``) when it
+    gets a 401, injecting that request into the client's normal
+    request/response cycle. httpx applies one ``follow_redirects`` value to the
+    whole cycle, so a malicious or compromised token endpoint could redirect
+    that request elsewhere, carrying the refresh token or client secret with
+    it. ``ensure_fresh_token``'s own no-redirect guard below only covers this
+    module's proactive refresh, not this SDK-internal path.
+
+    httpx invokes response event hooks on every response, before deciding
+    whether to follow a redirect (confirmed against httpx 0.28's
+    ``_send_handling_redirects``), so raising here stops the redirect from
+    being followed while leaving ``follow_redirects=True`` -- and ordinary MCP
+    traffic -- untouched. Only a POST with a form-encoded OAuth grant body is
+    matched; anything else (MCP's own JSON-RPC POSTs, GETs, redirects with no
+    grant body) passes through unaffected.
+    """
+    if not response.has_redirect_location:
+        return
+    request = response.request
+    if request.method != "POST":
+        return
+    if "application/x-www-form-urlencoded" not in request.headers.get("content-type", ""):
+        return
+    body = request.read()
+    if b"grant_type=refresh_token" in body or b"grant_type=authorization_code" in body:
+        raise TokenExchangeRedirected(
+            f"refusing to follow a {response.status_code} redirect on an OAuth token exchange request to "
+            f"{request.url}"
+        )
+
+
+def mcp_http_client_with_redirect_guard(
+    headers: dict[str, str] | None = None,
+    timeout: httpx.Timeout | None = None,
+    auth: httpx.Auth | None = None,
+) -> httpx.AsyncClient:
+    """``McpHttpClientFactory``-shaped factory for ``sse_client``.
+
+    ``sse_client`` builds its own httpx client internally (unlike the
+    streamable-HTTP transport, which takes a pre-built one), so the redirect
+    guard can't be added to that client the same way. This factory delegates
+    to the SDK's own ``create_mcp_http_client`` for its usual defaults
+    (``follow_redirects=True``, standard timeouts), then attaches
+    ``_reject_redirected_token_exchange`` on top -- see its docstring for why.
+    """
+    client = create_mcp_http_client(headers=headers, timeout=timeout, auth=auth)
+    client.event_hooks = {
+        **client.event_hooks,
+        "response": [*client.event_hooks.get("response", []), _reject_redirected_token_exchange],
+    }
+    return client
 
 
 def normalize_server_url(url: str) -> str:

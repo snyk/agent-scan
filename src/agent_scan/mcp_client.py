@@ -35,7 +35,9 @@ from agent_scan.oauth_store import (
     OAuthTokenStore,
     PersistentTokenStorage,
     StoredServerAuth,
+    _reject_redirected_token_exchange,
     ensure_fresh_token,
+    mcp_http_client_with_redirect_guard,
 )
 from agent_scan.traffic_capture import PipeStderrCapture, TrafficCapture, capturing_client
 from agent_scan.utils import expand_env_vars, resolve_command_and_args
@@ -93,7 +95,11 @@ async def streamablehttp_client_without_session(
 ):
     oauth_client_provider = await _resolve_scan_oauth_provider(url, token)
     async with httpx.AsyncClient(
-        auth=oauth_client_provider, follow_redirects=True, headers=headers, timeout=timeout
+        auth=oauth_client_provider,
+        follow_redirects=True,
+        headers=headers,
+        timeout=timeout,
+        event_hooks={"response": [_reject_redirected_token_exchange]},
     ) as custom_client:
         async with streamable_http_client(url=url, http_client=custom_client) as (read, write, _):
             yield read, write
@@ -130,6 +136,7 @@ async def get_client(
             # env=server_config.env, #Not supported by MCP yet, but present in vscode
             timeout=timeout,
             auth=sse_oauth_provider,
+            httpx_client_factory=mcp_http_client_with_redirect_guard,
         )
     elif isinstance(server_config, RemoteServer) and server_config.type == "http":
         logger.debug(

@@ -1,14 +1,17 @@
 """Unit tests for the interactive OAuth flow (M2)."""
 
 import urllib.request
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 
 from agent_scan import oauth_flow as oauth_flow_module
+from agent_scan import oauth_store
 from agent_scan.oauth_flow import (
     _AuthFlowTokenStorage,
+    _connect_once,
     _LoopbackCallbackServer,
     _transport_strategy,
     authenticate_server,
@@ -44,6 +47,79 @@ def test_transport_strategy_preserves_query_string():
     assert ("http", "https://host/mcp?tenant=acme") in attempts
     assert ("http", "https://host?tenant=acme") in attempts
     assert ("sse", "https://host/sse?tenant=acme") in attempts
+
+
+class _FakeSession:
+    """Stands in for ClientSession so _connect_once's real MCP handshake
+    (which the fake streams below can't actually service) never runs."""
+
+    def __init__(self, *args, **kwargs):
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def initialize(self):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_connect_once_http_wires_redirect_guard(monkeypatch):
+    """Integration: mcp-auth's HTTP connection attempt must carry the
+    token-exchange redirect guard, since the OAuthClientProvider it's given
+    can trigger its own internal refresh/auth-code exchange through this same
+    client on a 401 -- a path this module's own no-redirect refresh guard
+    (ensure_fresh_token, in oauth_store.py) never sees."""
+    captured = {}
+
+    class _FakeAsyncClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    @asynccontextmanager
+    async def fake_streamable_http_client(url, http_client):
+        yield (None, None, None)
+
+    monkeypatch.setattr(oauth_flow_module.httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(oauth_flow_module, "streamable_http_client", fake_streamable_http_client)
+    monkeypatch.setattr(oauth_flow_module, "ClientSession", _FakeSession)
+
+    await _connect_once("http", "https://example.test/mcp", provider=object(), timeout=5.0)
+
+    hooks = captured["event_hooks"]["response"]
+    assert oauth_store._reject_redirected_token_exchange in hooks
+
+
+@pytest.mark.asyncio
+async def test_connect_once_sse_wires_redirect_guard(monkeypatch):
+    """Integration: mcp-auth's SSE connection attempt must carry the same guard."""
+    captured = {}
+
+    @asynccontextmanager
+    async def fake_sse_client(**kwargs):
+        captured.update(kwargs)
+        yield (None, None)
+
+    monkeypatch.setattr(oauth_flow_module, "sse_client", fake_sse_client)
+    monkeypatch.setattr(oauth_flow_module, "ClientSession", _FakeSession)
+
+    await _connect_once("sse", "https://example.test/sse", provider=object(), timeout=5.0)
+
+    factory = captured["httpx_client_factory"]
+    client = factory(headers=None, timeout=None, auth=None)
+    try:
+        assert oauth_store._reject_redirected_token_exchange in client.event_hooks["response"]
+    finally:
+        await client.aclose()
 
 
 @pytest.mark.asyncio

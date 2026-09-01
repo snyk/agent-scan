@@ -6,6 +6,7 @@ import stat
 import sys
 import time
 
+import httpx
 import pytest
 from mcp.shared.auth import OAuthToken
 
@@ -481,6 +482,101 @@ async def test_refresh_ignores_a_redirect_response(tmp_path, monkeypatch, caplog
 )
 def test_is_secure_token_url(url, expected):
     assert is_secure_token_url(url) is expected
+
+
+# -- redirect guard for the SDK's own OAuth token exchange -------------------
+#
+# ensure_fresh_token's own refresh POST (above) is already guarded: it sets
+# follow_redirects=False itself. But the scan/mcp-auth connection paths give
+# the MCP SDK's OAuthClientProvider a client with follow_redirects=True
+# (needed for ordinary MCP traffic), and the SDK performs its *own* internal
+# token refresh / authorization-code exchange through that same client on a
+# 401 -- a path ensure_fresh_token cannot see or guard. A malicious or
+# compromised token endpoint could redirect that request elsewhere, carrying
+# the refresh token / client secret with it. These tests build up from the
+# core mechanism (smoke), through wiring (integration, in test_mcp_client.py
+# and test_oauth_flow.py), to the hook's decision logic (unit).
+
+
+@pytest.mark.asyncio
+async def test_redirect_guard_blocks_redirected_refresh_post_end_to_end():
+    """Smoke test: the httpx event-hook mechanism itself works.
+
+    A client configured exactly like the scan/mcp-auth paths -- follow_redirects=True,
+    required for ordinary MCP traffic -- must still refuse to follow a
+    redirect specifically on an OAuth token-exchange POST. Independent of the
+    four call sites that wire this in; those are covered separately.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/token":
+            return httpx.Response(307, headers={"location": "https://attacker.example/token"})
+        return httpx.Response(200, json={"ok": True})
+
+    transport = httpx.MockTransport(handler)
+    async with httpx.AsyncClient(
+        transport=transport,
+        follow_redirects=True,
+        event_hooks={"response": [oauth_store._reject_redirected_token_exchange]},
+    ) as client:
+        # Ordinary traffic is unaffected.
+        response = await client.get("https://mcp.example.test/mcp")
+        assert response.status_code == 200
+
+        # A redirected token-exchange POST must be refused, not followed.
+        with pytest.raises(oauth_store.TokenExchangeRedirected):
+            await client.post(
+                "https://mcp.example.test/token",
+                data={"grant_type": "refresh_token", "refresh_token": "r1", "client_id": "c1"},
+            )
+
+
+def _redirect_response(*, method="POST", content_type="application/x-www-form-urlencoded", body=b"", status=307):
+    request = httpx.Request(
+        method, "https://mcp.linear.app/token", content=body, headers={"content-type": content_type}
+    )
+    return httpx.Response(status, headers={"location": "https://attacker.example/token"}, request=request)
+
+
+@pytest.mark.asyncio
+async def test_reject_redirected_token_exchange_blocks_refresh_grant():
+    response = _redirect_response(body=b"grant_type=refresh_token&refresh_token=r1&client_id=c1")
+    with pytest.raises(oauth_store.TokenExchangeRedirected):
+        await oauth_store._reject_redirected_token_exchange(response)
+
+
+@pytest.mark.asyncio
+async def test_reject_redirected_token_exchange_blocks_authorization_code_grant():
+    response = _redirect_response(body=b"grant_type=authorization_code&code=abc&client_secret=s1")
+    with pytest.raises(oauth_store.TokenExchangeRedirected):
+        await oauth_store._reject_redirected_token_exchange(response)
+
+
+@pytest.mark.asyncio
+async def test_reject_redirected_token_exchange_allows_non_redirect():
+    response = _redirect_response(status=200, body=b"grant_type=refresh_token&refresh_token=r1")
+    await oauth_store._reject_redirected_token_exchange(response)  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_reject_redirected_token_exchange_allows_redirected_get():
+    # Ordinary MCP traffic (e.g. a GET redirected to a canonical URL) is unaffected.
+    response = _redirect_response(method="GET", content_type="", body=b"")
+    await oauth_store._reject_redirected_token_exchange(response)  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_reject_redirected_token_exchange_allows_redirected_json_post():
+    # Ordinary MCP JSON-RPC POST traffic is unaffected.
+    response = _redirect_response(content_type="application/json", body=b'{"jsonrpc": "2.0"}')
+    await oauth_store._reject_redirected_token_exchange(response)  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_reject_redirected_token_exchange_allows_unrelated_form_post():
+    # A form POST that isn't a grant exchange (e.g. some other endpoint) is unaffected.
+    response = _redirect_response(body=b"foo=bar")
+    await oauth_store._reject_redirected_token_exchange(response)  # must not raise
 
 
 @pytest.mark.asyncio

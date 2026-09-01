@@ -1,5 +1,6 @@
 """Unit tests for the mcp_client module."""
 
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -17,7 +18,15 @@ from mcp.types import (
 )
 from pytest_lazy_fixtures import lf
 
-from agent_scan.mcp_client import _check_server_pass, check_server, get_client, scan_mcp_config_file
+from agent_scan import mcp_client as mcp_client_module
+from agent_scan import oauth_store
+from agent_scan.mcp_client import (
+    _check_server_pass,
+    check_server,
+    get_client,
+    scan_mcp_config_file,
+    streamablehttp_client_without_session,
+)
 from agent_scan.models import RemoteServer, StdioServer
 from agent_scan.utils import resolve_command_and_args
 
@@ -187,6 +196,62 @@ async def test_get_client_expands_env_placeholders_for_remote_sse_server(mock_ss
     assert called_kwargs["headers"] == {"Authorization": "Bearer real-secret-value"}
     # The parsed model itself must be untouched -- still the literal placeholder.
     assert server.headers == {"Authorization": "Bearer ${LINEAR_API_TOKEN}"}
+
+
+@pytest.mark.asyncio
+async def test_streamablehttp_client_without_session_wires_redirect_guard(monkeypatch):
+    """Integration: the HTTP scan-path client must carry the token-exchange
+    redirect guard, since the MCP SDK's OAuthClientProvider can trigger its
+    own internal refresh through this same client on a 401 -- a path the
+    proactive ensure_fresh_token guard in oauth_store.py never sees."""
+    captured = {}
+
+    class _FakeAsyncClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    @asynccontextmanager
+    async def fake_streamable_http_client(url, http_client):
+        yield (None, None, None)
+
+    monkeypatch.setattr(mcp_client_module.httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(mcp_client_module, "streamable_http_client", fake_streamable_http_client)
+
+    async with streamablehttp_client_without_session(url="https://example.test/mcp", headers={}, timeout=5):
+        pass
+
+    hooks = captured["event_hooks"]["response"]
+    assert oauth_store._reject_redirected_token_exchange in hooks
+
+
+@pytest.mark.asyncio
+@patch("agent_scan.mcp_client.sse_client")
+async def test_get_client_sse_wires_redirect_guard(mock_sse_client):
+    """Integration: the SSE scan-path client must carry the same guard."""
+    mock_read = AsyncMock()
+    mock_write = AsyncMock()
+    mock_client = AsyncMock()
+    mock_client.__aenter__.return_value = (mock_read, mock_write)
+    mock_sse_client.return_value = mock_client
+
+    server = RemoteServer(url="https://example.com/sse", type="sse")
+
+    async with get_client(server, timeout=5):
+        pass
+
+    called_kwargs = mock_sse_client.call_args.kwargs
+    factory = called_kwargs["httpx_client_factory"]
+    client = factory(headers=None, timeout=None, auth=None)
+    try:
+        assert oauth_store._reject_redirected_token_exchange in client.event_hooks["response"]
+    finally:
+        await client.aclose()
 
 
 @pytest.mark.parametrize(
