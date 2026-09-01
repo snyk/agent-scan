@@ -985,7 +985,7 @@ def main():
     setup_scan_parser(mcp_auth_parser, add_files=False)
     add_target_arguments(mcp_auth_parser, positional=True, include_type=False)
     mcp_auth_parser.add_argument(
-        "--all-unauthenticated", action="store_true", help="Authenticate every discovered remote MCP server"
+        "--all-servers", action="store_true", help="Authenticate every discovered remote MCP server"
     )
 
     # GUARD command
@@ -1248,7 +1248,7 @@ async def mcp_auth(args) -> int:
     store = OAuthTokenStore()
     url_arg = getattr(args, "url", None)
     server_arg = getattr(args, "server", None)
-    all_unauth = getattr(args, "all_unauthenticated", False)
+    all_servers = getattr(args, "all_servers", False)
 
     targets: list[tuple[str, str]] = []
     if url_arg:
@@ -1265,7 +1265,7 @@ async def mcp_auth(args) -> int:
         )
         discovered = await discover_servers_by_name(inspect_args, remote_only=True)
         remote: dict[str, str] = {name: server.url for name, server in discovered.items()}
-        if all_unauth:
+        if all_servers:
             targets = list(remote.items())
         elif server_arg:
             if server_arg not in remote:
@@ -1273,7 +1273,7 @@ async def mcp_auth(args) -> int:
                 return 1
             targets = [(server_arg, remote[server_arg])]
         else:
-            rich.print("[bold red]Specify a server name, --url <url>, or --all-unauthenticated.[/bold red]")
+            rich.print("[bold red]Specify a server name, --url <url>, or --all-servers.[/bold red]")
             return 1
 
     if not targets:
