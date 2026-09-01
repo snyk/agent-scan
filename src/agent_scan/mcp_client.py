@@ -89,7 +89,7 @@ async def _resolve_scan_oauth_provider(url: str, token: TokenAndClientInfo | Non
 @asynccontextmanager
 async def streamablehttp_client_without_session(
     url: str,
-    headers: dict[str, str],
+    headers: dict[str, str] | None,
     timeout: int,
     token: TokenAndClientInfo | None = None,
 ):
