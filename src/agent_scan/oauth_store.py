@@ -5,8 +5,9 @@ must survive across separate process runs and be refreshed silently on each
 run. This module provides that persistence:
 
 * ``OAuthTokenStore`` — a file-backed store under ``~/.mcp-scan`` keyed by the
-  *normalized* server URL, so the same server discovered under different config
-  names or transport suffixes (``/mcp`` vs ``/sse``) maps to one entry.
+  *normalized* server URL (trailing slash trimmed only -- see
+  ``normalize_server_url``), so a server's credential is looked up by its exact
+  URL and never shared with a different service on the same origin.
 * ``PersistentTokenStorage`` — a ``mcp.client.auth.TokenStorage`` bound to one
   server, so the MCP SDK reads and writes tokens through the store.
 * ``ensure_fresh_token`` — proactively refreshes an expired access token
@@ -89,13 +90,29 @@ def is_secure_token_url(url: str) -> bool:
 def normalize_server_url(url: str) -> str:
     """Reduce a remote MCP server URL to a stable identity key.
 
-    Similar in spirit to the reduction ``check_server`` applies while probing
-    transports (``mcp_client.py``): strip a trailing slash, then a trailing
-    ``/mcp`` or ``/sse`` path segment. This ensures the same server keys to one
-    store entry whether it is reached via ``.../mcp``, ``.../sse``, or the bare
-    base URL. Unlike that helper, the suffix is stripped from the parsed
-    *path* only, so a query string or fragment (e.g. ``?tenant=acme``) is
-    preserved rather than sliced off along with the suffix.
+    Trims a trailing slash from the path only, so a bare URL and its
+    trailing-slash form key to the same store entry. Deliberately does *not*
+    strip a trailing ``/mcp`` or ``/sse`` segment the way ``_strip_transport_suffix``
+    does for transport probing: two different services that happen to live at
+    ``.../mcp`` and ``.../sse`` under the same origin are different servers and
+    must not collapse to (and leak a credential through) one store entry.
+    """
+    split = urlsplit(url)
+    path = split.path.rstrip("/")
+    return urlunsplit((split.scheme, split.netloc, path, split.query, split.fragment))
+
+
+def _strip_transport_suffix(url: str) -> str:
+    """Reduce a URL to a bare base for building the transport-probing matrix.
+
+    Strips a trailing slash, then a trailing ``/mcp`` or ``/sse`` path segment,
+    so ``_transport_strategy`` (``oauth_flow.py``) can cleanly reattach either
+    suffix while trying transports. This is *not* used for the store's
+    identity key (see ``normalize_server_url``) -- collapsing those suffixes
+    there would let two different services on the same origin share one
+    credential. The suffix is stripped from the parsed *path* only, so a query
+    string or fragment (e.g. ``?tenant=acme``) is preserved rather than sliced
+    off along with the suffix.
     """
     split = urlsplit(url)
     path = split.path.rstrip("/")

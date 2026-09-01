@@ -92,14 +92,16 @@ async def test_auth_flow_storage_creates_entry(tmp_path):
     await storage.set_client_info(client_info)
     await storage.set_tokens(_tok(access="access-value", refresh="refresh-value"))
 
-    # A full entry is created, keyed by the normalized URL (note: /sse suffix here).
-    entry = store.get("https://mcp.linear.app/sse")
+    # A full entry is created, keyed by the exact URL passed at construction.
+    entry = store.get("https://mcp.linear.app/mcp")
     assert entry is not None
     assert entry.client_id == "cid-1"
     assert entry.token.access_token == "access-value"
     assert entry.token.refresh_token == "refresh-value"
     assert entry.expires_at is not None
     assert entry.redirect_uris == ["http://127.0.0.1:5000/callback"]
+    # A different suffix on the same origin must not see this credential.
+    assert store.get("https://mcp.linear.app/sse") is None
 
 
 @pytest.mark.asyncio
@@ -121,7 +123,7 @@ async def test_authenticate_server_success_persists_token_endpoint(tmp_path, mon
     result = await authenticate_server("https://example.test/mcp", "example", store, timeout=1.0)
 
     assert result.ok is True
-    assert result.server_url == "https://example.test"
+    assert result.server_url == "https://example.test/mcp"
     entry = store.get("https://example.test/mcp")
     assert entry is not None
     assert entry.token.access_token == "access-value"
@@ -140,7 +142,7 @@ async def test_authenticate_server_reports_generic_failure_after_exhausting_tran
     result = await authenticate_server("https://example.test/mcp", "example", store, timeout=1.0)
 
     assert result.ok is False
-    assert result.server_url == "https://example.test"
+    assert result.server_url == "https://example.test/mcp"
     assert "ConnectionRefusedError" in result.message
     # Nothing was persisted for a fully failed attempt.
     assert store.get("https://example.test/mcp") is None
@@ -166,3 +168,25 @@ async def test_authenticate_server_warns_on_insecure_token_endpoint(tmp_path, mo
     entry = store.get("https://example.test/mcp")
     assert entry is not None
     assert entry.token_url == ""
+
+
+@pytest.mark.asyncio
+async def test_authenticate_server_reports_failure_when_no_token_is_obtained(tmp_path, monkeypatch):
+    """A server that needs no OAuth at all must not be reported as authenticated.
+
+    ``_connect_once`` succeeds (the session just initializes) without the SDK
+    ever calling ``set_tokens``/``set_client_info`` on the storage, so nothing
+    is persisted. Success must be gated on a token actually having been
+    written, not merely on the connection succeeding.
+    """
+    store = OAuthTokenStore(path=tmp_path / "store.json")
+
+    async def fake_connect_once(kind, attempt_url, provider, timeout):
+        return None
+
+    monkeypatch.setattr(oauth_flow_module, "_connect_once", fake_connect_once)
+
+    result = await authenticate_server("https://example.test/mcp", "example", store, timeout=1.0)
+
+    assert result.ok is False
+    assert store.get("https://example.test/mcp") is None

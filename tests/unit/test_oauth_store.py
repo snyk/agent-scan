@@ -57,6 +57,27 @@ def permissive_umask():
 @pytest.mark.parametrize(
     "url,expected",
     [
+        # Unlike the transport-probing helper (_strip_transport_suffix), the
+        # store's identity key does NOT strip a trailing /mcp or /sse segment:
+        # two different services at those paths under the same origin are
+        # different servers and must not collapse to one credential.
+        ("https://mcp.linear.app/mcp", "https://mcp.linear.app/mcp"),
+        ("https://mcp.linear.app/sse", "https://mcp.linear.app/sse"),
+        ("https://mcp.linear.app/mcp/", "https://mcp.linear.app/mcp"),
+        ("https://mcp.linear.app/", "https://mcp.linear.app"),
+        ("https://mcp.linear.app", "https://mcp.linear.app"),
+        ("https://cf.mcp.atlassian.com/v1/mcp", "https://cf.mcp.atlassian.com/v1/mcp"),
+        # A query string is preserved.
+        ("https://host/mcp?tenant=acme", "https://host/mcp?tenant=acme"),
+    ],
+)
+def test_normalize_server_url(url, expected):
+    assert normalize_server_url(url) == expected
+
+
+@pytest.mark.parametrize(
+    "url,expected",
+    [
         ("https://mcp.linear.app/mcp", "https://mcp.linear.app"),
         ("https://mcp.linear.app/sse", "https://mcp.linear.app"),
         ("https://mcp.linear.app/mcp/", "https://mcp.linear.app"),
@@ -67,16 +88,24 @@ def permissive_umask():
         ("https://host/mcp?tenant=acme", "https://host?tenant=acme"),
     ],
 )
-def test_normalize_server_url(url, expected):
-    assert normalize_server_url(url) == expected
+def test_strip_transport_suffix(url, expected):
+    assert oauth_store._strip_transport_suffix(url) == expected
 
 
-def test_transport_suffixes_key_to_one_entry(tmp_path):
+def test_different_transport_suffixes_do_not_share_entry(tmp_path):
     store = OAuthTokenStore(path=tmp_path / "store.json")
     store.put("https://mcp.linear.app/mcp", _entry())
-    # The /sse form and the bare form must resolve to the same stored entry.
-    assert store.get("https://mcp.linear.app/sse") is not None
-    assert store.get("https://mcp.linear.app") is not None
+    # A different service at /sse (or the bare origin) on the same origin must
+    # not receive the /mcp service's credential.
+    assert store.get("https://mcp.linear.app/sse") is None
+    assert store.get("https://mcp.linear.app") is None
+    assert store.get("https://mcp.linear.app/mcp") is not None
+
+
+def test_trailing_slash_keys_to_same_entry(tmp_path):
+    store = OAuthTokenStore(path=tmp_path / "store.json")
+    store.put("https://mcp.linear.app/mcp", _entry())
+    assert store.get("https://mcp.linear.app/mcp/") is not None
 
 
 def test_from_token_and_client_info_computes_expiry():
@@ -115,7 +144,7 @@ def test_store_roundtrip_and_permissions(tmp_path):
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
     # It is valid JSON keyed by the normalized URL.
     data = json.loads(path.read_text())
-    assert list(data.keys()) == ["https://mcp.linear.app"]
+    assert list(data.keys()) == ["https://mcp.linear.app/mcp"]
 
 
 def test_store_encrypts_secrets_at_rest(tmp_path):
@@ -144,7 +173,7 @@ def test_store_reads_legacy_plaintext_entries(tmp_path):
     no encryption tag) must still be read correctly."""
     path = tmp_path / "store.json"
     entry = _entry(token=_token(access="PLAINACCESS", refresh="PLAINREFRESH"))
-    path.write_text(json.dumps({"https://mcp.linear.app": json.loads(entry.model_dump_json())}))
+    path.write_text(json.dumps({"https://mcp.linear.app/mcp": json.loads(entry.model_dump_json())}))
 
     store = OAuthTokenStore(path=path)
     got = store.get("https://mcp.linear.app/mcp")
@@ -156,7 +185,7 @@ def test_store_migrates_legacy_entry_to_encrypted_on_next_write(tmp_path):
     """A legacy plaintext entry gets encrypted the next time it is written."""
     path = tmp_path / "store.json"
     entry = _entry(token=_token(access="PLAINACCESS", refresh="PLAINREFRESH"))
-    path.write_text(json.dumps({"https://mcp.linear.app": json.loads(entry.model_dump_json())}))
+    path.write_text(json.dumps({"https://mcp.linear.app/mcp": json.loads(entry.model_dump_json())}))
 
     store = OAuthTokenStore(path=path)
     store.update_token(
@@ -195,7 +224,7 @@ def test_update_token_preserves_refresh_when_omitted(tmp_path):
 async def test_persistent_storage_roundtrip(tmp_path):
     store = OAuthTokenStore(path=tmp_path / "store.json")
     store.put("https://mcp.linear.app/mcp", _entry())
-    storage = PersistentTokenStorage(store, "https://mcp.linear.app/sse")  # different suffix, same server
+    storage = PersistentTokenStorage(store, "https://mcp.linear.app/mcp")
     tokens = await storage.get_tokens()
     assert tokens is not None and tokens.access_token == "a1"
     client_info = await storage.get_client_info()
@@ -266,7 +295,7 @@ async def test_ensure_fresh_token_refreshes_expired(tmp_path, monkeypatch):
     store = OAuthTokenStore(path=tmp_path / "store.json")
     store.put("https://mcp.linear.app/mcp", _entry(expires_at=time.time() - 10))  # expired
 
-    await ensure_fresh_token(store, "https://mcp.linear.app/sse")
+    await ensure_fresh_token(store, "https://mcp.linear.app/mcp")
 
     got = store.get("https://mcp.linear.app/mcp")
     assert got.token.access_token == "refreshed"

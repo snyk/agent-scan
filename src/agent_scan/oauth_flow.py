@@ -36,7 +36,7 @@ from mcp.client.sse import sse_client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
 
-from agent_scan.oauth_store import OAuthTokenStore, StoredServerAuth, normalize_server_url
+from agent_scan.oauth_store import OAuthTokenStore, StoredServerAuth, _strip_transport_suffix, normalize_server_url
 
 logger = logging.getLogger(__name__)
 
@@ -202,9 +202,11 @@ def _transport_strategy(url: str) -> list[tuple[str, str]]:
     The OAuth flow triggers on the 401 from whichever transport/URL the server
     actually answers on, so we try the common shapes until one connects.
     """
-    # Reuse the store's suffix-stripping so a query string or fragment (e.g.
-    # ``?tenant=acme``) is preserved rather than sliced off with the suffix.
-    base = normalize_server_url(url)
+    # This intentionally uses the transport-probing helper, not
+    # normalize_server_url: the store's identity key must NOT strip /mcp or
+    # /sse (see that function's docstring), but this matrix still needs a bare
+    # base to reattach either suffix to.
+    base = _strip_transport_suffix(url)
     split = urlparse(base)
 
     def _with_path_suffix(suffix: str) -> str:
@@ -282,8 +284,19 @@ async def authenticate_server(
                 last_error = f"{type(e).__name__}: {e}"
                 logger.debug("mcp-auth attempt failed (%s %s): %s", kind, attempt_url, last_error)
                 continue
-            # Connected and initialized -> auth succeeded. Persist the token
-            # endpoint discovered by the SDK so refreshes hit the right URL.
+            # Connected and initialized, but that alone doesn't mean OAuth
+            # happened -- a server that requires no authentication gets this
+            # far too, without the SDK ever calling set_tokens. Only a
+            # persisted entry means a credential was actually obtained; further
+            # transport/URL guesses would just reconnect to the same server.
+            if store.get(url) is None:
+                logger.info("Connected to %s %s but no OAuth token was obtained", kind, attempt_url)
+                return AuthResult(
+                    ok=False,
+                    server_url=normalize_server_url(url),
+                    message="the server accepted the connection without requiring OAuth authentication",
+                )
+            # Persist the token endpoint discovered by the SDK so refreshes hit the right URL.
             metadata = getattr(provider.context, "oauth_metadata", None)
             token_endpoint = getattr(metadata, "token_endpoint", None) if metadata else None
             if token_endpoint:
