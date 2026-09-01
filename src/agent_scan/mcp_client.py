@@ -269,6 +269,7 @@ async def check_server(
     server_name: str | None = None,
     config_path: str | None = None,
     stream_stderr: bool = False,
+    probe_transports: bool = True,
 ) -> tuple[ServerSignature, StdioServer | RemoteServer]:
     logger.debug("Checking server with timeout: %s seconds", timeout)
 
@@ -302,20 +303,28 @@ async def check_server(
         url_with_mcp = base_url + "/mcp"
         url_with_sse = base_url + "/sse"
 
-        if server_config.type == "http" or server_config.type is None:
-            strategy.append(("http", url_with_mcp))
-            strategy.append(("http", url_without_end))
-            strategy.append(("sse", url_with_mcp))
-            strategy.append(("sse", url_without_end))
-            strategy.append(("http", url_with_sse))
-            strategy.append(("sse", url_with_sse))
+        # Strict mode: contact exactly the configured transport and URL, once.
+        # No /mcp or /sse rewriting -- the caller told us what this server is.
+        if not probe_transports and original_type is not None:
+            strategy.append((original_type, original_url))
         else:
-            strategy.append(("sse", url_with_mcp))
-            strategy.append(("sse", url_without_end))
-            strategy.append(("http", url_with_mcp))
-            strategy.append(("http", url_without_end))
-            strategy.append(("sse", url_with_sse))
-            strategy.append(("http", url_with_sse))
+            if not probe_transports:
+                logger.warning("probe_transports=False but no transport type set; falling back to probing")
+
+            if server_config.type == "http" or server_config.type is None:
+                strategy.append(("http", url_with_mcp))
+                strategy.append(("http", url_without_end))
+                strategy.append(("sse", url_with_mcp))
+                strategy.append(("sse", url_without_end))
+                strategy.append(("http", url_with_sse))
+                strategy.append(("sse", url_with_sse))
+            else:
+                strategy.append(("sse", url_with_mcp))
+                strategy.append(("sse", url_without_end))
+                strategy.append(("http", url_with_mcp))
+                strategy.append(("http", url_without_end))
+                strategy.append(("sse", url_with_sse))
+                strategy.append(("http", url_with_sse))
 
         exceptions: list[Exception] = []
         for protocol, url in strategy:
@@ -351,6 +360,13 @@ async def check_server(
         # callers don't see it stuck on the last-tried mutated URL.
         server_config.url = original_url
         server_config.type = original_type
+
+        # A single failed attempt -- which only happens when probing is disabled
+        # and the strategy holds one entry -- needs no grouping. Raise the real
+        # error so callers see the actual cause rather than the opaque
+        # "unhandled errors in a TaskGroup (1 sub-exception)".
+        if len(exceptions) == 1:
+            raise exceptions[0]
 
         # if python 3.11 or higher, use ExceptionGroup
         if sys.version_info >= (3, 11):

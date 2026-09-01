@@ -240,3 +240,66 @@ class TestResolveCommandAndArgsRegression:
         assert args == []
         assert command == str(script)
         assert params.args == []
+
+
+class TestTransportProbing:
+    """check_server probes six transport/URL combinations unless probing is disabled."""
+
+    @staticmethod
+    def _failing_pass():
+        return AsyncMock(side_effect=RuntimeError("connect failed"))
+
+    @pytest.mark.asyncio
+    async def test_probing_tries_six_combinations_and_groups_errors(self):
+        config = RemoteServer(url="https://example.test/mcp-server/mcp", type="http")
+
+        with patch("agent_scan.mcp_client._check_server_pass", new=self._failing_pass()) as attempt:
+            with pytest.raises(ExceptionGroup):  # noqa: F821
+                await check_server(config, 5)
+
+        assert attempt.await_count == 6
+
+    @pytest.mark.asyncio
+    async def test_strict_mode_makes_exactly_one_attempt(self):
+        config = RemoteServer(url="https://example.test/mcp-server/mcp", type="http")
+
+        with patch("agent_scan.mcp_client._check_server_pass", new=self._failing_pass()) as attempt:
+            with pytest.raises(RuntimeError):
+                await check_server(config, 5, probe_transports=False)
+
+        assert attempt.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_strict_mode_raises_the_real_error_not_a_group(self):
+        """A single failure must surface its own exception, not ExceptionGroup(1 sub-exception)."""
+        config = RemoteServer(url="https://example.test/mcp-server/mcp", type="http")
+
+        with patch("agent_scan.mcp_client._check_server_pass", new=self._failing_pass()):
+            with pytest.raises(RuntimeError, match="connect failed"):
+                await check_server(config, 5, probe_transports=False)
+
+    @pytest.mark.asyncio
+    async def test_strict_mode_contacts_the_exact_url_without_suffix_rewriting(self):
+        """No /mcp or /sse appending: the caller said what this server is."""
+        config = RemoteServer(url="https://example.test/mcp-server/custom", type="sse")
+        seen: list[tuple[str, str]] = []
+
+        async def record(server_config, *args, **kwargs):
+            seen.append((server_config.type, server_config.url))
+            raise RuntimeError("connect failed")
+
+        with patch("agent_scan.mcp_client._check_server_pass", new=record):
+            with pytest.raises(RuntimeError):
+                await check_server(config, 5, probe_transports=False)
+
+        assert seen == [("sse", "https://example.test/mcp-server/custom")]
+
+    @pytest.mark.asyncio
+    async def test_strict_mode_without_a_type_falls_back_to_probing(self):
+        config = RemoteServer(url="https://example.test/mcp-server/mcp")
+
+        with patch("agent_scan.mcp_client._check_server_pass", new=self._failing_pass()) as attempt:
+            with pytest.raises(ExceptionGroup):  # noqa: F821
+                await check_server(config, 5, probe_transports=False)
+
+        assert attempt.await_count == 6
