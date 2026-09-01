@@ -136,7 +136,7 @@ Omit the scheme for `streamable-https:` / `streamable-http:` — the prefix supp
 | `--analysis-url URL` | string | version-specific | Analysis API endpoint; see the defaults below. With `SNYK_TOKEN`, the CLI rewrites it to the `/cli/analysis-machine` variant automatically. In v0.6+, any supplied `version` query parameter is replaced with `2026-07-10` so the URL cannot select an incompatible wire contract. |
 | `--verification-H HEADER` | repeatable | — | Extra HTTP header for the analysis request, in `Name: value` format. Repeat for multiple headers. |
 | `--skip-ssl-verify` | boolean | `false` | Disable TLS certificate verification for analysis and upload calls. |
-| `--mcp-oauth-tokens-path PATH` | string | — | JSON file containing MCP OAuth tokens (`TokenAndClientInfoList` schema) for OAuth-protected remote MCP servers. |
+| `--mcp-oauth-tokens-path PATH` | string | — | JSON file containing MCP OAuth tokens (`TokenAndClientInfoList` schema) for OAuth-protected remote MCP servers. Each token is copied into the persistent store at `~/.mcp-scan/oauth-tokens.json` (unless a credential for that server is already stored there), so it is reused and refreshed by subsequent runs, not just the current scan. |
 
 The default analysis URL is the main version-dependent value:
 
