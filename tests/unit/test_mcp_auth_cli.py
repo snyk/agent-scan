@@ -19,7 +19,7 @@ def _args(**kwargs):
     defaults = {
         "url": None,
         "server": None,
-        "all_unauthenticated": False,
+        "all_servers": False,
         "server_timeout": 10,
         "scan_all_users": False,
     }
@@ -75,4 +75,4 @@ async def test_returns_one_when_any_of_several_targets_fails():
         patch("agent_scan.cli.discover_servers_by_name", AsyncMock(return_value=discovered)),
         patch("agent_scan.oauth_flow.authenticate_server", fake_authenticate_server),
     ):
-        assert await mcp_auth(_args(all_unauthenticated=True)) == 1
+        assert await mcp_auth(_args(all_servers=True)) == 1
