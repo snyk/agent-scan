@@ -372,9 +372,11 @@ _SENSITIVE_HEADER_NAMES = frozenset(
 def redact_args(args: list[str]) -> list[str]:
     """Redact secret-bearing values in CLI argument tokens.
 
-    Detection runs in four passes against a tokenized view of ``args``
-    (each ``--flag=value`` arg yields two tokens; everything else
-    yields one):
+    Positional environment assignments are parsed first so their name and
+    separator are never treated as secret material. Their value is processed
+    by the same syntax-preserving assignment path used for free text. All
+    other arguments enter five detection passes against a tokenized view
+    (each ``--flag=value`` arg yields two tokens; everything else yields one):
 
     1. Format detectors (AWSKeyDetector, GitHubTokenDetector, ...) on
        the bare token value.
@@ -415,6 +417,10 @@ def redact_args(args: list[str]) -> list[str]:
     token should never appear verbatim in upload payloads, even if it
     masquerades as a CLI flag.
     """
+    out = list(args)
+    assignment_entropy_plugins: list | None = None
+    assignments: dict[int, re.Match] = {}
+
     # Tokenize args into a flat token list with positional metadata.
     # Each token is a tuple (arg_idx, slot, raw, normalized) where
     # slot 0 is the "whole arg" or the flag half of --flag=value,
@@ -426,7 +432,19 @@ def redact_args(args: list[str]) -> list[str]:
             tokens.append((i, 0, flag, flag.lstrip("-").replace("-", "_")))
             tokens.append((i, 1, value, value.lstrip("-").replace("-", "_")))
         else:
-            tokens.append((i, 0, arg, arg.lstrip("-").replace("-", "_")))
+            assignment = _ENV_ASSIGNMENT_RE.fullmatch(arg)
+            if assignment is not None:
+                if assignment_entropy_plugins is None:
+                    _, assignment_entropy_plugins = _get_cached_plugins_split()
+                out[i] = _redact_assignment(assignment, assignment_entropy_plugins)
+                assignments[i] = assignment
+                _, value, _ = _split_assignment_value(assignment.group("value"))
+                # The value core participates in the ordinary token passes so
+                # a preceding flag can still provide keyword/sensitive-name
+                # context. Reassembly below restores the assignment syntax.
+                tokens.append((i, 0, value, value.lstrip("-").replace("-", "_")))
+            else:
+                tokens.append((i, 0, arg, arg.lstrip("-").replace("-", "_")))
 
     marks: list[str | None] = [None] * len(tokens)
 
@@ -491,12 +509,15 @@ def redact_args(args: list[str]) -> list[str]:
                 marks[t_idx] = "SensitiveHeaderName"
 
     # Reassemble.
-    out = list(args)
     # Iterate each token once; for slot-1 tokens we look up the sibling
     # flag (slot 0 of the same arg_idx) directly from args[arg_idx].
     for t_idx, (arg_idx, slot, _raw, _normalized) in enumerate(tokens):
         mark = marks[t_idx]
         if mark is None:
+            continue
+        if arg_idx in assignments:
+            assert assignment_entropy_plugins is not None
+            out[arg_idx] = _redact_assignment(assignments[arg_idx], assignment_entropy_plugins, triggering_plugin=mark)
             continue
         if slot == 0:
             # If the original arg had "=" in it, slot 0 is the flag name;
@@ -521,6 +542,19 @@ def redact_args(args: list[str]) -> list[str]:
 # excludes ``= + / - _`` (legitimate secret characters); ``.`` is only removed as
 # an edge character (``str.strip`` touches the ends only), never internally.
 _TOKEN_EDGE_CHARS = "`'\"()[]{}<>.,;:!?"
+
+# Shell-style environment assignments may use horizontal whitespace around
+# ``=`` and may quote a value containing spaces. Named groups retain the exact
+# separator and value spelling so redaction can replace only the value content.
+# The left boundary excludes URL/query/path punctuation, avoiding matches such
+# as the ``token=...`` portion of a URL. ``(?![=])`` excludes comparison-like
+# ``NAME==value`` text.
+_ENV_ASSIGNMENT_RE = re.compile(
+    r"(?<![A-Za-z0-9_?&./:-])"
+    r"(?P<name>[A-Za-z_][A-Za-z0-9_]*)"
+    r"(?P<separator>[ \t]*=[ \t]*)(?![=])"
+    r'(?P<value>"(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])*\'|[^\s]*)'
+)
 
 
 def _unwrapped_token_core(token: str) -> str | None:
@@ -549,50 +583,60 @@ def _unwrapped_token_core(token: str) -> str | None:
 _TOKEN_SPLIT_DELIMS = re.compile(r"[/:.,;@?&#|\\]")
 
 
-def _redact_secrets_in_line(line: str, entropy_plugins: list) -> str:
-    """Redact secret-bearing substrings within a single line of free text.
+def _split_assignment_value(value: str) -> tuple[str, str, str]:
+    """Return an assignment value's leading wrapper, core, and trailing wrapper."""
+    if len(value) >= 2 and value[0] in {'"', "'"} and value[-1] == value[0]:
+        return value[0], value[1:-1], value[-1]
 
-    Reuses the detect-secrets plugin set in two complementary passes that each
-    preserve the line's surrounding text and whitespace:
+    core = value.strip(_TOKEN_EDGE_CHARS)
+    if not core:
+        return value, "", ""
+    core_start = value.find(core)
+    core_end = core_start + len(core)
+    return value[:core_start], core, value[core_end:]
 
-    1. Raw-line scan with the high-entropy plugins only. They report the
-       *complete* secret value via ``secret_value`` (unlike some format
-       detectors -- e.g. the GitHub token detector reports only the ``ghp``
-       prefix), so their value is safe to splice out by substring. They fire on
-       the quoted forms common in skill code snippets (``key = "value"``).
-    2. Whitespace-token scan with :func:`_detect_secret`, which runs format
-       detectors on the bare token and entropy detectors on a quote-wrapped
-       copy. A whole secret-shaped token (AWS key, GitHub token, bare
-       high-entropy string) is therefore replaced wholesale -- no partial
-       prefix can leak. The raw token is tried first; when it is not flagged,
-       an edge-stripped *core* (see :func:`_unwrapped_token_core`) is tried as a
-       fallback, so a secret wrapped in markdown/punctuation (a backtick code
-       span, or a trailing ``"`` from a longer quoted string) is still
-       detected. Only the matched candidate substring is replaced, so the
-       surrounding markup stays intact. When neither the token nor its core is
-       flagged, the token is split on structural delimiters
-       (see :data:`_TOKEN_SPLIT_DELIMS`) and each segment re-checked, so a
-       secret embedded as a URL path/query segment or a dotted/colon-joined
-       value is recovered without disturbing the surrounding structure.
 
-    Replacements are applied longest-first so a secret that is a substring of
-    another does not corrupt the marker inserted for the longer one.
-    """
+def _redact_assignment(
+    assignment: re.Match,
+    entropy_plugins: list,
+    triggering_plugin: str | None = None,
+) -> str:
+    """Redact only the value content of a parsed environment assignment."""
+    name = assignment.group("name")
+    separator = assignment.group("separator")
+    value = assignment.group("value")
+    leading, core, trailing = _split_assignment_value(value)
+
+    plugin_name = triggering_plugin or _detect_secret_cached(core)
+    if plugin_name is None:
+        plugin_name = _detect_keyword(name, core)
+
+    if plugin_name is not None:
+        redacted_core = _redaction_marker(plugin_name)
+    else:
+        redacted_core = _redact_non_assignment_text(core, entropy_plugins)
+
+    return f"{name}{separator}{leading}{redacted_core}{trailing}"
+
+
+def _redact_non_assignment_text(text: str, entropy_plugins: list) -> str:
+    """Redact secrets in text known not to contain an environment assignment."""
+    if not text:
+        return text
+
     replacements: dict[str, str] = {}
 
-    # Pass 1: high-entropy detectors on the raw line (catches quoted literals).
+    # Pass 1: high-entropy detectors on the raw text (catches quoted literals).
     for plugin in entropy_plugins:
-        for secret in plugin.analyze_line(filename="adhoc", line=line, line_number=1) or []:
+        for secret in plugin.analyze_line(filename="adhoc", line=text, line_number=1) or []:
             value = getattr(secret, "secret_value", None)
             if value:
                 replacements.setdefault(value, _redaction_marker(type(plugin).__name__))
 
-    # Pass 2: whole-token detection for format/entropy-shaped tokens. Reuse the
-    # caller's already-built ``plugins`` (under its single transient_settings
-    # context) so we don't re-enter that context per token. The raw token is
-    # tried first (preserving prior behaviour); only when it is not flagged is
-    # the edge-stripped core consulted as a fallback.
-    for token in line.split():
+    # Pass 2: whole-token detection for format/entropy-shaped tokens. The raw
+    # token is tried first; only when it is not flagged is its edge-stripped
+    # core consulted as a fallback.
+    for token in text.split():
         core = _unwrapped_token_core(token)
         candidates = [token] if core is None else [token, core]
         handled = False
@@ -607,11 +651,9 @@ def _redact_secrets_in_line(line: str, entropy_plugins: list) -> str:
                 break
         if handled:
             continue
-        # Fallback: a secret separated from surrounding text by a structural
-        # delimiter (a URL path/query segment, a dotted or colon-joined value)
-        # rides along inside one whitespace token and escapes the whole-token
-        # scan above. Split on those delimiters and flag each secret-shaped
-        # segment; only the matched segment is replaced, so the structure stays.
+        # A secret separated from surrounding text by a structural delimiter
+        # can escape whole-token detection. Re-scan each segment and replace
+        # only the segment so the surrounding structure stays intact.
         for segment in _TOKEN_SPLIT_DELIMS.split(token):
             if not segment or segment in replacements:
                 continue
@@ -619,10 +661,52 @@ def _redact_secrets_in_line(line: str, entropy_plugins: list) -> str:
             if plugin_name is not None:
                 replacements[segment] = _redaction_marker(plugin_name)
 
-    redacted = line
+    redacted = text
     for value in sorted(replacements, key=len, reverse=True):
         redacted = redacted.replace(value, replacements[value])
     return redacted
+
+
+def _redact_secrets_in_line(line: str, entropy_plugins: list) -> str:
+    """Redact secret-bearing substrings within a single line of free text.
+
+    Reuses the detect-secrets plugin set in two complementary passes that each
+    preserve the line's surrounding text and whitespace:
+
+    1. Raw-line scan with the high-entropy plugins only. They report the
+       *complete* secret value via ``secret_value`` (unlike some format
+       detectors -- e.g. the GitHub token detector reports only the ``ghp``
+       prefix), so their value is safe to splice out by substring. They fire on
+       the quoted forms common in skill code snippets (``key = "value"``).
+    2. Whitespace-token scan with :func:`_detect_secret`, which runs format
+       detectors on the bare token and entropy detectors on a quote-wrapped
+       copy. Shell-style ``NAME=value`` assignments are split first: only the
+       value is entropy-scanned, while the name supplies keyword context. A
+       whole non-assignment secret-shaped token (AWS key, GitHub token, bare
+       high-entropy string) is replaced wholesale -- no partial prefix can
+       leak. The raw token is tried first; when it is not flagged, an
+       edge-stripped *core* (see :func:`_unwrapped_token_core`) is tried as a
+       fallback, so a secret wrapped in markdown/punctuation (a backtick code
+       span, or a trailing ``"`` from a longer quoted string) is still
+       detected. Only the matched candidate substring is replaced, so the
+       surrounding markup stays intact. When neither the token nor its core is
+       flagged, the token is split on structural delimiters
+       (see :data:`_TOKEN_SPLIT_DELIMS`) and each segment re-checked, so a
+       secret embedded as a URL path/query segment or a dotted/colon-joined
+       value is recovered without disturbing the surrounding structure.
+
+    Environment assignments are parsed before these passes. Only their value
+    content is scanned; whitespace, quotes, and wrapping punctuation are kept
+    byte-for-byte. Non-assignment spans retain the general detection behavior.
+    """
+    parts: list[str] = []
+    cursor = 0
+    for assignment in _ENV_ASSIGNMENT_RE.finditer(line):
+        parts.append(_redact_non_assignment_text(line[cursor : assignment.start()], entropy_plugins))
+        parts.append(_redact_assignment(assignment, entropy_plugins))
+        cursor = assignment.end()
+    parts.append(_redact_non_assignment_text(line[cursor:], entropy_plugins))
+    return "".join(parts)
 
 
 def redact_text(text: str | None) -> str | None:

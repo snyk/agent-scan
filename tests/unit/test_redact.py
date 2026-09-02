@@ -187,6 +187,45 @@ class TestRedactArgs:
         assert is_secret_marker(result[0])
         assert FAKE_API_KEY not in result[0]
 
+    def test_redact_args_preserves_benign_positional_environment_assignment(self):
+        args = ["JARVIS_PROJECTS_DIR=/home/augustine/Projects"]
+
+        assert redact_args(args) == args
+
+    def test_redact_args_redacts_only_positional_environment_assignment_value(self):
+        args = [f"SESSION_VALUE={FAKE_API_KEY}"]
+
+        result = redact_args(args)
+
+        name, separator, value = result[0].partition("=")
+        assert (name, separator) == ("SESSION_VALUE", "=")
+        assert is_secret_marker(value)
+        assert FAKE_API_KEY not in result[0]
+
+    @pytest.mark.parametrize("separator", ["=", " =", "= ", " = ", "\t=\t"])
+    def test_redact_args_positional_environment_assignment_handles_whitespace(self, separator):
+        args = [f"API_KEY{separator}abc123"]
+
+        assert redact_args(args) == [f"API_KEY{separator}**REDACTED_SECRET_KEYWORDDETECTOR**"]
+
+    @pytest.mark.parametrize("quote", ['"', "'"])
+    def test_redact_args_positional_environment_assignment_preserves_quotes(self, quote):
+        args = [f"API_KEY={quote}abc 123{quote}"]
+
+        assert redact_args(args) == [f"API_KEY={quote}**REDACTED_SECRET_KEYWORDDETECTOR**{quote}"]
+
+    @pytest.mark.parametrize(
+        ("assignment", "expected"),
+        [
+            ("VALUE=abc123", "VALUE=**REDACTED_SECRET_KEYWORDDETECTOR**"),
+            ('VALUE = "abc 123"', 'VALUE = "**REDACTED_SECRET_KEYWORDDETECTOR**"'),
+        ],
+    )
+    def test_redact_args_uses_preceding_flag_as_assignment_value_context(self, assignment, expected):
+        args = ["--api-key", assignment]
+
+        assert redact_args(args) == ["--api-key", expected]
+
     def test_redact_args_header_token_high_entropy_value_redacted(self):
         """An HTTP-header-shaped token "name:value" with a high-entropy value is fully redacted."""
         header_token = f"x-client-id:{FAKE_API_KEY}"
@@ -591,6 +630,69 @@ class TestRedactText:
         text = "Loading from /Users/alice/project/config.json"
         result = redact_text(text)
         assert result == text
+
+    def test_redact_text_preserves_benign_environment_assignment_with_absolute_path(self):
+        """A shell assignment containing an ordinary absolute path is documentation,
+        not a credential, even when the combined token has high apparent entropy."""
+        text = "export JARVIS_PROJECTS_DIR=/home/augustine/Projects"
+
+        assert redact_text(text) == text
+
+    def test_redact_text_redacts_only_high_entropy_environment_assignment_value(self):
+        text = f"export SESSION_VALUE={FAKE_API_KEY}"
+
+        result = redact_text(text)
+
+        assert result.startswith("export SESSION_VALUE=")
+        assert is_secret_marker(result.removeprefix("export SESSION_VALUE="))
+        assert FAKE_API_KEY not in result
+
+    def test_redact_text_uses_environment_variable_name_as_keyword_context(self):
+        text = "export API_KEY=abc123"
+
+        assert redact_text(text) == "export API_KEY=**REDACTED_SECRET_KEYWORDDETECTOR**"
+
+    @pytest.mark.parametrize("separator", ["=", " =", "= ", " = ", "\t=\t"])
+    def test_redact_text_environment_assignment_handles_whitespace(self, separator):
+        text = f"export API_KEY{separator}abc123"
+
+        assert redact_text(text) == f"export API_KEY{separator}**REDACTED_SECRET_KEYWORDDETECTOR**"
+
+    @pytest.mark.parametrize("quote", ['"', "'"])
+    def test_redact_text_environment_assignment_preserves_quotes(self, quote):
+        text = f"export API_KEY = {quote}abc 123{quote}"
+
+        assert redact_text(text) == f"export API_KEY = {quote}**REDACTED_SECRET_KEYWORDDETECTOR**{quote}"
+
+    @pytest.mark.parametrize(
+        ("text_template", "expected_template"),
+        [
+            ("export TOKEN={secret}!", "export TOKEN={marker}!"),
+            ("use (TOKEN={secret}) now", "use (TOKEN={marker}) now"),
+            ("use `TOKEN={secret}` now", "use `TOKEN={marker}` now"),
+        ],
+    )
+    def test_redact_text_environment_assignment_preserves_wrapping_punctuation(self, text_template, expected_template):
+        text = text_template.format(secret=FAKE_API_KEY)
+
+        result = redact_text(text)
+
+        assert FAKE_API_KEY not in result
+        marker_match = re.search(r"\*\*REDACTED_SECRET_[A-Z0-9_]+\*\*", result)
+        assert marker_match is not None
+        marker = marker_match.group()
+        assert result == expected_template.format(marker=marker)
+
+    def test_redact_text_handles_multiple_environment_assignments_on_one_line(self):
+        text = f"JARVIS_PROJECTS_DIR = /home/augustine/Projects API_KEY = abc123 SESSION_VALUE={FAKE_API_KEY}"
+
+        result = redact_text(text)
+
+        assert result.startswith("JARVIS_PROJECTS_DIR = /home/augustine/Projects ")
+        assert "API_KEY = **REDACTED_SECRET_KEYWORDDETECTOR**" in result
+        assert "SESSION_VALUE=" in result
+        assert FAKE_API_KEY not in result
+        assert result.count("**REDACTED_SECRET_") == 2
 
     def test_redact_text_preserves_line_structure(self):
         text = f"line one\n{FAKE_API_KEY}\nline three"
