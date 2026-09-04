@@ -180,6 +180,9 @@ The four scopes:
 - **Project / workspace** — config scoped to an opened project or workspace.
 - **Extension / plugin** — components bundled inside installed extensions or plugins.
 
+Their machine-readable values are `system`, `user`, `project_workspace`, and `extension_plugin`. Explicit positional
+inputs are tracked internally as `custom`; they are caller-selected rather than part of automatic discovery.
+
 Legend: **✓** detected · **✗** the agent supports this but Agent Scan does not scan it yet · **N/A** the agent has no such component at this scope.
 
 | Agent | System<br>skills | System<br>servers | User<br>skills | User<br>servers | Project / WS<br>skills | Project / WS<br>servers | Ext / plugin<br>skills | Ext / plugin<br>servers |

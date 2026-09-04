@@ -12,7 +12,7 @@ from agent_scan.agents.base import (
     McpConfigsResult,
     SkillsDirsResult,
 )
-from agent_scan.models import MCPConfig, OpenCodeConfigFile
+from agent_scan.models import DiscoveryLocationScope, MCPConfig, OpenCodeConfigFile
 from agent_scan.well_known_clients import expand_path
 
 logger = logging.getLogger(__name__)
@@ -195,19 +195,30 @@ class OpenCodeDiscoverer(AgentDiscoverer):
 
     def discover_mcp_servers(self) -> McpConfigsResult:
         result: McpConfigsResult = {}
-        result.update(self._discover_global_mcp_servers())
-        result.update(self._discover_project_mcp_servers())
-        result.update(self._discover_managed_mcp_servers())
-        result.update(self._discover_env_override_mcp_servers())
+        self._merge_mcp_results(result, self._discover_project_mcp_servers, DiscoveryLocationScope.PROJECT_WORKSPACE)
+        self._merge_mcp_results(result, self._discover_global_mcp_servers, DiscoveryLocationScope.USER)
+        self._merge_mcp_results(result, self._discover_env_override_mcp_servers, DiscoveryLocationScope.USER)
+        self._merge_mcp_results(result, self._discover_managed_mcp_servers, DiscoveryLocationScope.SYSTEM)
         return result
 
     def discover_skills(self) -> SkillsDirsResult:
         result: SkillsDirsResult = {}
-        result.update(self._discover_global_skills())
-        result.update(self._discover_project_skills())
-        result.update(self._discover_managed_skills())
-        result.update(self._discover_config_skills_paths())
-        result.update(self._discover_cached_url_skills())
+        self._merge_skill_results(result, self._discover_project_skills, DiscoveryLocationScope.PROJECT_WORKSPACE)
+        self._merge_skill_results(result, self._discover_global_skills, DiscoveryLocationScope.USER)
+        self._merge_skill_results(result, self._discover_cached_url_skills, DiscoveryLocationScope.USER)
+        self._merge_scoped_skill_results(
+            result,
+            self._discover_config_skills_paths(DiscoveryLocationScope.PROJECT_WORKSPACE),
+        )
+        self._merge_scoped_skill_results(
+            result,
+            self._discover_config_skills_paths(DiscoveryLocationScope.USER),
+        )
+        self._merge_skill_results(result, self._discover_managed_skills, DiscoveryLocationScope.SYSTEM)
+        self._merge_scoped_skill_results(
+            result,
+            self._discover_config_skills_paths(DiscoveryLocationScope.SYSTEM),
+        )
         return result
 
     # --- folder resolution ---
@@ -589,24 +600,32 @@ class OpenCodeDiscoverer(AgentDiscoverer):
         opencode honors it is picked up. The file may or may not exist;
         ``_load_json_file`` handles missing/unreadable files quietly.
         """
-        candidates: list[Path] = []
-        for base in self._global_config_dirs():
-            for filename in _CONFIG_FILENAMES:
-                candidates.append(base / filename)
-        for project in self._discovery_paths_with_ancestors():
-            for base in self._project_config_bases(project):
+        return [path for path, _scope in self._iter_scoped_candidate_config_files()]
+
+    def _iter_scoped_candidate_config_files(
+        self, source_scope: DiscoveryLocationScope | None = None
+    ) -> list[tuple[Path, DiscoveryLocationScope]]:
+        candidates: list[tuple[Path, DiscoveryLocationScope]] = []
+        if source_scope in (None, DiscoveryLocationScope.USER):
+            for base in self._global_config_dirs():
                 for filename in _CONFIG_FILENAMES:
-                    candidates.append(base / filename)
-        managed = self._managed_config_dir()
-        if managed is not None:
-            for filename in _CONFIG_FILENAMES:
-                candidates.append(managed / filename)
-        env_path = self._opencode_config_env_path()
-        if env_path is not None:
-            candidates.append(env_path)
+                    candidates.append((base / filename, DiscoveryLocationScope.USER))
+            env_path = self._opencode_config_env_path()
+            if env_path is not None:
+                candidates.append((env_path, DiscoveryLocationScope.USER))
+        if source_scope in (None, DiscoveryLocationScope.PROJECT_WORKSPACE):
+            for project in self._discovery_paths_with_ancestors():
+                for base in self._project_config_bases(project):
+                    for filename in _CONFIG_FILENAMES:
+                        candidates.append((base / filename, DiscoveryLocationScope.PROJECT_WORKSPACE))
+        if source_scope in (None, DiscoveryLocationScope.SYSTEM):
+            managed = self._managed_config_dir()
+            if managed is not None:
+                for filename in _CONFIG_FILENAMES:
+                    candidates.append((managed / filename, DiscoveryLocationScope.SYSTEM))
         return candidates
 
-    def _discover_config_skills_paths(self) -> SkillsDirsResult:
+    def _discover_config_skills_paths(self, source_scope: DiscoveryLocationScope | None = None) -> SkillsDirsResult:
         """Scan every ``skills.paths`` entry referenced from any opencode.json.
 
         Per ``packages/core/src/v1/config/skills.ts``:
@@ -630,8 +649,10 @@ class OpenCodeDiscoverer(AgentDiscoverer):
         # opencode's instance dirs (the db ``worktree`` leaves); computed once so
         # the relative-entry resolution below doesn't re-read the SQLite db per
         # candidate config file.
-        worktrees = self._all_discovery_folders()
-        for config_path in self._iter_candidate_config_files():
+        worktrees = (
+            self._all_discovery_folders() if self._scope_enabled(DiscoveryLocationScope.PROJECT_WORKSPACE) else []
+        )
+        for config_path, config_scope in self._iter_scoped_candidate_config_files(source_scope):
             data = self._load_json_file(config_path)
             if not isinstance(data, dict):
                 continue
@@ -644,8 +665,15 @@ class OpenCodeDiscoverer(AgentDiscoverer):
             for entry in paths:
                 if not isinstance(entry, str) or not entry:
                     continue
+                is_project_relative = entry != "~" and not entry.startswith("~/") and not Path(entry).is_absolute()
+                result_scope = DiscoveryLocationScope.PROJECT_WORKSPACE if is_project_relative else config_scope
+                if not self._scope_enabled(result_scope):
+                    continue
                 for resolved in self._resolve_skills_path_entry(entry, worktrees):
-                    self._record_skills_at(result, resolved)
+                    entries = self._scan_skills_dir(resolved)
+                    if entries is not None:
+                        key = resolved.as_posix()
+                        result[key] = self._scope_skill_results({key: entries}, result_scope)[key]
         return result
 
     def _resolve_skills_path_entry(self, entry: str, worktrees: list[Path]) -> list[Path]:

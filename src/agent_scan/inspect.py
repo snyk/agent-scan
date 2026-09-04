@@ -11,7 +11,9 @@ from agent_scan.models import (
     CandidateClient,
     ClientToInspect,
     CouldNotParseMCPConfig,
+    DiscoveredServer,
     DiscoveredSkill,
+    DiscoveryLocationScope,
     FileNotFoundConfig,
     InspectedPath,
     InspectedServer,
@@ -81,6 +83,7 @@ async def get_mcp_config_per_client(
     create_file_not_found_error: bool = False,
     *,
     scope: DiscoveryScope = DiscoveryScope.ALL,
+    skip_discovery_scopes: set[DiscoveryLocationScope] | frozenset[DiscoveryLocationScope] | None = None,
 ) -> list[ClientToInspect]:
     """
     Looks for Client (Cursor, VSCode, etc.) across all home directories in the machine.
@@ -90,13 +93,23 @@ async def get_mcp_config_per_client(
     if any(path.startswith("~") for path in client.client_exists_paths):
         for home_directory, username in home_dirs:
             cti = await get_mcp_config_per_home_directory(
-                client, home_directory, create_file_not_found_error, scope=scope
+                client,
+                home_directory,
+                create_file_not_found_error,
+                scope=scope,
+                skip_discovery_scopes=skip_discovery_scopes,
             )
             if cti is not None:
                 cti.username = username
                 ctis.append(cti)
     else:
-        cti = await get_mcp_config_per_home_directory(client, None, create_file_not_found_error, scope=scope)
+        cti = await get_mcp_config_per_home_directory(
+            client,
+            None,
+            create_file_not_found_error,
+            scope=scope,
+            skip_discovery_scopes=skip_discovery_scopes,
+        )
         if cti is not None:
             ctis.append(cti)
     return ctis
@@ -108,6 +121,7 @@ async def get_mcp_config_per_home_directory(
     create_file_not_found_error: bool = False,
     *,
     scope: DiscoveryScope = DiscoveryScope.ALL,
+    skip_discovery_scopes: set[DiscoveryLocationScope] | frozenset[DiscoveryLocationScope] | None = None,
 ) -> ClientToInspect | None:
     """
     Looks for Client (Cursor, VSCode, etc.) config files.
@@ -121,6 +135,35 @@ async def get_mcp_config_per_home_directory(
     scope = DiscoveryScope(scope)
     want_servers = scope in (DiscoveryScope.SERVERS, DiscoveryScope.ALL)
     want_skills = scope in (DiscoveryScope.SKILLS, DiscoveryScope.ALL)
+    skipped = frozenset(DiscoveryLocationScope(value) for value in skip_discovery_scopes or ())
+
+    def location_scope(path: str, overrides: dict[str, DiscoveryLocationScope]) -> DiscoveryLocationScope:
+        return overrides.get(path, client.default_location_scope)
+
+    enabled_mcp_paths = [
+        path for path in client.mcp_config_paths if location_scope(path, client.mcp_config_path_scopes) not in skipped
+    ]
+    enabled_skill_paths = [
+        path for path in client.skills_dir_paths if location_scope(path, client.skills_dir_path_scopes) not in skipped
+    ]
+    enabled_mcp_globs = [
+        pattern
+        for pattern in client.mcp_config_globs
+        if location_scope(pattern, client.mcp_config_glob_scopes) not in skipped
+    ]
+    enabled_skill_globs = [
+        pattern
+        for pattern in client.skills_dir_globs
+        if location_scope(pattern, client.skills_dir_glob_scopes) not in skipped
+    ]
+    has_requested_sources = (want_servers and bool(client.mcp_config_paths or client.mcp_config_globs)) or (
+        want_skills and bool(client.skills_dir_paths or client.skills_dir_globs)
+    )
+    has_enabled_requested_sources = (want_servers and bool(enabled_mcp_paths or enabled_mcp_globs)) or (
+        want_skills and bool(enabled_skill_paths or enabled_skill_globs)
+    )
+    if has_requested_sources and not has_enabled_requested_sources:
+        return None
 
     # check if client exists
     client_path: str | None = None
@@ -140,23 +183,24 @@ async def get_mcp_config_per_home_directory(
     # parse mcp configs
     mcp_configs: dict[
         str,
-        list[tuple[str, StdioServer | RemoteServer]]
-        | FileNotFoundConfig
-        | UnknownConfigFormat
-        | CouldNotParseMCPConfig,
+        list[DiscoveredServer] | FileNotFoundConfig | UnknownConfigFormat | CouldNotParseMCPConfig,
     ] = {}
 
-    all_mcp_config_paths: list[str] = []
+    all_mcp_config_paths: dict[str, DiscoveryLocationScope] = {}
     if want_servers:
-        all_mcp_config_paths = list(client.mcp_config_paths)
-        for glob_pattern in client.mcp_config_globs:
+        for path in enabled_mcp_paths:
+            all_mcp_config_paths[path] = location_scope(path, client.mcp_config_path_scopes)
+        for glob_pattern in enabled_mcp_globs:
             expanded_glob = str(expand_path(Path(glob_pattern), home_directory))
-            all_mcp_config_paths.extend(_resolve_glob_with_depth(expanded_glob, client.max_glob_depth))
-        all_mcp_config_paths = list(
-            dict.fromkeys(str(expand_path(Path(p), home_directory).resolve()) for p in all_mcp_config_paths)
-        )
+            glob_scope = location_scope(glob_pattern, client.mcp_config_glob_scopes)
+            for match in _resolve_glob_with_depth(expanded_glob, client.max_glob_depth):
+                all_mcp_config_paths[match] = glob_scope
+        all_mcp_config_paths = {
+            str(expand_path(Path(path), home_directory).resolve()): path_scope
+            for path, path_scope in all_mcp_config_paths.items()
+        }
 
-    for mcp_config_path in all_mcp_config_paths:
+    for mcp_config_path, path_scope in all_mcp_config_paths.items():
         mcp_config_path_expanded = expand_path(Path(mcp_config_path), home_directory)
         if not mcp_config_path_expanded.exists():
             if create_file_not_found_error:
@@ -179,7 +223,8 @@ async def get_mcp_config_per_home_directory(
                 if isinstance(server_config, StdioServer):
                     server_config = check_server_signature(server_config)
             mcp_configs[mcp_config_path_expanded.as_posix()] = [
-                (server_name, server) for server_name, server in server_configs_by_name.items()
+                DiscoveredServer(name=server_name, server=server, scope=path_scope)
+                for server_name, server in server_configs_by_name.items()
             ]
         except Exception as e:
             logger.exception(f"Error parsing MCP config file {mcp_config_path_expanded.as_posix()}: {e}")
@@ -192,22 +237,28 @@ async def get_mcp_config_per_home_directory(
     # parse skills dirs
     skills_dirs: dict[str, list[DiscoveredSkill] | FileNotFoundConfig] = {}
 
-    all_skills_dir_paths: list[str] = []
+    all_skills_dir_paths: dict[str, DiscoveryLocationScope] = {}
     if want_skills:
-        all_skills_dir_paths = list(client.skills_dir_paths)
-        for glob_pattern in client.skills_dir_globs:
+        for path in enabled_skill_paths:
+            all_skills_dir_paths[path] = location_scope(path, client.skills_dir_path_scopes)
+        for glob_pattern in enabled_skill_globs:
             expanded_glob = str(expand_path(Path(glob_pattern), home_directory))
+            glob_scope = location_scope(glob_pattern, client.skills_dir_glob_scopes)
             for match in _resolve_glob_with_depth(expanded_glob, client.max_glob_depth):
                 if Path(match).is_dir():
-                    all_skills_dir_paths.append(match)
-        all_skills_dir_paths = list(
-            dict.fromkeys(str(expand_path(Path(p), home_directory).resolve()) for p in all_skills_dir_paths)
-        )
+                    all_skills_dir_paths[match] = glob_scope
+        all_skills_dir_paths = {
+            str(expand_path(Path(path), home_directory).resolve()): path_scope
+            for path, path_scope in all_skills_dir_paths.items()
+        }
 
-    for skills_dir_path in all_skills_dir_paths:
+    for skills_dir_path, path_scope in all_skills_dir_paths.items():
         skills_dir_path_expanded = expand_path(Path(skills_dir_path), home_directory)
         if skills_dir_path_expanded.exists():
-            skills_dirs[skills_dir_path_expanded.as_posix()] = inspect_skills_dir(str(skills_dir_path_expanded))
+            skills_dirs[skills_dir_path_expanded.as_posix()] = [
+                skill.model_copy(update={"scope": path_scope})
+                for skill in inspect_skills_dir(str(skills_dir_path_expanded))
+            ]
         elif create_file_not_found_error:
             skills_dirs[skills_dir_path_expanded.as_posix()] = FileNotFoundConfig(
                 message=f"Skills dir {skills_dir_path_expanded.as_posix()} does not exist"
@@ -418,7 +469,9 @@ async def _inspect_server_configs(
         if isinstance(servers_or_error, FileNotFoundConfig | UnknownConfigFormat | CouldNotParseMCPConfig):
             candidate_errors.append(_config_error_to_scan_error(servers_or_error))
             continue
-        for name, config in servers_or_error:
+        for discovered_server in servers_or_error:
+            name = discovered_server.name
+            config = discovered_server.server
             inspected_server = await _inspect_server(
                 name,
                 config,

@@ -21,6 +21,7 @@ from agent_scan.agents.vscode import (
     VSCodeFamilyDiscoverer,
     WindsurfDiscoverer,
 )
+from agent_scan.models import AUTOMATIC_DISCOVERY_SCOPES, DiscoveryLocationScope
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +38,11 @@ DISCOVERERS: dict[str, type[AgentDiscoverer]] = {
 }
 
 
-def find_discoverers(home_directory: Path | None, target_folders: list[Path] | None = None) -> list[AgentDiscoverer]:
+def find_discoverers(
+    home_directory: Path | None,
+    target_folders: list[Path] | None = None,
+    skip_discovery_scopes: set[DiscoveryLocationScope] | frozenset[DiscoveryLocationScope] | None = None,
+) -> list[AgentDiscoverer]:
     """Construct one instance per registered discoverer with the given home and
     explicit request targets, then return only those whose ``client_exists()``
     confirms the agent is installed. Each returned instance is home-bound; the
@@ -46,9 +51,12 @@ def find_discoverers(home_directory: Path | None, target_folders: list[Path] | N
     A discoverer whose ``client_exists()`` raises is skipped (and logged) so a
     single buggy subclass cannot abort discovery for the whole machine.
     """
+    skipped = frozenset(skip_discovery_scopes or ())
+    if skipped >= AUTOMATIC_DISCOVERY_SCOPES:
+        return []
     found: list[AgentDiscoverer] = []
     for cls in DISCOVERERS.values():
-        discoverer = cls(home_directory, target_folders)
+        discoverer = cls(home_directory, target_folders, skipped)
         try:
             exists = discoverer.client_exists() is not None
         except Exception:

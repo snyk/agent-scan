@@ -59,7 +59,7 @@ from agent_scan.agents.base import (
     McpConfigsResult,
     SkillsDirsResult,
 )
-from agent_scan.models import CouldNotParseMCPConfig
+from agent_scan.models import CouldNotParseMCPConfig, DiscoveryLocationScope
 from agent_scan.well_known_clients import expand_path
 
 logger = logging.getLogger(__name__)
@@ -107,6 +107,11 @@ class ClaudeDesktopDiscoverer(AgentDiscoverer):
         return None
 
     def discover_mcp_servers(self) -> McpConfigsResult:
+        result: McpConfigsResult = {}
+        self._merge_mcp_results(result, self._discover_user_mcp_servers, DiscoveryLocationScope.USER)
+        return result
+
+    def _discover_user_mcp_servers(self) -> McpConfigsResult:
         """Parse the top-level ``mcpServers`` map from ``claude_desktop_config.json``.
 
         Mirrors ``ClaudeCodeDiscoverer._discover_global_mcp_servers``: a missing

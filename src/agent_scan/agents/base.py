@@ -22,7 +22,9 @@ from agent_scan.models import (
     SERVER_CONFIG_DISCRIMINATOR_KEYS,
     ClientToInspect,
     CouldNotParseMCPConfig,
+    DiscoveredServer,
     DiscoveredSkill,
+    DiscoveryLocationScope,
     FileNotFoundConfig,
     MCPConfig,
     MCPServerMap,
@@ -36,7 +38,10 @@ from agent_scan.skill_client import inspect_skills_dir
 logger = logging.getLogger(__name__)
 McpConfigsResult = dict[
     str,
-    list[tuple[str, StdioServer | RemoteServer]] | FileNotFoundConfig | UnknownConfigFormat | CouldNotParseMCPConfig,
+    list[DiscoveredServer | tuple[str, StdioServer | RemoteServer]]
+    | FileNotFoundConfig
+    | UnknownConfigFormat
+    | CouldNotParseMCPConfig,
 ]
 SkillsDirsResult = dict[str, list[DiscoveredSkill] | FileNotFoundConfig]
 # Return type of the per-file MCP parsers (``_parse_mcp_file`` /
@@ -49,6 +54,15 @@ class DiscoveryScope(str, Enum):
     SERVERS = "servers"
     SKILLS = "skills"
     ALL = "all"
+
+
+_LOCATION_SCOPE_PRECEDENCE = {
+    DiscoveryLocationScope.PROJECT_WORKSPACE: 0,
+    DiscoveryLocationScope.USER: 1,
+    DiscoveryLocationScope.EXTENSION_PLUGIN: 2,
+    DiscoveryLocationScope.SYSTEM: 3,
+    DiscoveryLocationScope.CUSTOM: 4,
+}
 
 
 # Cap traversal into ``~/.claude/plugins/{cache,repos}``
@@ -153,13 +167,19 @@ class AgentDiscoverer(ABC):
 
     name: str = ""
 
-    def __init__(self, home_directory: Path | None, target_folders: list[Path] | None = None) -> None:
+    def __init__(
+        self,
+        home_directory: Path | None,
+        target_folders: list[Path] | None = None,
+        skip_discovery_scopes: set[DiscoveryLocationScope] | frozenset[DiscoveryLocationScope] | None = None,
+    ) -> None:
         # ``None`` is the own-home sentinel; normalize to ``Path.home()`` so the
         # stored home is always concrete. ``expand_path`` treats ``None`` as
         # "unknown home — don't expand", which would leave a ``~``-prefixed literal
         # (e.g. ``~/.claude``) on an own-home scan whose relocating env var is unset.
         self.home_directory = home_directory if home_directory is not None else Path.home()
         self.target_folders = list(target_folders or [])
+        self.skip_discovery_scopes = frozenset(DiscoveryLocationScope(scope) for scope in skip_discovery_scopes or ())
         # Lazily-populated cache of the discovery roots (recorded project roots plus
         # explicit target roots) with their ancestors. A discoverer serves a single
         # scan (see find_discoverers), so the list is stable for its lifetime and
@@ -242,6 +262,82 @@ class AgentDiscoverer(ABC):
             mcp_configs=mcp_configs,
             skills_dirs=skills_dirs,
         )
+
+    def _scope_enabled(self, scope: DiscoveryLocationScope) -> bool:
+        return scope not in self.skip_discovery_scopes
+
+    @staticmethod
+    def _scope_mcp_results(results: McpConfigsResult, scope: DiscoveryLocationScope) -> McpConfigsResult:
+        scoped: McpConfigsResult = {}
+        for path, value in results.items():
+            if not isinstance(value, list):
+                scoped[path] = value
+                continue
+            entries: list[DiscoveredServer | tuple[str, StdioServer | RemoteServer]] = []
+            for entry in value:
+                if isinstance(entry, DiscoveredServer):
+                    entry_scope = scope if entry.scope is DiscoveryLocationScope.CUSTOM else entry.scope
+                    entries.append(entry.model_copy(update={"scope": entry_scope}))
+                else:
+                    name, server = entry
+                    entries.append(DiscoveredServer(name=name, server=server, scope=scope))
+            scoped[path] = entries
+        return scoped
+
+    @staticmethod
+    def _scope_skill_results(results: SkillsDirsResult, scope: DiscoveryLocationScope) -> SkillsDirsResult:
+        scoped: SkillsDirsResult = {}
+        for path, value in results.items():
+            if not isinstance(value, list):
+                scoped[path] = value
+                continue
+            scoped[path] = [
+                skill.model_copy(
+                    update={"scope": scope if skill.scope is DiscoveryLocationScope.CUSTOM else skill.scope}
+                )
+                for skill in value
+            ]
+        return scoped
+
+    @staticmethod
+    def _result_precedence(value: object) -> int:
+        if isinstance(value, list) and value:
+            first = value[0]
+            if isinstance(first, DiscoveredServer | DiscoveredSkill):
+                return _LOCATION_SCOPE_PRECEDENCE[first.scope]
+        return -1
+
+    def _merge_mcp_results(
+        self,
+        target: McpConfigsResult,
+        source: Callable[[], McpConfigsResult],
+        scope: DiscoveryLocationScope,
+    ) -> None:
+        if not self._scope_enabled(scope):
+            return
+        scoped = self._scope_mcp_results(source(), scope)
+        for path, value in scoped.items():
+            existing = target.get(path)
+            if existing is None or self._result_precedence(value) >= self._result_precedence(existing):
+                target[path] = value
+
+    def _merge_skill_results(
+        self,
+        target: SkillsDirsResult,
+        source: Callable[[], SkillsDirsResult],
+        scope: DiscoveryLocationScope,
+    ) -> None:
+        if not self._scope_enabled(scope):
+            return
+        scoped = self._scope_skill_results(source(), scope)
+        self._merge_scoped_skill_results(target, scoped)
+
+    def _merge_scoped_skill_results(self, target: SkillsDirsResult, source: SkillsDirsResult) -> None:
+        """Merge skill results whose entries already carry their location scope."""
+        for path, value in source.items():
+            existing = target.get(path)
+            if existing is None or self._result_precedence(value) >= self._result_precedence(existing):
+                target[path] = value
 
     # --- shared helpers (inherited by every concrete subclass) ---
 

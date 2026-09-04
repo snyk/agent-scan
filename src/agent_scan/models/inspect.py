@@ -2,6 +2,7 @@
 
 from pydantic import BaseModel, Field
 
+from agent_scan.models.discovery import DiscoveredServer, DiscoveryLocationScope
 from agent_scan.models.errors import CouldNotParseMCPConfig, FileNotFoundConfig, ScanError, UnknownConfigFormat
 from agent_scan.models.mcp import RemoteServer, ServerSignature, StdioServer
 from agent_scan.models.skill import DiscoveredSkill, SkillFile
@@ -17,6 +18,11 @@ class CandidateClient(BaseModel):
     mcp_config_globs: list[str] = Field(default_factory=list)
     skills_dir_globs: list[str] = Field(default_factory=list)
     max_glob_depth: int = 6
+    default_location_scope: DiscoveryLocationScope = DiscoveryLocationScope.USER
+    mcp_config_path_scopes: dict[str, DiscoveryLocationScope] = Field(default_factory=dict)
+    skills_dir_path_scopes: dict[str, DiscoveryLocationScope] = Field(default_factory=dict)
+    mcp_config_glob_scopes: dict[str, DiscoveryLocationScope] = Field(default_factory=dict)
+    skills_dir_glob_scopes: dict[str, DiscoveryLocationScope] = Field(default_factory=dict)
 
 
 class ClientToInspect(BaseModel):
@@ -27,10 +33,7 @@ class ClientToInspect(BaseModel):
     username: str | None = None
     mcp_configs: dict[
         str,
-        list[tuple[str, StdioServer | RemoteServer]]
-        | FileNotFoundConfig
-        | UnknownConfigFormat
-        | CouldNotParseMCPConfig,
+        list[DiscoveredServer] | FileNotFoundConfig | UnknownConfigFormat | CouldNotParseMCPConfig,
     ]
     skills_dirs: dict[str, list[DiscoveredSkill] | FileNotFoundConfig]
 

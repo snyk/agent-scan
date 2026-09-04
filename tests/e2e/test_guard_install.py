@@ -90,6 +90,8 @@ class TestGuardInstallE2E:
         discover_command = discovery_groups[0]["hooks"][0]["command"]
         discover_script = "snyk-agent-guard-discover.ps1" if os.name == "nt" else "snyk-agent-guard-discover.sh"
         assert discover_script in discover_command
+        assert ("-SkipDiscoveryScopes" if os.name == "nt" else "--skip-discovery-scopes") in discover_command
+        assert "project_workspace" in discover_command
         assert str(config_file) not in discover_command
         assert ("-ConfigFile" if os.name == "nt" else "--file") not in discover_command
         assert [request["body"]["hook_event_name"] for request in _FakeHookServer.requests] == [
@@ -160,6 +162,10 @@ class TestGuardInstallE2E:
         ]
         assert len(discovery_entries) == 1
         assert set(discovery_entries[0]) == {"command"}
+        assert ("-SkipDiscoveryScopes" if os.name == "nt" else "--skip-discovery-scopes") in discovery_entries[0][
+            "command"
+        ]
+        assert "project_workspace" in discovery_entries[0]["command"]
         assert str(config_file) not in discovery_entries[0]["command"]
 
         discover_result = subprocess.run(
@@ -222,6 +228,10 @@ class TestGuardInstallE2E:
         assert len(discovery_groups) == 1
         assert "matcher" not in discovery_groups[0]
         assert discovery_groups[0]["hooks"][0]["async"] is True
+        assert ("-SkipDiscoveryScopes" if os.name == "nt" else "--skip-discovery-scopes") in discovery_groups[0][
+            "hooks"
+        ][0]["command"]
+        assert "project_workspace" in discovery_groups[0]["hooks"][0]["command"]
         assert str(config_file) not in discovery_groups[0]["hooks"][0]["command"]
 
         discover_result = subprocess.run(

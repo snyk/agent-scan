@@ -33,6 +33,7 @@ from agent_scan.agents.base import (
 from agent_scan.models import (
     ClaudeConfigFile,
     CouldNotParseMCPConfig,
+    DiscoveryLocationScope,
     PluginMCPConfigFile,
 )
 from agent_scan.skill_client import inspect_skills_dir
@@ -106,22 +107,27 @@ class CodexDiscoverer(AgentDiscoverer):
         """MCP servers across every on-disk layer: user + profile + system config,
         plugins, and each registered project."""
         result: McpConfigsResult = {}
-        result.update(self._discover_user_mcp_servers())
-        result.update(self._discover_profile_mcp_servers())
-        result.update(self._discover_system_mcp_servers())
-        result.update(self._discover_plugin_mcp_servers())
-        result.update(self._discover_plugin_manifest_mcp_servers())
-        result.update(self._discover_project_mcp_servers())
+        self._merge_mcp_results(result, self._discover_project_mcp_servers, DiscoveryLocationScope.PROJECT_WORKSPACE)
+        self._merge_mcp_results(result, self._discover_user_mcp_servers, DiscoveryLocationScope.USER)
+        self._merge_mcp_results(result, self._discover_profile_mcp_servers, DiscoveryLocationScope.USER)
+        self._merge_mcp_results(result, self._discover_plugin_mcp_servers, DiscoveryLocationScope.EXTENSION_PLUGIN)
+        self._merge_mcp_results(
+            result, self._discover_plugin_manifest_mcp_servers, DiscoveryLocationScope.EXTENSION_PLUGIN
+        )
+        self._merge_mcp_results(result, self._discover_system_mcp_servers, DiscoveryLocationScope.SYSTEM)
         return result
 
     def discover_skills(self) -> SkillsDirsResult:
         """Skills from the documented user/admin dirs, installed plugins, and every
         registered project."""
         result: SkillsDirsResult = {}
-        result.update(self._discover_global_skills())
-        result.update(self._discover_plugin_skills())
-        result.update(self._discover_plugin_manifest_skills())
-        result.update(self._discover_project_skills())
+        self._merge_skill_results(result, self._discover_project_skills, DiscoveryLocationScope.PROJECT_WORKSPACE)
+        self._merge_skill_results(result, self._discover_user_skills, DiscoveryLocationScope.USER)
+        self._merge_skill_results(result, self._discover_plugin_skills, DiscoveryLocationScope.EXTENSION_PLUGIN)
+        self._merge_skill_results(
+            result, self._discover_plugin_manifest_skills, DiscoveryLocationScope.EXTENSION_PLUGIN
+        )
+        self._merge_skill_results(result, self._discover_system_skills, DiscoveryLocationScope.SYSTEM)
         return result
 
     # --- private: MCP discovery ---
@@ -338,7 +344,7 @@ class CodexDiscoverer(AgentDiscoverer):
 
     # --- private: skills discovery ---
 
-    def _discover_global_skills(self) -> SkillsDirsResult:
+    def _discover_user_skills(self) -> SkillsDirsResult:
         """Scan the user (``~/.agents/skills``), the deprecated-but-still-loaded
         ``<codex_home>/skills`` (kept by Codex for backward compatibility), the
         OpenAI-embedded ``<codex_home>/skills/.system`` cache, and admin
@@ -355,13 +361,24 @@ class CodexDiscoverer(AgentDiscoverer):
             self._codex_home() / "skills",
             self._codex_home() / "skills" / ".system",
             expand_path(Path(self._user_skills_relative), self.home_directory),
-            Path(self._admin_skills_dir),
         )
         for skills_dir in skills_dirs:
             entries = self._scan_skills_dir(skills_dir)
             if entries is not None:
                 result[skills_dir.as_posix()] = entries
         return result
+
+    def _discover_system_skills(self) -> SkillsDirsResult:
+        result: SkillsDirsResult = {}
+        skills_dir = Path(self._admin_skills_dir)
+        entries = self._scan_skills_dir(skills_dir)
+        if entries is not None:
+            result[skills_dir.as_posix()] = entries
+        return result
+
+    def _discover_global_skills(self) -> SkillsDirsResult:
+        """Compatibility helper returning both user-global and system skills."""
+        return {**self._discover_user_skills(), **self._discover_system_skills()}
 
     def _discover_project_skills(self) -> SkillsDirsResult:
         """Scan ``<project>/.agents/skills`` for every registered project and ancestor."""

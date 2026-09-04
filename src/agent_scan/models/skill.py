@@ -5,6 +5,8 @@ Contains models for representing skill files during local discovery and analysis
 
 from pydantic import BaseModel, Field
 
+from agent_scan.models.discovery import DiscoveryLocationScope
+
 
 class DiscoveredSkill(BaseModel):
     """A skill or command found locally and awaiting file collection.
@@ -22,6 +24,10 @@ class DiscoveredSkill(BaseModel):
     path: str = Field(
         description="Path to the skill directory or command file, such as '~/.claude/skills/review' "
         "or '~/.claude/commands/git/commit.md'."
+    )
+    scope: DiscoveryLocationScope = Field(
+        default=DiscoveryLocationScope.CUSTOM,
+        description="Filesystem/location tier from which the skill was discovered.",
     )
 
 

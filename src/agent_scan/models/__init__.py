@@ -6,6 +6,7 @@ here keeps callers independent of that internal layout.
 
 from agent_scan.models.api import *  # noqa: F403
 from agent_scan.models.api import __all__ as _api_models
+from agent_scan.models.discovery import AUTOMATIC_DISCOVERY_SCOPES, DiscoveredServer, DiscoveryLocationScope
 from agent_scan.models.errors import (
     FAILURE_CATEGORY_TO_CODE,
     AnalysisError,
@@ -70,7 +71,9 @@ __all__ = [
     "ConfigWithoutMCP",
     "ControlServer",
     "CouldNotParseMCPConfig",
+    "DiscoveredServer",
     "DiscoveredSkill",
+    "DiscoveryLocationScope",
     "Entity",
     "ErrorCategory",
     "FileNotFoundConfig",
@@ -102,4 +105,5 @@ __all__ = [
     "VSCodeMCPConfig",
     "entity_to_tool",
     "rebalance_command_args",
+    "AUTOMATIC_DISCOVERY_SCOPES",
 ]
