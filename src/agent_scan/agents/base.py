@@ -273,7 +273,7 @@ class AgentDiscoverer(ABC):
             if not isinstance(value, list):
                 scoped[path] = value
                 continue
-            entries: list[DiscoveredServer] = []
+            entries: list[DiscoveredServer | tuple[str, StdioServer | RemoteServer]] = []
             for entry in value:
                 if isinstance(entry, DiscoveredServer):
                     entry_scope = scope if entry.scope is DiscoveryLocationScope.CUSTOM else entry.scope

@@ -469,7 +469,9 @@ async def _inspect_server_configs(
         if isinstance(servers_or_error, FileNotFoundConfig | UnknownConfigFormat | CouldNotParseMCPConfig):
             candidate_errors.append(_config_error_to_scan_error(servers_or_error))
             continue
-        for name, config in servers_or_error:
+        for discovered_server in servers_or_error:
+            name = discovered_server.name
+            config = discovered_server.server
             inspected_server = await _inspect_server(
                 name,
                 config,
