@@ -20,6 +20,7 @@ from agent_scan.models import (
     ClientToInspect,
     CouldNotParseMCPConfig,
     DiscoveredSkill,
+    DiscoveryLocationScope,
     InspectedPath,
     InspectedServer,
     InspectedSkill,
@@ -681,6 +682,36 @@ async def test_glob_discovers_plugin_mcp_configs():
 
 
 @pytest.mark.asyncio
+async def test_legacy_discovery_skips_selected_location_before_plugin_glob(tmp_path):
+    home = tmp_path / "user"
+    client_root = home / ".fake-client"
+    client_root.mkdir(parents=True)
+    (client_root / "mcp.json").write_text('{"mcpServers": {"user-server": {"command": "user"}}}')
+    plugin = client_root / "plugins" / "cache" / "vendor" / "plugin"
+    plugin.mkdir(parents=True)
+    (plugin / ".mcp.json").write_text('{"plugin-server": {"command": "plugin"}}')
+    pattern = "~/.fake-client/plugins/cache/**/.mcp.json"
+    candidate = CandidateClient(
+        name="fake-client",
+        client_exists_paths=["~/.fake-client"],
+        mcp_config_paths=["~/.fake-client/mcp.json"],
+        skills_dir_paths=[],
+        mcp_config_globs=[pattern],
+        mcp_config_glob_scopes={pattern: DiscoveryLocationScope.EXTENSION_PLUGIN},
+    )
+
+    ctis = await get_mcp_config_per_client(
+        candidate,
+        [(home, "user")],
+        skip_discovery_scopes={DiscoveryLocationScope.EXTENSION_PLUGIN},
+    )
+
+    entries = [server for value in ctis[0].mcp_configs.values() if isinstance(value, list) for server in value]
+    assert [server.name for server in entries] == ["user-server"]
+    assert entries[0].scope is DiscoveryLocationScope.USER
+
+
+@pytest.mark.asyncio
 async def test_glob_no_matches_still_works():
     """When mcp_config_globs match nothing, the client should still be discovered with empty configs."""
     tmp = tempfile.mkdtemp()
@@ -931,3 +962,52 @@ async def test_client_detection_is_scope_independent(scoped_candidate):
         ctis = await get_mcp_config_per_client(candidate, [(home, "user")], scope=scope)
         assert len(ctis) == 1, scope
         assert ctis[0].client_path is not None, scope
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "scope,mcp_config_paths,skills_dir_paths",
+    [
+        (DiscoveryScope.SERVERS, [], ["~/.fake-client/skills"]),
+        (DiscoveryScope.SKILLS, ["~/.fake-client/mcp.json"], []),
+    ],
+)
+async def test_client_detection_runs_when_requested_half_has_no_configured_sources(
+    tmp_path, scope, mcp_config_paths, skills_dir_paths
+):
+    home = tmp_path / "user"
+    (home / ".fake-client").mkdir(parents=True)
+    candidate = CandidateClient(
+        name="fake-client",
+        client_exists_paths=["~/.fake-client"],
+        mcp_config_paths=mcp_config_paths,
+        skills_dir_paths=skills_dir_paths,
+    )
+
+    ctis = await get_mcp_config_per_client(candidate, [(home, "user")], scope=scope)
+
+    assert len(ctis) == 1
+    assert ctis[0].client_path == (home / ".fake-client").as_posix()
+    assert ctis[0].mcp_configs == {}
+    assert ctis[0].skills_dirs == {}
+
+
+@pytest.mark.asyncio
+async def test_client_detection_is_skipped_when_exclusions_remove_all_requested_sources(tmp_path):
+    home = tmp_path / "user"
+    (home / ".fake-client").mkdir(parents=True)
+    candidate = CandidateClient(
+        name="fake-client",
+        client_exists_paths=["~/.fake-client"],
+        mcp_config_paths=["~/.fake-client/mcp.json"],
+        skills_dir_paths=[],
+    )
+
+    ctis = await get_mcp_config_per_client(
+        candidate,
+        [(home, "user")],
+        scope=DiscoveryScope.SERVERS,
+        skip_discovery_scopes={DiscoveryLocationScope.USER},
+    )
+
+    assert ctis == []

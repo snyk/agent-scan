@@ -535,6 +535,54 @@ def test_claude_code_discoverer_discover_mcp_servers_combines_global_and_project
     project_entry = mcp_configs[project_keys[0]]
     assert isinstance(global_entry, list) and global_entry[0][0] == "global-srv"
     assert isinstance(project_entry, list) and project_entry[0][0] == "proj-srv"
+    assert global_entry[0].scope.value == "user"
+    assert project_entry[0].scope.value == "project_workspace"
+
+
+def test_claude_code_discoverer_skips_project_source_before_calling_it(tmp_path, monkeypatch):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+    from agent_scan.models import DiscoveryLocationScope
+
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude.json").write_text('{"mcpServers": {"global-srv": {"command": "g"}}}')
+    discoverer = ClaudeCodeDiscoverer(
+        tmp_path,
+        skip_discovery_scopes={DiscoveryLocationScope.PROJECT_WORKSPACE},
+    )
+    monkeypatch.setattr(
+        discoverer,
+        "_discover_project_mcp_servers",
+        lambda: pytest.fail("project discovery must not run"),
+    )
+
+    mcp_configs = discoverer.discover_mcp_servers()
+
+    entries = next(value for value in mcp_configs.values() if isinstance(value, list))
+    assert entries[0].scope is DiscoveryLocationScope.USER
+
+
+def test_discovery_scope_precedence_keeps_user_over_project_for_same_path(tmp_path, monkeypatch):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+    from agent_scan.models import DiscoveryLocationScope
+
+    (tmp_path / ".claude").mkdir()
+    discoverer = ClaudeCodeDiscoverer(tmp_path)
+    shared = (tmp_path / ".claude" / "shared.json").as_posix()
+    monkeypatch.setattr(
+        discoverer,
+        "_discover_project_mcp_servers",
+        lambda: {shared: [("project", StdioServer(command="project"))]},
+    )
+    monkeypatch.setattr(
+        discoverer,
+        "_discover_global_mcp_servers",
+        lambda: {shared: [("user", StdioServer(command="user"))]},
+    )
+
+    result = discoverer.discover_mcp_servers()
+
+    assert result[shared][0].name == "user"
+    assert result[shared][0].scope is DiscoveryLocationScope.USER
 
 
 # --- ClaudeCodeDiscoverer: project skills ---
@@ -621,6 +669,10 @@ def test_claude_code_discoverer_discover_skills_combines_global_and_project(tmp_
     skills_dirs = ClaudeCodeDiscoverer(tmp_path).discover_skills()
 
     assert len(skills_dirs) == 2  # one global, one project
+    scopes = {
+        skill.name: skill.scope.value for skills in skills_dirs.values() if isinstance(skills, list) for skill in skills
+    }
+    assert scopes == {"global-skill": "user", "proj-skill": "project_workspace"}
 
 
 # --- ClaudeCodeDiscoverer: plugin MCP + skills ---
@@ -935,6 +987,7 @@ def test_claude_code_discoverer_discover_mcp_includes_plugin_servers(tmp_path):
 
     plugin_keys = [k for k in mcp_configs if k.endswith("/p/.mcp.json")]
     assert len(plugin_keys) == 1
+    assert mcp_configs[plugin_keys[0]][0].scope.value == "extension_plugin"
 
 
 def test_claude_code_discoverer_discover_skills_includes_plugin_skills(tmp_path):
@@ -949,6 +1002,7 @@ def test_claude_code_discoverer_discover_skills_includes_plugin_skills(tmp_path)
 
     plugin_keys = [k for k in skills_dirs if "/plugins/cache/" in k]
     assert len(plugin_keys) == 1
+    assert skills_dirs[plugin_keys[0]][0].scope.value == "extension_plugin"
 
 
 def test_claude_code_discoverer_plugin_mcp_servers_scans_repos_dir(tmp_path):
@@ -1239,6 +1293,15 @@ def test_find_discoverers_returns_empty_when_no_agents_installed(tmp_path):
     found = find_discoverers(tmp_path)
 
     assert found == []
+
+
+def test_find_discoverers_skips_client_probes_when_all_locations_are_excluded(tmp_path):
+    from agent_scan.agents import find_discoverers
+    from agent_scan.models import AUTOMATIC_DISCOVERY_SCOPES
+
+    (tmp_path / ".claude").mkdir()
+
+    assert find_discoverers(tmp_path, skip_discovery_scopes=AUTOMATIC_DISCOVERY_SCOPES) == []
 
 
 # --- Pipeline dispatch: legacy for all + ABC merge phase ---
@@ -4942,6 +5005,7 @@ def test_claude_code_discovers_managed_mcp_servers(tmp_path, monkeypatch):
     name, server = mcp_configs[keys[0]][0]
     assert name == "corp-server"
     assert isinstance(server, StdioServer)
+    assert mcp_configs[keys[0]][0].scope.value == "system"
 
 
 def test_managed_mcp_path_honors_program_files_env_on_windows(tmp_path, monkeypatch):
@@ -5550,6 +5614,7 @@ def test_windsurf_discovers_system_skills_dir(tmp_path, monkeypatch):
     keys = [k for k in skills_dirs if k.endswith("/system-windsurf-skills")]
     assert len(keys) == 1
     assert {skill.name for skill in skills_dirs[keys[0]]} == {"system-skill"}
+    assert {skill.scope.value for skill in skills_dirs[keys[0]]} == {"system"}
 
 
 @pytest.mark.skipif(
@@ -6982,6 +7047,7 @@ def test_codex_discoverer_discovers_system_mcp_servers(tmp_path, monkeypatch):
     keys = [k for k in mcp_configs if k.endswith("/system-config.toml")]
     assert len(keys) == 1
     assert mcp_configs[keys[0]][0][0] == "system_srv"
+    assert mcp_configs[keys[0]][0].scope.value == "system"
 
 
 def test_codex_system_config_path_is_per_os(monkeypatch):
@@ -8617,6 +8683,63 @@ def test_opencode_discoverer_scans_skills_paths_relative_against_each_worktree(t
     assert not any(k.endswith("/.config/opencode/team-skills") for k in skills_dirs)
 
 
+def test_opencode_user_config_relative_skill_survives_skipped_user_scope(tmp_path):
+    from agent_scan.agents import OpenCodeDiscoverer
+    from agent_scan.models import DiscoveryLocationScope
+
+    install = _opencode_install(tmp_path)
+    project = tmp_path / "project"
+    project_skill = project / "team-skills" / "project-skill"
+    project_skill.mkdir(parents=True)
+    (project_skill / "SKILL.md").write_text("---\nname: project-skill\ndescription: p\n---\nBody\n")
+    user_root = tmp_path / "user-skills"
+    user_skill = user_root / "user-skill"
+    user_skill.mkdir(parents=True)
+    (user_skill / "SKILL.md").write_text("---\nname: user-skill\ndescription: u\n---\nBody\n")
+    (install / "opencode.json").write_text(json.dumps({"skills": {"paths": ["./team-skills", "~/user-skills"]}}))
+    _seed_opencode_db(tmp_path / ".local" / "share" / "opencode" / "opencode.db", [project.as_posix()])
+
+    skills_dirs = OpenCodeDiscoverer(
+        tmp_path,
+        skip_discovery_scopes={DiscoveryLocationScope.USER},
+    ).discover_skills()
+
+    project_entries = skills_dirs[(project / "team-skills").as_posix()]
+    assert [skill.name for skill in project_entries] == ["project-skill"]
+    assert {skill.scope for skill in project_entries} == {DiscoveryLocationScope.PROJECT_WORKSPACE}
+    assert user_root.as_posix() not in skills_dirs
+
+
+def test_opencode_managed_config_relative_skill_survives_skipped_system_scope(tmp_path, monkeypatch):
+    from agent_scan.agents import OpenCodeDiscoverer
+    from agent_scan.models import DiscoveryLocationScope
+
+    _opencode_install(tmp_path)
+    managed = tmp_path / "managed"
+    managed.mkdir()
+    monkeypatch.setattr(OpenCodeDiscoverer, "_managed_config_dir", lambda self: managed)
+    project = tmp_path / "project"
+    project_skill = project / "team-skills" / "project-skill"
+    project_skill.mkdir(parents=True)
+    (project_skill / "SKILL.md").write_text("---\nname: project-skill\ndescription: p\n---\nBody\n")
+    system_root = tmp_path / "system-skills"
+    system_skill = system_root / "system-skill"
+    system_skill.mkdir(parents=True)
+    (system_skill / "SKILL.md").write_text("---\nname: system-skill\ndescription: s\n---\nBody\n")
+    (managed / "opencode.json").write_text(json.dumps({"skills": {"paths": ["./team-skills", system_root.as_posix()]}}))
+    _seed_opencode_db(tmp_path / ".local" / "share" / "opencode" / "opencode.db", [project.as_posix()])
+
+    skills_dirs = OpenCodeDiscoverer(
+        tmp_path,
+        skip_discovery_scopes={DiscoveryLocationScope.SYSTEM},
+    ).discover_skills()
+
+    project_entries = skills_dirs[(project / "team-skills").as_posix()]
+    assert [skill.name for skill in project_entries] == ["project-skill"]
+    assert {skill.scope for skill in project_entries} == {DiscoveryLocationScope.PROJECT_WORKSPACE}
+    assert system_root.as_posix() not in skills_dirs
+
+
 def test_opencode_discoverer_skills_paths_relative_records_nothing_without_projects(tmp_path):
     """With no opened projects there is no instance directory to anchor a relative
     ``skills.paths`` entry against, so it resolves to nothing — matching that
@@ -9234,6 +9357,36 @@ async def test_pipeline_preserves_unresolved_target_folder_spelling(tmp_path):
         )
 
     find.assert_called_once_with(home, target_folders=[project_link])
+
+
+@pytest.mark.asyncio
+async def test_pipeline_does_not_resolve_target_folders_when_project_scope_is_skipped(tmp_path):
+    from agent_scan.models import DiscoveryLocationScope
+    from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
+
+    home = tmp_path / "home"
+    home.mkdir()
+    with (
+        patch("agent_scan.pipelines.get_readable_home_directories", return_value=[(home, "alice")]),
+        patch("agent_scan.pipelines.get_well_known_clients", return_value=[]),
+        patch("agent_scan.pipelines.find_discoverers", return_value=[]) as find,
+        patch.object(Path, "resolve", side_effect=AssertionError("target folder must not be resolved")),
+    ):
+        await discover_clients_to_inspect(
+            InspectArgs(
+                timeout=0,
+                tokens=[],
+                paths=[],
+                target_folders=["/session/project"],
+                skip_discovery_scopes={DiscoveryLocationScope.PROJECT_WORKSPACE},
+            )
+        )
+
+    find.assert_called_once_with(
+        home,
+        target_folders=[],
+        skip_discovery_scopes={DiscoveryLocationScope.PROJECT_WORKSPACE},
+    )
 
 
 @pytest.mark.asyncio

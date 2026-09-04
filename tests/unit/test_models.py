@@ -12,7 +12,26 @@ class TestInspectionResults:
 
         assert skill.name == "git:commit"
         assert skill.path == "/project/.claude/commands/git/commit.md"
-        assert set(skill.model_dump()) == {"name", "path"}
+        assert skill.model_dump() == {
+            "name": "git:commit",
+            "path": "/project/.claude/commands/git/commit.md",
+            "scope": "custom",
+        }
+
+    def test_legacy_discovered_server_pair_is_normalized_as_custom(self):
+        from agent_scan.models import ClientToInspect, DiscoveredServer, DiscoveryLocationScope, StdioServer
+
+        client = ClientToInspect(
+            name="custom",
+            client_path="/custom",
+            mcp_configs={"/custom/config.json": [("server", StdioServer(command="server"))]},
+            skills_dirs={},
+        )
+
+        discovered = client.mcp_configs["/custom/config.json"]
+        assert isinstance(discovered, list)
+        assert isinstance(discovered[0], DiscoveredServer)
+        assert discovered[0].scope is DiscoveryLocationScope.CUSTOM
 
     def test_v20260710_wire_models_are_distinct_from_inspection_models(self):
         from agent_scan.models.api.v20260710 import McpServerRequest, ScanPathRequest, SkillRequest

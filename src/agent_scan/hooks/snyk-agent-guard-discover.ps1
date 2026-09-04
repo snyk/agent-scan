@@ -22,7 +22,10 @@ param(
 
     [Parameter(Mandatory=$false)]
     [ValidateSet("servers","skills","all")]
-    [string]$Scope = "servers"
+    [string]$Scope = "servers",
+
+    [Parameter(Mandatory=$false)]
+    [string]$SkipDiscoveryScopes
 )
 
 $ErrorActionPreference = "Stop"
@@ -37,6 +40,7 @@ $cmd = if ($AgentScanCommand) { $AgentScanCommand } elseif ($env:AGENT_SCAN_COMM
 if (-not $cmd) { exit 0 }
 
 $arguments = @("guard", "discover", "--client", $Client, "--scope", $Scope)
+if ($SkipDiscoveryScopes) { $arguments += @("--skip-discovery-scopes", $SkipDiscoveryScopes) }
 
 # Do not read stdin here. Invoking the binary outside a pipeline lets it inherit this
 # process's stdin, so `guard discover` reads the hook payload itself under its own 5s

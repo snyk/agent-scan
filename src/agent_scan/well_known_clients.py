@@ -4,7 +4,7 @@ import os
 import sys
 from pathlib import Path
 
-from agent_scan.models import CandidateClient
+from agent_scan.models import CandidateClient, DiscoveryLocationScope
 
 # Set up logger for this module
 logger = logging.getLogger(__name__)
@@ -51,6 +51,8 @@ MACOS_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
         skills_dir_paths=["~/.claude/skills"],
         mcp_config_globs=["~/.claude/plugins/cache/**/.mcp.json"],
         skills_dir_globs=["~/.claude/plugins/cache/**/skills"],
+        mcp_config_glob_scopes={"~/.claude/plugins/cache/**/.mcp.json": DiscoveryLocationScope.EXTENSION_PLUGIN},
+        skills_dir_glob_scopes={"~/.claude/plugins/cache/**/skills": DiscoveryLocationScope.EXTENSION_PLUGIN},
     ),
     CandidateClient(
         name="gemini cli",
@@ -68,12 +70,17 @@ MACOS_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
             "~/.openclaw/workspace/skills",
             ".openclaw/skills",
         ],
+        skills_dir_path_scopes={
+            "~/.openclaw/workspace/skills": DiscoveryLocationScope.PROJECT_WORKSPACE,
+            ".openclaw/skills": DiscoveryLocationScope.PROJECT_WORKSPACE,
+        },
     ),
     CandidateClient(
         name="amp",
         client_exists_paths=["~/.config/agents", ".amp"],
         mcp_config_paths=[],
         skills_dir_paths=["~/.config/agents/skills", ".amp/skills"],
+        skills_dir_path_scopes={".amp/skills": DiscoveryLocationScope.PROJECT_WORKSPACE},
     ),
     CandidateClient(
         name="kiro",
@@ -141,6 +148,8 @@ LINUX_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
         skills_dir_paths=["~/.claude/skills"],
         mcp_config_globs=["~/.claude/plugins/cache/**/.mcp.json"],
         skills_dir_globs=["~/.claude/plugins/cache/**/skills"],
+        mcp_config_glob_scopes={"~/.claude/plugins/cache/**/.mcp.json": DiscoveryLocationScope.EXTENSION_PLUGIN},
+        skills_dir_glob_scopes={"~/.claude/plugins/cache/**/skills": DiscoveryLocationScope.EXTENSION_PLUGIN},
     ),
     CandidateClient(
         name="gemini cli",
@@ -158,12 +167,17 @@ LINUX_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
             "~/.openclaw/workspace/skills",
             ".openclaw/skills",
         ],
+        skills_dir_path_scopes={
+            "~/.openclaw/workspace/skills": DiscoveryLocationScope.PROJECT_WORKSPACE,
+            ".openclaw/skills": DiscoveryLocationScope.PROJECT_WORKSPACE,
+        },
     ),
     CandidateClient(
         name="amp",
         client_exists_paths=["~/.config/agents", ".amp"],
         mcp_config_paths=[],
         skills_dir_paths=["~/.config/agents/skills", ".amp/skills"],
+        skills_dir_path_scopes={".amp/skills": DiscoveryLocationScope.PROJECT_WORKSPACE},
     ),
     CandidateClient(
         name="kiro",
@@ -238,6 +252,8 @@ WINDOWS_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
         skills_dir_paths=["~/.claude/skills"],
         mcp_config_globs=["~/.claude/plugins/cache/**/.mcp.json"],
         skills_dir_globs=["~/.claude/plugins/cache/**/skills"],
+        mcp_config_glob_scopes={"~/.claude/plugins/cache/**/.mcp.json": DiscoveryLocationScope.EXTENSION_PLUGIN},
+        skills_dir_glob_scopes={"~/.claude/plugins/cache/**/skills": DiscoveryLocationScope.EXTENSION_PLUGIN},
     ),
     CandidateClient(
         name="gemini cli",
@@ -255,12 +271,17 @@ WINDOWS_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
             "~/.openclaw/workspace/skills",
             ".openclaw/skills",
         ],
+        skills_dir_path_scopes={
+            "~/.openclaw/workspace/skills": DiscoveryLocationScope.PROJECT_WORKSPACE,
+            ".openclaw/skills": DiscoveryLocationScope.PROJECT_WORKSPACE,
+        },
     ),
     CandidateClient(
         name="amp",
         client_exists_paths=["~/.config/agents", ".amp"],
         mcp_config_paths=[],
         skills_dir_paths=["~/.config/agents/skills", ".amp/skills"],
+        skills_dir_path_scopes={".amp/skills": DiscoveryLocationScope.PROJECT_WORKSPACE},
     ),
     CandidateClient(
         name="kiro",

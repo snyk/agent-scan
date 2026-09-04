@@ -16,6 +16,7 @@ from agent_scan.models import (
     ClientToInspect,
     ControlServer,
     DiscoveredSkill,
+    DiscoveryLocationScope,
     InspectedPath,
     ScanError,
     ScanResponse,
@@ -37,6 +38,7 @@ class InspectArgs(BaseModel):
     scan_skills: bool = False
     discovery_scope: DiscoveryScope = DiscoveryScope.ALL
     target_folders: list[str] = Field(default_factory=list)
+    skip_discovery_scopes: set[DiscoveryLocationScope] = Field(default_factory=set)
 
 
 class AnalyzeArgs(BaseModel):
@@ -89,31 +91,37 @@ async def discover_clients_to_inspect(
     else:
         target_folders: list[Path] = []
         seen_target_folders: set[Path] = set()
-        for raw_path in inspect_args.target_folders:
-            target_path = Path(raw_path).expanduser()
-            try:
-                key = target_path.resolve()
-            except (OSError, RuntimeError, ValueError):
-                # Target folders come from untrusted hook-payload JSON, where a NUL byte
-                # raises ValueError; fall back to the literal path so one bad entry cannot
-                # abort the whole discovery.
-                key = target_path
-            if key in seen_target_folders:
-                continue
-            seen_target_folders.add(key)
-            try:
-                exists = key.exists()
-            except (OSError, RuntimeError, ValueError):
-                logger.warning("Skipping inaccessible target folder: %s", target_path)
-                continue
-            if not exists:
-                logger.warning("Skipping non-existent target folder: %s", target_path)
-                continue
-            target_folders.append(target_path)
+        if DiscoveryLocationScope.PROJECT_WORKSPACE not in inspect_args.skip_discovery_scopes:
+            for raw_path in inspect_args.target_folders:
+                target_path = Path(raw_path).expanduser()
+                try:
+                    key = target_path.resolve()
+                except (OSError, RuntimeError, ValueError):
+                    # Target folders come from untrusted hook-payload JSON, where a NUL byte
+                    # raises ValueError; fall back to the literal path so one bad entry cannot
+                    # abort the whole discovery.
+                    key = target_path
+                if key in seen_target_folders:
+                    continue
+                seen_target_folders.add(key)
+                try:
+                    exists = key.exists()
+                except (OSError, RuntimeError, ValueError):
+                    logger.warning("Skipping inaccessible target folder: %s", target_path)
+                    continue
+                if not exists:
+                    logger.warning("Skipping non-existent target folder: %s", target_path)
+                    continue
+                target_folders.append(target_path)
 
         # Phase A — legacy path. Runs for EVERY well-known client including Claude Code.
         for client in get_well_known_clients():
-            ctis = await get_mcp_config_per_client(client, home_dirs_with_users, scope=inspect_args.discovery_scope)
+            ctis = await get_mcp_config_per_client(
+                client,
+                home_dirs_with_users,
+                scope=inspect_args.discovery_scope,
+                skip_discovery_scopes=inspect_args.skip_discovery_scopes,
+            )
             if ctis:
                 clients_to_inspect.extend(ctis)
             else:
@@ -121,7 +129,10 @@ async def discover_clients_to_inspect(
 
         # Phase B — ABC path. Runs sequentially after Phase A and merges into its output.
         for home_directory, username in home_dirs_with_users:
-            for discoverer in find_discoverers(home_directory, target_folders=target_folders):
+            discoverer_kwargs: dict = {"target_folders": target_folders}
+            if inspect_args.skip_discovery_scopes:
+                discoverer_kwargs["skip_discovery_scopes"] = inspect_args.skip_discovery_scopes
+            for discoverer in find_discoverers(home_directory, **discoverer_kwargs):
                 try:
                     cti = discoverer.discover(inspect_args.discovery_scope)
                 except Exception:
@@ -292,6 +303,7 @@ async def client_to_inspect_from_path(
                 client_exists_paths=[path],
                 mcp_config_paths=[],
                 skills_dir_paths=[path],
+                default_location_scope=DiscoveryLocationScope.CUSTOM,
             )
             return await get_mcp_config_per_client(
                 candidate_client, home_dirs=home_dirs, create_file_not_found_error=True
@@ -316,5 +328,6 @@ async def client_to_inspect_from_path(
             client_exists_paths=[path],
             mcp_config_paths=[path],
             skills_dir_paths=[],
+            default_location_scope=DiscoveryLocationScope.CUSTOM,
         )
         return await get_mcp_config_per_client(candidate_client, home_dirs=home_dirs, create_file_not_found_error=True)
