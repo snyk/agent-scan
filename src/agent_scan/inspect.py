@@ -8,6 +8,7 @@ from httpx import HTTPStatusError
 from agent_scan.agents.base import DiscoveryScope
 from agent_scan.mcp_client import check_server, scan_mcp_config_file
 from agent_scan.models import (
+    AUTOMATIC_DISCOVERY_SCOPES,
     LOCATION_SCOPE_PRECEDENCE,
     CandidateClient,
     ClientToInspect,
@@ -204,8 +205,12 @@ async def get_mcp_config_per_home_directory(
     If not found, returns None.
 
     ``scope`` gates the two halves the same way ``AgentDiscoverer.discover`` does, so a
-    servers-only request does not pay for the skills glob (and vice versa). Client
-    detection itself always runs, so a client never disappears from a scoped report.
+    servers-only request does not pay for the skills glob (and vice versa).
+
+    Client detection always runs, so an installed agent never disappears from a
+    scoped report -- it comes back with only its in-scope components. The one
+    exception is ``skip_discovery_scopes`` covering every automatic scope, which
+    asks for no discovery at all and so withholds presence too.
     """
     scope = DiscoveryScope(scope)
     want_servers = scope in (DiscoveryScope.SERVERS, DiscoveryScope.ALL)
@@ -240,13 +245,14 @@ async def get_mcp_config_per_home_directory(
         for pattern in client.skills_dir_globs
         if location_scope(pattern, client.skills_dir_glob_scopes) not in skipped
     ]
-    has_requested_sources = (want_servers and bool(client.mcp_config_paths or client.mcp_config_globs)) or (
-        want_skills and bool(client.skills_dir_paths or client.skills_dir_globs)
-    )
-    has_enabled_requested_sources = (want_servers and bool(enabled_mcp_paths or enabled_mcp_globs)) or (
-        want_skills and bool(enabled_skill_paths or enabled_skill_globs)
-    )
-    if has_requested_sources and not has_enabled_requested_sources:
+    # Excluding every automatic scope means "discover nothing", including the
+    # fact that an agent is installed and where -- otherwise the session-start
+    # event still discloses that. Mirrors ``find_discoverers``, which
+    # short-circuits on the same condition. Anything short of that keeps the
+    # client so a caller can tell "installed, nothing in scope" from
+    # "not installed": the pipeline logs a not-present message otherwise, and
+    # derives the scanned username from the surviving clients.
+    if skipped >= AUTOMATIC_DISCOVERY_SCOPES:
         return None
 
     # check if client exists

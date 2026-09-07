@@ -993,7 +993,14 @@ async def test_client_detection_runs_when_requested_half_has_no_configured_sourc
 
 
 @pytest.mark.asyncio
-async def test_client_detection_is_skipped_when_exclusions_remove_all_requested_sources(tmp_path):
+async def test_installed_client_is_still_reported_when_exclusions_remove_its_sources(tmp_path):
+    """An installed client whose every source is excluded has no in-scope
+    components -- it is not absent. Returning nothing made ``pipelines`` log
+    "does not exist on this machine" about an agent that is installed, and left
+    ``scanned_usernames`` with no username to attribute the scan to. It also
+    contradicted the sibling test above, where a client with no *configured*
+    sources for the requested half is reported with empty dicts.
+    """
     home = tmp_path / "user"
     (home / ".fake-client").mkdir(parents=True)
     candidate = CandidateClient(
@@ -1010,7 +1017,44 @@ async def test_client_detection_is_skipped_when_exclusions_remove_all_requested_
         skip_discovery_scopes={DiscoveryLocationScope.USER},
     )
 
-    assert ctis == []
+    assert len(ctis) == 1
+    assert ctis[0].client_path == (home / ".fake-client").as_posix()
+    assert ctis[0].mcp_configs == {}
+
+
+@pytest.mark.asyncio
+async def test_excluding_every_automatic_scope_reports_nothing_at_all(tmp_path):
+    """``--skip-discovery-scopes all`` is documented as excluding every automatic
+    scope, so it must not still disclose which agents are installed and where.
+    Previously a client declaring no sources for the requested half bypassed the
+    gate entirely and shipped a presence entry, while one with sources vanished.
+    """
+    from agent_scan.models import AUTOMATIC_DISCOVERY_SCOPES
+
+    home = tmp_path / "user"
+    (home / ".fake-client").mkdir(parents=True)
+    (home / ".no-sources").mkdir(parents=True)
+    with_sources = CandidateClient(
+        name="fake-client",
+        client_exists_paths=["~/.fake-client"],
+        mcp_config_paths=["~/.fake-client/mcp.json"],
+        skills_dir_paths=[],
+    )
+    without_sources = CandidateClient(
+        name="no-sources",
+        client_exists_paths=["~/.no-sources"],
+        mcp_config_paths=[],
+        skills_dir_paths=[],
+    )
+
+    for candidate in (with_sources, without_sources):
+        ctis = await get_mcp_config_per_client(
+            candidate,
+            [(home, "user")],
+            scope=DiscoveryScope.SERVERS,
+            skip_discovery_scopes=AUTOMATIC_DISCOVERY_SCOPES,
+        )
+        assert ctis == [], f"{candidate.name} still disclosed its presence"
 
 
 def _claude_code_candidate() -> CandidateClient:
@@ -1188,3 +1232,40 @@ async def test_colliding_declarations_are_order_independent(tmp_path):
         > (LOCATION_SCOPE_PRECEDENCE[DiscoveryLocationScope.PROJECT_WORKSPACE])
     )
     assert [s.scope for s in entries] == [DiscoveryLocationScope.SYSTEM]
+
+
+@pytest.mark.asyncio
+async def test_scanned_username_is_the_scanned_home_not_the_scanning_user(tmp_path):
+    """``scanned_usernames`` falls back to ``getpass.getuser()`` when no client
+    survives discovery. A *location* filter must not change which identity the
+    scan is attributed to -- before this, ``--skip-discovery-scopes user``
+    emptied the client list and stamped the scan with whoever ran the process.
+    """
+    home = tmp_path / "alice-home"
+    (home / ".fake-client").mkdir(parents=True)
+    (home / ".fake-client" / "mcp.json").write_text('{"mcpServers": {"srv": {"command": "node"}}}')
+    candidate = CandidateClient(
+        name="fake-client",
+        client_exists_paths=["~/.fake-client"],
+        mcp_config_paths=["~/.fake-client/mcp.json"],
+        skills_dir_paths=[],
+    )
+
+    from agent_scan.pipelines import discover_clients_to_inspect
+
+    args = InspectArgs(
+        timeout=1,
+        tokens=[],
+        paths=[],
+        discovery_scope=DiscoveryScope.SERVERS,
+        skip_discovery_scopes={DiscoveryLocationScope.USER},
+    )
+    with (
+        patch("agent_scan.pipelines.get_readable_home_directories", return_value=[(home, "alice")]),
+        patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
+        patch("agent_scan.pipelines.find_discoverers", return_value=[]),
+    ):
+        _, _, scanned_usernames = await discover_clients_to_inspect(args)
+
+    assert scanned_usernames == ["alice"]
+    assert getpass.getuser() not in scanned_usernames or getpass.getuser() == "alice"
