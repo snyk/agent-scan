@@ -19,6 +19,7 @@ from pathlib import Path
 import pyjson5
 
 from agent_scan.models import (
+    LOCATION_SCOPE_PRECEDENCE,
     SERVER_CONFIG_DISCRIMINATOR_KEYS,
     ClientToInspect,
     CouldNotParseMCPConfig,
@@ -56,14 +57,13 @@ class DiscoveryScope(str, Enum):
     ALL = "all"
 
 
-_LOCATION_SCOPE_PRECEDENCE = {
-    DiscoveryLocationScope.PROJECT_WORKSPACE: 0,
-    DiscoveryLocationScope.USER: 1,
-    DiscoveryLocationScope.EXTENSION_PLUGIN: 2,
-    DiscoveryLocationScope.SYSTEM: 3,
-    DiscoveryLocationScope.CUSTOM: 4,
-}
-
+# Merge ranks below the real ``LOCATION_SCOPE_PRECEDENCE`` band (0..4), ordered
+# so that data beats errors, a surfaced failure beats a benign record, and
+# "found nothing" never displaces anything. See ``_result_precedence``.
+_PRECEDENCE_EMPTY = -4
+_PRECEDENCE_NON_FAILURE = -3
+_PRECEDENCE_FAILURE = -2
+_PRECEDENCE_UNLABELLED = -1
 
 # Cap traversal into ``~/.claude/plugins/{cache,repos}``
 _MAX_PLUGIN_RGLOB_DEPTH = 10
@@ -186,6 +186,7 @@ class AgentDiscoverer(ABC):
         # discovery does not need to re-walk workspaceStorage / re-read
         # ~/.claude.json each time.
         self._discovery_paths_cache: list[Path] | None = None
+        self._project_anchors_cache: list[Path] | None = None
 
     def _scans_own_home(self) -> bool:
         """True when this discoverer targets the scanning process's own user.
@@ -266,34 +267,99 @@ class AgentDiscoverer(ABC):
     def _scope_enabled(self, scope: DiscoveryLocationScope) -> bool:
         return scope not in self.skip_discovery_scopes
 
-    @staticmethod
-    def _scope_mcp_results(results: McpConfigsResult, scope: DiscoveryLocationScope) -> McpConfigsResult:
+    def _is_home_or_above(self, root: Path) -> bool:
+        try:
+            return self.home_directory.is_relative_to(root)
+        except (OSError, ValueError):
+            return False
+
+    def _project_anchors(self) -> list[Path]:
+        """Discovery roots that can legitimately confer ``PROJECT_WORKSPACE``.
+
+        ``_discovery_paths_with_ancestors`` deliberately walks to the filesystem
+        root so a monorepo root above an opened project still counts as project
+        config. The side effect is that the scanned home -- and ``/`` -- are
+        ancestors of every project beneath them, so without this filter every
+        user-scope directory also looks project-scoped and
+        ``--skip-discovery-scopes user`` stops excluding anything.
+        """
+        if self._project_anchors_cache is None:
+            self._project_anchors_cache = [
+                root for root in self._discovery_paths_with_ancestors() if not self._is_home_or_above(root)
+            ]
+        return self._project_anchors_cache
+
+    def _location_scope_for(
+        self, path: Path, default: DiscoveryLocationScope = DiscoveryLocationScope.USER
+    ) -> DiscoveryLocationScope:
+        """Classify where a relocatable file or directory actually lives.
+
+        For paths an environment variable or config setting may point anywhere,
+        a fixed label is wrong in both directions: a project-local target
+        survives an exclusion meant to drop it, and a relocated global one is
+        dropped by an exclusion that should not apply.
+        """
+        if any(Path(os.path.normpath(path)).is_relative_to(anchor) for anchor in self._project_anchors()):
+            return DiscoveryLocationScope.PROJECT_WORKSPACE
+        return default
+
+    def _resolve_entry_scope(self, path: str, declared: DiscoveryLocationScope) -> DiscoveryLocationScope:
+        """Demote a ``PROJECT_WORKSPACE`` label that does not resolve inside a project.
+
+        Scope describes where a component lives, not which file mentioned it, so
+        a path is only project-scoped when it actually sits inside an opened
+        project (or an ancestor of one that is not the home). Two things depend
+        on this: the project sweep re-finds the user directories through the
+        ancestor walk, and a config file gets to name paths outside its own tier
+        -- a repo-committed one could otherwise point at the user's home and pick
+        the label that excludes it.
+
+        Only ``PROJECT_WORKSPACE`` is validated; it is the one label a caller can
+        obtain for a location it does not own. Compared lexically, with no
+        filesystem access, so a symlink planted between this check and the walk
+        cannot change the answer.
+        """
+        if declared is not DiscoveryLocationScope.PROJECT_WORKSPACE:
+            return declared
+        candidate = Path(os.path.normpath(path))
+        if any(candidate.is_relative_to(anchor) for anchor in self._project_anchors()):
+            return declared
+        return DiscoveryLocationScope.USER
+
+    def _scope_mcp_results(self, results: McpConfigsResult, scope: DiscoveryLocationScope) -> McpConfigsResult:
         scoped: McpConfigsResult = {}
         for path, value in results.items():
             if not isinstance(value, list):
                 scoped[path] = value
                 continue
+            path_scope = self._resolve_entry_scope(path, scope)
+            if not self._scope_enabled(path_scope):
+                # Demoted out of the requested set (e.g. a project sweep that
+                # re-found a user directory while user scope is excluded).
+                continue
             entries: list[DiscoveredServer | tuple[str, StdioServer | RemoteServer]] = []
             for entry in value:
                 if isinstance(entry, DiscoveredServer):
-                    entry_scope = scope if entry.scope is DiscoveryLocationScope.CUSTOM else entry.scope
+                    entry_scope = path_scope if entry.scope is DiscoveryLocationScope.CUSTOM else entry.scope
                     entries.append(entry.model_copy(update={"scope": entry_scope}))
                 else:
                     name, server = entry
-                    entries.append(DiscoveredServer(name=name, server=server, scope=scope))
+                    entries.append(DiscoveredServer(name=name, server=server, scope=path_scope))
             scoped[path] = entries
         return scoped
 
-    @staticmethod
-    def _scope_skill_results(results: SkillsDirsResult, scope: DiscoveryLocationScope) -> SkillsDirsResult:
+    def _scope_skill_results(self, results: SkillsDirsResult, scope: DiscoveryLocationScope) -> SkillsDirsResult:
         scoped: SkillsDirsResult = {}
         for path, value in results.items():
             if not isinstance(value, list):
                 scoped[path] = value
                 continue
+            path_scope = self._resolve_entry_scope(path, scope)
+            if not self._scope_enabled(path_scope):
+                continue
             scoped[path] = [
                 skill.model_copy(
-                    update={"scope": scope if skill.scope is DiscoveryLocationScope.CUSTOM else skill.scope}
+                    update={"scope": path_scope if skill.scope is DiscoveryLocationScope.CUSTOM else skill.scope}
                 )
                 for skill in value
             ]
@@ -301,11 +367,25 @@ class AgentDiscoverer(ABC):
 
     @staticmethod
     def _result_precedence(value: object) -> int:
-        if isinstance(value, list) and value:
+        """Rank a merge candidate for one path key. Higher wins.
+
+        Real data outranks every error record, and a deliberately-surfaced
+        failure outranks both "not present" and "found nothing" -- otherwise a
+        later pass that simply came up empty at the same path would erase a parse
+        error the scanner reports on purpose (opencode does exactly this for a
+        malformed ``$OPENCODE_CONFIG``).
+        """
+        if isinstance(value, list):
+            if not value:
+                return _PRECEDENCE_EMPTY
             first = value[0]
             if isinstance(first, DiscoveredServer | DiscoveredSkill):
-                return _LOCATION_SCOPE_PRECEDENCE[first.scope]
-        return -1
+                return LOCATION_SCOPE_PRECEDENCE[first.scope]
+            # A legacy ``(name, server)`` pair carries no scope; still real data.
+            return _PRECEDENCE_UNLABELLED
+        if getattr(value, "is_failure", False):
+            return _PRECEDENCE_FAILURE
+        return _PRECEDENCE_NON_FAILURE
 
     def _merge_mcp_results(
         self,

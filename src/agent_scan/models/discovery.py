@@ -27,6 +27,22 @@ AUTOMATIC_DISCOVERY_SCOPES = frozenset(
     }
 )
 
+# Which label wins when two declarations name the same resolved path. Higher
+# wins. Lives here rather than in ``agents`` because both discovery phases need
+# it and ``models`` must not import from ``agents``.
+#
+# ``CUSTOM`` ranks highest because it doubles as the "not yet labelled" sentinel
+# (see ``AgentDiscoverer._scope_mcp_results``) *and* as the scope of an explicit
+# ``--path`` scan, which the caller asked for by name and should never lose to an
+# automatically-discovered label.
+LOCATION_SCOPE_PRECEDENCE = {
+    DiscoveryLocationScope.PROJECT_WORKSPACE: 0,
+    DiscoveryLocationScope.USER: 1,
+    DiscoveryLocationScope.EXTENSION_PLUGIN: 2,
+    DiscoveryLocationScope.SYSTEM: 3,
+    DiscoveryLocationScope.CUSTOM: 4,
+}
+
 
 class DiscoveredServer(BaseModel):
     """An MCP server found locally before inspection.
@@ -67,4 +83,9 @@ class DiscoveredServer(BaseModel):
         return super().__eq__(other)
 
 
-__all__ = ["AUTOMATIC_DISCOVERY_SCOPES", "DiscoveredServer", "DiscoveryLocationScope"]
+__all__ = [
+    "AUTOMATIC_DISCOVERY_SCOPES",
+    "LOCATION_SCOPE_PRECEDENCE",
+    "DiscoveredServer",
+    "DiscoveryLocationScope",
+]

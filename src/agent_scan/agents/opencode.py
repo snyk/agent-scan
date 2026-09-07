@@ -5,7 +5,7 @@ import logging
 import os
 import sqlite3
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from agent_scan.agents.base import (
     AgentDiscoverer,
@@ -23,6 +23,26 @@ _OPENCODE_MCP_FORMATS: tuple[type[MCPConfig], ...] = (OpenCodeConfigFile,)
 # opencode accepts either extension; per https://opencode.ai/docs/config the
 # layered-config loader tries each when reading global and project scopes.
 _CONFIG_FILENAMES: tuple[str, ...] = ("opencode.json", "opencode.jsonc")
+
+
+def _is_rooted_skills_entry(entry: str) -> bool:
+    """Whether a ``skills.paths`` entry names a location outside any project.
+
+    ``Path`` is bound to the running platform, so ``Path("/opt/skills")`` is not
+    absolute on Windows (it has no drive) and ``Path("C:/x")`` is not absolute on
+    POSIX. Either way the entry would be treated as project-relative and joined
+    onto every worktree, which both mislabels its scope and resolves it somewhere
+    the config never named. A config file is data, not code running on the host,
+    so both spellings have to be recognised on every platform.
+    """
+    return (
+        PurePosixPath(entry).is_absolute() or PureWindowsPath(entry).is_absolute() or bool(PureWindowsPath(entry).root)
+    )
+
+
+def _is_home_skills_entry(entry: str) -> bool:
+    """Whether the entry is home-relative, in either path spelling."""
+    return entry == "~" or entry.startswith(("~/", "~\\"))
 
 
 class OpenCodeDiscoverer(AgentDiscoverer):
@@ -197,7 +217,7 @@ class OpenCodeDiscoverer(AgentDiscoverer):
         result: McpConfigsResult = {}
         self._merge_mcp_results(result, self._discover_project_mcp_servers, DiscoveryLocationScope.PROJECT_WORKSPACE)
         self._merge_mcp_results(result, self._discover_global_mcp_servers, DiscoveryLocationScope.USER)
-        self._merge_mcp_results(result, self._discover_env_override_mcp_servers, DiscoveryLocationScope.USER)
+        self._merge_mcp_results(result, self._discover_env_override_mcp_servers, self._env_override_config_scope())
         self._merge_mcp_results(result, self._discover_managed_mcp_servers, DiscoveryLocationScope.SYSTEM)
         return result
 
@@ -320,6 +340,20 @@ class OpenCodeDiscoverer(AgentDiscoverer):
             program_data = os.environ.get("PROGRAMDATA") or r"C:\ProgramData"
             return Path(program_data) / "opencode"
         return None
+
+    def _env_override_config_scope(self) -> DiscoveryLocationScope:
+        """Location scope of the ``$OPENCODE_CONFIG`` file, which may sit anywhere.
+
+        Labelling it ``user`` unconditionally means a project-local override
+        survives ``--skip-discovery-scopes project_workspace``, while a genuinely
+        relocated global config is silently dropped by
+        ``--skip-discovery-scopes user`` -- the file is never even opened, so no
+        parse error is surfaced either.
+        """
+        env_path = self._opencode_config_env_path()
+        if env_path is None:
+            return DiscoveryLocationScope.USER
+        return self._location_scope_for(env_path)
 
     def _opencode_config_env_path(self) -> Path | None:
         """Resolved ``$OPENCODE_CONFIG`` path on an own-home scan, else ``None``."""
@@ -610,9 +644,14 @@ class OpenCodeDiscoverer(AgentDiscoverer):
             for base in self._global_config_dirs():
                 for filename in _CONFIG_FILENAMES:
                     candidates.append((base / filename, DiscoveryLocationScope.USER))
-            env_path = self._opencode_config_env_path()
-            if env_path is not None:
-                candidates.append((env_path, DiscoveryLocationScope.USER))
+        # ``$OPENCODE_CONFIG`` is scoped by where it points, not by the fact that
+        # it came from the environment, so it belongs to whichever group matches.
+        env_path = self._opencode_config_env_path()
+        if env_path is not None:
+            env_scope = self._env_override_config_scope()
+            if source_scope in (None, env_scope):
+                candidates.append((env_path, env_scope))
+
         if source_scope in (None, DiscoveryLocationScope.PROJECT_WORKSPACE):
             for project in self._discovery_paths_with_ancestors():
                 for base in self._project_config_bases(project):
@@ -665,15 +704,20 @@ class OpenCodeDiscoverer(AgentDiscoverer):
             for entry in paths:
                 if not isinstance(entry, str) or not entry:
                     continue
-                is_project_relative = entry != "~" and not entry.startswith("~/") and not Path(entry).is_absolute()
-                result_scope = DiscoveryLocationScope.PROJECT_WORKSPACE if is_project_relative else config_scope
-                if not self._scope_enabled(result_scope):
+                is_project_relative = not _is_home_skills_entry(entry) and not _is_rooted_skills_entry(entry)
+                declared_scope = DiscoveryLocationScope.PROJECT_WORKSPACE if is_project_relative else config_scope
+                if not self._scope_enabled(declared_scope):
                     continue
                 for resolved in self._resolve_skills_path_entry(entry, worktrees):
                     entries = self._scan_skills_dir(resolved)
                     if entries is not None:
                         key = resolved.as_posix()
-                        result[key] = self._scope_skill_results({key: entries}, result_scope)[key]
+                        # ``_scope_skill_results`` re-checks the scope against where the
+                        # entry actually resolved, so a config cannot label a location it
+                        # does not own; it drops the key when that demotes into a skip.
+                        scoped = self._scope_skill_results({key: entries}, declared_scope)
+                        if key in scoped:
+                            result[key] = scoped[key]
         return result
 
     def _resolve_skills_path_entry(self, entry: str, worktrees: list[Path]) -> list[Path]:
@@ -688,12 +732,11 @@ class OpenCodeDiscoverer(AgentDiscoverer):
           nothing — matching that opencode would never load it from the config
           dir.
         """
-        if entry == "~" or entry.startswith("~/"):
-            return [expand_path(Path(entry), self.home_directory)]
-        candidate = Path(entry)
-        if candidate.is_absolute():
-            return [candidate]
-        return [worktree / candidate for worktree in worktrees]
+        if _is_home_skills_entry(entry):
+            return [expand_path(Path(entry.replace("\\", "/")), self.home_directory)]
+        if _is_rooted_skills_entry(entry):
+            return [Path(entry)]
+        return [worktree / Path(entry) for worktree in worktrees]
 
     # --- URL-pulled skills cache (Gap C) ---
 

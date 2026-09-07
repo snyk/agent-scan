@@ -23,6 +23,13 @@ class CandidateClient(BaseModel):
     skills_dir_path_scopes: dict[str, DiscoveryLocationScope] = Field(default_factory=dict)
     mcp_config_glob_scopes: dict[str, DiscoveryLocationScope] = Field(default_factory=dict)
     skills_dir_glob_scopes: dict[str, DiscoveryLocationScope] = Field(default_factory=dict)
+    mcp_config_path_nested_scopes: dict[str, set[DiscoveryLocationScope]] = Field(
+        default_factory=dict,
+        description="Scopes a config file can yield *in addition* to its declared one, because the "
+        "format nests more than one tier in a single file (``~/.claude.json`` holds user-global "
+        "servers alongside per-project ones). Without this the path-level exclusion would skip the "
+        "file before it is opened and the nested scopes would never be seen.",
+    )
 
 
 class ClientToInspect(BaseModel):

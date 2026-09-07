@@ -8,6 +8,7 @@ from httpx import HTTPStatusError
 from agent_scan.agents.base import DiscoveryScope
 from agent_scan.mcp_client import check_server, scan_mcp_config_file
 from agent_scan.models import (
+    LOCATION_SCOPE_PRECEDENCE,
     CandidateClient,
     ClientToInspect,
     CouldNotParseMCPConfig,
@@ -18,6 +19,7 @@ from agent_scan.models import (
     InspectedPath,
     InspectedServer,
     InspectedSkill,
+    MCPConfig,
     RemoteServer,
     ScanError,
     ServerHTTPError,
@@ -30,7 +32,6 @@ from agent_scan.models import (
     UnknownMCPConfig,
     UserDeclinedError,
 )
-from agent_scan.signed_binary import check_server_signature
 from agent_scan.skill_client import (
     SkillInspectionError,
     collect_skill_files,
@@ -61,6 +62,80 @@ def _inspection_error_to_scan_error(
         category=error.category,
         server_output=error.server_output if isinstance(error, ServerStartupError | ServerHTTPError) else None,
     )
+
+
+def _servers_by_origin(mcp_config: MCPConfig) -> dict[str | None, dict[str, StdioServer | RemoteServer]]:
+    """Group a parsed config's servers by the block that declared them.
+
+    Almost every config format holds one location scope, so its servers come back
+    under a single ``None`` origin. ``~/.claude.json`` is the exception and
+    reports each ``projects.<path>`` block separately.
+    """
+    by_origin = getattr(mcp_config, "get_servers_by_origin", None)
+    if by_origin is None:
+        return {None: mcp_config.get_servers()}
+    return by_origin()
+
+
+def _discovered_servers(
+    mcp_config: MCPConfig,
+    path_scope: DiscoveryLocationScope,
+    skipped: frozenset[DiscoveryLocationScope],
+) -> list[DiscoveredServer]:
+    """Label each server with the scope of the block that declared it.
+
+    The exclusion is applied per entry rather than per file because a single
+    file can mix scopes: labelling all of ``~/.claude.json`` with one scope makes
+    either its user-global or its project servers wrong, and then
+    ``--skip-discovery-scopes`` filters the wrong half.
+
+    Servers under a project-path key are project-scoped regardless of where the
+    declaring file lives — that nesting is what makes them project config.
+    """
+    discovered: list[DiscoveredServer] = []
+    for origin, servers in _servers_by_origin(mcp_config).items():
+        scope = path_scope if origin is None else DiscoveryLocationScope.PROJECT_WORKSPACE
+        if scope in skipped:
+            continue
+        discovered.extend(
+            DiscoveredServer(name=server_name, server=server, scope=scope) for server_name, server in servers.items()
+        )
+    return discovered
+
+
+def _resolved_key(path: str, home_directory: Path | None) -> str:
+    """Absolute, symlink-resolved key for deduplicating two spellings of one file.
+
+    Resolution is guarded the way ``pipelines`` guards its target folders: these
+    paths include glob matches over trees another user can write to, and a stale
+    mount or a NUL byte would otherwise abort discovery for the whole home. On
+    failure the literal expanded spelling is used, which at worst leaves two keys
+    where there should be one.
+    """
+    expanded = expand_path(Path(path), home_directory)
+    try:
+        return str(expanded.resolve())
+    except (OSError, RuntimeError, ValueError):
+        return str(expanded)
+
+
+def _merge_resolved_scope(
+    resolved: dict[str, DiscoveryLocationScope],
+    key: str,
+    scope: DiscoveryLocationScope,
+) -> None:
+    """Record *scope* for *key*, keeping the higher-precedence label on collision.
+
+    Two declarations can name the same file by different spellings -- an explicit
+    path and a glob that matches it, or a ``~``-prefixed and a relative form.
+    Re-keying by resolved path collapses them, so without a precedence rule the
+    surviving label depends on declaration order: globs are inserted after
+    explicit paths, so a plugin glob would silently relabel a user config.
+    Mirrors what the discoverers do in ``AgentDiscoverer._merge_mcp_results``.
+    """
+    existing = resolved.get(key)
+    if existing is None or LOCATION_SCOPE_PRECEDENCE[scope] > LOCATION_SCOPE_PRECEDENCE[existing]:
+        resolved[key] = scope
 
 
 def _resolve_glob_with_depth(pattern: str, max_depth: int) -> list[str]:
@@ -140,9 +215,18 @@ async def get_mcp_config_per_home_directory(
     def location_scope(path: str, overrides: dict[str, DiscoveryLocationScope]) -> DiscoveryLocationScope:
         return overrides.get(path, client.default_location_scope)
 
-    enabled_mcp_paths = [
-        path for path in client.mcp_config_paths if location_scope(path, client.mcp_config_path_scopes) not in skipped
-    ]
+    def mcp_path_enabled(path: str) -> bool:
+        """Whether any scope this file can yield survives the exclusion.
+
+        A file whose format nests several tiers has to be opened even when its
+        declared scope is excluded, so the per-entry filter in
+        ``_discovered_servers`` can keep the nested scopes that are still wanted.
+        """
+        possible = {location_scope(path, client.mcp_config_path_scopes)}
+        possible |= client.mcp_config_path_nested_scopes.get(path, set())
+        return bool(possible - skipped)
+
+    enabled_mcp_paths = [path for path in client.mcp_config_paths if mcp_path_enabled(path)]
     enabled_skill_paths = [
         path for path in client.skills_dir_paths if location_scope(path, client.skills_dir_path_scopes) not in skipped
     ]
@@ -189,16 +273,16 @@ async def get_mcp_config_per_home_directory(
     all_mcp_config_paths: dict[str, DiscoveryLocationScope] = {}
     if want_servers:
         for path in enabled_mcp_paths:
-            all_mcp_config_paths[path] = location_scope(path, client.mcp_config_path_scopes)
+            _merge_resolved_scope(all_mcp_config_paths, path, location_scope(path, client.mcp_config_path_scopes))
         for glob_pattern in enabled_mcp_globs:
             expanded_glob = str(expand_path(Path(glob_pattern), home_directory))
             glob_scope = location_scope(glob_pattern, client.mcp_config_glob_scopes)
             for match in _resolve_glob_with_depth(expanded_glob, client.max_glob_depth):
-                all_mcp_config_paths[match] = glob_scope
-        all_mcp_config_paths = {
-            str(expand_path(Path(path), home_directory).resolve()): path_scope
-            for path, path_scope in all_mcp_config_paths.items()
-        }
+                _merge_resolved_scope(all_mcp_config_paths, match, glob_scope)
+        resolved_mcp_paths: dict[str, DiscoveryLocationScope] = {}
+        for path, path_scope in all_mcp_config_paths.items():
+            _merge_resolved_scope(resolved_mcp_paths, _resolved_key(path, home_directory), path_scope)
+        all_mcp_config_paths = resolved_mcp_paths
 
     for mcp_config_path, path_scope in all_mcp_config_paths.items():
         mcp_config_path_expanded = expand_path(Path(mcp_config_path), home_directory)
@@ -218,14 +302,7 @@ async def get_mcp_config_per_home_directory(
                 )
                 continue
 
-            server_configs_by_name = mcp_config.get_servers()
-            for server_config in server_configs_by_name.values():
-                if isinstance(server_config, StdioServer):
-                    server_config = check_server_signature(server_config)
-            mcp_configs[mcp_config_path_expanded.as_posix()] = [
-                DiscoveredServer(name=server_name, server=server, scope=path_scope)
-                for server_name, server in server_configs_by_name.items()
-            ]
+            mcp_configs[mcp_config_path_expanded.as_posix()] = _discovered_servers(mcp_config, path_scope, skipped)
         except Exception as e:
             logger.exception(f"Error parsing MCP config file {mcp_config_path_expanded.as_posix()}: {e}")
             mcp_configs[mcp_config_path_expanded.as_posix()] = CouldNotParseMCPConfig(
@@ -240,17 +317,17 @@ async def get_mcp_config_per_home_directory(
     all_skills_dir_paths: dict[str, DiscoveryLocationScope] = {}
     if want_skills:
         for path in enabled_skill_paths:
-            all_skills_dir_paths[path] = location_scope(path, client.skills_dir_path_scopes)
+            _merge_resolved_scope(all_skills_dir_paths, path, location_scope(path, client.skills_dir_path_scopes))
         for glob_pattern in enabled_skill_globs:
             expanded_glob = str(expand_path(Path(glob_pattern), home_directory))
             glob_scope = location_scope(glob_pattern, client.skills_dir_glob_scopes)
             for match in _resolve_glob_with_depth(expanded_glob, client.max_glob_depth):
                 if Path(match).is_dir():
-                    all_skills_dir_paths[match] = glob_scope
-        all_skills_dir_paths = {
-            str(expand_path(Path(path), home_directory).resolve()): path_scope
-            for path, path_scope in all_skills_dir_paths.items()
-        }
+                    _merge_resolved_scope(all_skills_dir_paths, match, glob_scope)
+        resolved_skill_paths: dict[str, DiscoveryLocationScope] = {}
+        for path, path_scope in all_skills_dir_paths.items():
+            _merge_resolved_scope(resolved_skill_paths, _resolved_key(path, home_directory), path_scope)
+        all_skills_dir_paths = resolved_skill_paths
 
     for skills_dir_path, path_scope in all_skills_dir_paths.items():
         skills_dir_path_expanded = expand_path(Path(skills_dir_path), home_directory)

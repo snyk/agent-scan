@@ -1011,3 +1011,180 @@ async def test_client_detection_is_skipped_when_exclusions_remove_all_requested_
     )
 
     assert ctis == []
+
+
+def _claude_code_candidate() -> CandidateClient:
+    """A ``claude code``-shaped candidate: one config file holding both scopes."""
+    return CandidateClient(
+        name="claude code",
+        client_exists_paths=["~/.claude"],
+        mcp_config_paths=["~/.claude.json"],
+        skills_dir_paths=[],
+        mcp_config_path_nested_scopes={"~/.claude.json": {DiscoveryLocationScope.PROJECT_WORKSPACE}},
+    )
+
+
+def _write_claude_json(home: Path) -> None:
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude.json").write_text(
+        '{"mcpServers": {"user-global": {"command": "/bin/user"}},'
+        ' "projects": {"/work/repo": {"mcpServers": {"project-only": {"command": "/bin/proj"}}}}}'
+    )
+
+
+def _servers(cti: ClientToInspect) -> dict[str, DiscoveryLocationScope]:
+    return {
+        server.name: server.scope for value in cti.mcp_configs.values() if isinstance(value, list) for server in value
+    }
+
+
+@pytest.mark.asyncio
+async def test_claude_json_labels_each_server_by_its_declaring_origin(tmp_path):
+    """One config file, two scopes: the top-level block is user-global while
+    ``projects.<path>`` blocks are project-scoped. A single per-file label makes
+    one of them wrong whichever value is chosen."""
+    home = tmp_path / "user"
+    _write_claude_json(home)
+
+    ctis = await get_mcp_config_per_client(_claude_code_candidate(), [(home, "user")])
+
+    assert _servers(ctis[0]) == {
+        "user-global": DiscoveryLocationScope.USER,
+        "project-only": DiscoveryLocationScope.PROJECT_WORKSPACE,
+    }
+
+
+@pytest.mark.asyncio
+async def test_skipping_project_scope_drops_only_the_project_servers(tmp_path):
+    """``--skip-discovery-scopes project_workspace`` is what the installed
+    SessionStart hook passes, so this is the flag's headline behaviour."""
+    home = tmp_path / "user"
+    _write_claude_json(home)
+
+    ctis = await get_mcp_config_per_client(
+        _claude_code_candidate(),
+        [(home, "user")],
+        skip_discovery_scopes={DiscoveryLocationScope.PROJECT_WORKSPACE},
+    )
+
+    assert _servers(ctis[0]) == {"user-global": DiscoveryLocationScope.USER}
+
+
+@pytest.mark.asyncio
+async def test_skipping_user_scope_drops_only_the_user_servers(tmp_path):
+    home = tmp_path / "user"
+    _write_claude_json(home)
+
+    ctis = await get_mcp_config_per_client(
+        _claude_code_candidate(),
+        [(home, "user")],
+        skip_discovery_scopes={DiscoveryLocationScope.USER},
+    )
+
+    assert _servers(ctis[0]) == {"project-only": DiscoveryLocationScope.PROJECT_WORKSPACE}
+
+
+@pytest.mark.asyncio
+async def test_same_named_project_servers_both_reach_the_report(tmp_path):
+    """The same ``github`` server configured in two repos is two separate
+    registrations; both must be inspected."""
+    home = tmp_path / "user"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude.json").write_text(
+        '{"projects": {"/work/a": {"mcpServers": {"github": {"command": "/bin/a"}}},'
+        ' "/work/b": {"mcpServers": {"github": {"command": "/bin/b"}}}}}'
+    )
+
+    ctis = await get_mcp_config_per_client(_claude_code_candidate(), [(home, "user")])
+
+    entries = [server for value in ctis[0].mcp_configs.values() if isinstance(value, list) for server in value]
+    assert sorted(server.server.command for server in entries) == ["/bin/a", "/bin/b"]
+    assert {server.scope for server in entries} == {DiscoveryLocationScope.PROJECT_WORKSPACE}
+
+
+@pytest.mark.asyncio
+async def test_cwd_relative_paths_are_not_probed_for_a_scanned_home(tmp_path, monkeypatch):
+    """Phase A only receives home directories, never project roots, so a
+    relative declaration has nothing to anchor against and ``expand_path``
+    leaves it to resolve against the *scanner's* current directory. That is not
+    a project root, and under ``--scan-all-users`` the same directory is
+    reported once per home."""
+    from agent_scan.well_known_clients import get_well_known_clients
+
+    relative = [
+        (client.name, path)
+        for client in get_well_known_clients()
+        for path in (*client.client_exists_paths, *client.mcp_config_paths, *client.skills_dir_paths)
+        if not path.startswith("~") and not Path(path).is_absolute()
+    ]
+
+    assert relative == []
+
+
+@pytest.mark.asyncio
+async def test_colliding_declarations_resolve_to_the_higher_precedence_scope(tmp_path):
+    """An explicit path and a glob can name the same file with different scopes.
+    Re-keying by resolved path collapses them, so without a precedence rule the
+    label is decided by declaration order rather than by the tier that owns the
+    file. Phase B already resolves this with ``_LOCATION_SCOPE_PRECEDENCE``."""
+    from agent_scan.models.discovery import LOCATION_SCOPE_PRECEDENCE
+
+    home = tmp_path / "user"
+    plugin_dir = home / ".fake-client" / "plugins" / "cache" / "vendor" / "v1"
+    plugin_dir.mkdir(parents=True)
+    mcp_json = plugin_dir / ".mcp.json"
+    mcp_json.write_text('{"srv": {"command": "node"}}')
+
+    pattern = "~/.fake-client/plugins/cache/**/.mcp.json"
+    candidate = CandidateClient(
+        name="fake-client",
+        client_exists_paths=["~/.fake-client"],
+        mcp_config_paths=[str(mcp_json)],
+        skills_dir_paths=[],
+        mcp_config_globs=[pattern],
+        mcp_config_glob_scopes={pattern: DiscoveryLocationScope.EXTENSION_PLUGIN},
+    )
+
+    ctis = await get_mcp_config_per_client(candidate, [(home, "user")])
+
+    entries = [s for value in ctis[0].mcp_configs.values() if isinstance(value, list) for s in value]
+    assert len(entries) == 1
+    # EXTENSION_PLUGIN outranks USER, so the plugin label wins either ordering.
+    assert (
+        LOCATION_SCOPE_PRECEDENCE[DiscoveryLocationScope.EXTENSION_PLUGIN]
+        > (LOCATION_SCOPE_PRECEDENCE[DiscoveryLocationScope.USER])
+    )
+    assert entries[0].scope is DiscoveryLocationScope.EXTENSION_PLUGIN
+
+
+@pytest.mark.asyncio
+async def test_colliding_declarations_are_order_independent(tmp_path):
+    """Same collision, but the higher-precedence scope is declared on the
+    explicit path (which is inserted first) instead of the glob."""
+    from agent_scan.models.discovery import LOCATION_SCOPE_PRECEDENCE
+
+    home = tmp_path / "user"
+    conf_dir = home / ".fake-client" / "managed"
+    conf_dir.mkdir(parents=True)
+    mcp_json = conf_dir / "mcp.json"
+    mcp_json.write_text('{"mcpServers": {"srv": {"command": "node"}}}')
+
+    pattern = "~/.fake-client/managed/**/mcp.json"
+    candidate = CandidateClient(
+        name="fake-client",
+        client_exists_paths=["~/.fake-client"],
+        mcp_config_paths=[str(mcp_json)],
+        skills_dir_paths=[],
+        mcp_config_path_scopes={str(mcp_json): DiscoveryLocationScope.SYSTEM},
+        mcp_config_globs=[pattern],
+        mcp_config_glob_scopes={pattern: DiscoveryLocationScope.PROJECT_WORKSPACE},
+    )
+
+    ctis = await get_mcp_config_per_client(candidate, [(home, "user")])
+
+    entries = [s for value in ctis[0].mcp_configs.values() if isinstance(value, list) for s in value]
+    assert (
+        LOCATION_SCOPE_PRECEDENCE[DiscoveryLocationScope.SYSTEM]
+        > (LOCATION_SCOPE_PRECEDENCE[DiscoveryLocationScope.PROJECT_WORKSPACE])
+    )
+    assert [s.scope for s in entries] == [DiscoveryLocationScope.SYSTEM]

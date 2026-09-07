@@ -9519,3 +9519,234 @@ async def test_pipeline_null_byte_target_folder_is_skipped_without_aborting(tmp_
         )
 
     find.assert_called_once_with(home, target_folders=[good])
+
+
+# --- location scope must follow where a component lives, not who declared it ---
+
+
+def _seed_claude_home_with_project(home: Path, project: Path) -> None:
+    (home / ".claude").mkdir(parents=True, exist_ok=True)
+    project.mkdir(parents=True, exist_ok=True)
+    (home / ".claude.json").write_text(f'{{"projects": {{"{project.as_posix()}": {{"mcpServers": {{}}}}}}}}')
+
+
+def test_user_skills_dir_is_not_relabelled_project_when_user_scope_is_skipped(tmp_path):
+    """``$HOME`` is an ancestor of any project beneath it, so the project-scope
+    sweep re-finds ``~/.claude/skills``. Labelling that copy ``project_workspace``
+    makes ``--skip-discovery-scopes user`` a no-op: the directory is still
+    scanned and still reported, just under the other label."""
+    from agent_scan.agents import ClaudeCodeDiscoverer
+    from agent_scan.models import DiscoveryLocationScope
+
+    home = tmp_path / "user"
+    _seed_claude_home_with_project(home, home / "proj")
+    skill = home / ".claude" / "skills" / "myskill"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: myskill\ndescription: d\n---\nBody\n")
+
+    unfiltered = ClaudeCodeDiscoverer(home).discover_skills()
+    user_key = (home / ".claude" / "skills").as_posix()
+    assert {s.scope for s in unfiltered[user_key]} == {DiscoveryLocationScope.USER}
+
+    filtered = ClaudeCodeDiscoverer(home, skip_discovery_scopes={DiscoveryLocationScope.USER}).discover_skills()
+    assert user_key not in filtered
+
+
+def test_monorepo_ancestor_skills_stay_project_scoped(tmp_path):
+    """Guard against over-demotion: the ancestor walk exists so a monorepo root
+    above the opened project is still project config."""
+    from agent_scan.agents import ClaudeCodeDiscoverer
+    from agent_scan.models import DiscoveryLocationScope
+
+    home = tmp_path / "user"
+    _seed_claude_home_with_project(home, tmp_path / "work" / "mono" / "app")
+    ancestor_skills = tmp_path / "work" / "mono" / ".claude" / "skills" / "shared"
+    ancestor_skills.mkdir(parents=True)
+    (ancestor_skills / "SKILL.md").write_text("---\nname: shared\ndescription: d\n---\nBody\n")
+
+    skills_dirs = ClaudeCodeDiscoverer(home).discover_skills()
+
+    key = (tmp_path / "work" / "mono" / ".claude" / "skills").as_posix()
+    assert {s.scope for s in skills_dirs[key]} == {DiscoveryLocationScope.PROJECT_WORKSPACE}
+
+
+def test_repo_settings_cannot_label_a_home_directory_project_scoped(tmp_path, monkeypatch):
+    """A repo-committed ``.vscode/settings.json`` picks the path *and* the label.
+    If the declaring file decides the scope, a committed config can point at the
+    user's home and choose the label that excludes it from the scan."""
+    from agent_scan.agents.vscode import VSCodeDiscoverer
+    from agent_scan.models import DiscoveryLocationScope
+
+    home = tmp_path / "user"
+    rogue = home / ".local" / "share" / "rogue-skills" / "evil"
+    rogue.mkdir(parents=True)
+    (rogue / "SKILL.md").write_text("---\nname: evil\ndescription: d\n---\nBody\n")
+
+    repo = tmp_path / "work" / "repo"
+    vscode_dir = repo / ".vscode"
+    vscode_dir.mkdir(parents=True)
+    locations = {(home / ".local" / "share" / "rogue-skills").as_posix(): True}
+    (vscode_dir / "settings.json").write_text(json.dumps({"chat.agentSkillsLocations": locations}))
+
+    key = (home / ".local" / "share" / "rogue-skills").as_posix()
+    discoverer = VSCodeDiscoverer(home, [repo])
+    scoped = discoverer._discover_settings_skill_locations(include_user=False, include_project=True)
+    assert key in scoped
+
+    labelled = VSCodeDiscoverer(home, [repo]).discover_skills()
+    assert {s.scope for s in labelled[key]} == {DiscoveryLocationScope.USER}
+
+
+def test_opencode_absolute_skills_path_entry_is_platform_independent():
+    """``Path`` is platform-bound, so a machine-wide POSIX path in a config read
+    on Windows looks relative and gets joined onto every worktree -- escaping it.
+    A Windows drive path read on Linux is misclassified the same way."""
+    from agent_scan.agents.opencode import _is_rooted_skills_entry
+
+    assert _is_rooted_skills_entry("/opt/skills")
+    assert _is_rooted_skills_entry("\\opt\\skills")
+    assert _is_rooted_skills_entry("C:/repo/skills")
+    assert _is_rooted_skills_entry("\\\\server\\share\\skills")
+    assert not _is_rooted_skills_entry("rel/skills")
+    assert not _is_rooted_skills_entry("~/skills")
+    assert not _is_rooted_skills_entry("~\\skills")
+    assert not _is_rooted_skills_entry("~")
+
+
+def test_opencode_windows_home_spelling_resolves_to_home(tmp_path):
+    """``~\\skills`` is the Windows spelling of a home path; treating it as
+    project-relative resolves it to a literal ``~`` directory inside the repo."""
+    from agent_scan.agents.opencode import OpenCodeDiscoverer
+
+    discoverer = OpenCodeDiscoverer(tmp_path)
+
+    assert discoverer._resolve_skills_path_entry("~\\skills", [tmp_path / "repo"]) == [tmp_path / "skills"]
+
+
+def test_opencode_env_override_config_scope_follows_its_location(tmp_path, monkeypatch):
+    """``$OPENCODE_CONFIG`` can point anywhere, so a fixed ``user`` label is
+    wrong in both directions: a project-local override survives
+    ``--skip-discovery-scopes project_workspace``, and a relocated global config
+    is dropped entirely by ``--skip-discovery-scopes user`` without any error."""
+    from agent_scan.agents.opencode import OpenCodeDiscoverer
+    from agent_scan.models import DiscoveryLocationScope
+
+    home = tmp_path / "user"
+    (home / ".config" / "opencode").mkdir(parents=True)
+    _force_home(monkeypatch, home)
+
+    repo = tmp_path / "work" / "repo"
+    repo.mkdir(parents=True)
+    project_config = repo / "relocated.json"
+    project_config.write_text('{"mcp": {"proj-srv": {"type": "local", "command": ["node"]}}}')
+    monkeypatch.setenv("OPENCODE_CONFIG", str(project_config))
+
+    discoverer = OpenCodeDiscoverer(home, [repo])
+    entries = discoverer.discover_mcp_servers()[project_config.as_posix()]
+    assert {e.scope for e in entries} == {DiscoveryLocationScope.PROJECT_WORKSPACE}
+
+    skipped = OpenCodeDiscoverer(
+        home, [repo], skip_discovery_scopes={DiscoveryLocationScope.PROJECT_WORKSPACE}
+    ).discover_mcp_servers()
+    assert project_config.as_posix() not in skipped
+
+
+def test_opencode_env_override_outside_any_project_is_user_scoped(tmp_path, monkeypatch):
+    from agent_scan.agents.opencode import OpenCodeDiscoverer
+    from agent_scan.models import DiscoveryLocationScope
+
+    home = tmp_path / "user"
+    (home / ".config" / "opencode").mkdir(parents=True)
+    _force_home(monkeypatch, home)
+
+    elsewhere = tmp_path / "elsewhere" / "opencode.json"
+    elsewhere.parent.mkdir(parents=True)
+    elsewhere.write_text('{"mcp": {"relocated": {"type": "local", "command": ["node"]}}}')
+    monkeypatch.setenv("OPENCODE_CONFIG", str(elsewhere))
+
+    entries = OpenCodeDiscoverer(home).discover_mcp_servers()[elsewhere.as_posix()]
+
+    assert {e.scope for e in entries} == {DiscoveryLocationScope.USER}
+
+
+def test_merge_keeps_a_surfaced_parse_failure_over_a_later_empty_result(tmp_path):
+    """``_result_precedence`` scored errors and empty lists identically, so a
+    later pass that merely found nothing at the same path erased a parse failure
+    the scanner deliberately reports. opencode hits this for real: a malformed
+    ``$OPENCODE_CONFIG`` is surfaced on purpose, then merged at ``user`` after
+    the project pass and before the system one."""
+    from agent_scan.agents import ClaudeCodeDiscoverer
+    from agent_scan.models import CouldNotParseMCPConfig, DiscoveryLocationScope
+
+    discoverer = ClaudeCodeDiscoverer(tmp_path)
+    error = CouldNotParseMCPConfig(message="could not parse", traceback="tb", is_failure=True)
+    target = {"/p/config.json": error}
+
+    discoverer._merge_mcp_results(target, lambda: {"/p/config.json": []}, DiscoveryLocationScope.SYSTEM)
+
+    assert target["/p/config.json"] is error
+
+
+def test_merge_lets_real_data_replace_a_parse_failure(tmp_path):
+    """Real servers are still more informative than an error at the same path."""
+    from agent_scan.agents import ClaudeCodeDiscoverer
+    from agent_scan.models import CouldNotParseMCPConfig, DiscoveryLocationScope, StdioServer
+
+    discoverer = ClaudeCodeDiscoverer(tmp_path)
+    target = {"/p/config.json": CouldNotParseMCPConfig(message="x", traceback="tb", is_failure=True)}
+
+    discoverer._merge_mcp_results(
+        target,
+        lambda: {"/p/config.json": [("srv", StdioServer(command="node"))]},
+        DiscoveryLocationScope.SYSTEM,
+    )
+
+    entries = target["/p/config.json"]
+    assert isinstance(entries, list)
+    assert entries[0].name == "srv"
+
+
+def test_merge_keeps_a_parse_failure_over_a_file_not_found(tmp_path):
+    """A deliberate failure outranks a benign "not present" record."""
+    from agent_scan.agents import ClaudeCodeDiscoverer
+    from agent_scan.models import CouldNotParseMCPConfig, DiscoveryLocationScope, FileNotFoundConfig
+
+    discoverer = ClaudeCodeDiscoverer(tmp_path)
+    error = CouldNotParseMCPConfig(message="x", traceback="tb", is_failure=True)
+    target = {"/p/config.json": error}
+
+    discoverer._merge_mcp_results(
+        target,
+        lambda: {"/p/config.json": FileNotFoundConfig(message="missing", is_failure=False)},
+        DiscoveryLocationScope.SYSTEM,
+    )
+
+    assert target["/p/config.json"] is error
+
+
+def test_skill_merge_result_does_not_depend_on_merge_call_order(tmp_path):
+    """``_merge_*`` compares precedence rather than overwriting blindly, so a
+    subclass that merges a lower tier after a higher one (Cursor appends its
+    USER and EXTENSION_PLUGIN sources after ``super()`` has already merged
+    SYSTEM) still resolves to the owning tier instead of to whichever call ran
+    last. Pinned because the ordering is otherwise an invisible constraint on
+    every subclass.
+    """
+    from agent_scan.agents.vscode.cursor import CursorDiscoverer
+    from agent_scan.models import DiscoveryLocationScope
+
+    home = tmp_path / "user"
+    (home / ".cursor").mkdir(parents=True)
+    shared = home / "shared-skills"
+    (shared / "sk").mkdir(parents=True)
+    (shared / "sk" / "SKILL.md").write_text("---\nname: sk\ndescription: d\n---\nBody\n")
+
+    discoverer = CursorDiscoverer(home)
+    discoverer._platform_system_skills_dirs = lambda: [shared]
+    discoverer._builtin_skills_dirs = lambda: [shared]
+
+    result = discoverer.discover_skills()
+
+    key = shared.as_posix()
+    assert key in result, "a colliding path must not be dropped by the losing merge"
+    assert {s.scope for s in result[key]} == {DiscoveryLocationScope.SYSTEM}

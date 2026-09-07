@@ -53,6 +53,9 @@ MACOS_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
         skills_dir_globs=["~/.claude/plugins/cache/**/skills"],
         mcp_config_glob_scopes={"~/.claude/plugins/cache/**/.mcp.json": DiscoveryLocationScope.EXTENSION_PLUGIN},
         skills_dir_glob_scopes={"~/.claude/plugins/cache/**/skills": DiscoveryLocationScope.EXTENSION_PLUGIN},
+        # ``~/.claude.json`` nests per-project servers under ``projects.<path>``
+        # alongside the user-global top-level ``mcpServers``.
+        mcp_config_path_nested_scopes={"~/.claude.json": {DiscoveryLocationScope.PROJECT_WORKSPACE}},
     ),
     CandidateClient(
         name="gemini cli",
@@ -68,19 +71,16 @@ MACOS_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
             "~/.clawdbot/skills",
             "~/.openclaw/skills",
             "~/.openclaw/workspace/skills",
-            ".openclaw/skills",
         ],
         skills_dir_path_scopes={
             "~/.openclaw/workspace/skills": DiscoveryLocationScope.PROJECT_WORKSPACE,
-            ".openclaw/skills": DiscoveryLocationScope.PROJECT_WORKSPACE,
         },
     ),
     CandidateClient(
         name="amp",
-        client_exists_paths=["~/.config/agents", ".amp"],
+        client_exists_paths=["~/.config/agents"],
         mcp_config_paths=[],
-        skills_dir_paths=["~/.config/agents/skills", ".amp/skills"],
-        skills_dir_path_scopes={".amp/skills": DiscoveryLocationScope.PROJECT_WORKSPACE},
+        skills_dir_paths=["~/.config/agents/skills"],
     ),
     CandidateClient(
         name="kiro",
@@ -150,6 +150,9 @@ LINUX_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
         skills_dir_globs=["~/.claude/plugins/cache/**/skills"],
         mcp_config_glob_scopes={"~/.claude/plugins/cache/**/.mcp.json": DiscoveryLocationScope.EXTENSION_PLUGIN},
         skills_dir_glob_scopes={"~/.claude/plugins/cache/**/skills": DiscoveryLocationScope.EXTENSION_PLUGIN},
+        # ``~/.claude.json`` nests per-project servers under ``projects.<path>``
+        # alongside the user-global top-level ``mcpServers``.
+        mcp_config_path_nested_scopes={"~/.claude.json": {DiscoveryLocationScope.PROJECT_WORKSPACE}},
     ),
     CandidateClient(
         name="gemini cli",
@@ -165,19 +168,16 @@ LINUX_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
             "~/.clawdbot/skills",
             "~/.openclaw/skills",
             "~/.openclaw/workspace/skills",
-            ".openclaw/skills",
         ],
         skills_dir_path_scopes={
             "~/.openclaw/workspace/skills": DiscoveryLocationScope.PROJECT_WORKSPACE,
-            ".openclaw/skills": DiscoveryLocationScope.PROJECT_WORKSPACE,
         },
     ),
     CandidateClient(
         name="amp",
-        client_exists_paths=["~/.config/agents", ".amp"],
+        client_exists_paths=["~/.config/agents"],
         mcp_config_paths=[],
-        skills_dir_paths=["~/.config/agents/skills", ".amp/skills"],
-        skills_dir_path_scopes={".amp/skills": DiscoveryLocationScope.PROJECT_WORKSPACE},
+        skills_dir_paths=["~/.config/agents/skills"],
     ),
     CandidateClient(
         name="kiro",
@@ -254,6 +254,9 @@ WINDOWS_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
         skills_dir_globs=["~/.claude/plugins/cache/**/skills"],
         mcp_config_glob_scopes={"~/.claude/plugins/cache/**/.mcp.json": DiscoveryLocationScope.EXTENSION_PLUGIN},
         skills_dir_glob_scopes={"~/.claude/plugins/cache/**/skills": DiscoveryLocationScope.EXTENSION_PLUGIN},
+        # ``~/.claude.json`` nests per-project servers under ``projects.<path>``
+        # alongside the user-global top-level ``mcpServers``.
+        mcp_config_path_nested_scopes={"~/.claude.json": {DiscoveryLocationScope.PROJECT_WORKSPACE}},
     ),
     CandidateClient(
         name="gemini cli",
@@ -269,19 +272,16 @@ WINDOWS_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
             "~/.clawdbot/skills",
             "~/.openclaw/skills",
             "~/.openclaw/workspace/skills",
-            ".openclaw/skills",
         ],
         skills_dir_path_scopes={
             "~/.openclaw/workspace/skills": DiscoveryLocationScope.PROJECT_WORKSPACE,
-            ".openclaw/skills": DiscoveryLocationScope.PROJECT_WORKSPACE,
         },
     ),
     CandidateClient(
         name="amp",
-        client_exists_paths=["~/.config/agents", ".amp"],
+        client_exists_paths=["~/.config/agents"],
         mcp_config_paths=[],
-        skills_dir_paths=["~/.config/agents/skills", ".amp/skills"],
-        skills_dir_path_scopes={".amp/skills": DiscoveryLocationScope.PROJECT_WORKSPACE},
+        skills_dir_paths=["~/.config/agents/skills"],
     ),
     CandidateClient(
         name="kiro",

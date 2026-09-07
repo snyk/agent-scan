@@ -499,3 +499,67 @@ class TestPluginMCPConfigFile:
         new_servers = {"replaced": StdioServer(command="node", args=["index.js"])}
         config.set_servers(new_servers)
         assert config.get_servers() == new_servers
+
+
+class TestClaudeCodeConfigOrigins:
+    """``~/.claude.json`` carries user-global servers under a top-level
+    ``mcpServers`` key *and* project-scoped servers under ``projects.<path>``.
+    Both must survive parsing, and each must stay attributable to its origin so
+    the caller can label it with the right location scope."""
+
+    @pytest.mark.asyncio
+    async def test_keeps_top_level_and_project_servers(self, tmp_path):
+        from agent_scan.models import ClaudeCodeConfigFile
+
+        config = tmp_path / ".claude.json"
+        config.write_text(
+            '{"mcpServers": {"user-global": {"command": "/bin/user"}},'
+            ' "projects": {"/work/repo": {"mcpServers": {"proj": {"command": "/bin/proj"}}}}}'
+        )
+
+        mcp_config = await scan_mcp_config_file(str(config))
+
+        assert isinstance(mcp_config, ClaudeCodeConfigFile)
+        servers = mcp_config.get_servers()
+        assert set(servers) == {"user-global", "proj"}
+
+    @pytest.mark.asyncio
+    async def test_groups_servers_by_declaring_origin(self, tmp_path):
+        config = tmp_path / ".claude.json"
+        config.write_text(
+            '{"mcpServers": {"user-global": {"command": "/bin/user"}},'
+            ' "projects": {"/work/repo": {"mcpServers": {"proj": {"command": "/bin/proj"}}}}}'
+        )
+
+        mcp_config = await scan_mcp_config_file(str(config))
+        origins = mcp_config.get_servers_by_origin()
+
+        assert set(origins) == {None, "/work/repo"}
+        assert set(origins[None]) == {"user-global"}
+        assert set(origins["/work/repo"]) == {"proj"}
+
+    @pytest.mark.asyncio
+    async def test_same_named_server_in_two_projects_stays_distinct(self, tmp_path):
+        """The same ``github`` server configured in two repos is two registrations
+        with different commands; flattening by name silently drops one."""
+        config = tmp_path / ".claude.json"
+        config.write_text(
+            '{"projects": {"/work/a": {"mcpServers": {"github": {"command": "/bin/a"}}},'
+            ' "/work/b": {"mcpServers": {"github": {"command": "/bin/b"}}}}}'
+        )
+
+        mcp_config = await scan_mcp_config_file(str(config))
+        origins = mcp_config.get_servers_by_origin()
+
+        assert set(origins) == {"/work/a", "/work/b"}
+        assert origins["/work/a"]["github"].command == "/bin/a"
+        assert origins["/work/b"]["github"].command == "/bin/b"
+
+    @pytest.mark.asyncio
+    async def test_project_only_config_reports_no_user_origin(self, tmp_path):
+        config = tmp_path / ".claude.json"
+        config.write_text('{"projects": {"/work/repo": {"mcpServers": {"proj": {"command": "/bin/proj"}}}}}')
+
+        origins = (await scan_mcp_config_file(str(config))).get_servers_by_origin()
+
+        assert set(origins) == {"/work/repo"}
