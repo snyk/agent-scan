@@ -48,19 +48,33 @@ def find_discoverers(
     confirms the agent is installed. Each returned instance is home-bound; the
     caller just runs ``d.discover()`` on each.
 
-    A discoverer whose ``client_exists()`` raises is skipped (and logged) so a
-    single buggy subclass cannot abort discovery for the whole machine.
+    A discoverer whose construction or ``client_exists()`` raises is skipped
+    (and logged) so a single buggy subclass cannot abort discovery for the whole
+    machine. Construction is inside the guard because ``AgentDiscoverer``
+    coerces the scope set and raises on an unrecognized value -- and it would
+    raise on the *first* registered discoverer, taking out all of them.
     """
-    skipped = frozenset(skip_discovery_scopes or ())
+    # Coerced here, not just in the constructor: a str-Enum member hashes equal
+    # to its value, so a set of bare strings would sail through the
+    # ``>=`` check below and only blow up per discoverer. A bare string is
+    # accepted too, since ``frozenset("user")`` would otherwise iterate
+    # characters.
+    if isinstance(skip_discovery_scopes, str):
+        skip_discovery_scopes = {skip_discovery_scopes}  # type: ignore[assignment]
+    try:
+        skipped = frozenset(DiscoveryLocationScope(scope) for scope in skip_discovery_scopes or ())
+    except ValueError:
+        logger.exception("Unrecognized discovery location scope; discovering nothing")
+        return []
     if skipped >= AUTOMATIC_DISCOVERY_SCOPES:
         return []
     found: list[AgentDiscoverer] = []
     for cls in DISCOVERERS.values():
-        discoverer = cls(home_directory, target_folders, skipped)
         try:
+            discoverer = cls(home_directory, target_folders, skipped)
             exists = discoverer.client_exists() is not None
         except Exception:
-            logger.exception("Discoverer %s.client_exists() raised; skipping", cls.__name__)
+            logger.exception("Discoverer %s failed to construct or probe; skipping", cls.__name__)
             continue
         if exists:
             found.append(discoverer)

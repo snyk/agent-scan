@@ -9750,3 +9750,82 @@ def test_skill_merge_result_does_not_depend_on_merge_call_order(tmp_path):
     key = shared.as_posix()
     assert key in result, "a colliding path must not be dropped by the losing merge"
     assert {s.scope for s in result[key]} == {DiscoveryLocationScope.SYSTEM}
+
+
+def test_find_discoverers_tolerates_an_unknown_scope_value(tmp_path):
+    """The constructor coerces scopes to the enum and raises on an unknown
+    value, but it sat outside the try that guards client_exists() -- so the
+    ValueError escaped find_discoverers and took out discovery for the whole
+    machine, contradicting its own docstring. Under `guard discover` it is
+    swallowed whole and the hook reports nothing.
+    """
+    from agent_scan.agents import find_discoverers
+
+    assert find_discoverers(tmp_path, [], {"users"}) == []
+
+
+def test_find_discoverers_tolerates_a_bare_string_scope(tmp_path):
+    """``frozenset("user")`` iterates characters, so a caller passing a bare
+    string instead of a set raises on the first character."""
+    from agent_scan.agents import find_discoverers
+
+    assert find_discoverers(tmp_path, [], "user") == []
+
+
+def test_windows_client_merge_keeps_entries_that_differ_only_in_scope():
+    """The WSL merge dedupes on (name, exists, mcp_paths, skills_paths), a key
+    that omits both glob lists and all five scope dicts -- so a path-identical
+    but scope-divergent Linux entry silently collapses into its Windows twin.
+    Nothing covered this function at all.
+    """
+    from agent_scan.models import CandidateClient, DiscoveryLocationScope
+    from agent_scan.well_known_clients import merge_platform_clients
+
+    windows = CandidateClient(
+        name="dup",
+        client_exists_paths=["~/.dup"],
+        mcp_config_paths=["~/.dup/mcp.json"],
+        skills_dir_paths=[],
+    )
+    linux = CandidateClient(
+        name="dup",
+        client_exists_paths=["~/.dup"],
+        mcp_config_paths=["~/.dup/mcp.json"],
+        skills_dir_paths=[],
+        mcp_config_path_scopes={"~/.dup/mcp.json": DiscoveryLocationScope.SYSTEM},
+    )
+
+    merged = merge_platform_clients([windows], [linux])
+
+    assert len(merged) == 2, "entries differing only in scope must not be deduped"
+
+
+def test_windows_client_merge_still_dedupes_identical_entries():
+    from agent_scan.models import CandidateClient
+    from agent_scan.well_known_clients import merge_platform_clients
+
+    entry = CandidateClient(
+        name="same",
+        client_exists_paths=["~/.same"],
+        mcp_config_paths=["~/.same/mcp.json"],
+        skills_dir_paths=[],
+    )
+
+    assert len(merge_platform_clients([entry], [entry.model_copy()])) == 1
+
+
+def test_candidate_client_rejects_a_scope_override_for_an_undeclared_path():
+    """The override dicts are keyed by the raw declaration string, so a typo is
+    a silent no-op that degrades to default_location_scope (= user)."""
+    import pytest as _pytest
+
+    from agent_scan.models import CandidateClient, DiscoveryLocationScope
+
+    with _pytest.raises(ValueError, match="mcp_config_path_scopes"):
+        CandidateClient(
+            name="typo",
+            client_exists_paths=["~/.typo"],
+            mcp_config_paths=["~/.typo/mcp.json"],
+            skills_dir_paths=[],
+            mcp_config_path_scopes={"~/.typo/mcp.jsonn": DiscoveryLocationScope.SYSTEM},
+        )

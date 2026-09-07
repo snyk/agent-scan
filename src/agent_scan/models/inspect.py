@@ -1,6 +1,6 @@
 """Models for the discovery-to-inspection lifecycle and its results."""
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from agent_scan.models.discovery import DiscoveredServer, DiscoveryLocationScope
 from agent_scan.models.errors import CouldNotParseMCPConfig, FileNotFoundConfig, ScanError, UnknownConfigFormat
@@ -30,6 +30,31 @@ class CandidateClient(BaseModel):
         "servers alongside per-project ones). Without this the path-level exclusion would skip the "
         "file before it is opened and the nested scopes would never be seen.",
     )
+
+    @model_validator(mode="after")
+    def _scope_overrides_must_name_declared_paths(self) -> "CandidateClient":
+        """Reject an override whose key is not in the list it overrides.
+
+        The override dicts are keyed by the raw, unexpanded declaration string,
+        so a key that drifts from its list entry is not an error today -- it is
+        a silent no-op that falls back to ``default_location_scope`` (``user``),
+        which is exactly the kind of mislabelling the scope filter then acts on.
+        """
+        for override_field, source_field in (
+            ("mcp_config_path_scopes", "mcp_config_paths"),
+            ("skills_dir_path_scopes", "skills_dir_paths"),
+            ("mcp_config_glob_scopes", "mcp_config_globs"),
+            ("skills_dir_glob_scopes", "skills_dir_globs"),
+            ("mcp_config_path_nested_scopes", "mcp_config_paths"),
+        ):
+            declared = set(getattr(self, source_field))
+            unknown = sorted(set(getattr(self, override_field)) - declared)
+            if unknown:
+                raise ValueError(
+                    f"{self.name}: {override_field} names {unknown} which is not in {source_field}; "
+                    "the override would silently fall back to default_location_scope"
+                )
+        return self
 
 
 class ClientToInspect(BaseModel):

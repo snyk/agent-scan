@@ -304,36 +304,64 @@ WINDOWS_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
 ]
 
 
+def _discovery_identity(client: CandidateClient) -> str:
+    """A stable key covering everything that makes a client's discovery distinct.
+
+    Every discovery-relevant field is included, so two entries that differ only
+    in their glob lists or their location-scope overrides stay distinct. A key
+    that named only the path lists would silently collapse them and apply one
+    platform's scope labels to the other.
+    """
+    return client.model_dump_json(
+        include={
+            "name",
+            "client_exists_paths",
+            "mcp_config_paths",
+            "skills_dir_paths",
+            "mcp_config_globs",
+            "skills_dir_globs",
+            "max_glob_depth",
+            "default_location_scope",
+            "mcp_config_path_scopes",
+            "skills_dir_path_scopes",
+            "mcp_config_glob_scopes",
+            "skills_dir_glob_scopes",
+            "mcp_config_path_nested_scopes",
+        }
+    )
+
+
+def merge_platform_clients(primary: list[CandidateClient], secondary: list[CandidateClient]) -> list[CandidateClient]:
+    """Concatenate two per-OS client lists, dropping structural duplicates.
+
+    On Windows we may also be scanning Linux home directories that live inside
+    WSL distros (exposed as ``\\\\wsl.localhost\\<Distro>\\home\\<user>``). The Linux
+    client definitions use Linux-conventional paths (e.g. ``~/.config/Code``,
+    ``~/.claude.json``), which only match when expanded against a WSL home; the
+    Windows definitions only match against Windows-native homes. Merging both
+    lists gets WSL homes probed with Linux paths, while dropping Linux entries
+    whose discovery rules are identical to an existing Windows entry (e.g.
+    ``cursor`` uses ``~/.cursor/mcp.json`` on both) avoids scanning the same MCP
+    server twice per home.
+    """
+    seen: set[str] = set()
+    merged: list[CandidateClient] = []
+    for client in [*primary, *secondary]:
+        key = _discovery_identity(client)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(client)
+    return merged
+
+
 def get_well_known_clients() -> list[CandidateClient]:
     if sys.platform == "linux" or sys.platform == "linux2":
         return LINUX_WELL_KNOWN_CLIENTS
     elif sys.platform == "darwin":
         return MACOS_WELL_KNOWN_CLIENTS
     elif sys.platform == "win32":
-        # On Windows we may also be scanning Linux home directories that live
-        # inside WSL distros (exposed as \\wsl.localhost\<Distro>\home\<user>).
-        # The Linux client definitions use Linux-conventional paths
-        # (e.g. ~/.config/Code, ~/.claude.json), which only match when
-        # expanded against a WSL home; the Windows definitions only match
-        # against Windows-native homes. Merge both lists so WSL homes get
-        # probed with Linux paths, but drop Linux entries whose discovery
-        # paths are structurally identical to an existing Windows entry
-        # (e.g. `cursor` uses `~/.cursor/mcp.json` on both platforms) to
-        # avoid scanning the same MCP server twice per home.
-        seen: set[tuple[str, tuple[str, ...], tuple[str, ...], tuple[str, ...]]] = set()
-        merged: list[CandidateClient] = []
-        for client in WINDOWS_WELL_KNOWN_CLIENTS + LINUX_WELL_KNOWN_CLIENTS:
-            key = (
-                client.name,
-                tuple(client.client_exists_paths),
-                tuple(client.mcp_config_paths),
-                tuple(client.skills_dir_paths),
-            )
-            if key in seen:
-                continue
-            seen.add(key)
-            merged.append(client)
-        return merged
+        return merge_platform_clients(WINDOWS_WELL_KNOWN_CLIENTS, LINUX_WELL_KNOWN_CLIENTS)
     else:
         return []
 
