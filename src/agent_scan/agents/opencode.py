@@ -626,16 +626,6 @@ class OpenCodeDiscoverer(AgentDiscoverer):
 
     # --- skills.paths from user opencode.json (Gap B) ---
 
-    def _iter_candidate_config_files(self) -> list[Path]:
-        """Every opencode config file we'd consider for ``skills.paths`` extraction.
-
-        Covers the same scopes as MCP discovery (global, project, managed,
-        ``$OPENCODE_CONFIG`` env file) so a ``skills.paths`` declared anywhere
-        opencode honors it is picked up. The file may or may not exist;
-        ``_load_json_file`` handles missing/unreadable files quietly.
-        """
-        return [path for path, _scope in self._iter_scoped_candidate_config_files()]
-
     def _iter_scoped_candidate_config_files(
         self, source_scope: DiscoveryLocationScope | None = None
     ) -> list[tuple[Path, DiscoveryLocationScope]]:
@@ -688,9 +678,7 @@ class OpenCodeDiscoverer(AgentDiscoverer):
         # opencode's instance dirs (the db ``worktree`` leaves); computed once so
         # the relative-entry resolution below doesn't re-read the SQLite db per
         # candidate config file.
-        worktrees = (
-            self._all_discovery_folders() if self._scope_enabled(DiscoveryLocationScope.PROJECT_WORKSPACE) else []
-        )
+        worktrees = self._project_worktrees() if self._scope_enabled(DiscoveryLocationScope.PROJECT_WORKSPACE) else []
         for config_path, config_scope in self._iter_scoped_candidate_config_files(source_scope):
             data = self._load_json_file(config_path)
             if not isinstance(data, dict):
@@ -719,6 +707,20 @@ class OpenCodeDiscoverer(AgentDiscoverer):
                         if key in scoped:
                             result[key] = scoped[key]
         return result
+
+    def _project_worktrees(self) -> list[Path]:
+        """Literal opencode instance dirs, cached for this discoverer's lifetime.
+
+        ``_all_discovery_folders`` is uncached and re-reads the ``opencode*.db``
+        SQLite database on every call, and ``discover_skills`` calls
+        ``_discover_config_skills_paths`` three times -- so the db was opened
+        three extra times per discovery, inside the hook's 5s cap. The literal
+        roots (not the ancestor walk) are correct here because opencode joins a
+        relative ``skills.paths`` entry to the instance directory.
+        """
+        if self._project_worktrees_cache is None:
+            self._project_worktrees_cache = self._all_discovery_folders()
+        return self._project_worktrees_cache
 
     def _resolve_skills_path_entry(self, entry: str, worktrees: list[Path]) -> list[Path]:
         """Expand a single ``skills.paths`` entry the way opencode does.

@@ -346,9 +346,10 @@ class CodexDiscoverer(AgentDiscoverer):
 
     def _discover_user_skills(self) -> SkillsDirsResult:
         """Scan the user (``~/.agents/skills``), the deprecated-but-still-loaded
-        ``<codex_home>/skills`` (kept by Codex for backward compatibility), the
-        OpenAI-embedded ``<codex_home>/skills/.system`` cache, and admin
-        (``/etc/codex/skills``) skill dirs; missing/non-dir/unreadable paths are skipped.
+        ``<codex_home>/skills`` (kept by Codex for backward compatibility), and the
+        OpenAI-embedded ``<codex_home>/skills/.system`` cache; missing/non-dir/
+        unreadable paths are skipped. The admin dir is system scope and lives in
+        :meth:`_discover_system_skills`.
         These ``<codex_home>``-rooted dirs follow ``CODEX_HOME``, so a relocated home is
         covered where the legacy pipeline only scans the literal ``~/.codex/skills``.
 
@@ -375,10 +376,6 @@ class CodexDiscoverer(AgentDiscoverer):
         if entries is not None:
             result[skills_dir.as_posix()] = entries
         return result
-
-    def _discover_global_skills(self) -> SkillsDirsResult:
-        """Compatibility helper returning both user-global and system skills."""
-        return {**self._discover_user_skills(), **self._discover_system_skills()}
 
     def _discover_project_skills(self) -> SkillsDirsResult:
         """Scan ``<project>/.agents/skills`` for every registered project and ancestor."""

@@ -547,7 +547,7 @@ def test_claude_code_discoverer_skips_project_source_before_calling_it(tmp_path,
     (tmp_path / ".claude.json").write_text('{"mcpServers": {"global-srv": {"command": "g"}}}')
     discoverer = ClaudeCodeDiscoverer(
         tmp_path,
-        skip_discovery_scopes={DiscoveryLocationScope.PROJECT_WORKSPACE},
+        skip_discovery_scopes=frozenset({DiscoveryLocationScope.PROJECT_WORKSPACE}),
     )
     monkeypatch.setattr(
         discoverer,
@@ -9356,7 +9356,7 @@ async def test_pipeline_preserves_unresolved_target_folder_spelling(tmp_path):
             InspectArgs(timeout=0, tokens=[], paths=[], target_folders=[str(project_link)])
         )
 
-    find.assert_called_once_with(home, target_folders=[project_link])
+    find.assert_called_once_with(home, target_folders=[project_link], skip_discovery_scopes=frozenset())
 
 
 @pytest.mark.asyncio
@@ -9437,7 +9437,7 @@ async def test_pipeline_skips_target_folder_when_exists_raises(tmp_path, caplog)
             InspectArgs(timeout=0, tokens=[], paths=[], target_folders=[str(stale), str(good)])
         )
 
-    find.assert_called_once_with(home, target_folders=[good])
+    find.assert_called_once_with(home, target_folders=[good], skip_discovery_scopes=frozenset())
     assert str(stale) in caplog.text
     assert "Skipping" in caplog.text
 
@@ -9491,7 +9491,7 @@ async def test_pipeline_runtime_error_resolving_target_keeps_literal_folder(tmp_
             InspectArgs(timeout=0, tokens=[], paths=[], target_folders=[target.as_posix()])
         )
 
-    find.assert_called_once_with(home, target_folders=[target])
+    find.assert_called_once_with(home, target_folders=[target], skip_discovery_scopes=frozenset())
 
 
 @pytest.mark.asyncio
@@ -9518,7 +9518,7 @@ async def test_pipeline_null_byte_target_folder_is_skipped_without_aborting(tmp_
             InspectArgs(timeout=0, tokens=[], paths=[], target_folders=["a\x00b", good.as_posix()])
         )
 
-    find.assert_called_once_with(home, target_folders=[good])
+    find.assert_called_once_with(home, target_folders=[good], skip_discovery_scopes=frozenset())
 
 
 # --- location scope must follow where a component lives, not who declared it ---

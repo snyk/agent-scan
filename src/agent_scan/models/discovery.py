@@ -59,7 +59,14 @@ class DiscoveredServer(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _accept_legacy_pair(cls, value: object) -> object:
-        if isinstance(value, tuple) and len(value) == 2:
+        """Accept the historical ``(name, server)`` pair.
+
+        Lists are accepted as well as tuples: a tuple becomes a list across a
+        JSON round-trip, so a tuple-only check would reject the same value on
+        the way back in. ``scope`` is left at ``CUSTOM``, the not-yet-labelled
+        sentinel that ``_scope_mcp_results`` fills in.
+        """
+        if isinstance(value, tuple | list) and len(value) == 2:
             return {"name": value[0], "server": value[1]}
         return value
 

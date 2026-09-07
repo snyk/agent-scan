@@ -5140,7 +5140,7 @@ class TestRunDiscover:
 
         assert result == 0
         stdin.read.assert_called_once_with(1024 * 1024)
-        discover.assert_called_once_with(["/session/project"], discovery_scope="all")
+        discover.assert_called_once_with(["/session/project"], discovery_scope="all", skip_discovery_scopes=frozenset())
         assert json.loads(send.call_args.args[3])["session_id"] == "session"
 
     def test_hook_stdin_reads_cwd_for_codex(self, tmp_path, monkeypatch):
@@ -5162,7 +5162,7 @@ class TestRunDiscover:
 
         assert result == 0
         stdin.read.assert_called_once_with(1024 * 1024)
-        discover.assert_called_once_with(["/session/project"], discovery_scope="all")
+        discover.assert_called_once_with(["/session/project"], discovery_scope="all", skip_discovery_scopes=frozenset())
         assert json.loads(send.call_args.args[3])["session_id"] == "session"
 
     def test_hook_stdin_accepts_workspace_roots_list(self, tmp_path, monkeypatch):
@@ -5183,7 +5183,9 @@ class TestRunDiscover:
             result = guard_module.run_guard(self._args(config, client="cursor"))
 
         assert result == 0
-        discover.assert_called_once_with(["/workspace/one", "/workspace/two"], discovery_scope="all")
+        discover.assert_called_once_with(
+            ["/workspace/one", "/workspace/two"], discovery_scope="all", skip_discovery_scopes=frozenset()
+        )
         assert send.call_args.args[:3] == ("https://api.snyk.io", "cursor", "env-pk")
         assert json.loads(send.call_args.args[3])["conversation_id"] == "conversation"
 
@@ -5208,7 +5210,7 @@ class TestRunDiscover:
             )
 
         assert result == 0
-        discover.assert_called_once_with([], discovery_scope="all")
+        discover.assert_called_once_with([], discovery_scope="all", skip_discovery_scopes=frozenset())
         assert json.loads(send.call_args.args[3])["session_id"] == "session-start-server-discovery"
 
     def test_tty_stdin_is_not_read(self, tmp_path, monkeypatch):
@@ -5229,7 +5231,7 @@ class TestRunDiscover:
 
         assert result == 0
         stdin.read.assert_not_called()
-        discover.assert_called_once_with([], discovery_scope="all")
+        discover.assert_called_once_with([], discovery_scope="all", skip_discovery_scopes=frozenset())
 
     def test_pipe_that_never_closes_does_not_block_discovery(self, tmp_path, monkeypatch):
         import time as test_time

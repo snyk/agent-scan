@@ -183,6 +183,9 @@ class AgentDiscoverer(ABC):
         # ~/.claude.json each time.
         self._discovery_paths_cache: list[Path] | None = None
         self._project_anchors_cache: list[Path] | None = None
+        # Populated by subclasses whose project enumeration is expensive
+        # (opencode reads a SQLite db); see OpenCodeDiscoverer._project_worktrees.
+        self._project_worktrees_cache: list[Path] | None = None
 
     def _scans_own_home(self) -> bool:
         """True when this discoverer targets the scanning process's own user.

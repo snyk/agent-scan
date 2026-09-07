@@ -130,10 +130,11 @@ async def discover_clients_to_inspect(
 
         # Phase B — ABC path. Runs sequentially after Phase A and merges into its output.
         for home_directory, username in home_dirs_with_users:
-            discoverer_kwargs: dict = {"target_folders": target_folders}
-            if inspect_args.skip_discovery_scopes:
-                discoverer_kwargs["skip_discovery_scopes"] = inspect_args.skip_discovery_scopes
-            for discoverer in find_discoverers(home_directory, **discoverer_kwargs):
+            for discoverer in find_discoverers(
+                home_directory,
+                target_folders=target_folders,
+                skip_discovery_scopes=inspect_args.skip_discovery_scopes,
+            ):
                 try:
                     cti = discoverer.discover(inspect_args.discovery_scope)
                 except Exception:

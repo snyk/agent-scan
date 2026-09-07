@@ -412,7 +412,7 @@ def _run_discover(args) -> int:
         session_marker=session_id or "session-start-server-discovery",
         target_folders=target_folders,
         discovery_scope=getattr(args, "scope", DiscoveryScope.ALL),
-        skip_discovery_scopes=getattr(args, "skip_discovery_scopes", frozenset()) or None,
+        skip_discovery_scopes=getattr(args, "skip_discovery_scopes", frozenset()),
     )
     return 0 if success else 1
 
@@ -1329,14 +1329,11 @@ def _send_servers_discovered_event(
     rich.print("[dim]Discovering MCP servers...[/dim]")
     started = time.monotonic()
     try:
-        if skip_discovery_scopes is None:
-            servers = _discover_servers_payload(target_folders, discovery_scope=discovery_scope)
-        else:
-            servers = _discover_servers_payload(
-                target_folders,
-                discovery_scope=discovery_scope,
-                skip_discovery_scopes=skip_discovery_scopes,
-            )
+        servers = _discover_servers_payload(
+            target_folders,
+            discovery_scope=discovery_scope,
+            skip_discovery_scopes=skip_discovery_scopes,
+        )
     except Exception as e:
         rich.print(f"[yellow]Warning:[/yellow] Could not discover MCP servers: {e}")
         return False

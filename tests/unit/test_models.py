@@ -441,3 +441,30 @@ class TestMCPServerMap:
 
         with pytest.raises(ValidationError):
             MCPServerMap(servers={"bad": {"not_a": "server"}})
+
+
+def test_legacy_discovered_server_pair_survives_a_json_round_trip():
+    """A tuple becomes a list once serialized, so a tuple-only check would
+    reject the same value coming back in."""
+    from agent_scan.models import DiscoveredServer, DiscoveryLocationScope, StdioServer
+
+    from_list = DiscoveredServer.model_validate(["srv", StdioServer(command="node")])
+
+    assert from_list.name == "srv"
+    assert from_list.server.command == "node"
+    assert from_list.scope is DiscoveryLocationScope.CUSTOM
+
+
+def test_guard_wire_model_stays_in_field_parity_with_the_analysis_one():
+    """``GuardScanPathRequest`` is deliberately not a ``ScanPathRequest``
+    subclass, so nothing structurally stops the two drifting apart."""
+    from agent_scan.models.api.v20260710 import GuardScanPathRequest, ScanPathRequest
+
+    assert set(GuardScanPathRequest.model_fields) == set(ScanPathRequest.model_fields)
+
+
+def test_guard_server_wire_model_adds_only_scope():
+    from agent_scan.models.api.v20260710 import GuardMcpServerRequest, McpServerRequest
+
+    extra = set(GuardMcpServerRequest.model_fields) - set(McpServerRequest.model_fields)
+    assert extra == {"scope"}
