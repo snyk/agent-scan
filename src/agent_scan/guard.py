@@ -105,6 +105,7 @@ CODEX_HOOK_EVENTS = [
     "UserPromptSubmit",
     "Stop",
     "SessionStart",
+    "SubagentStart",
 ]
 
 CURSOR_HOOK_EVENTS = [
