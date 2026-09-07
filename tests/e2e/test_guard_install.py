@@ -161,6 +161,7 @@ class TestGuardInstallE2E:
             env={
                 **os.environ,
                 "HOME": str(home),
+                "USERPROFILE": str(home),
                 "PUSH_KEY": "test-pk-e2e",
                 "REMOTE_HOOKS_BASE_URL": fake_hook_server,
                 "MACHINE_ID": "docker-sandbox-machine",

@@ -1174,11 +1174,11 @@ def _servers_discovered_entries(clients_to_inspect: list[ClientToInspect]) -> li
                 )
                 for name, server in discovered
             )
-        for discovered in client.skills_dirs.values():
-            if isinstance(discovered, FileNotFoundConfig):
-                config_errors.append(_config_error_to_scan_error(discovered))
+        for skill_entries in client.skills_dirs.values():
+            if isinstance(skill_entries, FileNotFoundConfig):
+                config_errors.append(_config_error_to_scan_error(skill_entries))
                 continue
-            for skill in discovered:
+            for skill in skill_entries:
                 skill_name = skill.name
                 skill_error = None
                 try:
