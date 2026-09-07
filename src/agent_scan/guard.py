@@ -1149,8 +1149,8 @@ def _servers_discovered_entries(clients_to_inspect: list[ClientToInspect]) -> li
         _join_scan_errors,
     )
     from agent_scan.models import ScanError
-    from agent_scan.models.inspect import GuardInspectedPath, GuardInspectedServer
     from agent_scan.models.errors import CouldNotParseMCPConfig, FileNotFoundConfig, UnknownConfigFormat
+    from agent_scan.models.inspect import GuardInspectedPath, GuardInspectedServer
     from agent_scan.verify_api import build_guard_discovery_payloads
 
     inspected_paths: list[GuardInspectedPath] = []
@@ -1600,9 +1600,9 @@ def _render_posix_command(invocation: _HookInvocation) -> str:
     client = _shell_quote(invocation.hook_client) if invocation.quote_client else invocation.hook_client
     parts.append(f"--client {client}")
     if invocation.scope:
-        parts.append(f"--scope {invocation.scope}")
+        parts.append(f"--scope {_shell_quote(invocation.scope)}")
     if invocation.skip_discovery_scopes:
-        parts.append(f"--skip-discovery-scopes {invocation.skip_discovery_scopes}")
+        parts.append(f"--skip-discovery-scopes {_shell_quote(invocation.skip_discovery_scopes)}")
     return " ".join(parts)
 
 
@@ -1623,9 +1623,11 @@ def _render_powershell_command(invocation: _HookInvocation) -> str:
     if invocation.agent_scan_command:
         parts.extend(["-AgentScanCommand", _ps_quote(invocation.agent_scan_command)])
     if invocation.scope:
-        parts.extend(["-Scope", invocation.scope])
+        parts.extend(["-Scope", _ps_quote(invocation.scope)])
     if invocation.skip_discovery_scopes:
-        parts.extend(["-SkipDiscoveryScopes", invocation.skip_discovery_scopes])
+        # Quoted like every other value-bearing flag. The receiving script also
+        # accepts the unquoted array form, which is what the argv path produces.
+        parts.extend(["-SkipDiscoveryScopes", _ps_quote(invocation.skip_discovery_scopes)])
     return " ".join(parts)
 
 

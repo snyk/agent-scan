@@ -6,6 +6,7 @@ import base64
 import copy
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -19,6 +20,7 @@ from unittest.mock import call as mock_call
 import pytest
 
 import agent_scan.guard as guard_module
+from agent_scan import cli as cli_module
 from agent_scan.guard import (
     _PERMISSION_DENIED,
     ALL_CLIENTS,
@@ -260,15 +262,15 @@ class TestExtractEnvFromCmd:
             False,
             "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' MACHINE_ID='machine' "
             "AGENT_SCAN_COMMAND='/usr/local/bin/snyk-agent-scan' bash '/x/snyk-agent-guard-discover.sh' "
-            "--client 'claude-code' --scope servers --skip-discovery-scopes project_workspace",
+            "--client 'claude-code' --scope 'servers' --skip-discovery-scopes 'project_workspace'",
         ),
         (
             "discover",
             True,
             "powershell -File 'C:\\hooks\\snyk-agent-guard-discover.ps1' -Client claude-code -PushKey 'pk' "
             "-RemoteUrl 'https://api.snyk.io' -MachineId 'machine' "
-            "-AgentScanCommand 'C:\\Program Files\\Snyk\\snyk-agent-scan.exe' -Scope servers "
-            "-SkipDiscoveryScopes project_workspace",
+            "-AgentScanCommand 'C:\\Program Files\\Snyk\\snyk-agent-scan.exe' -Scope 'servers' "
+            "-SkipDiscoveryScopes 'project_workspace'",
         ),
     ],
 )
@@ -480,8 +482,8 @@ class TestBuildDiscoverHookCommand:
         assert "MACHINE_ID='machine'" in command
         assert "AGENT_SCAN_COMMAND='/opt/Snyk'\"'\"'s bin/snyk-agent-scan'" in command
         assert command.endswith(
-            f"bash '/x/snyk-agent-guard-discover.sh' --client '{client}' --scope servers "
-            "--skip-discovery-scopes project_workspace"
+            f"bash '/x/snyk-agent-guard-discover.sh' --client '{client}' --scope 'servers' "
+            "--skip-discovery-scopes 'project_workspace'"
         )
         assert _is_agent_scan_command(command)
 
@@ -501,8 +503,8 @@ class TestBuildDiscoverHookCommand:
         assert command == (
             rf"powershell -File 'C:\hooks\snyk-agent-guard-discover.ps1' -Client {client} "
             "-PushKey 'pk' -RemoteUrl 'https://api.snyk.io' -MachineId 'machine''s-id' "
-            r"-AgentScanCommand 'C:\Program Files\Snyk\snyk-agent-scan.exe' -Scope servers "
-            r"-SkipDiscoveryScopes project_workspace"
+            r"-AgentScanCommand 'C:\Program Files\Snyk\snyk-agent-scan.exe' -Scope 'servers' "
+            r"-SkipDiscoveryScopes 'project_workspace'"
         )
 
     def test_powershell_escapes_single_quotes_in_paths(self):
@@ -2091,7 +2093,7 @@ CODEX_AGENT_SCAN_CMD = (
 CODEX_DISCOVER_CMD = (
     "PUSH_KEY='pk-discover' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' "
     "AGENT_SCAN_COMMAND='/usr/local/bin/snyk-agent-scan' "
-    "bash '/home/u/.codex/hooks/snyk-agent-guard-discover.sh' --client codex --scope servers"
+    "bash '/home/u/.codex/hooks/snyk-agent-guard-discover.sh' --client codex --scope 'servers'"
 )
 
 
@@ -2311,7 +2313,7 @@ class TestDetectInstall:
         )
         later_discovery_command = (
             "PUSH_KEY='pk-later' REMOTE_HOOKS_BASE_URL='https://later.example' "
-            "bash '/x/snyk-agent-guard-discover.sh' --client test --scope servers"
+            "bash '/x/snyk-agent-guard-discover.sh' --client test --scope 'servers'"
         )
         path = tmp_path / "hooks.json"
         _write(
@@ -6449,3 +6451,88 @@ class TestGuardDiscoveryWireModel:
             mcp_configs=mcp_configs,
             skills_dirs={},
         )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX discovery script")
+class TestDiscoveryScopeFlagReachesTheCli:
+    """``--skip-discovery-scopes`` is documented and parsed as a CSV, but no test
+    ever put a multi-value CSV through a rendered hook command. On PowerShell a
+    bare ``system,user`` binds to an *array*, which coerces into the ``[string]``
+    parameter by joining on ``$OFS`` -- producing ``"system user"``, which the
+    CLI then rejects with exit 2 while the hook swallows the failure and exits 0.
+    """
+
+    def test_posix_hook_forwards_a_multi_value_csv_verbatim(self, tmp_path):
+        script = Path(guard_module.__file__).parent / "hooks" / "snyk-agent-guard-discover.sh"
+        marker = tmp_path / "invoked"
+        stub = tmp_path / "runner"
+        stub.write_text('#!/bin/sh\nprintf "%s\\n" "$*" > "$MARKER"\n')
+        stub.chmod(0o755)
+
+        result = subprocess.run(
+            [
+                "bash",
+                str(script),
+                "--client",
+                "claude-code",
+                "--scope",
+                "servers",
+                "--skip-discovery-scopes",
+                "system,user",
+            ],
+            input="{}",
+            text=True,
+            capture_output=True,
+            timeout=5,
+            env={
+                **os.environ,
+                "AGENT_SCAN_COMMAND": str(stub),
+                "MACHINE_ID": "machine-42",
+                "MARKER": str(marker),
+            },
+        )
+
+        assert result.returncode == 0
+        assert marker.read_text().strip().endswith("--skip-discovery-scopes system,user")
+
+    def test_cli_accepts_the_csv_the_renderers_emit(self):
+        """Whatever the renderers put on the command line has to parse."""
+        rendered = guard_module._render_posix_command(
+            guard_module._HookInvocation(
+                script_path=Path("/hooks/discover.sh"),
+                hook_client="claude-code",
+                push_key="k",
+                url="https://api.snyk.io",
+                scope="servers",
+                skip_discovery_scopes="system,user",
+            )
+        )
+
+        token = shlex.split(rendered)[shlex.split(rendered).index("--skip-discovery-scopes") + 1]
+        assert cli_module._parse_skip_discovery_scopes(token) == frozenset(
+            {DiscoveryLocationScope.SYSTEM, DiscoveryLocationScope.USER}
+        )
+
+    def test_powershell_renderer_quotes_the_csv_like_its_siblings(self):
+        rendered = guard_module._render_powershell_command(
+            guard_module._HookInvocation(
+                script_path=Path("C:/hooks/discover.ps1"),
+                hook_client="claude-code",
+                push_key="k",
+                url="https://api.snyk.io",
+                scope="servers",
+                skip_discovery_scopes="system,user",
+            )
+        )
+
+        assert "-SkipDiscoveryScopes 'system,user'" in rendered
+        assert "-Scope 'servers'" in rendered
+
+    def test_powershell_script_accepts_an_array_and_rejoins_it(self):
+        """Defence in depth for the argv path, where subprocess hands the value
+        to PowerShell unquoted because it contains no spaces."""
+        script = (Path(guard_module.__file__).parent / "hooks" / "snyk-agent-guard-discover.ps1").read_text()
+
+        assert "[string[]]$SkipDiscoveryScopes" in script
+        assert "-join ','" in script
+        assert "ValidatePattern" in script
