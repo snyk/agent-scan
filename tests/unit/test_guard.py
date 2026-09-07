@@ -62,7 +62,7 @@ from agent_scan.guard import (
     _write_codex_managed_config,
     _write_config,
 )
-from agent_scan.models import ClientToInspect, InspectedPath, InspectedServer, RemoteServer, StdioServer
+from agent_scan.models import ClientToInspect, DiscoveredSkill, InspectedPath, InspectedServer, RemoteServer, StdioServer
 from agent_scan.models.errors import CouldNotParseMCPConfig, FileNotFoundConfig
 from agent_scan.pushkeys import GuardEnabledAccessDeniedError
 
@@ -251,14 +251,14 @@ class TestExtractEnvFromCmd:
             False,
             "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' MACHINE_ID='machine' "
             "AGENT_SCAN_COMMAND='/usr/local/bin/snyk-agent-scan' bash '/x/snyk-agent-guard-discover.sh' "
-            "--client 'claude-code' --scope servers",
+            "--client 'claude-code' --scope all",
         ),
         (
             "discover",
             True,
             "powershell -File 'C:\\hooks\\snyk-agent-guard-discover.ps1' -Client claude-code -PushKey 'pk' "
             "-RemoteUrl 'https://api.snyk.io' -MachineId 'machine' "
-            "-AgentScanCommand 'C:\\Program Files\\Snyk\\snyk-agent-scan.exe' -Scope servers",
+            "-AgentScanCommand 'C:\\Program Files\\Snyk\\snyk-agent-scan.exe' -Scope all",
         ),
     ],
 )
@@ -469,7 +469,7 @@ class TestBuildDiscoverHookCommand:
         assert "TENANT_ID=" not in command
         assert "MACHINE_ID='machine'" in command
         assert "AGENT_SCAN_COMMAND='/opt/Snyk'\"'\"'s bin/snyk-agent-scan'" in command
-        assert command.endswith(f"bash '/x/snyk-agent-guard-discover.sh' --client '{client}' --scope servers")
+        assert command.endswith(f"bash '/x/snyk-agent-guard-discover.sh' --client '{client}' --scope all")
         assert _is_agent_scan_command(command)
 
     @pytest.mark.parametrize("client", ["claude-code", "cursor", "codex"])
@@ -488,7 +488,7 @@ class TestBuildDiscoverHookCommand:
         assert command == (
             rf"powershell -File 'C:\hooks\snyk-agent-guard-discover.ps1' -Client {client} "
             "-PushKey 'pk' -RemoteUrl 'https://api.snyk.io' -MachineId 'machine''s-id' "
-            r"-AgentScanCommand 'C:\Program Files\Snyk\snyk-agent-scan.exe' -Scope servers"
+            r"-AgentScanCommand 'C:\Program Files\Snyk\snyk-agent-scan.exe' -Scope all"
         )
 
     def test_powershell_escapes_single_quotes_in_paths(self):
@@ -3121,7 +3121,7 @@ class TestPowerShellDiscoveryHookScript:
 
         assert result.returncode == 0, result.stderr
         recorded = marker.read_text().splitlines()
-        assert recorded[0] == "guard discover --client claude-code --scope servers"
+        assert recorded[0] == "guard discover --client claude-code --scope all"
         assert json.loads("\n".join(recorded[1:])) == json.loads(payload)
 
     def test_nonzero_discovery_exit_is_swallowed(self, tmp_path):
@@ -4295,12 +4295,12 @@ class TestSendTestEventHooksScript:
 
 class TestServersDiscoveredPayload:
     @staticmethod
-    def _client(*, mcp_configs, name="claude code", path=None):
+    def _client(*, mcp_configs, skills_dirs=None, name="claude code", path=None):
         return ClientToInspect(
             name=name,
             client_path=path or (Path.home() / ".claude").as_posix(),
             mcp_configs=mcp_configs,
-            skills_dirs={},
+            skills_dirs=skills_dirs or {},
         )
 
     def test_builds_one_entry_per_client_and_merges_config_paths(self):
@@ -4337,6 +4337,40 @@ class TestServersDiscoveredPayload:
             ("remote", (home / "project" / ".mcp.json").as_posix()),
         ]
         assert result[1]["servers"] == []
+
+    def test_serializes_skill_metadata_without_reading_skill_files(self):
+        skill_path = (Path.home() / ".claude" / "skills" / "sandbox-skill").as_posix()
+        client = self._client(
+            mcp_configs={},
+            skills_dirs={
+                (Path.home() / ".claude" / "skills").as_posix(): [
+                    DiscoveredSkill(name="sandbox-skill", path=skill_path)
+                ]
+            },
+        )
+
+        result = guard_module._servers_discovered_entries([client])
+
+        assert result[0]["servers"] == []
+        assert result[0]["skills"] == [
+            {
+                "name": "sandbox-skill",
+                "installation_path": skill_path,
+                "files": [],
+                "error": None,
+            }
+        ]
+
+    def test_reports_skill_discovery_errors(self):
+        client = self._client(
+            mcp_configs={},
+            skills_dirs={"/missing-skills": FileNotFoundConfig(message="missing skills", traceback=None)},
+        )
+
+        result = guard_module._servers_discovered_entries([client])
+
+        assert result[0]["skills"] == []
+        assert result[0]["error"]["category"] == "file_not_found"
 
     def test_reports_config_discovery_errors(self):
         client = self._client(
@@ -4618,11 +4652,35 @@ class TestSendServersDiscoveredEvent:
         assert captured["client"] == hook_client
         assert captured["push_key"] == "pk-test"
         assert captured["machine_id"] == "machine-42"
+        assert payload["discovery_scope"] == "all"
 
     def test_empty_discovery_is_still_sent(self):
         ok, captured = self._capture(entries=[])
         assert ok is True
         assert captured["payload"]["servers"] == []
+
+    def test_payload_reports_requested_discovery_scope(self):
+        captured = {}
+
+        def fake_send(_url, _client, _push_key, payload, _machine_id, **kwargs):
+            captured["payload"] = json.loads(payload)
+            return True, ""
+
+        with (
+            patch(f"{_G}._discover_servers_payload", return_value=[]),
+            patch(f"{_G}.send_hook_event", side_effect=fake_send),
+            patch(f"{_G}.rich"),
+        ):
+            ok = guard_module._send_servers_discovered_event(
+                "pk",
+                "https://api.snyk.io",
+                "claude-code",
+                "machine-42",
+                discovery_scope=guard_module.DiscoveryScope.SKILLS,
+            )
+
+        assert ok is True
+        assert captured["payload"]["discovery_scope"] == "skills"
 
     def test_event_name_and_session_marker_can_be_overridden(self):
         captured = {}
@@ -4882,6 +4940,7 @@ class TestRunDiscover:
         assert captured["payload"] == {
             "hook_event_name": "sessionStartServerDiscovery",
             "servers": [],
+            "discovery_scope": "all",
             "session_id": "session-start-server-discovery",
         }
         assert captured["url"] == "https://env-hooks.example"
@@ -5202,12 +5261,11 @@ class TestRunInstallSendsServersDiscovered:
             "https://api.snyk.io",
             "claude-code",
             "machine-42",
-            discovery_scope=DiscoveryScope.SERVERS,
+            discovery_scope=DiscoveryScope.ALL,
             max_retries=2,
         )
 
-    def test_install_does_not_request_skills_discovery(self, tmp_path, monkeypatch):
-        """The install event only ever reports servers, so it must not pay for a skills sweep."""
+    def test_install_requests_full_component_discovery(self, tmp_path, monkeypatch):
         from agent_scan.agents import DiscoveryScope
 
         monkeypatch.setenv("PUSH_KEY", "headless-pk")
@@ -5217,7 +5275,7 @@ class TestRunInstallSendsServersDiscovered:
         ):
             _run_install(self._args(tmp_path, machine_id="machine-42"))
 
-        assert send.call_args.kwargs["discovery_scope"] is DiscoveryScope.SERVERS
+        assert send.call_args.kwargs["discovery_scope"] is DiscoveryScope.ALL
 
     def test_install_retries_delivery_unlike_session_start(self, tmp_path, monkeypatch):
         """``guard install`` is a one-shot the user is watching, so a transport blip retries."""

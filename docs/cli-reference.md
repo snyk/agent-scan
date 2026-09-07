@@ -356,7 +356,8 @@ snyk-agent-scan guard install {claude,cursor,codex,all} [OPTIONS]
 ```
 
 After configuring the hooks, installation sends a `hooksConfiguredServerDiscovery` event. It also configures a
-fire-and-forget session-start hook that reports discovered MCP servers with a `sessionStartServerDiscovery` event.
+fire-and-forget session-start hook that reports discovered MCP servers and skill metadata with a
+`sessionStartServerDiscovery` event. Skill file contents remain exclusive to explicit and periodic scans.
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
@@ -374,14 +375,14 @@ snyk-agent-scan guard discover [OPTIONS]
 ```
 
 This internal command is invoked by the SessionStart hook configured by `guard install`. It reads the current target
-folder(s) from the selected client's hook payload, discovers MCP servers locally, and sends the resulting
+folder(s) from the selected client's hook payload, discovers MCP servers and skills locally, and sends the resulting
 `sessionStartServerDiscovery` event directly to Agent Monitor; it is not normally run by hand.
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
 | `--url URL` | string | `https://api.snyk.io` | Remote hook base URL for the Snyk API environment. |
 | `--client {claude-code,cursor,codex}` | string | required | Hook client whose target-folder payload and endpoint conventions should be used. |
-| `--scope {servers,skills,all}` | string | `all` | Discovery data to collect. The session-start hook installed by `guard install` passes `servers`, because the event it sends carries MCP servers only. |
+| `--scope {servers,skills,all}` | string | `all` | Discovery data to collect. The session-start hook installed by `guard install` passes `all`. The event carries the selected value as `discovery_scope` so receivers only reconcile the component types covered by that event. |
 
 ### `guard uninstall`
 

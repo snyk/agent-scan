@@ -127,6 +127,67 @@ class TestGuardInstallE2E:
         assert session_discovery["body"]["discovery_duration_ms"] >= 0
 
     @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
+    def test_guard_discover_reports_server_and_skill_metadata(
+        self, agent_scan_cmd, tmp_path, fake_hook_server
+    ):
+        home = tmp_path / "home"
+        skills_dir = home / ".claude" / "skills" / "docker-sandbox-skill"
+        skills_dir.mkdir(parents=True)
+        (home / ".claude.json").write_text(
+            json.dumps(
+                {
+                    "mcpServers": {
+                        "docker-sandbox-mcp": {
+                            "command": "/bin/false",
+                            "args": [],
+                        }
+                    }
+                }
+            )
+        )
+        skill_path = skills_dir / "SKILL.md"
+        skill_path.write_text(
+            "---\n"
+            "name: docker-sandbox-skill\n"
+            "description: Reproduction skill inside Docker Sandbox.\n"
+            "---\n"
+            "Test instructions.\n"
+        )
+
+        result = subprocess.run(
+            [*agent_scan_cmd, "guard", "discover", "--client", "claude-code", "--scope", "all"],
+            input=json.dumps({"cwd": str(tmp_path), "session_id": "docker-sandbox-session"}),
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env={
+                **os.environ,
+                "HOME": str(home),
+                "PUSH_KEY": "test-pk-e2e",
+                "REMOTE_HOOKS_BASE_URL": fake_hook_server,
+                "MACHINE_ID": "docker-sandbox-machine",
+            },
+        )
+
+        assert result.returncode == 0, (
+            f"guard discover failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+        )
+        payload = _FakeHookServer.requests[-1]["body"]
+        assert payload["hook_event_name"] == "sessionStartServerDiscovery"
+        assert payload["discovery_scope"] == "all"
+        assert payload["session_id"] == "docker-sandbox-session"
+        claude_entry = next(entry for entry in payload["servers"] if entry["client"] == "claude code")
+        assert [server["name"] for server in claude_entry["servers"]] == ["docker-sandbox-mcp"]
+        assert claude_entry["skills"] == [
+            {
+                "name": "docker-sandbox-skill",
+                "installation_path": str(skills_dir),
+                "files": [],
+                "error": None,
+            }
+        ]
+
+    @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
     def test_guard_install_cursor(self, agent_scan_cmd, agent_scan_command, tmp_path, fake_hook_server):
         config_file = tmp_path / "hooks.json"
         result = subprocess.run(

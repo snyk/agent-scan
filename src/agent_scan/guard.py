@@ -326,7 +326,7 @@ def _run_install(args) -> None:
             url,
             first_installed_client,
             machine_id,
-            discovery_scope=DiscoveryScope.SERVERS,
+            discovery_scope=DiscoveryScope.ALL,
             max_retries=2,
         )
 
@@ -1141,19 +1141,25 @@ def _detect_install(path: Path, events: list[str], commands: Callable[[dict], It
 
 
 def _servers_discovered_entries(clients_to_inspect: list[ClientToInspect]) -> list[dict]:
-    """Serialize discovered clients exactly as ``scan`` serializes them for analysis."""
+    """Serialize discovered component metadata in the regular scan wire shape.
+
+    Guard discovery intentionally omits skill file contents. Session-start hooks
+    need enough metadata to keep the machine inventory current, without repeatedly
+    reading and uploading every file in every installed skill.
+    """
     from agent_scan.inspect import (
         _config_error_to_scan_error,
         _inspection_component_name,
         _join_scan_errors,
     )
-    from agent_scan.models import InspectedPath, InspectedServer, ScanError
+    from agent_scan.models import InspectedPath, InspectedServer, InspectedSkill, ScanError
     from agent_scan.models.errors import CouldNotParseMCPConfig, FileNotFoundConfig, UnknownConfigFormat
     from agent_scan.verify_api import build_scan_request
 
     inspected_paths: list[InspectedPath] = []
     for client in clients_to_inspect:
         servers: list[InspectedServer] = []
+        skills: list[InspectedSkill] = []
         config_errors: list[ScanError] = []
         for config_path, discovered in client.mcp_configs.items():
             if isinstance(discovered, FileNotFoundConfig | UnknownConfigFormat | CouldNotParseMCPConfig):
@@ -1167,11 +1173,23 @@ def _servers_discovered_entries(clients_to_inspect: list[ClientToInspect]) -> li
                 )
                 for name, server in discovered
             )
+        for discovered in client.skills_dirs.values():
+            if isinstance(discovered, FileNotFoundConfig):
+                config_errors.append(_config_error_to_scan_error(discovered))
+                continue
+            skills.extend(
+                InspectedSkill(
+                    name=_inspection_component_name(skill.name, "skill", skill.path),
+                    installation_path=skill.path,
+                )
+                for skill in discovered
+            )
         inspected_paths.append(
             InspectedPath(
                 client=client.name,
                 path=client.client_path,
                 servers=servers,
+                skills=skills,
                 error=_join_scan_errors(config_errors),
             )
         )
@@ -1314,23 +1332,24 @@ def _send_servers_discovered_event(
     discovery_scope: DiscoveryScope = DiscoveryScope.ALL,
     max_retries: int = 1,
 ) -> bool:
-    """Discover MCP servers and send an install- or session-scoped discovery event.
+    """Discover component metadata and send an install- or session-scoped discovery event.
 
     The default event follows ``hooksConfigured`` during installation. Session-start
     callers override it with ``sessionStartServerDiscovery``.
     """
-    rich.print("[dim]Discovering MCP servers...[/dim]")
+    rich.print("[dim]Discovering agent components...[/dim]")
     started = time.monotonic()
     try:
         servers = _discover_servers_payload(target_folders, discovery_scope=discovery_scope)
     except Exception as e:
-        rich.print(f"[yellow]Warning:[/yellow] Could not discover MCP servers: {e}")
+        rich.print(f"[yellow]Warning:[/yellow] Could not discover agent components: {e}")
         return False
     duration_ms = round((time.monotonic() - started) * 1000)
 
     payload_dict: dict = {
         "hook_event_name": event_name,
         "servers": servers,
+        "discovery_scope": DiscoveryScope(discovery_scope).value,
         "discovery_duration_ms": duration_ms,
     }
     payload_dict[HOOK_CLIENTS[hook_client].session_field] = session_marker
@@ -1340,10 +1359,15 @@ def _send_servers_discovered_event(
     ok, detail = send_hook_event(url, hook_client, push_key, payload, machine_id, max_retries=max_retries)
     if ok:
         server_count = sum(len(entry.get("servers", [])) for entry in servers)
-        noun = "server" if server_count == 1 else "servers"
-        rich.print(f"[green]\u2713[/green]  Discovered {server_count} MCP {noun}  [green]\u2192 OK[/green]")
+        skill_count = sum(len(entry.get("skills", [])) for entry in servers)
+        server_noun = "server" if server_count == 1 else "servers"
+        skill_noun = "skill" if skill_count == 1 else "skills"
+        rich.print(
+            f"[green]\u2713[/green]  Discovered {server_count} MCP {server_noun} "
+            f"and {skill_count} {skill_noun}  [green]\u2192 OK[/green]"
+        )
         return True
-    rich.print(f"[yellow]Warning:[/yellow] Could not send discovered MCP servers: {detail}")
+    rich.print(f"[yellow]Warning:[/yellow] Could not send discovered agent components: {detail}")
     return False
 
 
@@ -1704,7 +1728,7 @@ def _build_discover_hook_command(
         url=url,
         machine_id=machine_id,
         agent_scan_command=agent_scan_command,
-        scope="servers",
+        scope="all",
         quote_client=True,
     )
     if IS_WINDOWS:

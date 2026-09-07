@@ -22,7 +22,7 @@ param(
 
     [Parameter(Mandatory=$false)]
     [ValidateSet("servers","skills","all")]
-    [string]$Scope = "servers"
+    [string]$Scope = "all"
 )
 
 $ErrorActionPreference = "Stop"
