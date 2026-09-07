@@ -11,7 +11,13 @@ from pydantic import BaseModel, Field
 
 from agent_scan.models.api.common import ScanUserInfo
 from agent_scan.models.errors import ScanError
-from agent_scan.models.inspect import InspectedPath, InspectedServer, InspectedSkill
+from agent_scan.models.inspect import (
+    GuardInspectedPath,
+    GuardInspectedServer,
+    InspectedPath,
+    InspectedServer,
+    InspectedSkill,
+)
 from agent_scan.models.mcp import RemoteServer, ServerSignature, StdioServer
 from agent_scan.models.skill import SkillFile
 
@@ -107,6 +113,39 @@ class ScanPathRequest(BaseModel):
             servers=[McpServerRequest.from_inspected(server) for server in inspected.servers],
             skills=[SkillRequest.from_inspected(skill) for skill in inspected.skills],
             error=_error_for_request(inspected.error),
+        )
+
+
+class GuardMcpServerRequest(McpServerRequest):
+    """``McpServerRequest`` plus the location scope, for Guard events only.
+
+    Guard's ``sessionStartServerDiscovery`` event reports where each server was
+    found; the analysis contract does not model scope, and ``analyze_machine``
+    sends the plain ``McpServerRequest`` under the same version header. Keeping
+    the extra field on a subclass means the conversion still happens inside the
+    versioned models -- ``build_scan_request`` documents them as owning it --
+    rather than by mutating an already-serialized payload.
+    """
+
+    scope: str
+
+    @classmethod
+    def from_inspected(cls, inspected: GuardInspectedServer) -> "GuardMcpServerRequest":
+        base = McpServerRequest.from_inspected(inspected)
+        return cls(**base.model_dump(), scope=inspected.scope.value)
+
+
+class GuardScanPathRequest(ScanPathRequest):
+    """``ScanPathRequest`` whose servers carry their location scope."""
+
+    servers: list[GuardMcpServerRequest] = Field(default_factory=list)
+
+    @classmethod
+    def from_inspected(cls, inspected: GuardInspectedPath) -> "GuardScanPathRequest":
+        base = ScanPathRequest.from_inspected(inspected)
+        return cls(
+            **base.model_dump(exclude={"servers"}),
+            servers=[GuardMcpServerRequest.from_inspected(server) for server in inspected.servers],
         )
 
 

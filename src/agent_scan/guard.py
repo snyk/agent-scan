@@ -1148,48 +1148,38 @@ def _servers_discovered_entries(clients_to_inspect: list[ClientToInspect]) -> li
         _inspection_component_name,
         _join_scan_errors,
     )
-    from agent_scan.models import InspectedPath, InspectedServer, ScanError
+    from agent_scan.models import ScanError
+    from agent_scan.models.inspect import GuardInspectedPath, GuardInspectedServer
     from agent_scan.models.errors import CouldNotParseMCPConfig, FileNotFoundConfig, UnknownConfigFormat
-    from agent_scan.verify_api import build_scan_request
+    from agent_scan.verify_api import build_guard_discovery_payloads
 
-    inspected_paths: list[InspectedPath] = []
-    discovered_scopes: list[list[str]] = []
+    inspected_paths: list[GuardInspectedPath] = []
     for client in clients_to_inspect:
-        servers: list[InspectedServer] = []
-        server_scopes: list[str] = []
+        servers: list[GuardInspectedServer] = []
         config_errors: list[ScanError] = []
         for config_path, discovered in client.mcp_configs.items():
             if isinstance(discovered, FileNotFoundConfig | UnknownConfigFormat | CouldNotParseMCPConfig):
                 config_errors.append(_config_error_to_scan_error(discovered))
                 continue
             for discovered_server in discovered:
-                name, server = discovered_server
                 servers.append(
-                    InspectedServer(
-                        name=_inspection_component_name(name, "server", config_path),
+                    GuardInspectedServer(
+                        name=_inspection_component_name(discovered_server.name, "server", config_path),
                         config_path=config_path,
-                        server=server,
+                        server=discovered_server.server,
+                        scope=discovered_server.scope,
                     )
                 )
-                server_scopes.append(discovered_server.scope.value)
         inspected_paths.append(
-            InspectedPath(
+            GuardInspectedPath(
                 client=client.name,
                 path=client.client_path,
                 servers=servers,
                 error=_join_scan_errors(config_errors),
             )
         )
-        discovered_scopes.append(server_scopes)
 
-    payloads: list[dict] = []
-    requests = build_scan_request(inspected_paths).scan_path_requests
-    for request, scopes in zip(requests, discovered_scopes, strict=True):
-        payload = request.model_dump(mode="json")
-        for server, scope in zip(payload["servers"], scopes, strict=True):
-            server["scope"] = scope
-        payloads.append(payload)
-    return payloads
+    return build_guard_discovery_payloads(inspected_paths)
 
 
 def _discover_servers_payload(

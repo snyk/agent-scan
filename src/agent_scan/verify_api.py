@@ -16,9 +16,11 @@ from mcp.types import Prompt, Resource, ResourceTemplate, Tool
 
 from agent_scan.models.api.common import ScanUserInfo
 from agent_scan.models.api.v20260710 import (
+    GuardScanPathRequest,
     McpEntitySummary,
     McpServerRequest,
     McpServerRiskResponse,
+    ScanPathRequest,
     ScanPathResponse,
     ScanRequest,
     ScanResponse,
@@ -27,7 +29,7 @@ from agent_scan.models.api.v20260710 import (
     SkillRiskResponse,
 )
 from agent_scan.models.errors import ScanError
-from agent_scan.models.inspect import InspectedPath
+from agent_scan.models.inspect import GuardInspectedPath, InspectedPath
 from agent_scan.models.mcp import Entity
 from agent_scan.utils import get_environment, get_relative_path
 from agent_scan.well_known_clients import get_client_from_path
@@ -56,9 +58,33 @@ def build_scan_request(
         scan_metadata=scan_metadata,
     )
     for inspected_path, path_request in zip(inspected_paths, request.scan_path_requests, strict=True):
-        path_request.client = get_client_from_path(inspected_path.path) or path_request.client or inspected_path.path
-        path_request.path = get_relative_path(path_request.path)
+        _apply_transport_boundary(inspected_path, path_request)
     return request
+
+
+def _apply_transport_boundary(inspected_path: InspectedPath, path_request: ScanPathRequest) -> None:
+    """Infer the client and make the top-level path home-relative."""
+    path_request.client = get_client_from_path(inspected_path.path) or path_request.client or inspected_path.path
+    path_request.path = get_relative_path(path_request.path)
+
+
+def build_guard_discovery_payloads(inspected_paths: list[GuardInspectedPath]) -> list[dict]:
+    """Serialize inspected paths for Guard's session-start discovery event.
+
+    Same transport boundary as :func:`build_scan_request`, but built from the
+    Guard request models so each server carries the location scope the analysis
+    contract does not model. Going through the versioned models keeps them the
+    single owner of the conversion, instead of patching ``scope`` onto an
+    already-serialized ``ScanPathRequest`` by position -- which coupled Guard to
+    ``from_inspected`` never filtering or reordering servers.
+    """
+    return [_guard_path_payload(inspected_path) for inspected_path in inspected_paths]
+
+
+def _guard_path_payload(inspected_path: GuardInspectedPath) -> dict:
+    path_request = GuardScanPathRequest.from_inspected(inspected_path)
+    _apply_transport_boundary(inspected_path, path_request)
+    return path_request.model_dump(mode="json")
 
 
 class SnykTokenError(Exception):

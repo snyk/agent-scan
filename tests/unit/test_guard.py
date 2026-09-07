@@ -63,7 +63,15 @@ from agent_scan.guard import (
     _write_codex_managed_config,
     _write_config,
 )
-from agent_scan.models import ClientToInspect, InspectedPath, InspectedServer, RemoteServer, StdioServer
+from agent_scan.models import (
+    ClientToInspect,
+    DiscoveredServer,
+    DiscoveryLocationScope,
+    InspectedPath,
+    InspectedServer,
+    RemoteServer,
+    StdioServer,
+)
 from agent_scan.models.errors import CouldNotParseMCPConfig, FileNotFoundConfig
 from agent_scan.pushkeys import GuardEnabledAccessDeniedError
 
@@ -6373,3 +6381,71 @@ class TestRunInstallSkipsUninstalledClients:
         assert mock_install.call_count == len(ALL_CLIENTS)
         called_clients = [c.args[0] for c in mock_install.call_args_list]
         assert called_clients == ALL_CLIENTS
+
+
+class TestGuardDiscoveryWireModel:
+    """``scope`` reaches Guard's session-start event but must not appear on the
+    analysis wire. It was attached by mutating the already-serialized payload,
+    which bypasses the boundary ``verify_api.build_scan_request`` documents as
+    owning inspection-to-wire conversion ("The versioned API models own the
+    structural conversion")."""
+
+    def test_scope_is_carried_by_a_versioned_model_not_dict_mutation(self):
+        from agent_scan.models.api.v20260710 import GuardMcpServerRequest
+        from agent_scan.models.inspect import GuardInspectedServer
+
+        server = StdioServer(command="npx")
+        inspected = GuardInspectedServer(
+            name="github",
+            config_path="/config.json",
+            server=server,
+            scope=DiscoveryLocationScope.PROJECT_WORKSPACE,
+        )
+
+        request = GuardMcpServerRequest.from_inspected(inspected)
+
+        assert request.scope == "project_workspace"
+
+    def test_inspect_json_output_shape_is_unchanged(self):
+        """``InspectedServer`` is dumped verbatim by ``inspect --json``, so the
+        scope field lives on a Guard-side subclass instead of on it."""
+        from agent_scan.models.inspect import InspectedServer
+
+        assert "scope" not in InspectedServer.model_fields
+
+    def test_analysis_wire_still_has_no_scope_field(self):
+        """The analysis request is sent by ``analyze_machine`` under the same
+        version header, so ``scope`` must not leak onto it."""
+        from agent_scan.models.api.v20260710 import McpServerRequest
+
+        assert "scope" not in McpServerRequest.model_fields
+
+    def test_scope_survives_a_reordered_or_filtered_conversion(self):
+        """The old implementation zipped scopes onto the payload positionally
+        with ``strict=True``, so it depended on ``from_inspected`` never
+        filtering or reordering servers -- and the first version that dropped an
+        errored server would raise ValueError into a bare ``except Exception``
+        that renders as a generic warning."""
+        servers = [
+            StdioServer(command="a"),
+            StdioServer(command="b"),
+        ]
+        client = self._client(
+            mcp_configs={
+                "/a.json": [DiscoveredServer(name="a", server=servers[0], scope=DiscoveryLocationScope.SYSTEM)],
+                "/b.json": [DiscoveredServer(name="b", server=servers[1], scope=DiscoveryLocationScope.USER)],
+            }
+        )
+
+        result = guard_module._servers_discovered_entries([client])
+
+        by_name = {s["name"]: s["scope"] for s in result[0]["servers"]}
+        assert by_name == {"a": "system", "b": "user"}
+
+    def _client(self, *, mcp_configs):
+        return ClientToInspect(
+            name="claude code",
+            client_path="/home/u/.claude",
+            mcp_configs=mcp_configs,
+            skills_dirs={},
+        )

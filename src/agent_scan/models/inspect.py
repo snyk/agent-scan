@@ -80,3 +80,21 @@ class InspectedPath(BaseModel):
     servers: list[InspectedServer] = Field(default_factory=list)
     skills: list[InspectedSkill] = Field(default_factory=list)
     error: ScanError | None = None
+
+
+class GuardInspectedServer(InspectedServer):
+    """``InspectedServer`` plus the location scope Guard's discovery event reports.
+
+    Deliberately a subclass rather than a field on ``InspectedServer``: that
+    model is dumped verbatim by ``inspect --json`` (``cli.py``), so adding a
+    field there would change user-facing output, and the analysis contract does
+    not model scope either.
+    """
+
+    scope: DiscoveryLocationScope = DiscoveryLocationScope.CUSTOM
+
+
+class GuardInspectedPath(InspectedPath):
+    """``InspectedPath`` whose servers carry their location scope."""
+
+    servers: list[GuardInspectedServer] = Field(default_factory=list)
