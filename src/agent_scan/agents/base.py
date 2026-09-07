@@ -29,7 +29,6 @@ from agent_scan.models import (
     FileNotFoundConfig,
     MCPConfig,
     MCPServerMap,
-    RemoteServer,
     StdioServer,
     UnknownConfigFormat,
 )
@@ -39,16 +38,13 @@ from agent_scan.skill_client import inspect_skills_dir
 logger = logging.getLogger(__name__)
 McpConfigsResult = dict[
     str,
-    list[DiscoveredServer | tuple[str, StdioServer | RemoteServer]]
-    | FileNotFoundConfig
-    | UnknownConfigFormat
-    | CouldNotParseMCPConfig,
+    list[DiscoveredServer] | FileNotFoundConfig | UnknownConfigFormat | CouldNotParseMCPConfig,
 ]
 SkillsDirsResult = dict[str, list[DiscoveredSkill] | FileNotFoundConfig]
 # Return type of the per-file MCP parsers (``_parse_mcp_file`` /
 # ``_parse_settings_mcp_gated``): parsed servers, a parse failure, or ``None``
 # when the file is absent/empty/not-MCP.
-McpScanResult = list[tuple[str, StdioServer | RemoteServer]] | CouldNotParseMCPConfig | None
+McpScanResult = list[DiscoveredServer] | CouldNotParseMCPConfig | None
 
 
 class DiscoveryScope(str, Enum):
@@ -337,12 +333,15 @@ class AgentDiscoverer(ABC):
                 # Demoted out of the requested set (e.g. a project sweep that
                 # re-found a user directory while user scope is excluded).
                 continue
-            entries: list[DiscoveredServer | tuple[str, StdioServer | RemoteServer]] = []
+            entries: list[DiscoveredServer] = []
             for entry in value:
                 if isinstance(entry, DiscoveredServer):
                     entry_scope = path_scope if entry.scope is DiscoveryLocationScope.CUSTOM else entry.scope
                     entries.append(entry.model_copy(update={"scope": entry_scope}))
                 else:
+                    # Legacy ``(name, server)`` pair. Unreachable from the parsers,
+                    # which now emit ``DiscoveredServer`` directly, but kept because
+                    # tests inject sources in the historical shape.
                     name, server = entry
                     entries.append(DiscoveredServer(name=name, server=server, scope=path_scope))
             scoped[path] = entries
@@ -462,9 +461,13 @@ class AgentDiscoverer(ABC):
                 is_failure=True,
             )
 
-    def _servers_to_signed_list(self, validated: MCPConfig) -> list[tuple[str, StdioServer | RemoteServer]]:
-        """Materialize a validated config's servers into ``(name, server)`` tuples,
-        replacing each Stdio entry with its signature-checked form.
+    def _servers_to_signed_list(self, validated: MCPConfig) -> list[DiscoveredServer]:
+        """Materialize a validated config's servers, replacing each Stdio entry
+        with its signature-checked form.
+
+        Entries come back unlabelled (scope ``CUSTOM``, the not-yet-assigned
+        sentinel); ``_scope_mcp_results`` stamps the real scope when the source
+        is merged, so the parsers stay scope-agnostic.
 
         Shared by :meth:`_validate_servers` and :meth:`_parse_mcp_file` so the
         signature-check step stays in one place.
@@ -477,11 +480,9 @@ class AgentDiscoverer(ABC):
         for name, server_config in servers.items():
             if isinstance(server_config, StdioServer):
                 servers[name] = check_server_signature(server_config)
-        return list(servers.items())
+        return [DiscoveredServer(name=name, server=server) for name, server in servers.items()]
 
-    def _validate_servers(
-        self, raw: dict, source: str
-    ) -> list[tuple[str, StdioServer | RemoteServer]] | CouldNotParseMCPConfig:
+    def _validate_servers(self, raw: dict, source: str) -> list[DiscoveredServer] | CouldNotParseMCPConfig:
         """Validate a raw ``mcpServers`` mapping into typed Stdio/Remote server entries.
 
         Input is the *already-extracted* server map (e.g. the value of
@@ -505,7 +506,7 @@ class AgentDiscoverer(ABC):
         *,
         formats: tuple[type[MCPConfig], ...],
         skip_unrecognized: bool = False,
-    ) -> list[tuple[str, StdioServer | RemoteServer]] | CouldNotParseMCPConfig | None:
+    ) -> McpScanResult:
         """Load ``path``, try each ``MCPConfig`` subclass in order, return the first
         that validates.
 

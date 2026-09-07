@@ -6,7 +6,7 @@ import os
 import ssl
 import sys
 import traceback
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import aiohttp
@@ -29,7 +29,7 @@ from agent_scan.models.api.v20260710 import (
     SkillRiskResponse,
 )
 from agent_scan.models.errors import ScanError
-from agent_scan.models.inspect import GuardInspectedPath, InspectedPath
+from agent_scan.models.inspect import InspectedPath
 from agent_scan.models.mcp import Entity
 from agent_scan.utils import get_environment, get_relative_path
 from agent_scan.well_known_clients import get_client_from_path
@@ -62,13 +62,15 @@ def build_scan_request(
     return request
 
 
-def _apply_transport_boundary(inspected_path: InspectedPath, path_request: ScanPathRequest) -> None:
+def _apply_transport_boundary(
+    inspected_path: InspectedPath, path_request: ScanPathRequest | GuardScanPathRequest
+) -> None:
     """Infer the client and make the top-level path home-relative."""
     path_request.client = get_client_from_path(inspected_path.path) or path_request.client or inspected_path.path
     path_request.path = get_relative_path(path_request.path)
 
 
-def build_guard_discovery_payloads(inspected_paths: list[GuardInspectedPath]) -> list[dict]:
+def build_guard_discovery_payloads(inspected_paths: list[InspectedPath]) -> list[dict]:
     """Serialize inspected paths for Guard's session-start discovery event.
 
     Same transport boundary as :func:`build_scan_request`, but built from the
@@ -81,7 +83,7 @@ def build_guard_discovery_payloads(inspected_paths: list[GuardInspectedPath]) ->
     return [_guard_path_payload(inspected_path) for inspected_path in inspected_paths]
 
 
-def _guard_path_payload(inspected_path: GuardInspectedPath) -> dict:
+def _guard_path_payload(inspected_path: InspectedPath) -> dict:
     path_request = GuardScanPathRequest.from_inspected(inspected_path)
     _apply_transport_boundary(inspected_path, path_request)
     return path_request.model_dump(mode="json")
@@ -248,7 +250,7 @@ async def _submit_async_analysis(
 
 def _entity_summary(entity: Entity) -> McpEntitySummary:
     if isinstance(entity, Tool):
-        entity_type = "tool"
+        entity_type: Literal["tool", "resource", "resource_template", "prompt"] = "tool"
     elif isinstance(entity, Prompt):
         entity_type = "prompt"
     elif isinstance(entity, Resource):
@@ -263,7 +265,7 @@ def _entity_summary(entity: Entity) -> McpEntitySummary:
 def _skill_file_summary(path: str) -> SkillFileSummary:
     lowered = path.lower()
     if lowered.endswith(".md"):
-        file_type = "instruction"
+        file_type: Literal["instruction", "script", "asset"] = "instruction"
     elif lowered.rsplit(".", 1)[-1] in ("py", "js", "ts", "sh"):
         file_type = "script"
     else:

@@ -10,14 +10,9 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from agent_scan.models.api.common import ScanUserInfo
+from agent_scan.models.discovery import DiscoveryLocationScope
 from agent_scan.models.errors import ScanError
-from agent_scan.models.inspect import (
-    GuardInspectedPath,
-    GuardInspectedServer,
-    InspectedPath,
-    InspectedServer,
-    InspectedSkill,
-)
+from agent_scan.models.inspect import InspectedPath, InspectedServer, InspectedSkill
 from agent_scan.models.mcp import RemoteServer, ServerSignature, StdioServer
 from agent_scan.models.skill import SkillFile
 
@@ -127,25 +122,40 @@ class GuardMcpServerRequest(McpServerRequest):
     rather than by mutating an already-serialized payload.
     """
 
-    scope: str
+    scope: str = DiscoveryLocationScope.CUSTOM.value
 
     @classmethod
-    def from_inspected(cls, inspected: GuardInspectedServer) -> "GuardMcpServerRequest":
+    def from_inspected(cls, inspected: InspectedServer) -> "GuardMcpServerRequest":
+        """Accepts a plain ``InspectedServer`` too, which then carries no scope."""
         base = McpServerRequest.from_inspected(inspected)
-        return cls(**base.model_dump(), scope=inspected.scope.value)
+        scope = getattr(inspected, "scope", DiscoveryLocationScope.CUSTOM)
+        return cls(**base.model_dump(), scope=scope.value)
 
 
-class GuardScanPathRequest(ScanPathRequest):
-    """``ScanPathRequest`` whose servers carry their location scope."""
+class GuardScanPathRequest(BaseModel):
+    """Guard's session-start wire shape: ``ScanPathRequest`` plus per-server scope.
 
+    Deliberately not a subclass of ``ScanPathRequest``: narrowing ``servers`` to
+    the Guard server model would violate the base class's declared type, and
+    letting pydantic serialize subclass instances through a base-typed field
+    silently drops the extra ``scope``. Field parity with ``ScanPathRequest`` is
+    pinned by a test instead.
+    """
+
+    client: str | None = None
+    path: str
     servers: list[GuardMcpServerRequest] = Field(default_factory=list)
+    skills: list[SkillRequest] = Field(default_factory=list)
+    error: ScanError | None = None
 
     @classmethod
-    def from_inspected(cls, inspected: GuardInspectedPath) -> "GuardScanPathRequest":
-        base = ScanPathRequest.from_inspected(inspected)
+    def from_inspected(cls, inspected: InspectedPath) -> "GuardScanPathRequest":
         return cls(
-            **base.model_dump(exclude={"servers"}),
+            client=inspected.client,
+            path=inspected.path,
             servers=[GuardMcpServerRequest.from_inspected(server) for server in inspected.servers],
+            skills=[SkillRequest.from_inspected(skill) for skill in inspected.skills],
+            error=_error_for_request(inspected.error),
         )
 
 

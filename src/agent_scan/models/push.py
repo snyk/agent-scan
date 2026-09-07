@@ -4,7 +4,7 @@ from typing import Any
 
 from mcp.client.auth import TokenStorage
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
-from pydantic import BaseModel, ConfigDict, Field, RootModel, field_validator
+from pydantic import AnyUrl, BaseModel, ConfigDict, Field, RootModel, field_validator
 from pydantic.alias_generators import to_camel
 
 
@@ -62,7 +62,7 @@ class FileTokenStorage(TokenStorage):
     async def get_client_info(self) -> OAuthClientInformationFull | None:
         return OAuthClientInformationFull(
             client_id=self.data.client_id,
-            redirect_uris=["http://localhost:3030/callback"],
+            redirect_uris=[AnyUrl("http://localhost:3030/callback")],
         )
 
     async def set_client_info(self, client_info: OAuthClientInformationFull) -> None:

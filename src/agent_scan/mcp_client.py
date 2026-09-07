@@ -15,6 +15,7 @@ from mcp.client.sse import sse_client
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.auth import OAuthClientMetadata
+from pydantic import AnyUrl
 
 from agent_scan.models import (
     ClaudeCodeConfigFile,
@@ -59,11 +60,13 @@ async def streamablehttp_client_without_session(
                 client_name="mcp-scan",
                 grant_types=["authorization_code", "refresh_token"],
                 response_types=["code"],
-                redirect_uris=["http://localhost:3030/callback"],
+                redirect_uris=[AnyUrl("http://localhost:3030/callback")],
             ),
             storage=FileTokenStorage(data=token),
             redirect_handler=handle_redirect,
-            callback_handler=handle_callback,
+            # The SDK's stub types this as a zero-arg callable, but the
+            # implementation invokes it with the redirect URL and state.
+            callback_handler=handle_callback,  # type: ignore[arg-type]
         )
     else:
         oauth_client_provider = None
@@ -100,7 +103,7 @@ async def get_client(
             url=server_config.url,
             headers=server_config.headers,
             # env=server_config.env, #Not supported by MCP yet, but present in vscode
-            timeout=timeout,
+            timeout=timeout,  # type: ignore[arg-type]  # stub says float; None means "no timeout"
         )
     elif isinstance(server_config, RemoteServer) and server_config.type == "http":
         logger.debug(
@@ -131,7 +134,9 @@ async def get_client(
                 stream_server_name=server_name if (stream_stderr and server_name) else None,
                 stream_config_path=config_path if (stream_stderr and server_name) else None,
             )
-        client_cm = stdio_client(server_params, errlog=stderr_capture)
+        # PipeStderrCapture is a file-like wrapper rather than a TextIO, and
+        # ``None`` (no capture) is accepted too; the SDK only writes to it.
+        client_cm = stdio_client(server_params, errlog=stderr_capture)  # type: ignore[arg-type]
     else:
         raise ValueError(f"Invalid server config: {server_config}")
 

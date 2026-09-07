@@ -117,9 +117,3 @@ class GuardInspectedServer(InspectedServer):
     """
 
     scope: DiscoveryLocationScope = DiscoveryLocationScope.CUSTOM
-
-
-class GuardInspectedPath(InspectedPath):
-    """``InspectedPath`` whose servers carry their location scope."""
-
-    servers: list[GuardInspectedServer] = Field(default_factory=list)

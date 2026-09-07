@@ -1,11 +1,18 @@
 repos:
-- repo: https://github.com/pre-commit/mirrors-mypy
-  rev: 'v1.15.0'  # Use the sha / tag you want to point at
+- repo: local
   hooks:
+  # Runs in the project environment rather than mirrors-mypy's isolated one.
+  # That hook only installed types-requests and types-PyYAML, so with
+  # ignore_missing_imports pydantic's BaseModel degraded to Any and every
+  # pydantic-derived error disappeared -- it reported success on a tree with 40
+  # real errors. Passing the package instead of the changed files keeps
+  # cross-module inference intact.
   - id: mypy
-    args: [--config-file=pyproject.toml]
-    additional_dependencies: [types-requests, types-PyYAML]
-    exclude: ^tests/skills/
+    name: mypy
+    entry: uv run --with mypy mypy --config-file=pyproject.toml src/agent_scan/
+    language: system
+    types: [python]
+    pass_filenames: false
 
 - repo: https://github.com/astral-sh/ruff-pre-commit
   rev: v0.11.8

@@ -72,11 +72,12 @@ def collect_consent(
         for config_path, mcp_configs in client.mcp_configs.items():
             if isinstance(mcp_configs, FileNotFoundConfig | UnknownConfigFormat | CouldNotParseMCPConfig):
                 continue
-            for server_name, server in mcp_configs:
+            for discovered in mcp_configs:
+                server = discovered.server
                 if isinstance(server, StdioServer):
-                    stdio_items.append((config_path, server_name, server))
+                    stdio_items.append((config_path, discovered.name, server))
                 elif isinstance(server, RemoteServer):
-                    remote_items.append((config_path, server_name, server))
+                    remote_items.append((config_path, discovered.name, server))
 
     if not stdio_items and not remote_items:
         return set()

@@ -6,7 +6,7 @@ import re
 from typing import Annotated, Any, Literal, TypeAlias
 
 from lark import Lark
-from mcp.types import Completion, InitializeResult, Prompt, Resource, ResourceTemplate, Tool
+from mcp.types import InitializeResult, Prompt, Resource, ResourceTemplate, Tool
 from pydantic import (
     AliasChoices,
     BaseModel,
@@ -395,7 +395,10 @@ class ConfigWithoutMCP(MCPConfig):
 # MCP server signature and entity utilities
 # ============================================================================
 
-Entity: TypeAlias = Prompt | Resource | Tool | ResourceTemplate | Completion
+# ``Completion`` is deliberately absent: ``ServerSignature`` has no completions
+# field, so ``entities`` can never yield one, and including it made every
+# ``entity.name`` access unsound (Completion has no name).
+Entity: TypeAlias = Prompt | Resource | Tool | ResourceTemplate
 Metadata: TypeAlias = InitializeResult
 
 

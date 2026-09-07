@@ -34,8 +34,6 @@ from agent_scan.models import (
     DiscoveryLocationScope,
     MCPConfig,
     PluginMCPConfigFile,
-    RemoteServer,
-    StdioServer,
     VSCodeConfigFile,
     VSCodeMCPConfig,
 )
@@ -501,9 +499,7 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
                     result[candidate.as_posix()] = parsed
         return result
 
-    def _parse_settings_mcp_gated(
-        self, path: Path
-    ) -> list[tuple[str, StdioServer | RemoteServer]] | CouldNotParseMCPConfig | None:
+    def _parse_settings_mcp_gated(self, path: Path) -> McpScanResult:
         """Parse a multi-purpose ``settings.json`` for MCP, gated on the presence
         of actual MCP servers (a top-level ``mcpServers`` or an ``mcp.servers``).
 

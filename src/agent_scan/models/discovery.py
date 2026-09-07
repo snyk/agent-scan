@@ -63,7 +63,13 @@ class DiscoveredServer(BaseModel):
             return {"name": value[0], "server": value[1]}
         return value
 
-    def __iter__(self) -> Iterator[str | StdioServer | RemoteServer]:
+    # Deliberately incompatible with ``BaseModel.__iter__``, which yields
+    # ``(field_name, value)`` pairs: this shim exposes the historical
+    # ``(name, server)`` pair so callers can migrate to attribute access
+    # incrementally. ``model_dump`` is unaffected (it goes through the
+    # pydantic serializer), but note ``dict(server)`` yields
+    # ``{<server-name>: <server>}`` rather than the field map.
+    def __iter__(self) -> Iterator[str | StdioServer | RemoteServer]:  # type: ignore[override]
         yield self.name
         yield self.server
 

@@ -1188,7 +1188,7 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> ScanRespo
     inspect_args = InspectArgs(
         timeout=server_timeout,
         tokens=tokens,
-        paths=files,
+        paths=files or [],
         all_users=scan_all_users,
         scan_skills=scan_skills,
         discovery_scope=DiscoveryScope.ALL if scan_skills else DiscoveryScope.SERVERS,
@@ -1343,7 +1343,9 @@ def _parse_ignore_failure_codes(args, ci_mode: bool) -> set[str]:
 def _apply_ignore_risks(response: ScanResponse, ignored_risks: set[str]) -> None:
     """Remove ignored risks before rendering and CI exit evaluation."""
     for path in response.scan_path_responses:
-        risk_indexes = [server.risk_indexes for server in path.server_risks]
+        risk_indexes: list[McpServerRiskIndexes | SkillRiskIndexes] = [
+            server.risk_indexes for server in path.server_risks
+        ]
         risk_indexes.extend(skill.risk_indexes for skill in path.skill_risks)
         for indexes in risk_indexes:
             for name in ignored_risks & indexes.__class__.model_fields.keys():

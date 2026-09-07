@@ -15,6 +15,7 @@ from agent_scan.models import (
     CandidateClient,
     ClientToInspect,
     ControlServer,
+    DiscoveredServer,
     DiscoveredSkill,
     DiscoveryLocationScope,
     InspectedPath,
@@ -38,7 +39,7 @@ class InspectArgs(BaseModel):
     scan_skills: bool = False
     discovery_scope: DiscoveryScope = DiscoveryScope.ALL
     target_folders: list[str] = Field(default_factory=list)
-    skip_discovery_scopes: set[DiscoveryLocationScope] = Field(default_factory=set)
+    skip_discovery_scopes: frozenset[DiscoveryLocationScope] = Field(default_factory=frozenset)
 
 
 class AnalyzeArgs(BaseModel):
@@ -276,7 +277,7 @@ async def client_to_inspect_from_path(
                 name=path if use_path_as_client_name else "not-available",
                 client_path=path,
                 mcp_configs={
-                    path: [(server_name, server_config)],
+                    path: [DiscoveredServer(name=server_name, server=server_config)],
                 },
                 skills_dirs={},
             )

@@ -1150,12 +1150,12 @@ def _servers_discovered_entries(clients_to_inspect: list[ClientToInspect]) -> li
     )
     from agent_scan.models import ScanError
     from agent_scan.models.errors import CouldNotParseMCPConfig, FileNotFoundConfig, UnknownConfigFormat
-    from agent_scan.models.inspect import GuardInspectedPath, GuardInspectedServer
+    from agent_scan.models.inspect import GuardInspectedServer, InspectedPath, InspectedServer
     from agent_scan.verify_api import build_guard_discovery_payloads
 
-    inspected_paths: list[GuardInspectedPath] = []
+    inspected_paths: list[InspectedPath] = []
     for client in clients_to_inspect:
-        servers: list[GuardInspectedServer] = []
+        servers: list[InspectedServer] = []
         config_errors: list[ScanError] = []
         for config_path, discovered in client.mcp_configs.items():
             if isinstance(discovered, FileNotFoundConfig | UnknownConfigFormat | CouldNotParseMCPConfig):
@@ -1171,7 +1171,7 @@ def _servers_discovered_entries(clients_to_inspect: list[ClientToInspect]) -> li
                     )
                 )
         inspected_paths.append(
-            GuardInspectedPath(
+            InspectedPath(
                 client=client.name,
                 path=client.client_path,
                 servers=servers,
@@ -1199,7 +1199,7 @@ def _discover_servers_payload(
         paths=[],
         discovery_scope=discovery_scope,
         target_folders=target_folders or [],
-        skip_discovery_scopes=skip_discovery_scopes or set(),
+        skip_discovery_scopes=frozenset(skip_discovery_scopes or ()),
     )
     clients_to_inspect, _, _ = _run_with_timeout(
         lambda: asyncio.run(pipelines.discover_clients_to_inspect(inspect_args)),
