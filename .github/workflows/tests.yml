@@ -17,6 +17,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      # The mypy hook runs in the project environment (see .pre-commit-config.yaml),
+      # so it needs uv the same way the test job does.
+      - name: Install the latest version of uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
       - uses: pre-commit/action@v3.0.1
   test:
     runs-on: ${{ matrix.os }}
