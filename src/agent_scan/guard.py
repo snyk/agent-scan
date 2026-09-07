@@ -1154,6 +1154,7 @@ def _servers_discovered_entries(clients_to_inspect: list[ClientToInspect]) -> li
     )
     from agent_scan.models import InspectedPath, InspectedServer, InspectedSkill, ScanError
     from agent_scan.models.errors import CouldNotParseMCPConfig, FileNotFoundConfig, UnknownConfigFormat
+    from agent_scan.skill_client import resolve_skill_name
     from agent_scan.verify_api import build_scan_request
 
     inspected_paths: list[InspectedPath] = []
@@ -1177,13 +1178,25 @@ def _servers_discovered_entries(clients_to_inspect: list[ClientToInspect]) -> li
             if isinstance(discovered, FileNotFoundConfig):
                 config_errors.append(_config_error_to_scan_error(discovered))
                 continue
-            skills.extend(
-                InspectedSkill(
-                    name=_inspection_component_name(skill.name, "skill", skill.path),
-                    installation_path=skill.path,
+            for skill in discovered:
+                skill_name = skill.name
+                skill_error = None
+                try:
+                    skill_name = resolve_skill_name(skill)
+                except Exception as error:
+                    skill_error = ScanError(
+                        message="could not inspect skill",
+                        exception=str(error),
+                        is_failure=True,
+                        category="skill_scan_error",
+                    )
+                skills.append(
+                    InspectedSkill(
+                        name=_inspection_component_name(skill_name, "skill", skill.path),
+                        installation_path=skill.path,
+                        error=skill_error,
+                    )
                 )
-                for skill in discovered
-            )
         inspected_paths.append(
             InspectedPath(
                 client=client.name,

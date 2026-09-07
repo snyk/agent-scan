@@ -127,11 +127,9 @@ class TestGuardInstallE2E:
         assert session_discovery["body"]["discovery_duration_ms"] >= 0
 
     @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
-    def test_guard_discover_reports_server_and_skill_metadata(
-        self, agent_scan_cmd, tmp_path, fake_hook_server
-    ):
+    def test_guard_discover_reports_server_and_skill_metadata(self, agent_scan_cmd, tmp_path, fake_hook_server):
         home = tmp_path / "home"
-        skills_dir = home / ".claude" / "skills" / "docker-sandbox-skill"
+        skills_dir = home / ".claude" / "skills" / "docker-sandbox-skill-directory"
         skills_dir.mkdir(parents=True)
         (home / ".claude.json").write_text(
             json.dumps(
@@ -169,9 +167,7 @@ class TestGuardInstallE2E:
             },
         )
 
-        assert result.returncode == 0, (
-            f"guard discover failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
-        )
+        assert result.returncode == 0, f"guard discover failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
         payload = _FakeHookServer.requests[-1]["body"]
         assert payload["hook_event_name"] == "sessionStartServerDiscovery"
         assert payload["discovery_scope"] == "all"

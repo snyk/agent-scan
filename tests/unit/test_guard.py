@@ -62,7 +62,14 @@ from agent_scan.guard import (
     _write_codex_managed_config,
     _write_config,
 )
-from agent_scan.models import ClientToInspect, DiscoveredSkill, InspectedPath, InspectedServer, RemoteServer, StdioServer
+from agent_scan.models import (
+    ClientToInspect,
+    DiscoveredSkill,
+    InspectedPath,
+    InspectedServer,
+    RemoteServer,
+    StdioServer,
+)
 from agent_scan.models.errors import CouldNotParseMCPConfig, FileNotFoundConfig
 from agent_scan.pushkeys import GuardEnabledAccessDeniedError
 
@@ -4338,15 +4345,20 @@ class TestServersDiscoveredPayload:
         ]
         assert result[1]["servers"] == []
 
-    def test_serializes_skill_metadata_without_reading_skill_files(self):
-        skill_path = (Path.home() / ".claude" / "skills" / "sandbox-skill").as_posix()
+    def test_serializes_canonical_skill_metadata_without_collecting_skill_files(self, tmp_path):
+        skill_dir = tmp_path / "sandbox-skill-directory"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "---\n"
+            "name: canonical-sandbox-skill\n"
+            "description: Reproduction skill inside Docker Sandbox.\n"
+            "---\n"
+            "Test instructions.\n"
+        )
+        skill_path = skill_dir.as_posix()
         client = self._client(
             mcp_configs={},
-            skills_dirs={
-                (Path.home() / ".claude" / "skills").as_posix(): [
-                    DiscoveredSkill(name="sandbox-skill", path=skill_path)
-                ]
-            },
+            skills_dirs={tmp_path.as_posix(): [DiscoveredSkill(name="sandbox-skill", path=skill_path)]},
         )
 
         result = guard_module._servers_discovered_entries([client])
@@ -4354,12 +4366,26 @@ class TestServersDiscoveredPayload:
         assert result[0]["servers"] == []
         assert result[0]["skills"] == [
             {
-                "name": "sandbox-skill",
+                "name": "canonical-sandbox-skill",
                 "installation_path": skill_path,
                 "files": [],
                 "error": None,
             }
         ]
+
+    def test_skill_metadata_error_does_not_abort_discovery(self, tmp_path):
+        skill_dir = tmp_path / "invalid-skill"
+        skill_dir.mkdir()
+        client = self._client(
+            mcp_configs={},
+            skills_dirs={tmp_path.as_posix(): [DiscoveredSkill(name="invalid-skill", path=skill_dir.as_posix())]},
+        )
+
+        result = guard_module._servers_discovered_entries([client])
+
+        assert result[0]["skills"][0]["name"] == "invalid-skill"
+        assert result[0]["skills"][0]["files"] == []
+        assert result[0]["skills"][0]["error"]["category"] == "skill_scan_error"
 
     def test_reports_skill_discovery_errors(self):
         client = self._client(
