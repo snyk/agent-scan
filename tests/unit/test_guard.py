@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import base64
+import copy
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -18,6 +20,7 @@ from unittest.mock import call as mock_call
 import pytest
 
 import agent_scan.guard as guard_module
+from agent_scan import cli as cli_module
 from agent_scan.guard import (
     _PERMISSION_DENIED,
     ALL_CLIENTS,
@@ -62,7 +65,15 @@ from agent_scan.guard import (
     _write_codex_managed_config,
     _write_config,
 )
-from agent_scan.models import ClientToInspect, InspectedPath, InspectedServer, RemoteServer, StdioServer
+from agent_scan.models import (
+    ClientToInspect,
+    DiscoveredServer,
+    DiscoveryLocationScope,
+    InspectedPath,
+    InspectedServer,
+    RemoteServer,
+    StdioServer,
+)
 from agent_scan.models.errors import CouldNotParseMCPConfig, FileNotFoundConfig
 from agent_scan.pushkeys import GuardEnabledAccessDeniedError
 
@@ -251,14 +262,15 @@ class TestExtractEnvFromCmd:
             False,
             "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' MACHINE_ID='machine' "
             "AGENT_SCAN_COMMAND='/usr/local/bin/snyk-agent-scan' bash '/x/snyk-agent-guard-discover.sh' "
-            "--client 'claude-code' --scope servers",
+            "--client 'claude-code' --scope 'servers' --skip-discovery-scopes 'project_workspace'",
         ),
         (
             "discover",
             True,
             "powershell -File 'C:\\hooks\\snyk-agent-guard-discover.ps1' -Client claude-code -PushKey 'pk' "
             "-RemoteUrl 'https://api.snyk.io' -MachineId 'machine' "
-            "-AgentScanCommand 'C:\\Program Files\\Snyk\\snyk-agent-scan.exe' -Scope servers",
+            "-AgentScanCommand 'C:\\Program Files\\Snyk\\snyk-agent-scan.exe' -Scope 'servers' "
+            "-SkipDiscoveryScopes 'project_workspace'",
         ),
     ],
 )
@@ -469,7 +481,10 @@ class TestBuildDiscoverHookCommand:
         assert "TENANT_ID=" not in command
         assert "MACHINE_ID='machine'" in command
         assert "AGENT_SCAN_COMMAND='/opt/Snyk'\"'\"'s bin/snyk-agent-scan'" in command
-        assert command.endswith(f"bash '/x/snyk-agent-guard-discover.sh' --client '{client}' --scope servers")
+        assert command.endswith(
+            f"bash '/x/snyk-agent-guard-discover.sh' --client '{client}' --scope 'servers' "
+            "--skip-discovery-scopes 'project_workspace'"
+        )
         assert _is_agent_scan_command(command)
 
     @pytest.mark.parametrize("client", ["claude-code", "cursor", "codex"])
@@ -488,7 +503,8 @@ class TestBuildDiscoverHookCommand:
         assert command == (
             rf"powershell -File 'C:\hooks\snyk-agent-guard-discover.ps1' -Client {client} "
             "-PushKey 'pk' -RemoteUrl 'https://api.snyk.io' -MachineId 'machine''s-id' "
-            r"-AgentScanCommand 'C:\Program Files\Snyk\snyk-agent-scan.exe' -Scope servers"
+            r"-AgentScanCommand 'C:\Program Files\Snyk\snyk-agent-scan.exe' -Scope 'servers' "
+            r"-SkipDiscoveryScopes 'project_workspace'"
         )
 
     def test_powershell_escapes_single_quotes_in_paths(self):
@@ -587,6 +603,7 @@ class TestHookInvocationRenderers:
             tenant_id="tenant",
             agent_scan_command="/opt/Snyk's bin/snyk-agent-scan",
             scope="servers",
+            skip_discovery_scopes="project_workspace",
             quote_client=True,
         )
 
@@ -600,6 +617,8 @@ class TestHookInvocationRenderers:
             "cursor",
             "--scope",
             "servers",
+            "--skip-discovery-scopes",
+            "project_workspace",
         ]
         assert env == {
             "EXISTING": "value",
@@ -620,6 +639,7 @@ class TestHookInvocationRenderers:
             tenant_id="tenant",
             agent_scan_command=r"C:\Program Files\Snyk\snyk-agent-scan.exe",
             scope="servers",
+            skip_discovery_scopes="project_workspace",
         )
 
         with patch(f"{_G}.IS_WINDOWS", True):
@@ -641,6 +661,8 @@ class TestHookInvocationRenderers:
             r"C:\Program Files\Snyk\snyk-agent-scan.exe",
             "-Scope",
             "servers",
+            "-SkipDiscoveryScopes",
+            "project_workspace",
         ]
         assert env is None
 
@@ -2071,7 +2093,7 @@ CODEX_AGENT_SCAN_CMD = (
 CODEX_DISCOVER_CMD = (
     "PUSH_KEY='pk-discover' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' "
     "AGENT_SCAN_COMMAND='/usr/local/bin/snyk-agent-scan' "
-    "bash '/home/u/.codex/hooks/snyk-agent-guard-discover.sh' --client codex --scope servers"
+    "bash '/home/u/.codex/hooks/snyk-agent-guard-discover.sh' --client codex --scope 'servers'"
 )
 
 
@@ -2291,7 +2313,7 @@ class TestDetectInstall:
         )
         later_discovery_command = (
             "PUSH_KEY='pk-later' REMOTE_HOOKS_BASE_URL='https://later.example' "
-            "bash '/x/snyk-agent-guard-discover.sh' --client test --scope servers"
+            "bash '/x/snyk-agent-guard-discover.sh' --client test --scope 'servers'"
         )
         path = tmp_path / "hooks.json"
         _write(
@@ -4352,6 +4374,25 @@ class TestServersDiscoveredPayload:
         assert [server["name"] for server in result[0]["servers"]] == ["good"]
         assert result[0]["error"]["category"] == "parse_error"
 
+    def test_preserves_discovered_server_location_scope(self):
+        from agent_scan.models import DiscoveredServer, DiscoveryLocationScope
+
+        client = self._client(
+            mcp_configs={
+                "/config.json": [
+                    DiscoveredServer(
+                        name="github",
+                        server=StdioServer(command="github"),
+                        scope=DiscoveryLocationScope.EXTENSION_PLUGIN,
+                    )
+                ]
+            }
+        )
+
+        result = guard_module._servers_discovered_entries([client])
+
+        assert result[0]["servers"][0]["scope"] == "extension_plugin"
+
     def test_client_with_only_error_configs_still_emits_entry(self):
         client = self._client(
             mcp_configs={
@@ -4390,7 +4431,7 @@ class TestServersDiscoveredPayload:
     def test_empty_input_returns_empty_list(self):
         assert guard_module._servers_discovered_entries([]) == []
 
-    def test_matches_scan_path_request_wire_shape(self):
+    def test_adds_scope_only_to_guard_server_entries(self):
         from agent_scan.verify_api import build_scan_request
 
         server = StdioServer(command="npx", args=["--mode", "read-only"], binary_identifier="binary-id")
@@ -4403,10 +4444,20 @@ class TestServersDiscoveredPayload:
 
         result = guard_module._servers_discovered_entries([client])
 
-        expected = build_scan_request([inspected]).scan_path_requests[0].model_dump(mode="json")
+        analysis_request = build_scan_request([inspected]).scan_path_requests[0].model_dump(mode="json")
+        expected = copy.deepcopy(analysis_request)
+        expected["servers"][0]["scope"] = "custom"
         assert result == [expected]
+        assert "scope" not in analysis_request["servers"][0]
         assert set(result[0]) == {"client", "path", "servers", "skills", "error"}
-        assert set(result[0]["servers"][0]) == {"name", "config_path", "server", "signature", "error"}
+        assert set(result[0]["servers"][0]) == {
+            "name",
+            "config_path",
+            "server",
+            "signature",
+            "error",
+            "scope",
+        }
         assert result[0]["servers"][0]["server"] == {
             "command": "npx",
             "args": ["--mode", "read-only"],
@@ -4467,6 +4518,17 @@ class TestDiscoverServersPayload:
             guard_module._discover_servers_payload(discovery_scope=DiscoveryScope.SERVERS)
 
         assert discover.await_args.args[0].discovery_scope is DiscoveryScope.SERVERS
+
+    def test_forwards_location_scope_exclusions(self):
+        from agent_scan.models import DiscoveryLocationScope
+
+        discover = AsyncMock(return_value=([], [], []))
+        skipped = {DiscoveryLocationScope.PROJECT_WORKSPACE}
+
+        with patch("agent_scan.pipelines.discover_clients_to_inspect", discover):
+            guard_module._discover_servers_payload(skip_discovery_scopes=skipped)
+
+        assert discover.await_args.args[0].skip_discovery_scopes == skipped
 
     def test_threads_target_folders_to_inspect_args(self):
         discover = AsyncMock(return_value=([], [], []))
@@ -4833,6 +4895,102 @@ class TestGuardDiscoverCli:
         assert exc.value.code == 0
         assert run.call_args.args[0].client == agent
 
+    def test_discovery_scope_exclusions_default_to_empty(self, monkeypatch):
+        from agent_scan import cli
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["agent-scan", "guard", "discover", "--client", "claude-code"],
+        )
+        with patch(f"{_G}.run_guard", return_value=0) as run, pytest.raises(SystemExit):
+            cli.main()
+
+        assert run.call_args.args[0].skip_discovery_scopes == frozenset()
+
+    def test_parses_discovery_scope_exclusion_csv(self, monkeypatch):
+        from agent_scan import cli
+        from agent_scan.models import DiscoveryLocationScope
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "agent-scan",
+                "guard",
+                "discover",
+                "--client",
+                "claude-code",
+                "--skip-discovery-scopes",
+                " user,project_workspace,user ",
+            ],
+        )
+        with patch(f"{_G}.run_guard", return_value=0) as run, pytest.raises(SystemExit):
+            cli.main()
+
+        assert run.call_args.args[0].skip_discovery_scopes == frozenset(
+            {DiscoveryLocationScope.USER, DiscoveryLocationScope.PROJECT_WORKSPACE}
+        )
+
+    def test_parses_all_discovery_scope_exclusions(self, monkeypatch):
+        from agent_scan import cli
+        from agent_scan.models import AUTOMATIC_DISCOVERY_SCOPES
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "agent-scan",
+                "guard",
+                "discover",
+                "--client",
+                "claude-code",
+                "--skip-discovery-scopes",
+                "all",
+            ],
+        )
+        with patch(f"{_G}.run_guard", return_value=0) as run, pytest.raises(SystemExit):
+            cli.main()
+
+        assert run.call_args.args[0].skip_discovery_scopes == AUTOMATIC_DISCOVERY_SCOPES
+
+    @pytest.mark.parametrize("value", ["", "user,,system", "custom", "unknown", "all,user"])
+    def test_rejects_invalid_discovery_scope_exclusions(self, value, monkeypatch):
+        from agent_scan import cli
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            [
+                "agent-scan",
+                "guard",
+                "discover",
+                "--client",
+                "claude-code",
+                "--skip-discovery-scopes",
+                value,
+            ],
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+
+        assert exc.value.code == 2
+
+    def test_location_scope_exclusion_flag_is_not_available_to_scan(self, monkeypatch):
+        from agent_scan import cli
+
+        monkeypatch.setattr(
+            sys,
+            "argv",
+            ["agent-scan", "scan", "--skip-discovery-scopes", "user"],
+        )
+
+        with pytest.raises(SystemExit) as exc:
+            cli.main()
+
+        assert exc.value.code == 2
+
 
 class TestRunDiscover:
     @pytest.fixture(autouse=True)
@@ -4888,6 +5046,26 @@ class TestRunDiscover:
         assert captured["client"] == "claude-code"
         assert captured["push_key"] == "env-pk"
         assert captured["machine_id"] == "env-machine"
+
+    def test_forwards_requested_location_scope_exclusions(self, tmp_path, monkeypatch):
+        from agent_scan.models import DiscoveryLocationScope
+
+        monkeypatch.setenv("PUSH_KEY", "env-pk")
+        skipped = frozenset({DiscoveryLocationScope.PROJECT_WORKSPACE})
+        discover = MagicMock(return_value=[])
+        with (
+            patch(f"{_G}._discover_servers_payload", discover),
+            patch(f"{_G}.send_hook_event", return_value=(True, "")),
+            patch(f"{_G}.rich"),
+        ):
+            result = guard_module.run_guard(self._args(tmp_path / "settings.json", skip_discovery_scopes=skipped))
+
+        assert result == 0
+        discover.assert_called_once_with(
+            [],
+            discovery_scope="all",
+            skip_discovery_scopes=skipped,
+        )
 
     def test_explicit_url_overrides_environment(self, tmp_path, monkeypatch):
         config = tmp_path / "settings.json"
@@ -4962,7 +5140,7 @@ class TestRunDiscover:
 
         assert result == 0
         stdin.read.assert_called_once_with(1024 * 1024)
-        discover.assert_called_once_with(["/session/project"], discovery_scope="all")
+        discover.assert_called_once_with(["/session/project"], discovery_scope="all", skip_discovery_scopes=frozenset())
         assert json.loads(send.call_args.args[3])["session_id"] == "session"
 
     def test_hook_stdin_reads_cwd_for_codex(self, tmp_path, monkeypatch):
@@ -4984,7 +5162,7 @@ class TestRunDiscover:
 
         assert result == 0
         stdin.read.assert_called_once_with(1024 * 1024)
-        discover.assert_called_once_with(["/session/project"], discovery_scope="all")
+        discover.assert_called_once_with(["/session/project"], discovery_scope="all", skip_discovery_scopes=frozenset())
         assert json.loads(send.call_args.args[3])["session_id"] == "session"
 
     def test_hook_stdin_accepts_workspace_roots_list(self, tmp_path, monkeypatch):
@@ -5005,7 +5183,9 @@ class TestRunDiscover:
             result = guard_module.run_guard(self._args(config, client="cursor"))
 
         assert result == 0
-        discover.assert_called_once_with(["/workspace/one", "/workspace/two"], discovery_scope="all")
+        discover.assert_called_once_with(
+            ["/workspace/one", "/workspace/two"], discovery_scope="all", skip_discovery_scopes=frozenset()
+        )
         assert send.call_args.args[:3] == ("https://api.snyk.io", "cursor", "env-pk")
         assert json.loads(send.call_args.args[3])["conversation_id"] == "conversation"
 
@@ -5030,7 +5210,7 @@ class TestRunDiscover:
             )
 
         assert result == 0
-        discover.assert_called_once_with([], discovery_scope="all")
+        discover.assert_called_once_with([], discovery_scope="all", skip_discovery_scopes=frozenset())
         assert json.loads(send.call_args.args[3])["session_id"] == "session-start-server-discovery"
 
     def test_tty_stdin_is_not_read(self, tmp_path, monkeypatch):
@@ -5051,7 +5231,7 @@ class TestRunDiscover:
 
         assert result == 0
         stdin.read.assert_not_called()
-        discover.assert_called_once_with([], discovery_scope="all")
+        discover.assert_called_once_with([], discovery_scope="all", skip_discovery_scopes=frozenset())
 
     def test_pipe_that_never_closes_does_not_block_discovery(self, tmp_path, monkeypatch):
         import time as test_time
@@ -6205,3 +6385,156 @@ class TestRunInstallSkipsUninstalledClients:
         assert mock_install.call_count == len(ALL_CLIENTS)
         called_clients = [c.args[0] for c in mock_install.call_args_list]
         assert called_clients == ALL_CLIENTS
+
+
+class TestGuardDiscoveryWireModel:
+    """``scope`` reaches Guard's session-start event but must not appear on the
+    analysis wire. It was attached by mutating the already-serialized payload,
+    which bypasses the boundary ``verify_api.build_scan_request`` documents as
+    owning inspection-to-wire conversion ("The versioned API models own the
+    structural conversion")."""
+
+    def test_scope_is_carried_by_a_versioned_model_not_dict_mutation(self):
+        from agent_scan.models.api.v20260710 import GuardMcpServerRequest
+        from agent_scan.models.inspect import GuardInspectedServer
+
+        server = StdioServer(command="npx")
+        inspected = GuardInspectedServer(
+            name="github",
+            config_path="/config.json",
+            server=server,
+            scope=DiscoveryLocationScope.PROJECT_WORKSPACE,
+        )
+
+        request = GuardMcpServerRequest.from_inspected(inspected)
+
+        assert request.scope == "project_workspace"
+
+    def test_inspect_json_output_shape_is_unchanged(self):
+        """``InspectedServer`` is dumped verbatim by ``inspect --json``, so the
+        scope field lives on a Guard-side subclass instead of on it."""
+        from agent_scan.models.inspect import InspectedServer
+
+        assert "scope" not in InspectedServer.model_fields
+
+    def test_analysis_wire_still_has_no_scope_field(self):
+        """The analysis request is sent by ``analyze_machine`` under the same
+        version header, so ``scope`` must not leak onto it."""
+        from agent_scan.models.api.v20260710 import McpServerRequest
+
+        assert "scope" not in McpServerRequest.model_fields
+
+    def test_scope_survives_a_reordered_or_filtered_conversion(self):
+        """The old implementation zipped scopes onto the payload positionally
+        with ``strict=True``, so it depended on ``from_inspected`` never
+        filtering or reordering servers -- and the first version that dropped an
+        errored server would raise ValueError into a bare ``except Exception``
+        that renders as a generic warning."""
+        servers = [
+            StdioServer(command="a"),
+            StdioServer(command="b"),
+        ]
+        client = self._client(
+            mcp_configs={
+                "/a.json": [DiscoveredServer(name="a", server=servers[0], scope=DiscoveryLocationScope.SYSTEM)],
+                "/b.json": [DiscoveredServer(name="b", server=servers[1], scope=DiscoveryLocationScope.USER)],
+            }
+        )
+
+        result = guard_module._servers_discovered_entries([client])
+
+        by_name = {s["name"]: s["scope"] for s in result[0]["servers"]}
+        assert by_name == {"a": "system", "b": "user"}
+
+    def _client(self, *, mcp_configs):
+        return ClientToInspect(
+            name="claude code",
+            client_path="/home/u/.claude",
+            mcp_configs=mcp_configs,
+            skills_dirs={},
+        )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX discovery script")
+class TestDiscoveryScopeFlagReachesTheCli:
+    """``--skip-discovery-scopes`` is documented and parsed as a CSV, but no test
+    ever put a multi-value CSV through a rendered hook command. On PowerShell a
+    bare ``system,user`` binds to an *array*, which coerces into the ``[string]``
+    parameter by joining on ``$OFS`` -- producing ``"system user"``, which the
+    CLI then rejects with exit 2 while the hook swallows the failure and exits 0.
+    """
+
+    def test_posix_hook_forwards_a_multi_value_csv_verbatim(self, tmp_path):
+        script = Path(guard_module.__file__).parent / "hooks" / "snyk-agent-guard-discover.sh"
+        marker = tmp_path / "invoked"
+        stub = tmp_path / "runner"
+        stub.write_text('#!/bin/sh\nprintf "%s\\n" "$*" > "$MARKER"\n')
+        stub.chmod(0o755)
+
+        result = subprocess.run(
+            [
+                "bash",
+                str(script),
+                "--client",
+                "claude-code",
+                "--scope",
+                "servers",
+                "--skip-discovery-scopes",
+                "system,user",
+            ],
+            input="{}",
+            text=True,
+            capture_output=True,
+            timeout=5,
+            env={
+                **os.environ,
+                "AGENT_SCAN_COMMAND": str(stub),
+                "MACHINE_ID": "machine-42",
+                "MARKER": str(marker),
+            },
+        )
+
+        assert result.returncode == 0
+        assert marker.read_text().strip().endswith("--skip-discovery-scopes system,user")
+
+    def test_cli_accepts_the_csv_the_renderers_emit(self):
+        """Whatever the renderers put on the command line has to parse."""
+        rendered = guard_module._render_posix_command(
+            guard_module._HookInvocation(
+                script_path=Path("/hooks/discover.sh"),
+                hook_client="claude-code",
+                push_key="k",
+                url="https://api.snyk.io",
+                scope="servers",
+                skip_discovery_scopes="system,user",
+            )
+        )
+
+        token = shlex.split(rendered)[shlex.split(rendered).index("--skip-discovery-scopes") + 1]
+        assert cli_module._parse_skip_discovery_scopes(token) == frozenset(
+            {DiscoveryLocationScope.SYSTEM, DiscoveryLocationScope.USER}
+        )
+
+    def test_powershell_renderer_quotes_the_csv_like_its_siblings(self):
+        rendered = guard_module._render_powershell_command(
+            guard_module._HookInvocation(
+                script_path=Path("C:/hooks/discover.ps1"),
+                hook_client="claude-code",
+                push_key="k",
+                url="https://api.snyk.io",
+                scope="servers",
+                skip_discovery_scopes="system,user",
+            )
+        )
+
+        assert "-SkipDiscoveryScopes 'system,user'" in rendered
+        assert "-Scope 'servers'" in rendered
+
+    def test_powershell_script_accepts_an_array_and_rejoins_it(self):
+        """Defence in depth for the argv path, where subprocess hands the value
+        to PowerShell unquoted because it contains no spaces."""
+        script = (Path(guard_module.__file__).parent / "hooks" / "snyk-agent-guard-discover.ps1").read_text()
+
+        assert "[string[]]$SkipDiscoveryScopes" in script
+        assert "-join ','" in script
+        assert "ValidatePattern" in script

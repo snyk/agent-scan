@@ -24,8 +24,10 @@ from rich.logging import RichHandler
 from agent_scan.agents import DiscoveryScope
 from agent_scan.consent import collect_consent
 from agent_scan.models import (
+    AUTOMATIC_DISCOVERY_SCOPES,
     FAILURE_CATEGORY_TO_CODE,
     ControlServer,
+    DiscoveryLocationScope,
     InspectedPath,
     McpServerRiskIndexes,
     ScanResponse,
@@ -998,6 +1000,16 @@ def main():
         default=DiscoveryScope.ALL.value,
         help="Discovery data to collect (default: all)",
     )
+    guard_discover_parser.add_argument(
+        "--skip-discovery-scopes",
+        type=_parse_skip_discovery_scopes,
+        default=frozenset(),
+        metavar="CSV",
+        help=(
+            "Comma-separated location scopes to exclude: system, user, project_workspace, "
+            "extension_plugin, or all (default: exclude none)"
+        ),
+    )
     guard_uninstall_parser = guard_subparsers.add_parser(
         "uninstall",
         allow_abbrev=False,
@@ -1176,7 +1188,7 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> ScanRespo
     inspect_args = InspectArgs(
         timeout=server_timeout,
         tokens=tokens,
-        paths=files,
+        paths=files or [],
         all_users=scan_all_users,
         scan_skills=scan_skills,
         discovery_scope=DiscoveryScope.ALL if scan_skills else DiscoveryScope.SERVERS,
@@ -1279,6 +1291,23 @@ def _parse_comma_separated(raw_value: str | None) -> set[str]:
     return {value.strip() for value in raw_value.split(",") if value.strip()} if raw_value else set()
 
 
+def _parse_skip_discovery_scopes(raw_value: str) -> frozenset[DiscoveryLocationScope]:
+    """Validate the exclusion CSV used only by ``guard discover``."""
+    raw_parts = [value.strip() for value in raw_value.split(",")]
+    if not raw_parts or any(not value for value in raw_parts):
+        raise argparse.ArgumentTypeError("--skip-discovery-scopes requires a non-empty CSV")
+    values = set(raw_parts)
+    allowed = {scope.value for scope in AUTOMATIC_DISCOVERY_SCOPES}
+    unknown = values - allowed - {"all"}
+    if unknown:
+        raise argparse.ArgumentTypeError(f"unknown discovery scope(s): {', '.join(sorted(unknown))}")
+    if "all" in values:
+        if len(values) != 1:
+            raise argparse.ArgumentTypeError("'all' cannot be combined with specific discovery scopes")
+        return AUTOMATIC_DISCOVERY_SCOPES
+    return frozenset(DiscoveryLocationScope(value) for value in values)
+
+
 def _parse_ignore_risks(args, ci_mode: bool) -> set[str]:
     """Parse --ignore-risks, which is valid only for CI scans."""
     requested = _parse_comma_separated(getattr(args, "ignore_risks", None))
@@ -1314,7 +1343,9 @@ def _parse_ignore_failure_codes(args, ci_mode: bool) -> set[str]:
 def _apply_ignore_risks(response: ScanResponse, ignored_risks: set[str]) -> None:
     """Remove ignored risks before rendering and CI exit evaluation."""
     for path in response.scan_path_responses:
-        risk_indexes = [server.risk_indexes for server in path.server_risks]
+        risk_indexes: list[McpServerRiskIndexes | SkillRiskIndexes] = [
+            server.risk_indexes for server in path.server_risks
+        ]
         risk_indexes.extend(skill.risk_indexes for skill in path.skill_risks)
         for indexes in risk_indexes:
             for name in ignored_risks & indexes.__class__.model_fields.keys():

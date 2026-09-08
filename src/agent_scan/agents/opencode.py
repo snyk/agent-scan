@@ -5,14 +5,14 @@ import logging
 import os
 import sqlite3
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from agent_scan.agents.base import (
     AgentDiscoverer,
     McpConfigsResult,
     SkillsDirsResult,
 )
-from agent_scan.models import MCPConfig, OpenCodeConfigFile
+from agent_scan.models import DiscoveryLocationScope, MCPConfig, OpenCodeConfigFile
 from agent_scan.well_known_clients import expand_path
 
 logger = logging.getLogger(__name__)
@@ -23,6 +23,26 @@ _OPENCODE_MCP_FORMATS: tuple[type[MCPConfig], ...] = (OpenCodeConfigFile,)
 # opencode accepts either extension; per https://opencode.ai/docs/config the
 # layered-config loader tries each when reading global and project scopes.
 _CONFIG_FILENAMES: tuple[str, ...] = ("opencode.json", "opencode.jsonc")
+
+
+def _is_rooted_skills_entry(entry: str) -> bool:
+    """Whether a ``skills.paths`` entry names a location outside any project.
+
+    ``Path`` is bound to the running platform, so ``Path("/opt/skills")`` is not
+    absolute on Windows (it has no drive) and ``Path("C:/x")`` is not absolute on
+    POSIX. Either way the entry would be treated as project-relative and joined
+    onto every worktree, which both mislabels its scope and resolves it somewhere
+    the config never named. A config file is data, not code running on the host,
+    so both spellings have to be recognised on every platform.
+    """
+    return (
+        PurePosixPath(entry).is_absolute() or PureWindowsPath(entry).is_absolute() or bool(PureWindowsPath(entry).root)
+    )
+
+
+def _is_home_skills_entry(entry: str) -> bool:
+    """Whether the entry is home-relative, in either path spelling."""
+    return entry == "~" or entry.startswith(("~/", "~\\"))
 
 
 class OpenCodeDiscoverer(AgentDiscoverer):
@@ -195,19 +215,30 @@ class OpenCodeDiscoverer(AgentDiscoverer):
 
     def discover_mcp_servers(self) -> McpConfigsResult:
         result: McpConfigsResult = {}
-        result.update(self._discover_global_mcp_servers())
-        result.update(self._discover_project_mcp_servers())
-        result.update(self._discover_managed_mcp_servers())
-        result.update(self._discover_env_override_mcp_servers())
+        self._merge_mcp_results(result, self._discover_project_mcp_servers, DiscoveryLocationScope.PROJECT_WORKSPACE)
+        self._merge_mcp_results(result, self._discover_global_mcp_servers, DiscoveryLocationScope.USER)
+        self._merge_mcp_results(result, self._discover_env_override_mcp_servers, self._env_override_config_scope())
+        self._merge_mcp_results(result, self._discover_managed_mcp_servers, DiscoveryLocationScope.SYSTEM)
         return result
 
     def discover_skills(self) -> SkillsDirsResult:
         result: SkillsDirsResult = {}
-        result.update(self._discover_global_skills())
-        result.update(self._discover_project_skills())
-        result.update(self._discover_managed_skills())
-        result.update(self._discover_config_skills_paths())
-        result.update(self._discover_cached_url_skills())
+        self._merge_skill_results(result, self._discover_project_skills, DiscoveryLocationScope.PROJECT_WORKSPACE)
+        self._merge_skill_results(result, self._discover_global_skills, DiscoveryLocationScope.USER)
+        self._merge_skill_results(result, self._discover_cached_url_skills, DiscoveryLocationScope.USER)
+        self._merge_scoped_skill_results(
+            result,
+            self._discover_config_skills_paths(DiscoveryLocationScope.PROJECT_WORKSPACE),
+        )
+        self._merge_scoped_skill_results(
+            result,
+            self._discover_config_skills_paths(DiscoveryLocationScope.USER),
+        )
+        self._merge_skill_results(result, self._discover_managed_skills, DiscoveryLocationScope.SYSTEM)
+        self._merge_scoped_skill_results(
+            result,
+            self._discover_config_skills_paths(DiscoveryLocationScope.SYSTEM),
+        )
         return result
 
     # --- folder resolution ---
@@ -309,6 +340,20 @@ class OpenCodeDiscoverer(AgentDiscoverer):
             program_data = os.environ.get("PROGRAMDATA") or r"C:\ProgramData"
             return Path(program_data) / "opencode"
         return None
+
+    def _env_override_config_scope(self) -> DiscoveryLocationScope:
+        """Location scope of the ``$OPENCODE_CONFIG`` file, which may sit anywhere.
+
+        Labelling it ``user`` unconditionally means a project-local override
+        survives ``--skip-discovery-scopes project_workspace``, while a genuinely
+        relocated global config is silently dropped by
+        ``--skip-discovery-scopes user`` -- the file is never even opened, so no
+        parse error is surfaced either.
+        """
+        env_path = self._opencode_config_env_path()
+        if env_path is None:
+            return DiscoveryLocationScope.USER
+        return self._location_scope_for(env_path)
 
     def _opencode_config_env_path(self) -> Path | None:
         """Resolved ``$OPENCODE_CONFIG`` path on an own-home scan, else ``None``."""
@@ -581,32 +626,35 @@ class OpenCodeDiscoverer(AgentDiscoverer):
 
     # --- skills.paths from user opencode.json (Gap B) ---
 
-    def _iter_candidate_config_files(self) -> list[Path]:
-        """Every opencode config file we'd consider for ``skills.paths`` extraction.
-
-        Covers the same scopes as MCP discovery (global, project, managed,
-        ``$OPENCODE_CONFIG`` env file) so a ``skills.paths`` declared anywhere
-        opencode honors it is picked up. The file may or may not exist;
-        ``_load_json_file`` handles missing/unreadable files quietly.
-        """
-        candidates: list[Path] = []
-        for base in self._global_config_dirs():
-            for filename in _CONFIG_FILENAMES:
-                candidates.append(base / filename)
-        for project in self._discovery_paths_with_ancestors():
-            for base in self._project_config_bases(project):
+    def _iter_scoped_candidate_config_files(
+        self, source_scope: DiscoveryLocationScope | None = None
+    ) -> list[tuple[Path, DiscoveryLocationScope]]:
+        candidates: list[tuple[Path, DiscoveryLocationScope]] = []
+        if source_scope in (None, DiscoveryLocationScope.USER):
+            for base in self._global_config_dirs():
                 for filename in _CONFIG_FILENAMES:
-                    candidates.append(base / filename)
-        managed = self._managed_config_dir()
-        if managed is not None:
-            for filename in _CONFIG_FILENAMES:
-                candidates.append(managed / filename)
+                    candidates.append((base / filename, DiscoveryLocationScope.USER))
+        # ``$OPENCODE_CONFIG`` is scoped by where it points, not by the fact that
+        # it came from the environment, so it belongs to whichever group matches.
         env_path = self._opencode_config_env_path()
         if env_path is not None:
-            candidates.append(env_path)
+            env_scope = self._env_override_config_scope()
+            if source_scope in (None, env_scope):
+                candidates.append((env_path, env_scope))
+
+        if source_scope in (None, DiscoveryLocationScope.PROJECT_WORKSPACE):
+            for project in self._discovery_paths_with_ancestors():
+                for base in self._project_config_bases(project):
+                    for filename in _CONFIG_FILENAMES:
+                        candidates.append((base / filename, DiscoveryLocationScope.PROJECT_WORKSPACE))
+        if source_scope in (None, DiscoveryLocationScope.SYSTEM):
+            managed = self._managed_config_dir()
+            if managed is not None:
+                for filename in _CONFIG_FILENAMES:
+                    candidates.append((managed / filename, DiscoveryLocationScope.SYSTEM))
         return candidates
 
-    def _discover_config_skills_paths(self) -> SkillsDirsResult:
+    def _discover_config_skills_paths(self, source_scope: DiscoveryLocationScope | None = None) -> SkillsDirsResult:
         """Scan every ``skills.paths`` entry referenced from any opencode.json.
 
         Per ``packages/core/src/v1/config/skills.ts``:
@@ -630,8 +678,9 @@ class OpenCodeDiscoverer(AgentDiscoverer):
         # opencode's instance dirs (the db ``worktree`` leaves); computed once so
         # the relative-entry resolution below doesn't re-read the SQLite db per
         # candidate config file.
-        worktrees = self._all_discovery_folders()
-        for config_path in self._iter_candidate_config_files():
+        # Even excluded projects can supply relative references to user locations.
+        worktrees = self._project_worktrees()
+        for config_path, config_scope in self._iter_scoped_candidate_config_files(source_scope):
             data = self._load_json_file(config_path)
             if not isinstance(data, dict):
                 continue
@@ -644,9 +693,31 @@ class OpenCodeDiscoverer(AgentDiscoverer):
             for entry in paths:
                 if not isinstance(entry, str) or not entry:
                     continue
+                is_project_relative = not _is_home_skills_entry(entry) and not _is_rooted_skills_entry(entry)
+                declared_scope = DiscoveryLocationScope.PROJECT_WORKSPACE if is_project_relative else config_scope
                 for resolved in self._resolve_skills_path_entry(entry, worktrees):
-                    self._record_skills_at(result, resolved)
+                    key = resolved.as_posix()
+                    entry_scope = self._resolve_entry_scope(key, declared_scope)
+                    if not self._scope_enabled(entry_scope):
+                        continue
+                    entries = self._scan_skills_dir(resolved)
+                    if entries is not None:
+                        result.update(self._scope_skill_results({key: entries}, entry_scope))
         return result
+
+    def _project_worktrees(self) -> list[Path]:
+        """Literal opencode instance dirs, cached for this discoverer's lifetime.
+
+        ``_all_discovery_folders`` is uncached and re-reads the ``opencode*.db``
+        SQLite database on every call, and ``discover_skills`` calls
+        ``_discover_config_skills_paths`` three times -- so the db was opened
+        three extra times per discovery, inside the hook's 5s cap. The literal
+        roots (not the ancestor walk) are correct here because opencode joins a
+        relative ``skills.paths`` entry to the instance directory.
+        """
+        if self._project_worktrees_cache is None:
+            self._project_worktrees_cache = self._all_discovery_folders()
+        return self._project_worktrees_cache
 
     def _resolve_skills_path_entry(self, entry: str, worktrees: list[Path]) -> list[Path]:
         """Expand a single ``skills.paths`` entry the way opencode does.
@@ -660,12 +731,11 @@ class OpenCodeDiscoverer(AgentDiscoverer):
           nothing — matching that opencode would never load it from the config
           dir.
         """
-        if entry == "~" or entry.startswith("~/"):
-            return [expand_path(Path(entry), self.home_directory)]
-        candidate = Path(entry)
-        if candidate.is_absolute():
-            return [candidate]
-        return [worktree / candidate for worktree in worktrees]
+        if _is_home_skills_entry(entry):
+            return [expand_path(Path(entry.replace("\\", "/")), self.home_directory)]
+        if _is_rooted_skills_entry(entry):
+            return [Path(entry)]
+        return [worktree / Path(entry) for worktree in worktrees]
 
     # --- URL-pulled skills cache (Gap C) ---
 

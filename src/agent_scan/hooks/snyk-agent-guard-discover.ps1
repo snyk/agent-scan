@@ -22,7 +22,18 @@ param(
 
     [Parameter(Mandatory=$false)]
     [ValidateSet("servers","skills","all")]
-    [string]$Scope = "servers"
+    [string]$Scope = "servers",
+
+    # Declared as [string[]] so both spellings bind correctly: PowerShell parses
+    # a bare `system,user` in argument position as an array (which would coerce
+    # into a [string] by joining on $OFS, yielding "system user" and an exit-2
+    # rejection from the CLI), while a quoted 'system,user' binds as one element.
+    # Rejoined below, so either way the CLI receives the CSV it documents.
+    # ValidatePattern restores the guard its ValidateSet-constrained siblings
+    # have, which also constrains what reaches the Invoke-Expression fallback.
+    [Parameter(Mandatory=$false)]
+    [ValidatePattern('^[a-z_]+(,[a-z_]+)*$')]
+    [string[]]$SkipDiscoveryScopes
 )
 
 $ErrorActionPreference = "Stop"
@@ -37,6 +48,7 @@ $cmd = if ($AgentScanCommand) { $AgentScanCommand } elseif ($env:AGENT_SCAN_COMM
 if (-not $cmd) { exit 0 }
 
 $arguments = @("guard", "discover", "--client", $Client, "--scope", $Scope)
+if ($SkipDiscoveryScopes) { $arguments += @("--skip-discovery-scopes", ($SkipDiscoveryScopes -join ',')) }
 
 # Do not read stdin here. Invoking the binary outside a pipeline lets it inherit this
 # process's stdin, so `guard discover` reads the hook payload itself under its own 5s

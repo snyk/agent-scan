@@ -16,6 +16,7 @@ from agent_scan.agents.base import (
 from agent_scan.models import (
     ClaudeConfigFile,
     CouldNotParseMCPConfig,
+    DiscoveryLocationScope,
     MCPConfig,
     PluginMCPConfigFile,
 )
@@ -87,19 +88,23 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
 
     def discover_mcp_servers(self) -> McpConfigsResult:
         result: McpConfigsResult = {}
-        result.update(self._discover_global_mcp_servers())
-        result.update(self._discover_project_mcp_servers())
-        result.update(self._discover_plugin_mcp_servers())
-        result.update(self._discover_plugin_manifest_mcp_servers())
-        result.update(self._discover_managed_mcp_servers())
+        self._merge_mcp_results(result, self._discover_project_mcp_servers, DiscoveryLocationScope.PROJECT_WORKSPACE)
+        self._merge_mcp_results(result, self._discover_global_mcp_servers, DiscoveryLocationScope.USER)
+        self._merge_mcp_results(result, self._discover_plugin_mcp_servers, DiscoveryLocationScope.EXTENSION_PLUGIN)
+        self._merge_mcp_results(
+            result, self._discover_plugin_manifest_mcp_servers, DiscoveryLocationScope.EXTENSION_PLUGIN
+        )
+        self._merge_mcp_results(result, self._discover_managed_mcp_servers, DiscoveryLocationScope.SYSTEM)
         return result
 
     def discover_skills(self) -> SkillsDirsResult:
         result: SkillsDirsResult = {}
-        result.update(self._discover_global_skill())
-        result.update(self._discover_project_skills())
-        result.update(self._discover_plugin_skills())
-        result.update(self._discover_plugin_manifest_skills())
+        self._merge_skill_results(result, self._discover_project_skills, DiscoveryLocationScope.PROJECT_WORKSPACE)
+        self._merge_skill_results(result, self._discover_global_skill, DiscoveryLocationScope.USER)
+        self._merge_skill_results(result, self._discover_plugin_skills, DiscoveryLocationScope.EXTENSION_PLUGIN)
+        self._merge_skill_results(
+            result, self._discover_plugin_manifest_skills, DiscoveryLocationScope.EXTENSION_PLUGIN
+        )
         # NOTE: enterprise/managed skills are a documented Claude Code scope (the
         # "Enterprise" tier in the skills hierarchy, which overrides personal and
         # project skills) but are intentionally NOT discovered here. Unlike

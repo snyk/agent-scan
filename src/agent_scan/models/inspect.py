@@ -1,7 +1,8 @@
 """Models for the discovery-to-inspection lifecycle and its results."""
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
+from agent_scan.models.discovery import DiscoveredServer, DiscoveryLocationScope
 from agent_scan.models.errors import CouldNotParseMCPConfig, FileNotFoundConfig, ScanError, UnknownConfigFormat
 from agent_scan.models.mcp import RemoteServer, ServerSignature, StdioServer
 from agent_scan.models.skill import DiscoveredSkill, SkillFile
@@ -17,6 +18,43 @@ class CandidateClient(BaseModel):
     mcp_config_globs: list[str] = Field(default_factory=list)
     skills_dir_globs: list[str] = Field(default_factory=list)
     max_glob_depth: int = 6
+    default_location_scope: DiscoveryLocationScope = DiscoveryLocationScope.USER
+    mcp_config_path_scopes: dict[str, DiscoveryLocationScope] = Field(default_factory=dict)
+    skills_dir_path_scopes: dict[str, DiscoveryLocationScope] = Field(default_factory=dict)
+    mcp_config_glob_scopes: dict[str, DiscoveryLocationScope] = Field(default_factory=dict)
+    skills_dir_glob_scopes: dict[str, DiscoveryLocationScope] = Field(default_factory=dict)
+    mcp_config_path_nested_scopes: dict[str, set[DiscoveryLocationScope]] = Field(
+        default_factory=dict,
+        description="Scopes a config file can yield *in addition* to its declared one, because the "
+        "format nests more than one tier in a single file (``~/.claude.json`` holds user-global "
+        "servers alongside per-project ones). Without this the path-level exclusion would skip the "
+        "file before it is opened and the nested scopes would never be seen.",
+    )
+
+    @model_validator(mode="after")
+    def _scope_overrides_must_name_declared_paths(self) -> "CandidateClient":
+        """Reject an override whose key is not in the list it overrides.
+
+        The override dicts are keyed by the raw, unexpanded declaration string,
+        so a key that drifts from its list entry is not an error today -- it is
+        a silent no-op that falls back to ``default_location_scope`` (``user``),
+        which is exactly the kind of mislabelling the scope filter then acts on.
+        """
+        for override_field, source_field in (
+            ("mcp_config_path_scopes", "mcp_config_paths"),
+            ("skills_dir_path_scopes", "skills_dir_paths"),
+            ("mcp_config_glob_scopes", "mcp_config_globs"),
+            ("skills_dir_glob_scopes", "skills_dir_globs"),
+            ("mcp_config_path_nested_scopes", "mcp_config_paths"),
+        ):
+            declared = set(getattr(self, source_field))
+            unknown = sorted(set(getattr(self, override_field)) - declared)
+            if unknown:
+                raise ValueError(
+                    f"{self.name}: {override_field} names {unknown} which is not in {source_field}; "
+                    "the override would silently fall back to default_location_scope"
+                )
+        return self
 
 
 class ClientToInspect(BaseModel):
@@ -27,10 +65,7 @@ class ClientToInspect(BaseModel):
     username: str | None = None
     mcp_configs: dict[
         str,
-        list[tuple[str, StdioServer | RemoteServer]]
-        | FileNotFoundConfig
-        | UnknownConfigFormat
-        | CouldNotParseMCPConfig,
+        list[DiscoveredServer] | FileNotFoundConfig | UnknownConfigFormat | CouldNotParseMCPConfig,
     ]
     skills_dirs: dict[str, list[DiscoveredSkill] | FileNotFoundConfig]
 
@@ -70,3 +105,15 @@ class InspectedPath(BaseModel):
     servers: list[InspectedServer] = Field(default_factory=list)
     skills: list[InspectedSkill] = Field(default_factory=list)
     error: ScanError | None = None
+
+
+class GuardInspectedServer(InspectedServer):
+    """``InspectedServer`` plus the location scope Guard's discovery event reports.
+
+    Deliberately a subclass rather than a field on ``InspectedServer``: that
+    model is dumped verbatim by ``inspect --json`` (``cli.py``), so adding a
+    field there would change user-facing output, and the analysis contract does
+    not model scope either.
+    """
+
+    scope: DiscoveryLocationScope = DiscoveryLocationScope.CUSTOM

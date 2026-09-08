@@ -31,10 +31,9 @@ from agent_scan.agents.base import (
 from agent_scan.models import (
     ClaudeConfigFile,
     CouldNotParseMCPConfig,
+    DiscoveryLocationScope,
     MCPConfig,
     PluginMCPConfigFile,
-    RemoteServer,
-    StdioServer,
     VSCodeConfigFile,
     VSCodeMCPConfig,
 )
@@ -303,25 +302,41 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
 
     def discover_mcp_servers(self) -> McpConfigsResult:
         result: McpConfigsResult = {}
-        result.update(self._discover_user_mcp_files())
-        result.update(self._discover_user_settings_mcp())
-        result.update(self._discover_gated_home_settings_mcp())
-        result.update(self._discover_profile_mcp_files())
-        result.update(self._discover_workspace_mcp())
-        result.update(self._discover_agent_config_mcp())
-        result.update(self._discover_extension_mcp_servers())
-        result.update(self._discover_devcontainer_mcp())
-        result.update(self._discover_code_workspace_mcp())
+        self._merge_mcp_results(result, self._discover_workspace_mcp, DiscoveryLocationScope.PROJECT_WORKSPACE)
+        self._merge_mcp_results(
+            result,
+            lambda: self._discover_agent_config_mcp(include_user=False, include_project=True),
+            DiscoveryLocationScope.PROJECT_WORKSPACE,
+        )
+        self._merge_mcp_results(result, self._discover_devcontainer_mcp, DiscoveryLocationScope.PROJECT_WORKSPACE)
+        self._merge_mcp_results(result, self._discover_code_workspace_mcp, DiscoveryLocationScope.PROJECT_WORKSPACE)
+        self._merge_mcp_results(result, self._discover_user_mcp_files, DiscoveryLocationScope.USER)
+        self._merge_mcp_results(result, self._discover_user_settings_mcp, DiscoveryLocationScope.USER)
+        self._merge_mcp_results(result, self._discover_gated_home_settings_mcp, DiscoveryLocationScope.USER)
+        self._merge_mcp_results(result, self._discover_profile_mcp_files, DiscoveryLocationScope.USER)
+        self._merge_mcp_results(
+            result,
+            lambda: self._discover_agent_config_mcp(include_user=True, include_project=False),
+            DiscoveryLocationScope.USER,
+        )
+        self._merge_mcp_results(result, self._discover_extension_mcp_servers, DiscoveryLocationScope.EXTENSION_PLUGIN)
         return result
 
     def discover_skills(self) -> SkillsDirsResult:
         result: SkillsDirsResult = {}
-        result.update(self._discover_home_skills_dirs())
-        result.update(self._discover_system_skills_dirs())
-        result.update(self._discover_workspace_skills())
-        result.update(self._discover_extension_skills())
-        result.update(self._discover_settings_skill_locations())
-        result.update(self._discover_code_workspace_skills())
+        self._merge_skill_results(result, self._discover_workspace_skills, DiscoveryLocationScope.PROJECT_WORKSPACE)
+        self._merge_scoped_skill_results(
+            result,
+            self._discover_settings_skill_locations(include_user=False, include_project=True),
+        )
+        self._merge_scoped_skill_results(result, self._discover_code_workspace_skills())
+        self._merge_skill_results(result, self._discover_home_skills_dirs, DiscoveryLocationScope.USER)
+        self._merge_scoped_skill_results(
+            result,
+            self._discover_settings_skill_locations(include_user=True, include_project=False),
+        )
+        self._merge_skill_results(result, self._discover_extension_skills, DiscoveryLocationScope.EXTENSION_PLUGIN)
+        self._merge_skill_results(result, self._discover_system_skills_dirs, DiscoveryLocationScope.SYSTEM)
         return result
 
     def _discover_home_skills_dirs(self) -> SkillsDirsResult:
@@ -480,9 +495,7 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
                     result[candidate.as_posix()] = parsed
         return result
 
-    def _parse_settings_mcp_gated(
-        self, path: Path
-    ) -> list[tuple[str, StdioServer | RemoteServer]] | CouldNotParseMCPConfig | None:
+    def _parse_settings_mcp_gated(self, path: Path) -> McpScanResult:
         """Parse a multi-purpose ``settings.json`` for MCP, gated on the presence
         of actual MCP servers (a top-level ``mcpServers`` or an ``mcp.servers``).
 
@@ -627,7 +640,9 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
                 result[mcp_path.as_posix()] = parsed
         return result
 
-    def _discover_agent_config_mcp(self) -> McpConfigsResult:
+    def _discover_agent_config_mcp(
+        self, *, include_user: bool = True, include_project: bool = True
+    ) -> McpConfigsResult:
         """Scan custom-agent / subagent definition files for *inline* ``mcpServers``.
 
         Some forks store agents one-file-per-agent under a dedicated directory —
@@ -657,9 +672,12 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         """
         if not self._agent_config_dir_paths and not self._workspace_agent_config_relative:
             return {}
-        dirs: list[Path] = [expand_path(Path(raw), self.home_directory) for raw in self._agent_config_dir_paths]
-        for root in self._discovery_paths_with_ancestors():
-            dirs.extend(root / rel for rel in self._workspace_agent_config_relative)
+        dirs: list[Path] = []
+        if include_user:
+            dirs.extend(expand_path(Path(raw), self.home_directory) for raw in self._agent_config_dir_paths)
+        if include_project:
+            for root in self._discovery_paths_with_ancestors():
+                dirs.extend(root / rel for rel in self._workspace_agent_config_relative)
         result: McpConfigsResult = {}
         for base in dirs:
             try:
@@ -864,13 +882,15 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         The setting is a VS Code object map (``{path: bool}``); a bare list is a
         defensive fallback (see :func:`_enabled_skill_location_paths`). Entries may
         be absolute, ``~``-prefixed, or relative (resolved against ``base_dir``, the
-        workspace root for workspace-scoped settings). Only existing directories
-        are surfaced.
+        workspace root for workspace-scoped settings). Resolve each location's
+        scope before scanning, since one settings file can reference both user
+        and project directories even when its own scope is excluded.
         """
         result: SkillsDirsResult = {}
         if not self._settings_skill_locations_enabled or not isinstance(settings, dict):
             return result
         locations = _read_chat_setting(settings, "agentSkillsLocations")
+        declared_scope = DiscoveryLocationScope.USER if base_dir is None else DiscoveryLocationScope.PROJECT_WORKSPACE
         for raw in _enabled_skill_location_paths(locations):
             if raw.startswith("~"):
                 path = expand_path(Path(raw), self.home_directory)
@@ -880,31 +900,42 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
                 path = base_dir / raw
             else:
                 continue
+            key = path.as_posix()
+            entry_scope = self._resolve_entry_scope(key, declared_scope)
+            if not self._scope_enabled(entry_scope):
+                continue
             entries = self._scan_skills_dir(path)
             if entries is not None:
-                result[path.as_posix()] = entries
+                result.update(self._scope_skill_results({key: entries}, entry_scope))
         return result
 
-    def _settings_files_for_skill_locations(self) -> list[tuple[Path, Path | None]]:
+    def _settings_files_for_skill_locations(
+        self, *, include_user: bool = True, include_project: bool = True
+    ) -> list[tuple[Path, Path | None]]:
         """``(settings.json path, base_dir)`` pairs to scan for skill locations:
         userdata + profile settings (base ``None``) and per-workspace
         ``.vscode/settings.json`` (base = workspace root)."""
         pairs: list[tuple[Path, Path | None]] = []
-        if self._user_settings_file:
+        if include_user and self._user_settings_file:
             for userdata in self._user_data_dirs():
                 pairs.append((userdata / self._user_settings_file, None))
                 for profile in self._profile_dirs(userdata):
                     pairs.append((profile / "settings.json", None))
-        for path in self._discovery_paths_with_ancestors():
-            pairs.append((path / ".vscode" / "settings.json", path))
+        if include_project:
+            for path in self._discovery_paths_with_ancestors():
+                pairs.append((path / ".vscode" / "settings.json", path))
         return pairs
 
-    def _discover_settings_skill_locations(self) -> SkillsDirsResult:
+    def _discover_settings_skill_locations(
+        self, *, include_user: bool = True, include_project: bool = True
+    ) -> SkillsDirsResult:
         """Aggregate ``chat.agentSkillsLocations`` skill dirs across all settings sources."""
         result: SkillsDirsResult = {}
         if not self._settings_skill_locations_enabled:
             return result
-        for path, base_dir in self._settings_files_for_skill_locations():
+        for path, base_dir in self._settings_files_for_skill_locations(
+            include_user=include_user, include_project=include_project
+        ):
             data = self._load_json_file(path)
             if not isinstance(data, dict):
                 continue
@@ -950,6 +981,20 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         return result
 
     # --- private: .code-workspace multi-root files ---
+
+    @cached_property
+    def _code_workspace_mcp_paths(self) -> set[Path]:
+        """Exact registered files, without granting project scope to their parent dirs."""
+        return {Path(os.path.normpath(path)) for path, _ in self._code_workspace_json_files}
+
+    def _resolve_mcp_entry_scope(self, path: str, declared: DiscoveryLocationScope) -> DiscoveryLocationScope:
+        if (
+            self._code_workspace_enabled
+            and declared is DiscoveryLocationScope.PROJECT_WORKSPACE
+            and Path(os.path.normpath(path)) in self._code_workspace_mcp_paths
+        ):
+            return declared
+        return super()._resolve_mcp_entry_scope(path, declared)
 
     def _code_workspace_files(self) -> list[Path]:
         """``.code-workspace`` files referenced by the ``workspace`` field of any

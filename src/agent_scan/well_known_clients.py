@@ -4,7 +4,7 @@ import os
 import sys
 from pathlib import Path
 
-from agent_scan.models import CandidateClient
+from agent_scan.models import CandidateClient, DiscoveryLocationScope
 
 # Set up logger for this module
 logger = logging.getLogger(__name__)
@@ -51,6 +51,11 @@ MACOS_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
         skills_dir_paths=["~/.claude/skills"],
         mcp_config_globs=["~/.claude/plugins/cache/**/.mcp.json"],
         skills_dir_globs=["~/.claude/plugins/cache/**/skills"],
+        mcp_config_glob_scopes={"~/.claude/plugins/cache/**/.mcp.json": DiscoveryLocationScope.EXTENSION_PLUGIN},
+        skills_dir_glob_scopes={"~/.claude/plugins/cache/**/skills": DiscoveryLocationScope.EXTENSION_PLUGIN},
+        # ``~/.claude.json`` nests per-project servers under ``projects.<path>``
+        # alongside the user-global top-level ``mcpServers``.
+        mcp_config_path_nested_scopes={"~/.claude.json": {DiscoveryLocationScope.PROJECT_WORKSPACE}},
     ),
     CandidateClient(
         name="gemini cli",
@@ -66,14 +71,16 @@ MACOS_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
             "~/.clawdbot/skills",
             "~/.openclaw/skills",
             "~/.openclaw/workspace/skills",
-            ".openclaw/skills",
         ],
+        skills_dir_path_scopes={
+            "~/.openclaw/workspace/skills": DiscoveryLocationScope.PROJECT_WORKSPACE,
+        },
     ),
     CandidateClient(
         name="amp",
-        client_exists_paths=["~/.config/agents", ".amp"],
+        client_exists_paths=["~/.config/agents"],
         mcp_config_paths=[],
-        skills_dir_paths=["~/.config/agents/skills", ".amp/skills"],
+        skills_dir_paths=["~/.config/agents/skills"],
     ),
     CandidateClient(
         name="kiro",
@@ -141,6 +148,11 @@ LINUX_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
         skills_dir_paths=["~/.claude/skills"],
         mcp_config_globs=["~/.claude/plugins/cache/**/.mcp.json"],
         skills_dir_globs=["~/.claude/plugins/cache/**/skills"],
+        mcp_config_glob_scopes={"~/.claude/plugins/cache/**/.mcp.json": DiscoveryLocationScope.EXTENSION_PLUGIN},
+        skills_dir_glob_scopes={"~/.claude/plugins/cache/**/skills": DiscoveryLocationScope.EXTENSION_PLUGIN},
+        # ``~/.claude.json`` nests per-project servers under ``projects.<path>``
+        # alongside the user-global top-level ``mcpServers``.
+        mcp_config_path_nested_scopes={"~/.claude.json": {DiscoveryLocationScope.PROJECT_WORKSPACE}},
     ),
     CandidateClient(
         name="gemini cli",
@@ -156,14 +168,16 @@ LINUX_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
             "~/.clawdbot/skills",
             "~/.openclaw/skills",
             "~/.openclaw/workspace/skills",
-            ".openclaw/skills",
         ],
+        skills_dir_path_scopes={
+            "~/.openclaw/workspace/skills": DiscoveryLocationScope.PROJECT_WORKSPACE,
+        },
     ),
     CandidateClient(
         name="amp",
-        client_exists_paths=["~/.config/agents", ".amp"],
+        client_exists_paths=["~/.config/agents"],
         mcp_config_paths=[],
-        skills_dir_paths=["~/.config/agents/skills", ".amp/skills"],
+        skills_dir_paths=["~/.config/agents/skills"],
     ),
     CandidateClient(
         name="kiro",
@@ -238,6 +252,11 @@ WINDOWS_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
         skills_dir_paths=["~/.claude/skills"],
         mcp_config_globs=["~/.claude/plugins/cache/**/.mcp.json"],
         skills_dir_globs=["~/.claude/plugins/cache/**/skills"],
+        mcp_config_glob_scopes={"~/.claude/plugins/cache/**/.mcp.json": DiscoveryLocationScope.EXTENSION_PLUGIN},
+        skills_dir_glob_scopes={"~/.claude/plugins/cache/**/skills": DiscoveryLocationScope.EXTENSION_PLUGIN},
+        # ``~/.claude.json`` nests per-project servers under ``projects.<path>``
+        # alongside the user-global top-level ``mcpServers``.
+        mcp_config_path_nested_scopes={"~/.claude.json": {DiscoveryLocationScope.PROJECT_WORKSPACE}},
     ),
     CandidateClient(
         name="gemini cli",
@@ -253,14 +272,16 @@ WINDOWS_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
             "~/.clawdbot/skills",
             "~/.openclaw/skills",
             "~/.openclaw/workspace/skills",
-            ".openclaw/skills",
         ],
+        skills_dir_path_scopes={
+            "~/.openclaw/workspace/skills": DiscoveryLocationScope.PROJECT_WORKSPACE,
+        },
     ),
     CandidateClient(
         name="amp",
-        client_exists_paths=["~/.config/agents", ".amp"],
+        client_exists_paths=["~/.config/agents"],
         mcp_config_paths=[],
-        skills_dir_paths=["~/.config/agents/skills", ".amp/skills"],
+        skills_dir_paths=["~/.config/agents/skills"],
     ),
     CandidateClient(
         name="kiro",
@@ -283,36 +304,64 @@ WINDOWS_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
 ]
 
 
+def _discovery_identity(client: CandidateClient) -> str:
+    """A stable key covering everything that makes a client's discovery distinct.
+
+    Every discovery-relevant field is included, so two entries that differ only
+    in their glob lists or their location-scope overrides stay distinct. A key
+    that named only the path lists would silently collapse them and apply one
+    platform's scope labels to the other.
+    """
+    return client.model_dump_json(
+        include={
+            "name",
+            "client_exists_paths",
+            "mcp_config_paths",
+            "skills_dir_paths",
+            "mcp_config_globs",
+            "skills_dir_globs",
+            "max_glob_depth",
+            "default_location_scope",
+            "mcp_config_path_scopes",
+            "skills_dir_path_scopes",
+            "mcp_config_glob_scopes",
+            "skills_dir_glob_scopes",
+            "mcp_config_path_nested_scopes",
+        }
+    )
+
+
+def merge_platform_clients(primary: list[CandidateClient], secondary: list[CandidateClient]) -> list[CandidateClient]:
+    """Concatenate two per-OS client lists, dropping structural duplicates.
+
+    On Windows we may also be scanning Linux home directories that live inside
+    WSL distros (exposed as ``\\\\wsl.localhost\\<Distro>\\home\\<user>``). The Linux
+    client definitions use Linux-conventional paths (e.g. ``~/.config/Code``,
+    ``~/.claude.json``), which only match when expanded against a WSL home; the
+    Windows definitions only match against Windows-native homes. Merging both
+    lists gets WSL homes probed with Linux paths, while dropping Linux entries
+    whose discovery rules are identical to an existing Windows entry (e.g.
+    ``cursor`` uses ``~/.cursor/mcp.json`` on both) avoids scanning the same MCP
+    server twice per home.
+    """
+    seen: set[str] = set()
+    merged: list[CandidateClient] = []
+    for client in [*primary, *secondary]:
+        key = _discovery_identity(client)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(client)
+    return merged
+
+
 def get_well_known_clients() -> list[CandidateClient]:
     if sys.platform == "linux" or sys.platform == "linux2":
         return LINUX_WELL_KNOWN_CLIENTS
     elif sys.platform == "darwin":
         return MACOS_WELL_KNOWN_CLIENTS
     elif sys.platform == "win32":
-        # On Windows we may also be scanning Linux home directories that live
-        # inside WSL distros (exposed as \\wsl.localhost\<Distro>\home\<user>).
-        # The Linux client definitions use Linux-conventional paths
-        # (e.g. ~/.config/Code, ~/.claude.json), which only match when
-        # expanded against a WSL home; the Windows definitions only match
-        # against Windows-native homes. Merge both lists so WSL homes get
-        # probed with Linux paths, but drop Linux entries whose discovery
-        # paths are structurally identical to an existing Windows entry
-        # (e.g. `cursor` uses `~/.cursor/mcp.json` on both platforms) to
-        # avoid scanning the same MCP server twice per home.
-        seen: set[tuple[str, tuple[str, ...], tuple[str, ...], tuple[str, ...]]] = set()
-        merged: list[CandidateClient] = []
-        for client in WINDOWS_WELL_KNOWN_CLIENTS + LINUX_WELL_KNOWN_CLIENTS:
-            key = (
-                client.name,
-                tuple(client.client_exists_paths),
-                tuple(client.mcp_config_paths),
-                tuple(client.skills_dir_paths),
-            )
-            if key in seen:
-                continue
-            seen.add(key)
-            merged.append(client)
-        return merged
+        return merge_platform_clients(WINDOWS_WELL_KNOWN_CLIENTS, LINUX_WELL_KNOWN_CLIENTS)
     else:
         return []
 

@@ -6,7 +6,7 @@ import os
 import ssl
 import sys
 import traceback
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import aiohttp
@@ -16,9 +16,11 @@ from mcp.types import Prompt, Resource, ResourceTemplate, Tool
 
 from agent_scan.models.api.common import ScanUserInfo
 from agent_scan.models.api.v20260710 import (
+    GuardScanPathRequest,
     McpEntitySummary,
     McpServerRequest,
     McpServerRiskResponse,
+    ScanPathRequest,
     ScanPathResponse,
     ScanRequest,
     ScanResponse,
@@ -56,9 +58,35 @@ def build_scan_request(
         scan_metadata=scan_metadata,
     )
     for inspected_path, path_request in zip(inspected_paths, request.scan_path_requests, strict=True):
-        path_request.client = get_client_from_path(inspected_path.path) or path_request.client or inspected_path.path
-        path_request.path = get_relative_path(path_request.path)
+        _apply_transport_boundary(inspected_path, path_request)
     return request
+
+
+def _apply_transport_boundary(
+    inspected_path: InspectedPath, path_request: ScanPathRequest | GuardScanPathRequest
+) -> None:
+    """Infer the client and make the top-level path home-relative."""
+    path_request.client = get_client_from_path(inspected_path.path) or path_request.client or inspected_path.path
+    path_request.path = get_relative_path(path_request.path)
+
+
+def build_guard_discovery_payloads(inspected_paths: list[InspectedPath]) -> list[dict]:
+    """Serialize inspected paths for Guard's session-start discovery event.
+
+    Same transport boundary as :func:`build_scan_request`, but built from the
+    Guard request models so each server carries the location scope the analysis
+    contract does not model. Going through the versioned models keeps them the
+    single owner of the conversion, instead of patching ``scope`` onto an
+    already-serialized ``ScanPathRequest`` by position -- which coupled Guard to
+    ``from_inspected`` never filtering or reordering servers.
+    """
+    return [_guard_path_payload(inspected_path) for inspected_path in inspected_paths]
+
+
+def _guard_path_payload(inspected_path: InspectedPath) -> dict:
+    path_request = GuardScanPathRequest.from_inspected(inspected_path)
+    _apply_transport_boundary(inspected_path, path_request)
+    return path_request.model_dump(mode="json")
 
 
 class SnykTokenError(Exception):
@@ -222,7 +250,7 @@ async def _submit_async_analysis(
 
 def _entity_summary(entity: Entity) -> McpEntitySummary:
     if isinstance(entity, Tool):
-        entity_type = "tool"
+        entity_type: Literal["tool", "resource", "resource_template", "prompt"] = "tool"
     elif isinstance(entity, Prompt):
         entity_type = "prompt"
     elif isinstance(entity, Resource):
@@ -237,7 +265,7 @@ def _entity_summary(entity: Entity) -> McpEntitySummary:
 def _skill_file_summary(path: str) -> SkillFileSummary:
     lowered = path.lower()
     if lowered.endswith(".md"):
-        file_type = "instruction"
+        file_type: Literal["instruction", "script", "asset"] = "instruction"
     elif lowered.rsplit(".", 1)[-1] in ("py", "js", "ts", "sh"):
         file_type = "script"
     else:

@@ -9,6 +9,7 @@ from agent_scan.agents.vscode.base import (
     SkillsDirsResult,
     VSCodeFamilyDiscoverer,
 )
+from agent_scan.models import DiscoveryLocationScope
 from agent_scan.skill_client import inspect_skills_dir
 from agent_scan.well_known_clients import expand_path
 
@@ -102,13 +103,13 @@ class CursorDiscoverer(VSCodeFamilyDiscoverer):
 
     def discover_skills(self) -> SkillsDirsResult:
         result = super().discover_skills()
-        result.update(self._discover_builtin_skills())
-        result.update(self._discover_plugin_skills())
+        self._merge_skill_results(result, self._discover_builtin_skills, DiscoveryLocationScope.USER)
+        self._merge_skill_results(result, self._discover_plugin_skills, DiscoveryLocationScope.EXTENSION_PLUGIN)
         return result
 
     def discover_mcp_servers(self) -> McpConfigsResult:
         result = super().discover_mcp_servers()
-        result.update(self._discover_plugin_mcp_servers())
+        self._merge_mcp_results(result, self._discover_plugin_mcp_servers, DiscoveryLocationScope.EXTENSION_PLUGIN)
         return result
 
     # --- private: installed-plugin walks (~/.cursor/plugins, parity with Claude Code) ---

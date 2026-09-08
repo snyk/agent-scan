@@ -1,5 +1,7 @@
 import getpass
+import json
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -20,6 +22,7 @@ from agent_scan.models import (
     ClientToInspect,
     CouldNotParseMCPConfig,
     DiscoveredSkill,
+    DiscoveryLocationScope,
     InspectedPath,
     InspectedServer,
     InspectedSkill,
@@ -681,6 +684,36 @@ async def test_glob_discovers_plugin_mcp_configs():
 
 
 @pytest.mark.asyncio
+async def test_legacy_discovery_skips_selected_location_before_plugin_glob(tmp_path):
+    home = tmp_path / "user"
+    client_root = home / ".fake-client"
+    client_root.mkdir(parents=True)
+    (client_root / "mcp.json").write_text('{"mcpServers": {"user-server": {"command": "user"}}}')
+    plugin = client_root / "plugins" / "cache" / "vendor" / "plugin"
+    plugin.mkdir(parents=True)
+    (plugin / ".mcp.json").write_text('{"plugin-server": {"command": "plugin"}}')
+    pattern = "~/.fake-client/plugins/cache/**/.mcp.json"
+    candidate = CandidateClient(
+        name="fake-client",
+        client_exists_paths=["~/.fake-client"],
+        mcp_config_paths=["~/.fake-client/mcp.json"],
+        skills_dir_paths=[],
+        mcp_config_globs=[pattern],
+        mcp_config_glob_scopes={pattern: DiscoveryLocationScope.EXTENSION_PLUGIN},
+    )
+
+    ctis = await get_mcp_config_per_client(
+        candidate,
+        [(home, "user")],
+        skip_discovery_scopes={DiscoveryLocationScope.EXTENSION_PLUGIN},
+    )
+
+    entries = [server for value in ctis[0].mcp_configs.values() if isinstance(value, list) for server in value]
+    assert [server.name for server in entries] == ["user-server"]
+    assert entries[0].scope is DiscoveryLocationScope.USER
+
+
+@pytest.mark.asyncio
 async def test_glob_no_matches_still_works():
     """When mcp_config_globs match nothing, the client should still be discovered with empty configs."""
     tmp = tempfile.mkdtemp()
@@ -931,3 +964,365 @@ async def test_client_detection_is_scope_independent(scoped_candidate):
         ctis = await get_mcp_config_per_client(candidate, [(home, "user")], scope=scope)
         assert len(ctis) == 1, scope
         assert ctis[0].client_path is not None, scope
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "scope,mcp_config_paths,skills_dir_paths",
+    [
+        (DiscoveryScope.SERVERS, [], ["~/.fake-client/skills"]),
+        (DiscoveryScope.SKILLS, ["~/.fake-client/mcp.json"], []),
+    ],
+)
+async def test_client_detection_runs_when_requested_half_has_no_configured_sources(
+    tmp_path, scope, mcp_config_paths, skills_dir_paths
+):
+    home = tmp_path / "user"
+    (home / ".fake-client").mkdir(parents=True)
+    candidate = CandidateClient(
+        name="fake-client",
+        client_exists_paths=["~/.fake-client"],
+        mcp_config_paths=mcp_config_paths,
+        skills_dir_paths=skills_dir_paths,
+    )
+
+    ctis = await get_mcp_config_per_client(candidate, [(home, "user")], scope=scope)
+
+    assert len(ctis) == 1
+    assert ctis[0].client_path == (home / ".fake-client").as_posix()
+    assert ctis[0].mcp_configs == {}
+    assert ctis[0].skills_dirs == {}
+
+
+@pytest.mark.asyncio
+async def test_installed_client_is_still_reported_when_exclusions_remove_its_sources(tmp_path):
+    """An installed client whose every source is excluded has no in-scope
+    components -- it is not absent. Returning nothing made ``pipelines`` log
+    "does not exist on this machine" about an agent that is installed, and left
+    ``scanned_usernames`` with no username to attribute the scan to. It also
+    contradicted the sibling test above, where a client with no *configured*
+    sources for the requested half is reported with empty dicts.
+    """
+    home = tmp_path / "user"
+    (home / ".fake-client").mkdir(parents=True)
+    candidate = CandidateClient(
+        name="fake-client",
+        client_exists_paths=["~/.fake-client"],
+        mcp_config_paths=["~/.fake-client/mcp.json"],
+        skills_dir_paths=[],
+    )
+
+    ctis = await get_mcp_config_per_client(
+        candidate,
+        [(home, "user")],
+        scope=DiscoveryScope.SERVERS,
+        skip_discovery_scopes={DiscoveryLocationScope.USER},
+    )
+
+    assert len(ctis) == 1
+    assert ctis[0].client_path == (home / ".fake-client").as_posix()
+    assert ctis[0].mcp_configs == {}
+
+
+@pytest.mark.asyncio
+async def test_excluding_every_automatic_scope_reports_nothing_at_all(tmp_path):
+    """``--skip-discovery-scopes all`` is documented as excluding every automatic
+    scope, so it must not still disclose which agents are installed and where.
+    Previously a client declaring no sources for the requested half bypassed the
+    gate entirely and shipped a presence entry, while one with sources vanished.
+    """
+    from agent_scan.models import AUTOMATIC_DISCOVERY_SCOPES
+
+    home = tmp_path / "user"
+    (home / ".fake-client").mkdir(parents=True)
+    (home / ".no-sources").mkdir(parents=True)
+    with_sources = CandidateClient(
+        name="fake-client",
+        client_exists_paths=["~/.fake-client"],
+        mcp_config_paths=["~/.fake-client/mcp.json"],
+        skills_dir_paths=[],
+    )
+    without_sources = CandidateClient(
+        name="no-sources",
+        client_exists_paths=["~/.no-sources"],
+        mcp_config_paths=[],
+        skills_dir_paths=[],
+    )
+
+    for candidate in (with_sources, without_sources):
+        ctis = await get_mcp_config_per_client(
+            candidate,
+            [(home, "user")],
+            scope=DiscoveryScope.SERVERS,
+            skip_discovery_scopes=AUTOMATIC_DISCOVERY_SCOPES,
+        )
+        assert ctis == [], f"{candidate.name} still disclosed its presence"
+
+
+def _claude_code_candidate() -> CandidateClient:
+    """A ``claude code``-shaped candidate: one config file holding both scopes."""
+    return CandidateClient(
+        name="claude code",
+        client_exists_paths=["~/.claude"],
+        mcp_config_paths=["~/.claude.json"],
+        skills_dir_paths=[],
+        mcp_config_path_nested_scopes={"~/.claude.json": {DiscoveryLocationScope.PROJECT_WORKSPACE}},
+    )
+
+
+def _write_claude_json(home: Path) -> None:
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude.json").write_text(
+        '{"mcpServers": {"user-global": {"command": "/bin/user"}},'
+        ' "projects": {"/work/repo": {"mcpServers": {"project-only": {"command": "/bin/proj"}}}}}'
+    )
+
+
+def _servers(cti: ClientToInspect) -> dict[str, DiscoveryLocationScope]:
+    return {
+        server.name: server.scope for value in cti.mcp_configs.values() if isinstance(value, list) for server in value
+    }
+
+
+@pytest.mark.asyncio
+async def test_claude_json_labels_each_server_by_its_declaring_origin(tmp_path):
+    """One config file, two scopes: the top-level block is user-global while
+    ``projects.<path>`` blocks are project-scoped. A single per-file label makes
+    one of them wrong whichever value is chosen."""
+    home = tmp_path / "user"
+    _write_claude_json(home)
+
+    ctis = await get_mcp_config_per_client(_claude_code_candidate(), [(home, "user")])
+
+    assert _servers(ctis[0]) == {
+        "user-global": DiscoveryLocationScope.USER,
+        "project-only": DiscoveryLocationScope.PROJECT_WORKSPACE,
+    }
+
+
+@pytest.mark.asyncio
+async def test_skipping_project_scope_drops_only_the_project_servers(tmp_path):
+    """``--skip-discovery-scopes project_workspace`` is what the installed
+    SessionStart hook passes, so this is the flag's headline behaviour."""
+    home = tmp_path / "user"
+    _write_claude_json(home)
+
+    ctis = await get_mcp_config_per_client(
+        _claude_code_candidate(),
+        [(home, "user")],
+        skip_discovery_scopes={DiscoveryLocationScope.PROJECT_WORKSPACE},
+    )
+
+    assert _servers(ctis[0]) == {"user-global": DiscoveryLocationScope.USER}
+
+
+@pytest.mark.asyncio
+async def test_skipping_user_scope_drops_only_the_user_servers(tmp_path):
+    home = tmp_path / "user"
+    _write_claude_json(home)
+
+    ctis = await get_mcp_config_per_client(
+        _claude_code_candidate(),
+        [(home, "user")],
+        skip_discovery_scopes={DiscoveryLocationScope.USER},
+    )
+
+    assert _servers(ctis[0]) == {"project-only": DiscoveryLocationScope.PROJECT_WORKSPACE}
+
+
+@pytest.mark.asyncio
+async def test_same_named_project_servers_both_reach_the_report(tmp_path):
+    """The same ``github`` server configured in two repos is two separate
+    registrations; both must be inspected."""
+    home = tmp_path / "user"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude.json").write_text(
+        '{"projects": {"/work/a": {"mcpServers": {"github": {"command": "/bin/a"}}},'
+        ' "/work/b": {"mcpServers": {"github": {"command": "/bin/b"}}}}}'
+    )
+
+    ctis = await get_mcp_config_per_client(_claude_code_candidate(), [(home, "user")])
+
+    entries = [server for value in ctis[0].mcp_configs.values() if isinstance(value, list) for server in value]
+    assert sorted(server.server.command for server in entries) == ["/bin/a", "/bin/b"]
+    assert {server.scope for server in entries} == {DiscoveryLocationScope.PROJECT_WORKSPACE}
+
+
+@pytest.mark.asyncio
+async def test_cwd_relative_paths_are_not_probed_for_a_scanned_home(tmp_path, monkeypatch):
+    """Phase A only receives home directories, never project roots, so a
+    relative declaration has nothing to anchor against and ``expand_path``
+    leaves it to resolve against the *scanner's* current directory. That is not
+    a project root, and under ``--scan-all-users`` the same directory is
+    reported once per home."""
+    from agent_scan.well_known_clients import get_well_known_clients
+
+    relative = [
+        (client.name, path)
+        for client in get_well_known_clients()
+        for path in (*client.client_exists_paths, *client.mcp_config_paths, *client.skills_dir_paths)
+        if not path.startswith("~") and not Path(path).is_absolute()
+    ]
+
+    assert relative == []
+
+
+@pytest.mark.asyncio
+async def test_colliding_declarations_resolve_to_the_higher_precedence_scope(tmp_path):
+    """An explicit path and a glob can name the same file with different scopes.
+    Re-keying by resolved path collapses them, so without a precedence rule the
+    label is decided by declaration order rather than by the tier that owns the
+    file. Phase B already resolves this with ``_LOCATION_SCOPE_PRECEDENCE``."""
+    from agent_scan.models.discovery import LOCATION_SCOPE_PRECEDENCE
+
+    home = tmp_path / "user"
+    plugin_dir = home / ".fake-client" / "plugins" / "cache" / "vendor" / "v1"
+    plugin_dir.mkdir(parents=True)
+    mcp_json = plugin_dir / ".mcp.json"
+    mcp_json.write_text('{"srv": {"command": "node"}}')
+
+    pattern = "~/.fake-client/plugins/cache/**/.mcp.json"
+    candidate = CandidateClient(
+        name="fake-client",
+        client_exists_paths=["~/.fake-client"],
+        mcp_config_paths=[str(mcp_json)],
+        skills_dir_paths=[],
+        mcp_config_globs=[pattern],
+        mcp_config_glob_scopes={pattern: DiscoveryLocationScope.EXTENSION_PLUGIN},
+    )
+
+    ctis = await get_mcp_config_per_client(candidate, [(home, "user")])
+
+    entries = [s for value in ctis[0].mcp_configs.values() if isinstance(value, list) for s in value]
+    assert len(entries) == 1
+    # EXTENSION_PLUGIN outranks USER, so the plugin label wins either ordering.
+    assert (
+        LOCATION_SCOPE_PRECEDENCE[DiscoveryLocationScope.EXTENSION_PLUGIN]
+        > (LOCATION_SCOPE_PRECEDENCE[DiscoveryLocationScope.USER])
+    )
+    assert entries[0].scope is DiscoveryLocationScope.EXTENSION_PLUGIN
+
+
+@pytest.mark.asyncio
+async def test_colliding_declarations_are_order_independent(tmp_path):
+    """Same collision, but the higher-precedence scope is declared on the
+    explicit path (which is inserted first) instead of the glob."""
+    from agent_scan.models.discovery import LOCATION_SCOPE_PRECEDENCE
+
+    home = tmp_path / "user"
+    conf_dir = home / ".fake-client" / "managed"
+    conf_dir.mkdir(parents=True)
+    mcp_json = conf_dir / "mcp.json"
+    mcp_json.write_text('{"mcpServers": {"srv": {"command": "node"}}}')
+
+    pattern = "~/.fake-client/managed/**/mcp.json"
+    candidate = CandidateClient(
+        name="fake-client",
+        client_exists_paths=["~/.fake-client"],
+        mcp_config_paths=[str(mcp_json)],
+        skills_dir_paths=[],
+        mcp_config_path_scopes={str(mcp_json): DiscoveryLocationScope.SYSTEM},
+        mcp_config_globs=[pattern],
+        mcp_config_glob_scopes={pattern: DiscoveryLocationScope.PROJECT_WORKSPACE},
+    )
+
+    ctis = await get_mcp_config_per_client(candidate, [(home, "user")])
+
+    entries = [s for value in ctis[0].mcp_configs.values() if isinstance(value, list) for s in value]
+    assert (
+        LOCATION_SCOPE_PRECEDENCE[DiscoveryLocationScope.SYSTEM]
+        > (LOCATION_SCOPE_PRECEDENCE[DiscoveryLocationScope.PROJECT_WORKSPACE])
+    )
+    assert [s.scope for s in entries] == [DiscoveryLocationScope.SYSTEM]
+
+
+@pytest.mark.asyncio
+async def test_scanned_username_is_the_scanned_home_not_the_scanning_user(tmp_path):
+    """``scanned_usernames`` falls back to ``getpass.getuser()`` when no client
+    survives discovery. A *location* filter must not change which identity the
+    scan is attributed to -- before this, ``--skip-discovery-scopes user``
+    emptied the client list and stamped the scan with whoever ran the process.
+    """
+    home = tmp_path / "alice-home"
+    (home / ".fake-client").mkdir(parents=True)
+    (home / ".fake-client" / "mcp.json").write_text('{"mcpServers": {"srv": {"command": "node"}}}')
+    candidate = CandidateClient(
+        name="fake-client",
+        client_exists_paths=["~/.fake-client"],
+        mcp_config_paths=["~/.fake-client/mcp.json"],
+        skills_dir_paths=[],
+    )
+
+    from agent_scan.pipelines import discover_clients_to_inspect
+
+    args = InspectArgs(
+        timeout=1,
+        tokens=[],
+        paths=[],
+        discovery_scope=DiscoveryScope.SERVERS,
+        skip_discovery_scopes={DiscoveryLocationScope.USER},
+    )
+    with (
+        patch("agent_scan.pipelines.get_readable_home_directories", return_value=[(home, "alice")]),
+        patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
+        patch("agent_scan.pipelines.find_discoverers", return_value=[]),
+    ):
+        _, _, scanned_usernames = await discover_clients_to_inspect(args)
+
+    assert scanned_usernames == ["alice"]
+    assert getpass.getuser() not in scanned_usernames or getpass.getuser() == "alice"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("signing_returncode, expected_identifier", [(0, "com.example.mcp"), (1, None)])
+async def test_explicit_config_preserves_binary_identifier_through_inspection(
+    tmp_path, monkeypatch, signing_returncode, expected_identifier
+):
+    from agent_scan.pipelines import client_to_inspect_from_path
+
+    binary = tmp_path / "signed-server"
+    binary.write_text("")
+    binary.chmod(0o755)
+    config = tmp_path / "mcp.json"
+    config.write_text(json.dumps({"mcpServers": {"signed": {"command": str(binary)}}}))
+    monkeypatch.setattr("agent_scan.signed_binary.sys.platform", "darwin")
+
+    def codesign(args, **kwargs):
+        assert args == ["codesign", "-dvvv", str(binary)]
+        return subprocess.CompletedProcess(
+            args, signing_returncode, stdout="", stderr="Identifier=com.example.mcp\nAuthority=Apple Root CA\n"
+        )
+
+    monkeypatch.setattr(subprocess, "run", codesign)
+    clients = await client_to_inspect_from_path(str(config), True, [(tmp_path, "alice")], False)
+    entry = next(iter(clients[0].mcp_configs.values()))[0]
+    assert entry.server.binary_identifier == expected_identifier
+    inspected = await inspect_client(clients[0], timeout=0, tokens=[], scan_skills=False, do_stdio_handshake=False)
+    assert inspected.servers[0].server.binary_identifier == expected_identifier
+    assert inspected.model_dump()["servers"][0]["server"]["binary_identifier"] == expected_identifier
+
+
+@pytest.mark.asyncio
+async def test_legacy_discovery_does_not_check_signatures_for_remote_or_excluded_servers(tmp_path, monkeypatch):
+    config = tmp_path / "mcp.json"
+    config.write_text(
+        json.dumps(
+            {
+                "mcpServers": {"remote": {"url": "https://example.com/mcp"}},
+                "projects": {str(tmp_path / "repo"): {"mcpServers": {"excluded": {"command": "excluded-server"}}}},
+            }
+        )
+    )
+    client = CandidateClient(
+        name="legacy", client_exists_paths=[str(config)], mcp_config_paths=[str(config)], skills_dir_paths=[]
+    )
+    monkeypatch.setattr("agent_scan.signed_binary.sys.platform", "darwin")
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("unexpected signature check"))
+
+    clients = await get_mcp_config_per_client(
+        client, [(tmp_path, "alice")], skip_discovery_scopes={DiscoveryLocationScope.PROJECT_WORKSPACE}
+    )
+    entries = next(iter(clients[0].mcp_configs.values()))
+    assert [entry.name for entry in entries] == ["remote"]
+    assert isinstance(entries[0].server, RemoteServer)
+    assert entries[0].server.url == "https://example.com/mcp"

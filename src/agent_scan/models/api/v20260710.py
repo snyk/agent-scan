@@ -10,6 +10,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from agent_scan.models.api.common import ScanUserInfo
+from agent_scan.models.discovery import DiscoveryLocationScope
 from agent_scan.models.errors import ScanError
 from agent_scan.models.inspect import InspectedPath, InspectedServer, InspectedSkill
 from agent_scan.models.mcp import RemoteServer, ServerSignature, StdioServer
@@ -105,6 +106,54 @@ class ScanPathRequest(BaseModel):
             client=inspected.client,
             path=inspected.path,
             servers=[McpServerRequest.from_inspected(server) for server in inspected.servers],
+            skills=[SkillRequest.from_inspected(skill) for skill in inspected.skills],
+            error=_error_for_request(inspected.error),
+        )
+
+
+class GuardMcpServerRequest(McpServerRequest):
+    """``McpServerRequest`` plus the location scope, for Guard events only.
+
+    Guard's ``sessionStartServerDiscovery`` event reports where each server was
+    found; the analysis contract does not model scope, and ``analyze_machine``
+    sends the plain ``McpServerRequest`` under the same version header. Keeping
+    the extra field on a subclass means the conversion still happens inside the
+    versioned models -- ``build_scan_request`` documents them as owning it --
+    rather than by mutating an already-serialized payload.
+    """
+
+    scope: str = DiscoveryLocationScope.CUSTOM.value
+
+    @classmethod
+    def from_inspected(cls, inspected: InspectedServer) -> "GuardMcpServerRequest":
+        """Accepts a plain ``InspectedServer`` too, which then carries no scope."""
+        base = McpServerRequest.from_inspected(inspected)
+        scope = getattr(inspected, "scope", DiscoveryLocationScope.CUSTOM)
+        return cls(**base.model_dump(), scope=scope.value)
+
+
+class GuardScanPathRequest(BaseModel):
+    """Guard's session-start wire shape: ``ScanPathRequest`` plus per-server scope.
+
+    Deliberately not a subclass of ``ScanPathRequest``: narrowing ``servers`` to
+    the Guard server model would violate the base class's declared type, and
+    letting pydantic serialize subclass instances through a base-typed field
+    silently drops the extra ``scope``. Field parity with ``ScanPathRequest`` is
+    pinned by a test instead.
+    """
+
+    client: str | None = None
+    path: str
+    servers: list[GuardMcpServerRequest] = Field(default_factory=list)
+    skills: list[SkillRequest] = Field(default_factory=list)
+    error: ScanError | None = None
+
+    @classmethod
+    def from_inspected(cls, inspected: InspectedPath) -> "GuardScanPathRequest":
+        return cls(
+            client=inspected.client,
+            path=inspected.path,
+            servers=[GuardMcpServerRequest.from_inspected(server) for server in inspected.servers],
             skills=[SkillRequest.from_inspected(skill) for skill in inspected.skills],
             error=_error_for_request(inspected.error),
         )

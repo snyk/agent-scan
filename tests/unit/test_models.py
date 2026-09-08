@@ -12,7 +12,26 @@ class TestInspectionResults:
 
         assert skill.name == "git:commit"
         assert skill.path == "/project/.claude/commands/git/commit.md"
-        assert set(skill.model_dump()) == {"name", "path"}
+        assert skill.model_dump() == {
+            "name": "git:commit",
+            "path": "/project/.claude/commands/git/commit.md",
+            "scope": "custom",
+        }
+
+    def test_legacy_discovered_server_pair_is_normalized_as_custom(self):
+        from agent_scan.models import ClientToInspect, DiscoveredServer, DiscoveryLocationScope, StdioServer
+
+        client = ClientToInspect(
+            name="custom",
+            client_path="/custom",
+            mcp_configs={"/custom/config.json": [("server", StdioServer(command="server"))]},
+            skills_dirs={},
+        )
+
+        discovered = client.mcp_configs["/custom/config.json"]
+        assert isinstance(discovered, list)
+        assert isinstance(discovered[0], DiscoveredServer)
+        assert discovered[0].scope is DiscoveryLocationScope.CUSTOM
 
     def test_v20260710_wire_models_are_distinct_from_inspection_models(self):
         from agent_scan.models.api.v20260710 import McpServerRequest, ScanPathRequest, SkillRequest
@@ -422,3 +441,30 @@ class TestMCPServerMap:
 
         with pytest.raises(ValidationError):
             MCPServerMap(servers={"bad": {"not_a": "server"}})
+
+
+def test_legacy_discovered_server_pair_survives_a_json_round_trip():
+    """A tuple becomes a list once serialized, so a tuple-only check would
+    reject the same value coming back in."""
+    from agent_scan.models import DiscoveredServer, DiscoveryLocationScope, StdioServer
+
+    from_list = DiscoveredServer.model_validate(["srv", StdioServer(command="node")])
+
+    assert from_list.name == "srv"
+    assert from_list.server.command == "node"
+    assert from_list.scope is DiscoveryLocationScope.CUSTOM
+
+
+def test_guard_wire_model_stays_in_field_parity_with_the_analysis_one():
+    """``GuardScanPathRequest`` is deliberately not a ``ScanPathRequest``
+    subclass, so nothing structurally stops the two drifting apart."""
+    from agent_scan.models.api.v20260710 import GuardScanPathRequest, ScanPathRequest
+
+    assert set(GuardScanPathRequest.model_fields) == set(ScanPathRequest.model_fields)
+
+
+def test_guard_server_wire_model_adds_only_scope():
+    from agent_scan.models.api.v20260710 import GuardMcpServerRequest, McpServerRequest
+
+    extra = set(GuardMcpServerRequest.model_fields) - set(McpServerRequest.model_fields)
+    assert extra == {"scope"}

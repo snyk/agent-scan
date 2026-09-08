@@ -6,7 +6,7 @@ import re
 from typing import Annotated, Any, Literal, TypeAlias
 
 from lark import Lark
-from mcp.types import Completion, InitializeResult, Prompt, Resource, ResourceTemplate, Tool
+from mcp.types import InitializeResult, Prompt, Resource, ResourceTemplate, Tool
 from pydantic import (
     AliasChoices,
     BaseModel,
@@ -187,17 +187,49 @@ class ClaudeConfigFile(MCPConfig):
 
 
 class ClaudeCodeConfigFile(MCPConfig):
+    """``~/.claude.json``, which mixes two location scopes in one file.
+
+    User-global servers live under the top-level ``mcpServers``; project-scoped
+    servers live under ``projects.<project path>.mcpServers``. ``projects`` stays
+    required so a plain ``{"mcpServers": ...}`` file still falls through to
+    ``ClaudeConfigFile`` in the ``scan_mcp_config_file`` format union.
+    """
+
     model_config = ConfigDict()
     projects: dict[str, ClaudeConfigFile]
+    mcpServers: dict[str, StdioServer | RemoteServer] = Field(default_factory=dict)
+
+    def get_servers_by_origin(self) -> dict[str | None, dict[str, StdioServer | RemoteServer]]:
+        """Servers grouped by the key that declared them.
+
+        ``None`` is the top-level (user-global) group; every other key is a
+        project path. Callers need the origin to pick a location scope, and
+        grouping also keeps a server name that appears in several projects from
+        collapsing to whichever project happened to come last.
+        """
+        origins: dict[str | None, dict[str, StdioServer | RemoteServer]] = {}
+        if self.mcpServers:
+            origins[None] = dict(self.mcpServers)
+        for project_path, project in self.projects.items():
+            servers = project.get_servers()
+            if servers:
+                origins[project_path] = dict(servers)
+        return origins
 
     def get_servers(self) -> dict[str, StdioServer | RemoteServer]:
+        """Flattened view kept for callers that don't care about origin.
+
+        Lossy by construction: a name declared in more than one origin survives
+        once. Prefer ``get_servers_by_origin`` when the origin matters.
+        """
         servers: dict[str, StdioServer | RemoteServer] = {}
-        for proj in self.projects.values():
-            servers.update(proj.get_servers())
+        for origin_servers in self.get_servers_by_origin().values():
+            servers.update(origin_servers)
         return servers
 
     def set_servers(self, servers: dict[str, StdioServer | RemoteServer]) -> None:
         self.projects = {"~": ClaudeConfigFile(mcpServers=servers)}
+        self.mcpServers = {}
 
 
 class VSCodeMCPConfig(MCPConfig):
@@ -363,7 +395,10 @@ class ConfigWithoutMCP(MCPConfig):
 # MCP server signature and entity utilities
 # ============================================================================
 
-Entity: TypeAlias = Prompt | Resource | Tool | ResourceTemplate | Completion
+# ``Completion`` is deliberately absent: ``ServerSignature`` has no completions
+# field, so ``entities`` can never yield one, and including it made every
+# ``entity.name`` access unsound (Completion has no name).
+Entity: TypeAlias = Prompt | Resource | Tool | ResourceTemplate
 Metadata: TypeAlias = InitializeResult
 
 

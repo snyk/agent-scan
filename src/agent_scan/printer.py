@@ -1,7 +1,7 @@
 import os
 from collections import Counter
 from collections.abc import Sequence
-from typing import overload
+from typing import Any, overload
 
 import rich
 from mcp.types import Prompt, Resource, ResourceTemplate, Tool
@@ -290,8 +290,13 @@ def _sorted_risks(risk_indexes: SkillRiskIndexes) -> list[tuple[str, SkillRiskSc
 
 def _sorted_risks(
     risk_indexes: McpServerRiskIndexes | SkillRiskIndexes,
-) -> list[tuple[str, RiskScore | SkillRiskScore]]:
-    """Return detected risks highest-first, preserving model order for ties."""
+) -> list[tuple[str, Any]]:
+    """Return detected risks highest-first, preserving model order for ties.
+
+    ``Any`` appears only in the implementation signature; callers see the two
+    ``@overload`` declarations above, and mypy requires the implementation to be
+    assignable to both of them.
+    """
     risks = [(name, risk) for name, risk in risk_indexes if risk is not None]
     return sorted(risks, key=lambda item: item[1].score, reverse=True)
 

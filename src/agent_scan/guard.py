@@ -32,6 +32,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 lacks stdlib TOML
 
 from agent_scan.agents import DiscoveryScope
 from agent_scan.hook_events import HOOK_CLIENTS, send_hook_event
+from agent_scan.models import DiscoveryLocationScope
 from agent_scan.pushkeys import (
     GuardEnabledAccessDeniedError,
     _is_localhost,
@@ -412,6 +413,7 @@ def _run_discover(args) -> int:
         session_marker=session_id or "session-start-server-discovery",
         target_folders=target_folders,
         discovery_scope=getattr(args, "scope", DiscoveryScope.ALL),
+        skip_discovery_scopes=getattr(args, "skip_discovery_scopes", frozenset()),
     )
     return 0 if success else 1
 
@@ -1141,15 +1143,16 @@ def _detect_install(path: Path, events: list[str], commands: Callable[[dict], It
 
 
 def _servers_discovered_entries(clients_to_inspect: list[ClientToInspect]) -> list[dict]:
-    """Serialize discovered clients exactly as ``scan`` serializes them for analysis."""
+    """Serialize discovered clients in scan shape plus Guard-only location scope."""
     from agent_scan.inspect import (
         _config_error_to_scan_error,
         _inspection_component_name,
         _join_scan_errors,
     )
-    from agent_scan.models import InspectedPath, InspectedServer, ScanError
+    from agent_scan.models import ScanError
     from agent_scan.models.errors import CouldNotParseMCPConfig, FileNotFoundConfig, UnknownConfigFormat
-    from agent_scan.verify_api import build_scan_request
+    from agent_scan.models.inspect import GuardInspectedServer, InspectedPath, InspectedServer
+    from agent_scan.verify_api import build_guard_discovery_payloads
 
     inspected_paths: list[InspectedPath] = []
     for client in clients_to_inspect:
@@ -1159,14 +1162,15 @@ def _servers_discovered_entries(clients_to_inspect: list[ClientToInspect]) -> li
             if isinstance(discovered, FileNotFoundConfig | UnknownConfigFormat | CouldNotParseMCPConfig):
                 config_errors.append(_config_error_to_scan_error(discovered))
                 continue
-            servers.extend(
-                InspectedServer(
-                    name=_inspection_component_name(name, "server", config_path),
-                    config_path=config_path,
-                    server=server,
+            for discovered_server in discovered:
+                servers.append(
+                    GuardInspectedServer(
+                        name=_inspection_component_name(discovered_server.name, "server", config_path),
+                        config_path=config_path,
+                        server=discovered_server.server,
+                        scope=discovered_server.scope,
+                    )
                 )
-                for name, server in discovered
-            )
         inspected_paths.append(
             InspectedPath(
                 client=client.name,
@@ -1175,13 +1179,15 @@ def _servers_discovered_entries(clients_to_inspect: list[ClientToInspect]) -> li
                 error=_join_scan_errors(config_errors),
             )
         )
-    return [request.model_dump(mode="json") for request in build_scan_request(inspected_paths).scan_path_requests]
+
+    return build_guard_discovery_payloads(inspected_paths)
 
 
 def _discover_servers_payload(
     target_folders: list[str] | None = None,
     *,
     discovery_scope: DiscoveryScope = DiscoveryScope.ALL,
+    skip_discovery_scopes: set[DiscoveryLocationScope] | frozenset[DiscoveryLocationScope] | None = None,
 ) -> list[dict]:
     import asyncio
 
@@ -1194,6 +1200,7 @@ def _discover_servers_payload(
         paths=[],
         discovery_scope=discovery_scope,
         target_folders=target_folders or [],
+        skip_discovery_scopes=frozenset(skip_discovery_scopes or ()),
     )
     clients_to_inspect, _, _ = _run_with_timeout(
         lambda: asyncio.run(pipelines.discover_clients_to_inspect(inspect_args)),
@@ -1312,6 +1319,7 @@ def _send_servers_discovered_event(
     session_marker: str = "hooks-setup",
     target_folders: list[str] | None = None,
     discovery_scope: DiscoveryScope = DiscoveryScope.ALL,
+    skip_discovery_scopes: set[DiscoveryLocationScope] | frozenset[DiscoveryLocationScope] | None = None,
     max_retries: int = 1,
 ) -> bool:
     """Discover MCP servers and send an install- or session-scoped discovery event.
@@ -1322,7 +1330,11 @@ def _send_servers_discovered_event(
     rich.print("[dim]Discovering MCP servers...[/dim]")
     started = time.monotonic()
     try:
-        servers = _discover_servers_payload(target_folders, discovery_scope=discovery_scope)
+        servers = _discover_servers_payload(
+            target_folders,
+            discovery_scope=discovery_scope,
+            skip_discovery_scopes=skip_discovery_scopes,
+        )
     except Exception as e:
         rich.print(f"[yellow]Warning:[/yellow] Could not discover MCP servers: {e}")
         return False
@@ -1567,6 +1579,7 @@ class _HookInvocation(NamedTuple):
     tenant_id: str = ""
     agent_scan_command: str = ""
     scope: str = ""
+    skip_discovery_scopes: str = ""
     quote_client: bool = False
 
 
@@ -1585,7 +1598,9 @@ def _render_posix_command(invocation: _HookInvocation) -> str:
     client = _shell_quote(invocation.hook_client) if invocation.quote_client else invocation.hook_client
     parts.append(f"--client {client}")
     if invocation.scope:
-        parts.append(f"--scope {invocation.scope}")
+        parts.append(f"--scope {_shell_quote(invocation.scope)}")
+    if invocation.skip_discovery_scopes:
+        parts.append(f"--skip-discovery-scopes {_shell_quote(invocation.skip_discovery_scopes)}")
     return " ".join(parts)
 
 
@@ -1606,7 +1621,11 @@ def _render_powershell_command(invocation: _HookInvocation) -> str:
     if invocation.agent_scan_command:
         parts.extend(["-AgentScanCommand", _ps_quote(invocation.agent_scan_command)])
     if invocation.scope:
-        parts.extend(["-Scope", invocation.scope])
+        parts.extend(["-Scope", _ps_quote(invocation.scope)])
+    if invocation.skip_discovery_scopes:
+        # Quoted like every other value-bearing flag. The receiving script also
+        # accepts the unquoted array form, which is what the argv path produces.
+        parts.extend(["-SkipDiscoveryScopes", _ps_quote(invocation.skip_discovery_scopes)])
     return " ".join(parts)
 
 
@@ -1629,6 +1648,8 @@ def _render_argv(invocation: _HookInvocation) -> tuple[list[str], dict[str, str]
             argv.extend(["-AgentScanCommand", invocation.agent_scan_command])
         if invocation.scope:
             argv.extend(["-Scope", invocation.scope])
+        if invocation.skip_discovery_scopes:
+            argv.extend(["-SkipDiscoveryScopes", invocation.skip_discovery_scopes])
         return argv, None
 
     env = {
@@ -1645,6 +1666,8 @@ def _render_argv(invocation: _HookInvocation) -> tuple[list[str], dict[str, str]
     argv = ["bash", str(invocation.script_path), "--client", invocation.hook_client]
     if invocation.scope:
         argv.extend(["--scope", invocation.scope])
+    if invocation.skip_discovery_scopes:
+        argv.extend(["--skip-discovery-scopes", invocation.skip_discovery_scopes])
     return argv, env
 
 
@@ -1705,6 +1728,7 @@ def _build_discover_hook_command(
         machine_id=machine_id,
         agent_scan_command=agent_scan_command,
         scope="servers",
+        skip_discovery_scopes=DiscoveryLocationScope.PROJECT_WORKSPACE.value,
         quote_client=True,
     )
     if IS_WINDOWS:
