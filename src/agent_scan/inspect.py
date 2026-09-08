@@ -33,6 +33,7 @@ from agent_scan.models import (
     UnknownMCPConfig,
     UserDeclinedError,
 )
+from agent_scan.signed_binary import check_server_signature
 from agent_scan.skill_client import (
     SkillInspectionError,
     collect_skill_files,
@@ -98,9 +99,10 @@ def _discovered_servers(
         scope = path_scope if origin is None else DiscoveryLocationScope.PROJECT_WORKSPACE
         if scope in skipped:
             continue
-        discovered.extend(
-            DiscoveredServer(name=server_name, server=server, scope=scope) for server_name, server in servers.items()
-        )
+        for server_name, server in servers.items():
+            if isinstance(server, StdioServer):
+                server = check_server_signature(server)
+            discovered.append(DiscoveredServer(name=server_name, server=server, scope=scope))
     return discovered
 
 

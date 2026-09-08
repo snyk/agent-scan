@@ -325,16 +325,20 @@ class AgentDiscoverer(ABC):
             return declared
         return DiscoveryLocationScope.USER
 
+    def _resolve_mcp_entry_scope(self, path: str, declared: DiscoveryLocationScope) -> DiscoveryLocationScope:
+        """Resolve MCP scope, allowing agents to recognize registered workspace files."""
+        return self._resolve_entry_scope(path, declared)
+
     def _scope_mcp_results(self, results: McpConfigsResult, scope: DiscoveryLocationScope) -> McpConfigsResult:
         scoped: McpConfigsResult = {}
         for path, value in results.items():
-            if not isinstance(value, list):
-                scoped[path] = value
-                continue
-            path_scope = self._resolve_entry_scope(path, scope)
+            path_scope = self._resolve_mcp_entry_scope(path, scope)
             if not self._scope_enabled(path_scope):
                 # Demoted out of the requested set (e.g. a project sweep that
                 # re-found a user directory while user scope is excluded).
+                continue
+            if not isinstance(value, list):
+                scoped[path] = value
                 continue
             entries: list[DiscoveredServer] = []
             for entry in value:
@@ -353,11 +357,11 @@ class AgentDiscoverer(ABC):
     def _scope_skill_results(self, results: SkillsDirsResult, scope: DiscoveryLocationScope) -> SkillsDirsResult:
         scoped: SkillsDirsResult = {}
         for path, value in results.items():
-            if not isinstance(value, list):
-                scoped[path] = value
-                continue
             path_scope = self._resolve_entry_scope(path, scope)
             if not self._scope_enabled(path_scope):
+                continue
+            if not isinstance(value, list):
+                scoped[path] = value
                 continue
             scoped[path] = [
                 skill.model_copy(

@@ -678,7 +678,8 @@ class OpenCodeDiscoverer(AgentDiscoverer):
         # opencode's instance dirs (the db ``worktree`` leaves); computed once so
         # the relative-entry resolution below doesn't re-read the SQLite db per
         # candidate config file.
-        worktrees = self._project_worktrees() if self._scope_enabled(DiscoveryLocationScope.PROJECT_WORKSPACE) else []
+        # Even excluded projects can supply relative references to user locations.
+        worktrees = self._project_worktrees()
         for config_path, config_scope in self._iter_scoped_candidate_config_files(source_scope):
             data = self._load_json_file(config_path)
             if not isinstance(data, dict):
@@ -694,18 +695,14 @@ class OpenCodeDiscoverer(AgentDiscoverer):
                     continue
                 is_project_relative = not _is_home_skills_entry(entry) and not _is_rooted_skills_entry(entry)
                 declared_scope = DiscoveryLocationScope.PROJECT_WORKSPACE if is_project_relative else config_scope
-                if not self._scope_enabled(declared_scope):
-                    continue
                 for resolved in self._resolve_skills_path_entry(entry, worktrees):
+                    key = resolved.as_posix()
+                    entry_scope = self._resolve_entry_scope(key, declared_scope)
+                    if not self._scope_enabled(entry_scope):
+                        continue
                     entries = self._scan_skills_dir(resolved)
                     if entries is not None:
-                        key = resolved.as_posix()
-                        # ``_scope_skill_results`` re-checks the scope against where the
-                        # entry actually resolved, so a config cannot label a location it
-                        # does not own; it drops the key when that demotes into a skip.
-                        scoped = self._scope_skill_results({key: entries}, declared_scope)
-                        if key in scoped:
-                            result[key] = scoped[key]
+                        result.update(self._scope_skill_results({key: entries}, entry_scope))
         return result
 
     def _project_worktrees(self) -> list[Path]:

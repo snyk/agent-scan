@@ -1,5 +1,7 @@
 import getpass
+import json
 import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -1269,3 +1271,58 @@ async def test_scanned_username_is_the_scanned_home_not_the_scanning_user(tmp_pa
 
     assert scanned_usernames == ["alice"]
     assert getpass.getuser() not in scanned_usernames or getpass.getuser() == "alice"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("signing_returncode, expected_identifier", [(0, "com.example.mcp"), (1, None)])
+async def test_explicit_config_preserves_binary_identifier_through_inspection(
+    tmp_path, monkeypatch, signing_returncode, expected_identifier
+):
+    from agent_scan.pipelines import client_to_inspect_from_path
+
+    binary = tmp_path / "signed-server"
+    binary.write_text("")
+    binary.chmod(0o755)
+    config = tmp_path / "mcp.json"
+    config.write_text(json.dumps({"mcpServers": {"signed": {"command": str(binary)}}}))
+    monkeypatch.setattr("agent_scan.signed_binary.sys.platform", "darwin")
+
+    def codesign(args, **kwargs):
+        assert args == ["codesign", "-dvvv", str(binary)]
+        return subprocess.CompletedProcess(
+            args, signing_returncode, stdout="", stderr="Identifier=com.example.mcp\nAuthority=Apple Root CA\n"
+        )
+
+    monkeypatch.setattr(subprocess, "run", codesign)
+    clients = await client_to_inspect_from_path(str(config), True, [(tmp_path, "alice")], False)
+    entry = next(iter(clients[0].mcp_configs.values()))[0]
+    assert entry.server.binary_identifier == expected_identifier
+    inspected = await inspect_client(clients[0], timeout=0, tokens=[], scan_skills=False, do_stdio_handshake=False)
+    assert inspected.servers[0].server.binary_identifier == expected_identifier
+    assert inspected.model_dump()["servers"][0]["server"]["binary_identifier"] == expected_identifier
+
+
+@pytest.mark.asyncio
+async def test_legacy_discovery_does_not_check_signatures_for_remote_or_excluded_servers(tmp_path, monkeypatch):
+    config = tmp_path / "mcp.json"
+    config.write_text(
+        json.dumps(
+            {
+                "mcpServers": {"remote": {"url": "https://example.com/mcp"}},
+                "projects": {str(tmp_path / "repo"): {"mcpServers": {"excluded": {"command": "excluded-server"}}}},
+            }
+        )
+    )
+    client = CandidateClient(
+        name="legacy", client_exists_paths=[str(config)], mcp_config_paths=[str(config)], skills_dir_paths=[]
+    )
+    monkeypatch.setattr("agent_scan.signed_binary.sys.platform", "darwin")
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("unexpected signature check"))
+
+    clients = await get_mcp_config_per_client(
+        client, [(tmp_path, "alice")], skip_discovery_scopes={DiscoveryLocationScope.PROJECT_WORKSPACE}
+    )
+    entries = next(iter(clients[0].mcp_configs.values()))
+    assert [entry.name for entry in entries] == ["remote"]
+    assert isinstance(entries[0].server, RemoteServer)
+    assert entries[0].server.url == "https://example.com/mcp"

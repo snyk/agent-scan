@@ -9360,33 +9360,61 @@ async def test_pipeline_preserves_unresolved_target_folder_spelling(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_pipeline_does_not_resolve_target_folders_when_project_scope_is_skipped(tmp_path):
+async def test_pipeline_retains_target_scope_without_reading_excluded_project_configs(tmp_path, monkeypatch):
     from agent_scan.models import DiscoveryLocationScope
     from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
 
     home = tmp_path / "home"
-    home.mkdir()
-    with (
-        patch("agent_scan.pipelines.get_readable_home_directories", return_value=[(home, "alice")]),
-        patch("agent_scan.pipelines.get_well_known_clients", return_value=[]),
-        patch("agent_scan.pipelines.find_discoverers", return_value=[]) as find,
-        patch.object(Path, "resolve", side_effect=AssertionError("target folder must not be resolved")),
-    ):
-        await discover_clients_to_inspect(
-            InspectArgs(
-                timeout=0,
-                tokens=[],
-                paths=[],
-                target_folders=["/session/project"],
-                skip_discovery_scopes={DiscoveryLocationScope.PROJECT_WORKSPACE},
-            )
-        )
-
-    find.assert_called_once_with(
-        home,
-        target_folders=[],
-        skip_discovery_scopes={DiscoveryLocationScope.PROJECT_WORKSPACE},
+    project = home / "repo"
+    project.mkdir(parents=True)
+    config = project / "override.json"
+    config.write_text('{"mcp":{"project-server":{"type":"remote","url":"https://example.com/mcp"}}}')
+    (project / "opencode.json").write_text(config.read_text())
+    monkeypatch.setattr(Path, "home", lambda: home)
+    for variable in ("OPENCODE_CONFIG_DIR", "OPENCODE_DB", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME"):
+        monkeypatch.delenv(variable, raising=False)
+    monkeypatch.setenv("OPENCODE_CONFIG", str(config))
+    args = InspectArgs(
+        timeout=0, tokens=[], paths=[], target_folders=[str(project)], discovery_scope=DiscoveryScope.SERVERS
     )
+
+    clients, _, _ = await discover_clients_to_inspect(args)
+    opencode = next(client for client in clients if client.name == "opencode")
+    assert opencode.mcp_configs[config.as_posix()][0].scope == DiscoveryLocationScope.PROJECT_WORKSPACE
+
+    read_text = Path.read_text
+
+    def reject_project_read(path, *args, **kwargs):
+        if path.parent == project:
+            pytest.fail(f"excluded project config was read: {path}")
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", reject_project_read)
+    args.skip_discovery_scopes = frozenset({DiscoveryLocationScope.PROJECT_WORKSPACE})
+    clients, _, _ = await discover_clients_to_inspect(args)
+    opencode = next(client for client in clients if client.name == "opencode")
+    assert config.as_posix() not in opencode.mcp_configs
+    assert (project / "opencode.json").as_posix() not in opencode.mcp_configs
+
+
+@pytest.mark.asyncio
+async def test_pipeline_excluding_all_scopes_does_not_resolve_targets(tmp_path, monkeypatch):
+    from agent_scan.models import AUTOMATIC_DISCOVERY_SCOPES
+    from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(Path, "resolve", lambda *args, **kwargs: pytest.fail("excluded target was resolved"))
+    clients, unresolved, _ = await discover_clients_to_inspect(
+        InspectArgs(
+            timeout=0,
+            tokens=[],
+            paths=[],
+            target_folders=[str(tmp_path / "repo")],
+            skip_discovery_scopes=AUTOMATIC_DISCOVERY_SCOPES,
+        )
+    )
+    assert clients == []
+    assert unresolved == []
 
 
 @pytest.mark.asyncio
@@ -9829,3 +9857,168 @@ def test_candidate_client_rejects_a_scope_override_for_an_undeclared_path():
             skills_dir_paths=[],
             mcp_config_path_scopes={"~/.typo/mcp.jsonn": DiscoveryLocationScope.SYSTEM},
         )
+
+
+@pytest.mark.parametrize("source", ["vscode_settings", "vscode_workspace", "opencode"])
+@pytest.mark.parametrize("reference", ["tilde", "absolute", "relative"])
+@pytest.mark.parametrize("skipped", [None, "user", "project_workspace", "both"])
+def test_mixed_skill_references_filter_resolved_locations(tmp_path, monkeypatch, source, reference, skipped):
+    import os
+
+    from agent_scan.agents import OpenCodeDiscoverer, VSCodeDiscoverer
+    from agent_scan.models import DiscoveryLocationScope
+
+    home = tmp_path / "home"
+    project = home / "repo"
+    user_skills = home / "custom-skills"
+    project_skills = project / "custom-skills"
+    _write_skill(user_skills, "review-user-skill")
+    _write_skill(project_skills, "review-project-skill")
+    user_ref = {
+        "tilde": "~/custom-skills",
+        "absolute": user_skills.as_posix(),
+        "relative": "../custom-skills",
+    }[reference]
+    excluded = (
+        {DiscoveryLocationScope.USER, DiscoveryLocationScope.PROJECT_WORKSPACE}
+        if skipped == "both"
+        else ({DiscoveryLocationScope(skipped)} if skipped else set())
+    )
+    if source == "opencode":
+        discoverer = OpenCodeDiscoverer(home, [project], excluded)
+        (project / "opencode.json").write_text(json.dumps({"skills": {"paths": [user_ref, "custom-skills"]}}))
+    else:
+        discoverer = VSCodeDiscoverer(home, [project], excluded)
+        settings = {"chat.agentSkillsLocations": {user_ref: True, "custom-skills": True}}
+        if source == "vscode_settings":
+            (project / ".vscode").mkdir()
+            (project / ".vscode" / "settings.json").write_text(json.dumps(settings))
+        else:
+            workspace = project / "example.code-workspace"
+            workspace.write_text(json.dumps({"folders": [{"path": "."}], "settings": settings}))
+            storage = _userdata(discoverer) / "User" / "workspaceStorage" / "review"
+            storage.mkdir(parents=True)
+            (storage / "workspace.json").write_text(json.dumps({"workspace": workspace.as_uri()}))
+
+    listdir = os.listdir
+    excluded_dirs = {
+        directory
+        for directory, scope in (
+            (user_skills, DiscoveryLocationScope.USER),
+            (project_skills, DiscoveryLocationScope.PROJECT_WORKSPACE),
+        )
+        if scope in excluded
+    }
+
+    def reject_excluded_walk(path):
+        if Path(os.path.normpath(path)) in excluded_dirs:
+            pytest.fail(f"excluded skills directory was scanned: {path}")
+        return listdir(path)
+
+    monkeypatch.setattr(os, "listdir", reject_excluded_walk)
+    results = discoverer.discover_skills()
+    found = {
+        skill.name: skill.scope
+        for entries in results.values()
+        if isinstance(entries, list)
+        for skill in entries
+        if skill.name.startswith("review-")
+    }
+    expected = {
+        name: scope
+        for name, scope in (
+            ("review-user-skill", DiscoveryLocationScope.USER),
+            ("review-project-skill", DiscoveryLocationScope.PROJECT_WORKSPACE),
+        )
+        if scope not in excluded
+    }
+    assert found == expected
+
+
+@pytest.mark.parametrize("skipped", [None, "user", "project_workspace"])
+def test_external_registered_workspace_retains_mcp_scope_only_for_its_file(tmp_path, skipped):
+    from agent_scan.agents import VSCodeDiscoverer
+    from agent_scan.models import DiscoveryLocationScope
+
+    home = tmp_path / "home"
+    project = home / "repo"
+    project.mkdir(parents=True)
+    workspace = home / "workspaces" / "example.code-workspace"
+    neighbouring_skills = workspace.parent / "custom-skills"
+    _write_skill(neighbouring_skills, "neighbour")
+    workspace.write_text(
+        json.dumps(
+            {
+                "folders": [{"path": project.as_posix()}],
+                "settings": {
+                    "mcp": {"servers": {"workspace-server": {"url": "https://example.com/mcp"}}},
+                    "chat.agentSkillsLocations": {"custom-skills": True},
+                },
+            }
+        )
+    )
+    discoverer = VSCodeDiscoverer(home, skip_discovery_scopes={skipped} if skipped else set())
+    storage = _userdata(discoverer) / "User" / "workspaceStorage" / "review"
+    storage.mkdir(parents=True)
+    (workspace.parent / "nested").mkdir()
+    registered = workspace.parent / "nested" / ".." / workspace.name
+    (storage / "workspace.json").write_text(json.dumps({"workspace": registered.as_uri()}))
+
+    servers = discoverer.discover_mcp_servers()
+    found = [
+        entry
+        for entries in servers.values()
+        if isinstance(entries, list)
+        for entry in entries
+        if entry.name == "workspace-server"
+    ]
+    if skipped == "project_workspace":
+        assert found == []
+    else:
+        assert len(found) == 1
+        assert found[0].scope == DiscoveryLocationScope.PROJECT_WORKSPACE
+    skills = discoverer.discover_skills()
+    neighbours = [
+        skill
+        for entries in skills.values()
+        if isinstance(entries, list)
+        for skill in entries
+        if skill.name == "neighbour"
+    ]
+    if skipped == "user":
+        assert neighbours == []
+    else:
+        assert len(neighbours) == 1
+        assert neighbours[0].scope == DiscoveryLocationScope.USER
+
+
+@pytest.mark.parametrize("location", ["home", "project"])
+@pytest.mark.parametrize("malformed", [False, True])
+def test_claude_ancestor_config_exclusion_applies_to_errors_and_guard_payload(tmp_path, location, malformed):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+    from agent_scan.guard import _servers_discovered_entries
+    from agent_scan.models import DiscoveryLocationScope
+
+    home = tmp_path / "home"
+    project = home / "repo"
+    _seed_claude_home_with_project(home, project)
+    config = (home if location == "home" else project) / ".mcp.json"
+    config.write_text("{broken" if malformed else '{"mcpServers":{"review-server":{"url":"https://example.com/mcp"}}}')
+
+    client = ClaudeCodeDiscoverer(home, skip_discovery_scopes={DiscoveryLocationScope.USER}).discover(
+        DiscoveryScope.SERVERS
+    )
+    assert client is not None
+    payload = _servers_discovered_entries([client])[0]
+    if location == "home":
+        assert config.as_posix() not in client.mcp_configs
+        assert not payload.get("error")
+        assert not any(server["name"] == "review-server" for server in payload["servers"])
+    elif malformed:
+        assert isinstance(client.mcp_configs[config.as_posix()], CouldNotParseMCPConfig)
+        assert payload["error"]["category"] == "parse_error"
+        assert payload["error"]["is_failure"]
+    else:
+        assert client.mcp_configs[config.as_posix()][0].scope == DiscoveryLocationScope.PROJECT_WORKSPACE
+        assert not payload.get("error")
+        assert payload["servers"][0]["scope"] == "project_workspace"

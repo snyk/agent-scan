@@ -12,6 +12,7 @@ from agent_scan.inspect import (
     inspect_client,
 )
 from agent_scan.models import (
+    AUTOMATIC_DISCOVERY_SCOPES,
     CandidateClient,
     ClientToInspect,
     ControlServer,
@@ -92,7 +93,8 @@ async def discover_clients_to_inspect(
     else:
         target_folders: list[Path] = []
         seen_target_folders: set[Path] = set()
-        if DiscoveryLocationScope.PROJECT_WORKSPACE not in inspect_args.skip_discovery_scopes:
+        # Roots still classify relocated configs when project traversal is excluded.
+        if not inspect_args.skip_discovery_scopes >= AUTOMATIC_DISCOVERY_SCOPES:
             for raw_path in inspect_args.target_folders:
                 target_path = Path(raw_path).expanduser()
                 try:
