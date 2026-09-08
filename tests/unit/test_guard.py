@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -65,6 +66,7 @@ from agent_scan.guard import (
 from agent_scan.models import ClientToInspect, InspectedPath, InspectedServer, RemoteServer, StdioServer
 from agent_scan.models.errors import CouldNotParseMCPConfig, FileNotFoundConfig
 from agent_scan.pushkeys import GuardEnabledAccessDeniedError
+from agent_scan.version import version_info
 
 # ---------------------------------------------------------------------------
 # Helpers to build hook data
@@ -2892,6 +2894,64 @@ class TestCodexManagedRequirementsToml:
         assert diff["removed"]
 
 
+# ===================================================================
+# Install-time variables section of the forwarder scripts
+# ===================================================================
+
+
+# agent-monitor accepts a cli_version only in this shape and silently degrades anything
+# else to "unknown" (GuardrailingContext.get_cli_version / _CLI_VERSION_RE in
+# agent-monitor's src/agent_monitor/utils/guardrailing_context.py). Pinned here so a
+# version scheme the platform would drop fails on our side, where it is fixable.
+_AGENT_MONITOR_CLI_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$")
+
+_FORWARDER_SCRIPTS = ("snyk-agent-guard.sh", "snyk-agent-guard.ps1")
+
+# Both scripts fence their install-time variables with these markers. Only the tests read
+# them -- install substitutes over the whole file -- so they live here rather than in
+# guard.py, where they would be a constant nothing in the product uses.
+_SECTION_BEGIN = "# --- BEGIN install-time variables ---"
+_SECTION_END = "# --- END install-time variables ---"
+
+
+def _variables_section(text: str) -> str:
+    """Return the body between the scripts' install-time variables markers."""
+    assert _SECTION_BEGIN in text
+    assert _SECTION_END in text
+    return text.split(_SECTION_BEGIN, 1)[1].split(_SECTION_END, 1)[0]
+
+
+class TestHookScriptInstallTimeVariables:
+    """Both forwarder scripts carry a variables section that install fills in."""
+
+    @pytest.mark.parametrize("name", _FORWARDER_SCRIPTS)
+    def test_bundled_section_holds_the_version_placeholder(self, name):
+        section = _variables_section(_get_script_path(name).read_text())
+
+        assert "__AGENT_SCAN_VERSION__" in section
+
+    @pytest.mark.parametrize("name", _FORWARDER_SCRIPTS)
+    def test_copy_substitutes_the_whole_section(self, tmp_path, name):
+        dest = tmp_path / "hooks" / name
+        guard_module._copy_hook_script(dest)
+
+        section = _variables_section(dest.read_text())
+        assert f'"{version_info}"' in section
+        # A placeholder left unsubstituted travels to the platform as a literal, so the
+        # rendered section must hold no `__NAME__` -- including variables added later.
+        assert not re.search(r"__[A-Za-z0-9_]+__", section)
+
+    @pytest.mark.parametrize("name", _FORWARDER_SCRIPTS)
+    def test_every_placeholder_in_the_section_has_a_substitution(self, name):
+        section = _variables_section(_get_script_path(name).read_text())
+
+        declared = set(re.findall(r"__[A-Za-z0-9_]+__", section))
+        assert declared == {key.decode() for key in guard_module._hook_script_variables()}
+
+    def test_emitted_version_matches_the_shape_agent_monitor_accepts(self):
+        assert _AGENT_MONITOR_CLI_VERSION_RE.fullmatch(version_info)
+
+
 @pytest.mark.skipif(IS_WINDOWS, reason="bash script; skipped on Windows")
 class TestBashHookScript:
     """Integration: invoke the real .sh script against a local HTTP server."""
@@ -3012,6 +3072,56 @@ class TestBashHookScript:
         assert result.returncode == 0, result.stderr
         x_user = json.loads(_HookHandler.last_request["headers"]["X-User"])
         assert x_user["identifier"] == "machine-42"
+
+    def test_installed_script_reports_its_cli_version(self, tmp_path, hook_server):
+        script = tmp_path / "hooks" / "snyk-agent-guard.sh"
+        guard_module._copy_hook_script(script)
+
+        result = subprocess.run(
+            ["bash", str(script), "--client", "claude-code"],
+            input='{"hook_event_name":"test","session_id":"s1"}',
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={
+                "PATH": "/usr/bin:/bin:/usr/local/bin",
+                "PUSH_KEY": "test-pk",
+                "REMOTE_HOOKS_BASE_URL": hook_server,
+                "MACHINE_ID": "machine-42",
+            },
+        )
+
+        assert result.returncode == 0, result.stderr
+        req = _HookHandler.last_request
+        assert json.loads(req["headers"]["X-User"])["cli_version"] == version_info
+        assert req["headers"]["User-Agent"].endswith(f"Agent Scan v{version_info}")
+
+    def test_uninstalled_script_reports_an_unknown_cli_version(self, hook_server):
+        """Run from the source tree the placeholder survives -- it must not reach the wire.
+
+        The same holds for a copy written by a CLI that predates a variable: agent-monitor
+        would reject the literal anyway, and an unparseable value is worse than ``unknown``.
+        """
+        script = _get_script_path("snyk-agent-guard.sh")
+
+        result = subprocess.run(
+            ["bash", str(script), "--client", "claude-code"],
+            input='{"hook_event_name":"test","session_id":"s1"}',
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={
+                "PATH": "/usr/bin:/bin:/usr/local/bin",
+                "PUSH_KEY": "test-pk",
+                "REMOTE_HOOKS_BASE_URL": hook_server,
+                "MACHINE_ID": "machine-42",
+            },
+        )
+
+        assert result.returncode == 0, result.stderr
+        req = _HookHandler.last_request
+        assert json.loads(req["headers"]["X-User"])["cli_version"] == "unknown"
+        assert "__AGENT_SCAN_VERSION__" not in req["headers"]["User-Agent"]
 
     def test_missing_machine_id_fails(self, hook_server):
         script = _get_script_path("snyk-agent-guard.sh")
@@ -3285,6 +3395,64 @@ class TestPowerShellHookScript:
         assert result.returncode == 0, result.stderr
         x_user = json.loads(_HookHandler.last_request["headers"]["X-User"])
         assert x_user["identifier"] == "machine-42"
+
+    def test_installed_script_reports_its_cli_version(self, tmp_path, hook_server):
+        script = tmp_path / "hooks" / "snyk-agent-guard.ps1"
+        guard_module._copy_hook_script(script)
+
+        result = subprocess.run(
+            [
+                self._ps_cmd(),
+                "-File",
+                str(script),
+                "-Client",
+                "claude-code",
+                "-PushKey",
+                "test-pk",
+                "-RemoteUrl",
+                hook_server,
+                "-MachineId",
+                "machine-42",
+            ],
+            input='{"hook_event_name":"test","session_id":"s1"}',
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+        assert result.returncode == 0, result.stderr
+        req = _HookHandler.last_request
+        assert json.loads(req["headers"]["X-User"])["cli_version"] == version_info
+        assert req["headers"]["User-Agent"].endswith(f"Agent Scan v{version_info}")
+
+    def test_uninstalled_script_reports_an_unknown_cli_version(self, hook_server):
+        """The POSIX contract, pinned on Windows: an unsubstituted placeholder never ships."""
+        script = _get_script_path("snyk-agent-guard.ps1")
+
+        result = subprocess.run(
+            [
+                self._ps_cmd(),
+                "-File",
+                str(script),
+                "-Client",
+                "claude-code",
+                "-PushKey",
+                "test-pk",
+                "-RemoteUrl",
+                hook_server,
+                "-MachineId",
+                "machine-42",
+            ],
+            input='{"hook_event_name":"test","session_id":"s1"}',
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+        assert result.returncode == 0, result.stderr
+        req = _HookHandler.last_request
+        assert json.loads(req["headers"]["X-User"])["cli_version"] == "unknown"
+        assert "__AGENT_SCAN_VERSION__" not in req["headers"]["User-Agent"]
 
     def test_missing_machine_id_fails(self, hook_server):
         script = _get_script_path("snyk-agent-guard.ps1")

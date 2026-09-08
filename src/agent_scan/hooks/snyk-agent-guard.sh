@@ -17,8 +17,21 @@ set -euo pipefail
 # Hook API version.
 VERSION="2025-11-11"
 
-# Agent-scan CLI version (replaced at install time).
+# Install-time variables.
+#
+# `agent-scan guard install` substitutes each __PLACEHOLDER__ between the markers below as
+# it copies this script into place (_hook_script_variables in guard.py). Always read them
+# through script_var: this script also runs straight from the source tree, and a copy
+# written by an older CLI will not know about variables added later, so a placeholder can
+# survive. Keep the markers around declarations only -- the tests treat anything
+# placeholder-shaped left between them as a substitution that install forgot.
+#
+# Keep these per-release, never per-machine. agent-monitor's tamper detection compares the
+# installed script's checksum between installs, and a per-machine value would give every
+# machine a different checksum for the same release.
+# --- BEGIN install-time variables ---
 AGENT_SCAN_VERSION="__AGENT_SCAN_VERSION__"
+# --- END install-time variables ---
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -41,6 +54,16 @@ json_escape() {
 
 json_quote() {
   printf '"%s"' "$(json_escape "${1:-}")"
+}
+
+# Value of an install-time variable, or "unknown" when its placeholder was not substituted.
+# The literal placeholder is worse than nothing on the wire: agent-monitor rejects it as a
+# version anyway, and it would read as a real value everywhere else.
+script_var() {
+  case "${1-}" in
+    ""|__*__) printf '%s' "unknown" ;;
+    *) printf '%s' "$1" ;;
+  esac
 }
 
 get_hostname() {
@@ -90,21 +113,16 @@ hook_main() {
   [[ -n "$pushkey" ]] || die "PUSH_KEY environment variable is not set"
   [[ -n "${MACHINE_ID:-}" ]] || die "MACHINE_ID environment variable is not set"
 
-  # Determine endpoint and user-agent based on client
-  local endpoint user_agent
+  local cli_version user_agent
+  cli_version="$(script_var "$AGENT_SCAN_VERSION")"
+  user_agent="snyk/snyk-agent-guard.sh Agent Scan v${cli_version}"
+
+  # Determine endpoint based on client
+  local endpoint
   case "$client" in
-    claude-code)
-      endpoint="/hidden/agent-monitor/hooks/claude-code"
-      user_agent="snyk/snyk-agent-guard.sh Agent Scan v${AGENT_SCAN_VERSION}"
-      ;;
-    cursor)
-      endpoint="/hidden/agent-monitor/hooks/cursor"
-      user_agent="snyk/snyk-agent-guard.sh Agent Scan v${AGENT_SCAN_VERSION}"
-      ;;
-    codex)
-      endpoint="/hidden/agent-monitor/hooks/codex"
-      user_agent="snyk/snyk-agent-guard.sh Agent Scan v${AGENT_SCAN_VERSION}"
-      ;;
+    claude-code) endpoint="/hidden/agent-monitor/hooks/claude-code" ;;
+    cursor) endpoint="/hidden/agent-monitor/hooks/cursor" ;;
+    codex) endpoint="/hidden/agent-monitor/hooks/codex" ;;
     *) die "Unknown client: ${client}. Expected claude-code, cursor, or codex." ;;
   esac
 
@@ -127,10 +145,11 @@ hook_main() {
   hostname="$(get_hostname)"
   username="$(get_username)"
 
-  x_user="$(printf '{%s:%s,%s:%s,%s:%s}' \
+  x_user="$(printf '{%s:%s,%s:%s,%s:%s,%s:%s}' \
     "\"hostname\"" "$(json_quote "$hostname")" \
     "\"username\"" "$(json_quote "$username")" \
-    "\"identifier\"" "$(json_quote "$MACHINE_ID")")"
+    "\"identifier\"" "$(json_quote "$MACHINE_ID")" \
+    "\"cli_version\"" "$(json_quote "$cli_version")")"
 
   # Execute request
   local resp body http_code marker

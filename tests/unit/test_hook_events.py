@@ -77,6 +77,7 @@ def test_sends_existing_hook_wire_contract(client):
         "hostname": "host-1",
         "username": "user-1",
         "identifier": "machine-1",
+        "cli_version": version_info,
     }
 
 

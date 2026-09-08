@@ -1764,18 +1764,39 @@ class _CopiedScript(NamedTuple):
     new_checksum: str
 
 
+def _hook_script_variables() -> dict[bytes, bytes]:
+    """Values substituted into the hook scripts' install-time variables section.
+
+    Keyed by the ``__PLACEHOLDER__`` the scripts declare between their
+    ``--- BEGIN/END install-time variables ---`` markers. To add a variable, add it here
+    and to the section in both snyk-agent-guard.sh and snyk-agent-guard.ps1.
+
+    Substituting at install time rather than passing the value through the client's hook
+    config is deliberate: agent-monitor diffs the hook command strings between installs
+    and reports any change as hook tampering, so a value that moves with each release
+    would raise a finding on every machine on every upgrade. Script content is compared
+    against what the previous install wrote, which tracks releases without complaint.
+
+    Every value must be the same for all machines on a given release, for the same
+    reason -- see the note in the scripts' variables section.
+    """
+    from agent_scan.version import version_info
+
+    return {b"__AGENT_SCAN_VERSION__": version_info.encode()}
+
+
 def _copy_hook_script(dest: Path) -> _CopiedScript:
     """Copy the bundled hook script named ``dest.name`` to *dest*.
 
     Handles both the forwarding hook and the session-start discovery trampoline;
     the bundled resource and the destination share a basename.
     """
-    from agent_scan.version import version_info
-
     dest.parent.mkdir(parents=True, exist_ok=True)
 
     source = importlib_resources.files("agent_scan.hooks").joinpath(dest.name)
-    new_content = source.read_bytes().replace(b"__AGENT_SCAN_VERSION__", version_info.encode())
+    new_content = source.read_bytes()
+    for placeholder, value in _hook_script_variables().items():
+        new_content = new_content.replace(placeholder, value)
     new_checksum = hashlib.sha256(new_content).hexdigest()
 
     current_content = dest.read_bytes() if dest.exists() else None
