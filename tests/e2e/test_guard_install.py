@@ -212,6 +212,7 @@ class TestGuardInstallE2E:
         data = json.loads(config_file.read_text())
         assert "PreToolUse" in data["hooks"]
         assert "Stop" in data["hooks"]
+        assert "SubagentStart" in data["hooks"]
 
         discover_script = "snyk-agent-guard-discover.ps1" if os.name == "nt" else "snyk-agent-guard-discover.sh"
         discovery_groups = [
