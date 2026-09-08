@@ -29,25 +29,11 @@ $ErrorActionPreference = "Stop"
 # Hook API version.
 $VERSION = "2025-11-11"
 
-# Install-time variables.
-#
-# `agent-scan guard install` substitutes each __PLACEHOLDER__ between the markers below as
-# it copies this script into place (_hook_script_variables in guard.py). Always read them
-# through Get-ScriptVar: this script also runs straight from the source tree, and a copy
-# written by an older CLI will not know about variables added later, so a placeholder can
-# survive. Keep the markers around declarations only -- the tests treat anything
-# placeholder-shaped left between them as a substitution that install forgot.
-#
-# Keep these per-release, never per-machine. agent-monitor's tamper detection compares the
-# installed script's checksum between installs, and a per-machine value would give every
-# machine a different checksum for the same release.
 # --- BEGIN install-time variables ---
+# Agent-scan CLI version (replaced at install time).
 $AGENT_SCAN_VERSION = "__AGENT_SCAN_VERSION__"
 # --- END install-time variables ---
 
-# Value of an install-time variable, or "unknown" when its placeholder was not substituted.
-# The literal placeholder is worse than nothing on the wire: agent-monitor rejects it as a
-# version anyway, and it would read as a real value everywhere else.
 function Get-ScriptVar($value) {
     if (-not $value -or $value -match '^__[A-Za-z0-9_]+__$') { return "unknown" }
     return $value
