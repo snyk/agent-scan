@@ -26,13 +26,13 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# Hook API version.
-$VERSION = "2025-11-11"
-
 # --- BEGIN install-time variables ---
 # Agent-scan CLI version (replaced at install time).
 $AGENT_SCAN_VERSION = "__AGENT_SCAN_VERSION__"
 # --- END install-time variables ---
+
+# Hook API version.
+$VERSION = "2025-11-11"
 
 # ---------------------------------------------------------------------------
 # Main

@@ -1764,19 +1764,10 @@ class _CopiedScript(NamedTuple):
     new_checksum: str
 
 
-# The forwarder scripts fence the values install fills in with these markers; the
-# discovery trampolines declare no section and are copied verbatim.
+# The forwarder scripts fence the values install fills in with these markers
 _SECTION_BEGIN = b"# --- BEGIN install-time variables ---"
 _SECTION_END = b"# --- END install-time variables ---"
 
-# A name the scripts can declare and a reader can pick out of the section.
-_VARIABLE_NAME_RE = re.compile(rb"\A__[A-Za-z0-9_]+__\Z")
-
-# Deliberately agent-monitor's ``_CLI_VERSION_RE``
-# (src/agent_monitor/utils/guardrailing_context.py), which degrades anything else to
-# "unknown". A value the platform accepts is also inert inside the double-quoted bash and
-# PowerShell literals the placeholders sit in -- no quote, backslash, ``$``, backtick or
-# newline gets through -- so one check covers both consumers.
 _VARIABLE_VALUE_RE = re.compile(rb"\A[A-Za-z0-9][A-Za-z0-9._+-]{0,63}\Z")
 
 
@@ -1788,19 +1779,18 @@ def _hook_script_variables() -> dict[bytes, bytes]:
     and to the section in both snyk-agent-guard.sh and snyk-agent-guard.ps1; the discovery
     trampolines carry none, as the CLI they exec reports its own version.
 
-    Substituting at install time rather than passing the value through the client's hook
-    config is deliberate: agent-monitor diffs the hook command strings between installs
-    and reports any change as hook tampering, so a value that moves with each release
-    would raise a finding on every machine on every upgrade. Script content is compared
-    against what the previous install wrote, which tracks releases without complaint.
-
-    Every value must be the same for all machines on a given release: a per-machine value
-    would give every machine a different checksum for the same release, ruling out a
-    fleet-wide known-good.
+    Only the values are checked, because only they come from outside this repo: the
+    version is read from the installed distribution's metadata, and lands inside a
+    double-quoted shell literal. The variable names are committed alongside the scripts
+    that declare them, and tests pin the shape of both.
     """
     from agent_scan.version import version_info
 
-    return {b"__AGENT_SCAN_VERSION__": version_info.encode()}
+    variables = {b"__AGENT_SCAN_VERSION__": version_info.encode()}
+    for placeholder, value in variables.items():
+        if not _VARIABLE_VALUE_RE.match(value):
+            raise ValueError(f"Unusable install-time variable value for {placeholder!r}: {value!r}")
+    return variables
 
 
 def _substitute_hook_script_variables(content: bytes) -> bytes:
@@ -1809,23 +1799,23 @@ def _substitute_hook_script_variables(content: bytes) -> bytes:
     Only the section is rewritten. Both forwarders compare their variables against the
     literal placeholder to scrub a copy install never filled in, and the sh script keys
     its curl status readback on a ``__NAME__``-shaped marker; substituting over the whole
-    file would rewrite those. A script that declares no section is returned unchanged.
+    file would rewrite those. A script carrying no complete section -- the trampolines --
+    is returned unchanged.
+
+    The values are checked by ``_hook_script_variables`` before they get here; the markers
+    below are committed alongside the scripts that declare them, and tests pin their shape.
     """
     variables = _hook_script_variables()
-    for placeholder, value in variables.items():
-        if not _VARIABLE_NAME_RE.match(placeholder):
-            raise ValueError(f"Malformed install-time variable name: {placeholder!r}")
-        if not _VARIABLE_VALUE_RE.match(value):
-            raise ValueError(f"Unusable install-time variable value for {placeholder!r}: {value!r}")
 
     begin = content.find(_SECTION_BEGIN)
-    end = content.find(_SECTION_END)
-    if begin < 0 and end < 0:
+    if begin < 0:
         return content
-    if begin < 0 or end < begin:
-        raise ValueError("Hook script declares a malformed install-time variables section")
 
     start = begin + len(_SECTION_BEGIN)
+    end = content.find(_SECTION_END, start)
+    if end < 0:
+        return content
+
     section = content[start:end]
     for placeholder, value in variables.items():
         section = section.replace(placeholder, value)

@@ -19,6 +19,7 @@ from unittest.mock import call as mock_call
 import pytest
 
 import agent_scan.guard as guard_module
+import agent_scan.version as version_module
 from agent_scan.guard import (
     _PERMISSION_DENIED,
     ALL_CLIENTS,
@@ -2954,6 +2955,28 @@ class TestHookScriptInstallTimeVariables:
         assert "__AGENT_SCAN_VERSION__" in section
 
     @pytest.mark.parametrize("name", _FORWARDER_SCRIPTS)
+    def test_bundled_section_is_well_formed(self, name):
+        """Substitution trusts these markers, so the committed scripts have to declare them.
+
+        One BEGIN ahead of one END. A script declaring them any other way has no section
+        install can find, and would be copied with its placeholders intact.
+        """
+        text = _get_script_path(name).read_text()
+
+        assert text.count(_SECTION_BEGIN) == 1
+        assert text.count(_SECTION_END) == 1
+        assert text.index(_SECTION_BEGIN) < text.index(_SECTION_END)
+
+    def test_shipped_variable_names_are_placeholder_shaped(self):
+        """``__NAME__`` is what makes a variable unambiguous inside the section.
+
+        Substitution is a plain replace over the section body, so a name of any other
+        shape could match ordinary script text and rewrite it.
+        """
+        for placeholder in guard_module._hook_script_variables():
+            assert _PLACEHOLDER_RE.fullmatch(placeholder.decode())
+
+    @pytest.mark.parametrize("name", _FORWARDER_SCRIPTS)
     def test_copy_substitutes_the_whole_section(self, tmp_path, name):
         dest = tmp_path / "hooks" / name
         guard_module._copy_hook_script(dest)
@@ -3000,18 +3023,8 @@ class TestHookScriptInstallTimeVariables:
             assert placeholder.decode() in head + tail
 
 
-class TestHookScriptVariableSubstitution:
-    """What install writes into the section is checked before it lands."""
-
-    _SCRIPT = b"".join(
-        (
-            b'head "__X__"\n',
-            guard_module._SECTION_BEGIN,
-            b'\nV="__X__"\n',
-            guard_module._SECTION_END,
-            b'\ntail "__X__"\n',
-        )
-    )
+class TestHookScriptVariableValues:
+    """What install would write into the section is checked before it is handed out."""
 
     # Shapes a release can plausibly produce, all inert inside the double-quoted shell
     # literal they land in.
@@ -3034,48 +3047,77 @@ class TestHookScriptVariableSubstitution:
 
     @pytest.mark.parametrize("value", _ACCEPTED)
     def test_accepts_a_release_shaped_value(self, monkeypatch, value):
-        monkeypatch.setattr(guard_module, "_hook_script_variables", lambda: {b"__X__": value.encode()})
+        monkeypatch.setattr(version_module, "version_info", value)
 
-        rendered = guard_module._substitute_hook_script_variables(self._SCRIPT)
-
-        assert f'V="{value}"'.encode() in rendered
+        assert guard_module._hook_script_variables() == {b"__AGENT_SCAN_VERSION__": value.encode()}
         # Both consumers have to accept it: the shell that parses the script, and
         # agent-monitor, which degrades anything outside its shape to "unknown".
         assert _AGENT_MONITOR_CLI_VERSION_RE.fullmatch(value)
 
     @pytest.mark.parametrize("value", _REJECTED)
     def test_rejects_a_value_the_shell_or_the_platform_would_mangle(self, monkeypatch, value):
-        monkeypatch.setattr(guard_module, "_hook_script_variables", lambda: {b"__X__": value.encode()})
+        monkeypatch.setattr(version_module, "version_info", value)
 
         with pytest.raises(ValueError, match="install-time"):
-            guard_module._substitute_hook_script_variables(self._SCRIPT)
+            guard_module._hook_script_variables()
 
         assert not _AGENT_MONITOR_CLI_VERSION_RE.fullmatch(value)
 
-    def test_rejects_a_placeholder_the_scripts_could_not_declare(self, monkeypatch):
-        """A name outside `__NAME__` is one the section tests above would not find."""
-        monkeypatch.setattr(guard_module, "_hook_script_variables", lambda: {b"__PUSH-KEY__": b"0.6.2"})
+    @pytest.mark.parametrize("name", _FORWARDER_SCRIPTS)
+    def test_install_fails_rather_than_writing_an_unusable_value(self, monkeypatch, tmp_path, name):
+        """The check gates the copy, so a rejected value never reaches a hook script."""
+        monkeypatch.setattr(version_module, "version_info", '0.6.2"; id; x="')
+        dest = tmp_path / "hooks" / name
 
         with pytest.raises(ValueError, match="install-time"):
-            guard_module._substitute_hook_script_variables(self._SCRIPT)
+            guard_module._copy_hook_script(dest)
+
+        assert not dest.exists()
+
+    def test_the_shipped_variables_are_the_cli_version(self):
+        """The sentinel-driven tests prove the plumbing; this pins what actually ships."""
+        assert guard_module._hook_script_variables() == {b"__AGENT_SCAN_VERSION__": version_info.encode()}
+
+
+class TestHookScriptVariableSubstitution:
+    """Only the section is rewritten, with whatever the variables mapping holds."""
+
+    _SCRIPT = b"".join(
+        (
+            b'head "__X__"\n',
+            guard_module._SECTION_BEGIN,
+            b'\nV="__X__"\n',
+            guard_module._SECTION_END,
+            b'\ntail "__X__"\n',
+        )
+    )
 
     def test_substitutes_only_inside_the_section(self, monkeypatch):
         monkeypatch.setattr(guard_module, "_hook_script_variables", lambda: {b"__X__": b"0.6.2"})
 
         rendered = guard_module._substitute_hook_script_variables(self._SCRIPT)
 
+        assert b'V="0.6.2"' in rendered
         assert rendered.count(b"__X__") == 2
         assert rendered.startswith(b'head "__X__"\n')
         assert rendered.endswith(b'tail "__X__"\n')
 
-    @pytest.mark.parametrize("content", [_SCRIPT.split(_SECTION_END.encode())[0], guard_module._SECTION_END])
-    def test_a_half_declared_section_fails_loudly(self, content):
-        with pytest.raises(ValueError, match="install-time"):
-            guard_module._substitute_hook_script_variables(content)
+    @pytest.mark.parametrize(
+        "content",
+        [
+            _SCRIPT.split(_SECTION_END.encode())[0],
+            guard_module._SECTION_END,
+            guard_module._SECTION_END + guard_module._SECTION_BEGIN,
+        ],
+    )
+    def test_only_a_complete_section_is_rewritten(self, content):
+        """Anything short of a BEGIN-then-END pair leaves the script as it was.
 
-    def test_the_shipped_variables_are_the_cli_version(self):
-        """The sentinel-driven tests prove the plumbing; this pins what actually ships."""
-        assert guard_module._hook_script_variables() == {b"__AGENT_SCAN_VERSION__": version_info.encode()}
+        What the forwarders ship is pinned against the markers elsewhere. One that lost
+        its section keeps its placeholder, which the script's own fallback scrubs at hook
+        time rather than reporting it as a version.
+        """
+        assert guard_module._substitute_hook_script_variables(content) == content
 
     @pytest.mark.parametrize("name", _TRAMPOLINE_SCRIPTS)
     def test_trampolines_carry_no_install_time_variables(self, tmp_path, name):
