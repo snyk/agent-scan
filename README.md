@@ -61,7 +61,7 @@ Agent Scan helps you discover all your installed agent components (harnesses, MC
 > - **Review the consent prompt carefully** during interactive scans; it shows the command or remote URL for each server
 > - **Use `--dangerously-run-mcp-servers`** only in trusted environments where you've verified all MCP server commands and remote URLs
 >
-> By default, Agent Scan requires explicit user consent (y/n) before contacting each discovered MCP server during interactive runs. Unattended scans do not start stdio servers or connect to discovered remote servers unless `--dangerously-run-mcp-servers` is set. A remote URL passed directly on the command line is treated as an explicit request to connect.
+> By default, Agent Scan requires explicit user consent (y/n) before contacting each discovered MCP server during foreground interactive runs. Background and push-key scans continue to inspect remote servers automatically for fleet coverage, but do not start stdio servers unless `--dangerously-run-mcp-servers` is set.
 
 ## Quick Start
 
@@ -261,7 +261,7 @@ By default, Agent Scan prompts for user consent before contacting each discovere
 
 - Shows the server name and its command or remote URL; environment variables and headers are redacted
 - Allows you to approve or decline each server individually
-- Prevents potentially untrusted servers from running without your explicit permission
+- Prevents potentially untrusted servers from being contacted without your explicit permission
 - Records declined servers with a `user_declined` error (they are never contacted)
 
 **Best Practices:**
@@ -269,7 +269,7 @@ By default, Agent Scan prompts for user consent before contacting each discovere
 - When scanning untrusted or third-party MCP configs, run Agent Scan inside a sandbox (Docker, VM, or disposable environment)
 - Decline any servers with unfamiliar or suspicious commands
 
-For non-interactive environments (e.g., CI/CD pipelines), `--dangerously-run-mcp-servers` bypasses the consent prompt and contacts all configured servers. **Only use this flag in trusted environments where all MCP server commands and remote URLs have been verified.**
+Non-interactive environments (e.g., background and push-key scans) inspect remote MCP servers automatically. They do not start stdio servers unless `--dangerously-run-mcp-servers` is set. **Only use this flag in trusted environments where all MCP server commands and remote URLs have been verified.**
 
 #### Analysis and Validation
 

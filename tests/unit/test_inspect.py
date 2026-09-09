@@ -154,7 +154,7 @@ async def test_inspect_client_uses_original_empty_server_name_for_oauth_token_lo
 
 
 @pytest.mark.asyncio
-async def test_inspect_client_returns_server_signature():
+async def test_inspect_client_returns_remote_signature_without_stdio_handshake():
     remote = RemoteServer(url="https://example.test/mcp", type="http")
     signature = ServerSignature(
         metadata=InitializeResult(
@@ -171,13 +171,7 @@ async def test_inspect_client_returns_server_signature():
     )
 
     with patch("agent_scan.inspect.check_server", new_callable=AsyncMock, return_value=(signature, remote)):
-        result = await inspect_client(
-            client,
-            timeout=1,
-            tokens=[],
-            scan_skills=False,
-            do_stdio_handshake=True,
-        )
+        result = await inspect_client(client, timeout=1, tokens=[], scan_skills=False)
 
     assert len(result.servers) == 1
     assert result.servers[0].signature == signature
@@ -185,7 +179,7 @@ async def test_inspect_client_returns_server_signature():
 
 
 @pytest.mark.asyncio
-async def test_inspect_client_records_discovered_remote_server_without_handshake():
+async def test_inspect_client_does_not_contact_declined_remote_server():
     remote = RemoteServer(url="https://example.test/mcp", type="http")
     client = ClientToInspect(
         name="cursor",
@@ -195,38 +189,21 @@ async def test_inspect_client_records_discovered_remote_server_without_handshake
     )
 
     with patch("agent_scan.inspect.check_server", new_callable=AsyncMock) as check:
-        result = await inspect_client(client, timeout=1, tokens=[], scan_skills=False)
+        result = await inspect_client(
+            client,
+            timeout=1,
+            tokens=[],
+            scan_skills=False,
+            declined_servers={("/proj/.mcp.json", "remote")},
+            do_stdio_handshake=True,
+        )
 
     check.assert_not_awaited()
     assert len(result.servers) == 1
     assert result.servers[0].server == remote
     assert result.servers[0].signature is None
-    assert result.servers[0].error is None
-
-
-@pytest.mark.asyncio
-async def test_inspect_client_connects_to_explicit_direct_remote_scan_without_handshake():
-    remote = RemoteServer(url="https://example.test/mcp", type="http")
-    signature = ServerSignature(
-        metadata=InitializeResult(
-            protocolVersion="2024-11-05",
-            capabilities={},
-            serverInfo=Implementation(name="server", version="1"),
-        )
-    )
-    direct_target = "streamable-https:example.test/mcp"
-    client = ClientToInspect(
-        name="not-available",
-        client_path=direct_target,
-        mcp_configs={direct_target: [("http-mcp-server", remote)]},
-        skills_dirs={},
-    )
-
-    with patch("agent_scan.inspect.check_server", new_callable=AsyncMock, return_value=(signature, remote)) as check:
-        result = await inspect_client(client, timeout=1, tokens=[], scan_skills=False)
-
-    check.assert_awaited_once()
-    assert result.servers[0].signature == signature
+    assert result.servers[0].error is not None
+    assert result.servers[0].error.category == "user_declined"
 
 
 @pytest.mark.asyncio

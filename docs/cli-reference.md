@@ -149,7 +149,7 @@ Enterprise uploads include a push key, either via `--push-key` (v0.6 and later) 
 
 | `--dangerously-run-mcp-servers` | Consent prompts | Discovered MCP servers |
 | --- | --- | --- |
-| not set (default) | skipped | Not contacted; servers remain in the result as configured, while skills are still inspected |
+| not set (default) | skipped | Stdio servers are not started; remote servers and skills are still inspected |
 | set | skipped | Every stdio server is started and every remote server is contacted |
 
 Use `--dangerously-run-mcp-servers` only when a trusted fleet or CI job must contact configured MCP servers.
@@ -205,7 +205,7 @@ These options apply to `scan`, `inspect`, and `evo` in both CLI versions.
 | --- | --- | --- | --- |
 | `--server-timeout SECONDS` | float | `10` | Timeout for MCP server connections, including stdio handshakes and remote servers. |
 | `--suppress-mcpserver-io BOOL` | boolean | see below | Suppress stderr from stdio MCP servers. Stdout carries JSON-RPC and is never shown. Accepted values: `true`, `false`, `1`, `0`, `yes`, `no`, `y`, `n`, `t`, `f`. |
-| `--dangerously-run-mcp-servers` | boolean | `false` | Skip per-server consent and contact every configured MCP server. This starts stdio subprocesses and connects to remote URLs. Required with `--ci` in CI/CD. Use only in trusted environments. |
+| `--dangerously-run-mcp-servers` | boolean | `false` | Skip foreground per-server consent and contact every configured MCP server. This starts stdio subprocesses; background remote inspection occurs with or without this flag. Required with `--ci` in CI/CD. Use only in trusted environments. |
 
 | Run type | Default for `--suppress-mcpserver-io` |
 | --- | --- |
@@ -214,15 +214,15 @@ These options apply to `scan`, `inspect`, and `evo` in both CLI versions.
 
 **Handshake and consent matrix for discovered MCP servers:**
 
-| Command | Push key | `--dangerously-run-mcp-servers` | Contact servers | Consent prompt |
-| --- | --- | --- | --- | --- |
-| `inspect` | — | no | yes | yes |
-| `inspect` | — | yes | yes | no |
-| `scan` | no | no | yes | yes |
-| `scan` | no | yes | yes | no |
-| `scan` | yes | no | no | no |
-| `scan` | yes | yes | yes | no |
-| `evo` | yes (automatic) | no | no | no |
+| Command | Push key | `--dangerously-run-mcp-servers` | Start stdio | Connect remote | Consent prompt |
+| --- | --- | --- | --- | --- | --- |
+| `inspect` | — | no | yes | yes | each server |
+| `inspect` | — | yes | yes | yes | no |
+| `scan` | no | no | yes | yes | each server |
+| `scan` | no | yes | yes | yes | no |
+| `scan` | yes | no | no | yes | no |
+| `scan` | yes | yes | yes | yes | no |
+| `evo` | yes (automatic) | no | no | yes | no |
 
 Remote targets passed directly as `streamable-http:`, `streamable-https:`, or `sse:` arguments are contacted because the command-line target is an explicit connection request.
 

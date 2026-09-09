@@ -739,9 +739,9 @@ def is_interactive_run(args) -> bool:
 
 @dataclass(frozen=True)
 class HandshakeDecision:
-    # Whether to contact configured MCP servers to read their tool / prompt /
-    # resource catalogs. Direct remote URL scans are explicit connection
-    # requests and do not depend on this discovery-time authorization.
+    # Whether to start stdio MCP server subprocesses to read their tool /
+    # prompt / resource catalogs. Remote servers are always contacted in
+    # unattended runs, but share the foreground consent prompt.
     do_stdio_handshake: bool
     # Whether to run the interactive per-server y/n consent prompt before any
     # discovered subprocess is started or remote connection is made.
@@ -750,7 +750,7 @@ class HandshakeDecision:
 
 def decide_handshake(args) -> HandshakeDecision:
     """
-    Command logic for MCP server handshakes and interactive consent.
+    Command logic for stdio handshakes and foreground MCP server consent.
 
         command       push_key  --dangerously  do_stdio_handshake  collect_consent
         ------------  --------  -------------  ------------------  ---------------
@@ -767,7 +767,7 @@ def decide_handshake(args) -> HandshakeDecision:
     dangerously_run_mcp_servers = bool(getattr(args, "dangerously_run_mcp_servers", False))
 
     # 1. Explicit user opt-in via --dangerously-run-mcp-servers. Contact every
-    # configured MCP server and skip consent.
+    # configured MCP server and skip foreground consent.
     if dangerously_run_mcp_servers:
         return HandshakeDecision(do_stdio_handshake=True, collect_consent=False)
 
@@ -782,7 +782,8 @@ def decide_handshake(args) -> HandshakeDecision:
 
     # 3. Default - unattended (push-key scan, evo, or any
     # future subcommand).
-    # Safe default — no handshake, no consent.
+    # Safe default for subprocesses — no stdio handshake or consent. Remote
+    # servers remain auto-inspected in unattended fleet/background runs.
     return HandshakeDecision(do_stdio_handshake=False, collect_consent=False)
 
 
@@ -810,8 +811,8 @@ def resolve_server_io_default(args) -> None:
 
 def enforce_consent_requirements(args) -> None:
     """
-    --ci must opt into contacting MCP servers explicitly, because CI runs
-    cannot answer the interactive per-server consent prompt.
+    --ci must opt into starting stdio subprocesses explicitly, because CI
+    runs cannot answer the interactive per-server consent prompt.
     """
     dangerously_run_mcp_servers = getattr(args, "dangerously_run_mcp_servers", False)
     ci_mode = getattr(args, "ci", False)
@@ -819,8 +820,8 @@ def enforce_consent_requirements(args) -> None:
     if ci_mode and not dangerously_run_mcp_servers:
         rich.print(
             "[bold red]Running with --ci requires --dangerously-run-mcp-servers.[/bold red]\n"
-            "Agent Scan starts stdio subprocesses and makes outbound requests "
-            "to remote MCP servers, so CI runs must confirm trust explicitly.",
+            "Agent Scan starts subprocesses for every stdio MCP server it "
+            "scans, so CI runs must confirm trust explicitly.",
             file=sys.stderr,
         )
         sys.exit(CLI_USAGE_ERROR_EXIT_CODE)

@@ -130,7 +130,7 @@ Iterate `servers[]`:
 
 - **`servers[i].error` is not `null`:** That MCP server or skill failed to inspect (startup error, HTTP error, skill scan error, user declined consent, etc.).
 - Check `servers[i].error.is_failure` the same way as path-level errors.
-- A server with `signature: null` and `error: null` was **configured but not live-inspected** (common for MCP servers on unattended push-key scans without `--dangerously-run-mcp-servers`).
+- A server with `signature: null` and `error: null` was **configured but not live-inspected** (common for stdio MCP servers on unattended push-key scans without `--dangerously-run-mcp-servers`).
 
 #### Runtime failure codes (`X*`)
 

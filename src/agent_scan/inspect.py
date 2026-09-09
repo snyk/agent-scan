@@ -6,7 +6,6 @@ from pathlib import Path
 from httpx import HTTPStatusError
 
 from agent_scan.agents.base import DiscoveryScope
-from agent_scan.direct_scanner import is_direct_scan
 from agent_scan.mcp_client import check_server, scan_mcp_config_file
 from agent_scan.models import (
     CandidateClient,
@@ -390,11 +389,7 @@ async def _inspect_server(
             server=config,
             error=_inspection_error_to_scan_error(error),
         )
-    # A direct remote target in the command line is itself an explicit request
-    # to connect. Servers discovered inside config files require the same
-    # handshake authorization as local subprocesses.
-    direct_remote_scan = isinstance(config, RemoteServer) and is_direct_scan(config_path)
-    if not do_stdio_handshake and not direct_remote_scan:
+    if not do_stdio_handshake and isinstance(config, StdioServer):
         return InspectedServer(name=name, config_path=config_path, server=config)
     if isinstance(config, StdioServer):
         return await _inspect_stdio_server(

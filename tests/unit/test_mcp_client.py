@@ -176,12 +176,12 @@ async def test_remote_url_candidates_have_no_double_slash_and_include_clean(inpu
 
     server = RemoteServer(url=input_url)
     with patch("agent_scan.mcp_client._check_server_pass", side_effect=fake_check):
-        with pytest.raises(Exception, match="(?i)could not connect|boom"):
+        with pytest.raises(Exception, match=r"(?i)could not connect|boom"):
             await check_server(server, 1, False)
 
     assert tried, "expected the strategy to try at least one URL"
     for url in tried:
-        scheme, _, rest = url.partition("://")
+        _scheme, _, rest = url.partition("://")
         assert "//" not in rest, f"double slash leaked into candidate URL: {url}"
         assert "/mcp/mcp" not in url, f"duplicated /mcp suffix in candidate URL: {url}"
         assert "/sse/sse" not in url, f"duplicated /sse suffix in candidate URL: {url}"
