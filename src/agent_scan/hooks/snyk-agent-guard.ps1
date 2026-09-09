@@ -1,6 +1,6 @@
 #
 # Thin-client hook handler for forwarding agent hook events to Evo Agent Guard.
-# Supports Claude Code, Cursor, and Codex via the -Client argument.
+# Supports Claude Code, Cursor, Codex, and Github Copilot via the -Client argument.
 #
 # Usage:
 #   powershell -File snyk-agent-guard.ps1 -Client claude-code -PushKey '...' -RemoteUrl 'https://...'
@@ -11,7 +11,7 @@
 #
 param(
     [Parameter(Mandatory=$true)]
-    [ValidateSet("claude-code","cursor","codex")]
+    [ValidateSet("claude-code","cursor","codex","github-copilot")]
     [string]$Client,
 
     [Parameter(Mandatory=$false)]
@@ -67,6 +67,9 @@ switch ($Client) {
     "codex" {
         $endpoint = "/hidden/agent-monitor/hooks/codex"
     }
+    "github-copilot" {
+        $endpoint = "/hidden/agent-monitor/hooks/github-copilot"
+    }
 }
 
 $cliVersion = $AGENT_SCAN_VERSION
@@ -109,6 +112,20 @@ function JsonEscape($s) {
 $xUser = '{{"hostname":"{0}","username":"{1}","identifier":"{2}","cli_version":"{3}"}}' -f `
     (JsonEscape $hostname), (JsonEscape $username), (JsonEscape $MachineId), (JsonEscape $cliVersion)
 
+# Identify whether GitHub Copilot invoked this hook (see get_agent_surface in
+# snyk-agent-guard.sh for why the -Client argument cannot answer this: one Copilot hook
+# config is shared by the CLI, Copilot in VS Code, and the Copilot desktop app, so only
+# the inherited environment identifies them). Empty when the sender isn't Copilot, in
+# which case the header is omitted and agent-monitor falls back to its non-Copilot
+# agent name.
+$agentSurface = if ($env:AI_AGENT -eq "github_copilot_vscode_agent") {
+    "copilot-vscode"
+} elseif ($env:AI_AGENT -like "github_copilot_*" -or $env:COPILOT_CLI) {
+    "copilot"
+} else {
+    ""
+}
+
 # Execute request
 try {
     $headers = @{
@@ -116,6 +133,9 @@ try {
         "X-User"       = $xUser
         "Content-Type" = "text/plain"
         "X-Client-Id"  = $PushKey
+    }
+    if ($agentSurface) {
+        $headers["X-Agent-Surface"] = $agentSurface
     }
     $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($body)
     $response = Invoke-WebRequest -Uri $url -Method POST -Body $bodyBytes -Headers $headers -UseBasicParsing

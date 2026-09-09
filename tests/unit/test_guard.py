@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -29,6 +30,9 @@ from agent_scan.guard import (
     CODEX_HOOK_EVENTS,
     CODEX_HOOKS_PATH,
     CODEX_MANAGED_HOOKS_PATH,
+    COPILOT_HOOK_EVENTS,
+    COPILOT_HOOKS_PATH,
+    COPILOT_MANAGED_HOOKS_PATH,
     CURSOR_HOOK_EVENTS,
     CURSOR_HOOKS_PATH,
     CURSOR_MANAGED_HOOKS_PATH,
@@ -39,6 +43,7 @@ from agent_scan.guard import (
     _config_path,
     _detect_claude_install,
     _detect_codex_install,
+    _detect_copilot_install,
     _detect_cursor_install,
     _ensure_guard_enabled_for_tenant,
     _extract_env_from_cmd,
@@ -47,6 +52,7 @@ from agent_scan.guard import (
     _install_hooks,
     _is_agent_scan_command,
     _is_client_installed,
+    _is_copilot_policy_path,
     _mask_key,
     _parse_codex_requirements_toml,
     _parse_command_info,
@@ -54,6 +60,7 @@ from agent_scan.guard import (
     _prepare_claude_config,
     _prepare_codex_config,
     _prepare_codex_managed_config,
+    _prepare_copilot_config,
     _prepare_cursor_config,
     _print_client_status,
     _run_install,
@@ -61,6 +68,7 @@ from agent_scan.guard import (
     _send_test_event,
     _shell_quote,
     _uninstall_hooks,
+    _write_client_config,
     _write_codex_managed_config,
     _write_config,
 )
@@ -112,6 +120,11 @@ def _setup_cursor_hooks(cmd: str, path: Path) -> None:
     _write_config(data, path, preserved)
 
 
+def _setup_copilot_hooks(cmd: str, path: Path) -> None:
+    data, _, preserved = _prepare_copilot_config(cmd, path)
+    _write_config(data, path, preserved)
+
+
 def _setup_codex_hooks(cmd: str, path: Path) -> None:
     data, _, preserved = _prepare_codex_config(cmd, path)
     _write_config(data, path, preserved)
@@ -125,7 +138,7 @@ def _setup_codex_managed_hooks(cmd: str, path: Path) -> None:
 def _uninstall_test_client(client: str, path: Path) -> None:
     _uninstall_hooks(
         path,
-        filter_hooks=_filter_cursor_hooks if client == "cursor" else _filter_claude_hooks,
+        filter_hooks=_filter_cursor_hooks if client in ("cursor", "github-copilot") else _filter_claude_hooks,
         prune_empty_hooks=client != "cursor",
     )
 
@@ -135,6 +148,7 @@ def _detect_test_client(client: str, path: Path) -> dict | None:
         "claude": _detect_claude_install,
         "cursor": _detect_cursor_install,
         "codex": _detect_codex_install,
+        "github-copilot": _detect_copilot_install,
     }[client]
     return detect(path)
 
@@ -783,6 +797,78 @@ class TestPrepareCursorDiscoveryHook:
         assert not any(
             self.discover_command == entry.get("command")
             for entries in json.loads(path.read_text())["hooks"].values()
+            for entry in entries
+        )
+
+
+COPILOT_AGENT_SCAN_CMD = (
+    "PUSH_KEY='pk-1234' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' "
+    "TENANT_ID='tid-1' bash '/home/u/.copilot/hooks/snyk-agent-guard.sh' --client github-copilot"
+)
+
+COPILOT_OTHER_CMD = "some-other-hook --flag"
+
+COPILOT_AGENTGUARD_CMD = "PUSH_KEY='pk-old' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' '/usr/local/bin/agentguard' hook --client github-copilot"
+
+
+class TestPrepareGitHubCopilotDiscoveryHook:
+    discover_command = (
+        "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' bash '/x/snyk-agent-guard-discover.sh'"
+    )
+
+    def test_adds_flat_session_start_entry(self, tmp_path):
+        data, _, _ = _prepare_copilot_config(
+            COPILOT_AGENT_SCAN_CMD,
+            tmp_path / "agent-guard.json",
+            discover_command=self.discover_command,
+        )
+
+        assert data["hooks"]["SessionStart"][1] == {"type": "command", "command": self.discover_command}
+
+    def test_none_preserves_current_hook_shape(self, tmp_path):
+        data, _, _ = _prepare_copilot_config(
+            COPILOT_AGENT_SCAN_CMD,
+            tmp_path / "agent-guard.json",
+            discover_command=None,
+        )
+
+        assert all(len(data["hooks"][event]) == 1 for event in COPILOT_HOOK_EVENTS)
+        assert all(
+            data["hooks"][event][0] == {"type": "command", "command": COPILOT_AGENT_SCAN_CMD}
+            for event in COPILOT_HOOK_EVENTS
+        )
+
+    def test_reprepare_is_idempotent(self, tmp_path):
+        path = tmp_path / "agent-guard.json"
+        data, _, preserved = _prepare_copilot_config(
+            COPILOT_AGENT_SCAN_CMD,
+            path,
+            discover_command=self.discover_command,
+        )
+        _write_config(data, path, preserved)
+
+        _, diff, _ = _prepare_copilot_config(
+            COPILOT_AGENT_SCAN_CMD,
+            path,
+            discover_command=self.discover_command,
+        )
+
+        assert diff == {"added": {}, "modified": {}, "removed": {}}
+
+    def test_uninstall_removes_discovery_entry(self, tmp_path):
+        path = tmp_path / "agent-guard.json"
+        data, _, preserved = _prepare_copilot_config(
+            COPILOT_AGENT_SCAN_CMD,
+            path,
+            discover_command=self.discover_command,
+        )
+        _write_config(data, path, preserved)
+
+        _uninstall_test_client("github-copilot", path)
+
+        assert not any(
+            self.discover_command == entry.get("command")
+            for entries in json.loads(path.read_text()).get("hooks", {}).values()
             for entry in entries
         )
 
@@ -1605,6 +1691,115 @@ class TestDetectCursor:
 
 
 # ===================================================================
+# GitHub Copilot: uninstall + detect
+#
+# Copilot's flat hooks.json shape is identical to Cursor's (bare {"command": ...}
+# entries plus an explicit "type": "command"), so it reuses
+# _filter_cursor_hooks / _flat_hook_commands rather than duplicating them.
+# ===================================================================
+
+
+class TestUninstallGitHubCopilot:
+    def test_missing_file(self, tmp_path):
+        path = tmp_path / "agent-guard.json"
+        _uninstall_test_client("github-copilot", path)  # should not raise
+
+    def test_no_agent_scan_hooks(self, tmp_path):
+        path = tmp_path / "agent-guard.json"
+        _write(path, {"hooks": {"Stop": [{"type": "command", "command": COPILOT_OTHER_CMD}]}})
+        _uninstall_test_client("github-copilot", path)
+
+        data = json.loads(path.read_text())
+        assert len(data["hooks"]["Stop"]) == 1
+
+    def test_removes_only_agent_scan(self, tmp_path):
+        path = tmp_path / "agent-guard.json"
+        _write(
+            path,
+            {
+                "hooks": {
+                    "Stop": [
+                        {"type": "command", "command": COPILOT_OTHER_CMD},
+                        {"type": "command", "command": COPILOT_AGENT_SCAN_CMD},
+                    ],
+                    "SessionStart": [{"type": "command", "command": COPILOT_AGENT_SCAN_CMD}],
+                },
+            },
+        )
+        _uninstall_test_client("github-copilot", path)
+
+        data = json.loads(path.read_text())
+        assert len(data["hooks"]["Stop"]) == 1
+        assert data["hooks"]["Stop"][0]["command"] == COPILOT_OTHER_CMD
+        assert "SessionStart" not in data["hooks"]
+
+    def test_prunes_hooks_key_when_all_removed(self, tmp_path):
+        path = tmp_path / "agent-guard.json"
+        _write(path, {"hooks": {"Stop": [{"type": "command", "command": COPILOT_AGENT_SCAN_CMD}]}})
+        _uninstall_test_client("github-copilot", path)
+
+        assert "hooks" not in json.loads(path.read_text())
+
+    def test_preserves_agentguard(self, tmp_path):
+        path = tmp_path / "agent-guard.json"
+        _write(
+            path,
+            {
+                "hooks": {
+                    "Stop": [
+                        {"type": "command", "command": COPILOT_AGENTGUARD_CMD},
+                        {"type": "command", "command": COPILOT_AGENT_SCAN_CMD},
+                    ],
+                },
+            },
+        )
+        _uninstall_test_client("github-copilot", path)
+
+        data = json.loads(path.read_text())
+        assert len(data["hooks"]["Stop"]) == 1
+        assert data["hooks"]["Stop"][0]["command"] == COPILOT_AGENTGUARD_CMD
+
+    def test_full_install_then_uninstall(self, tmp_path):
+        path = tmp_path / "agent-guard.json"
+        _setup_copilot_hooks(COPILOT_AGENT_SCAN_CMD, path)
+        _uninstall_test_client("github-copilot", path)
+
+        assert "hooks" not in json.loads(path.read_text())
+
+
+class TestDetectGitHubCopilot:
+    def test_missing_file(self, tmp_path):
+        assert _detect_copilot_install(tmp_path / "nope.json") is None
+
+    def test_no_agent_scan_hooks(self, tmp_path):
+        path = tmp_path / "agent-guard.json"
+        _write(path, {"hooks": {"Stop": [{"type": "command", "command": COPILOT_OTHER_CMD}]}})
+        assert _detect_copilot_install(path) is None
+
+    def test_detects_installed(self, tmp_path):
+        path = tmp_path / "agent-guard.json"
+        _setup_copilot_hooks(COPILOT_AGENT_SCAN_CMD, path)
+
+        info = _detect_copilot_install(path)
+        assert info is not None
+        assert info["host"] == "api.snyk.io"
+        assert info["auth_value"] == "pk-1234"
+        assert info["tenant_id"] == "tid-1"
+        assert len(info["events"]) == len(COPILOT_HOOK_EVENTS)
+
+    def test_ignores_agentguard(self, tmp_path):
+        path = tmp_path / "agent-guard.json"
+        _write(path, {"hooks": {"Stop": [{"type": "command", "command": COPILOT_AGENTGUARD_CMD}]}})
+        assert _detect_copilot_install(path) is None
+
+    def test_invalid_json(self, tmp_path):
+        path = tmp_path / "agent-guard.json"
+        path.write_text("{broken json")
+        with pytest.raises(json.JSONDecodeError):
+            _detect_copilot_install(path)
+
+
+# ===================================================================
 # Filter functions
 # ===================================================================
 
@@ -1683,6 +1878,63 @@ class TestConfigPath:
     def test_codex_managed(self):
         assert _config_path("codex", managed=True) == CODEX_MANAGED_HOOKS_PATH
 
+    def test_copilot_user_default(self):
+        assert _config_path("github-copilot") == COPILOT_HOOKS_PATH
+
+    def test_copilot_managed(self):
+        assert _config_path("github-copilot", managed=True) == COPILOT_MANAGED_HOOKS_PATH
+
+    def test_copilot_managed_path_is_a_policy_d_file(self):
+        """Copilot loads managed hooks from policy.d, which is what _is_copilot_policy_path keys on."""
+        assert COPILOT_MANAGED_HOOKS_PATH.parent.name == "policy.d"
+        assert _is_copilot_policy_path(COPILOT_MANAGED_HOOKS_PATH)
+        assert not _is_copilot_policy_path(COPILOT_HOOKS_PATH)
+
+    def test_copilot_managed_config_has_the_documented_policy_shape(self, tmp_path):
+        """Copilot policy files use the same {"version": 1, "hooks": {...}} format as user files."""
+        path = tmp_path / "policy.d" / "agent-guard.json"
+        data, _, _ = _prepare_copilot_config(COPILOT_AGENT_SCAN_CMD, path)
+
+        assert data["version"] == 1
+        assert set(data["hooks"]) == set(COPILOT_HOOK_EVENTS)
+        assert all(
+            data["hooks"][event] == [{"type": "command", "command": COPILOT_AGENT_SCAN_CMD}]
+            for event in COPILOT_HOOK_EVENTS
+        )
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX permission requirement")
+    def test_managed_write_clears_group_and_world_write_bits(self, tmp_path):
+        """GitHub ignores a policy file that is group- or world-writable, so it must not be one.
+
+        A permissive umask would otherwise produce a file Copilot silently refuses to
+        load, which looks identical to a working install.
+        """
+        path = tmp_path / "policy.d" / "agent-guard.json"
+        data, _, preserved = _prepare_copilot_config(COPILOT_AGENT_SCAN_CMD, path)
+        _write_client_config("github-copilot", path, data, None, preserved)
+        path.chmod(0o666)
+
+        _write_client_config("github-copilot", path, data, None, preserved)
+
+        mode = path.stat().st_mode
+        assert not mode & stat.S_IWGRP
+        assert not mode & stat.S_IWOTH
+
+    def test_user_level_write_is_not_treated_as_a_policy_file(self, tmp_path):
+        """The hardening is keyed on policy.d, so a user-level install keeps its own mode."""
+        path = tmp_path / "hooks" / "agent-guard.json"
+        data, _, preserved = _prepare_copilot_config(COPILOT_AGENT_SCAN_CMD, path)
+        _write_client_config("github-copilot", path, data, None, preserved)
+        path.chmod(0o664)
+
+        _write_client_config("github-copilot", path, data, None, preserved)
+
+        assert path.stat().st_mode & stat.S_IWGRP
+
+    def test_copilot_file_override_takes_precedence_over_managed(self):
+        override = "/custom/path/agent-guard.json"
+        assert _config_path("github-copilot", override=override, managed=True) == Path(override)
+
     def test_file_override_takes_precedence_over_managed(self):
         override = "/custom/path/settings.json"
         assert _config_path("claude", override=override, managed=True) == Path(override)
@@ -1690,6 +1942,24 @@ class TestConfigPath:
     def test_file_override_takes_precedence_over_user(self):
         override = "/custom/path/settings.json"
         assert _config_path("claude", override=override) == Path(override)
+
+
+class TestGitHubCopilotClientMapping:
+    def test_label(self):
+        assert guard_module._client_label("github-copilot") == "GitHub Copilot"
+
+    def test_hook_client_name(self):
+        assert guard_module._hook_client_name("github-copilot") == "github-copilot"
+
+    def test_hooks_path_lives_under_hooks_dir(self):
+        """The config file must be inside the ~/.copilot/hooks directory,
+        or Copilot will never load it."""
+        assert COPILOT_HOOKS_PATH.parent.name == "hooks"
+        assert COPILOT_HOOKS_PATH.parent.parent.name == ".copilot"
+
+    def test_script_is_co_located_with_config_not_double_nested(self):
+        """_hooks_dir must not produce '.../hooks/hooks/' for Copilot."""
+        assert guard_module._hooks_dir(COPILOT_HOOKS_PATH) == COPILOT_HOOKS_PATH.parent
 
 
 class TestManagedPathConstants:
@@ -1885,6 +2155,7 @@ class TestRunStatus:
             patch(f"{_G}._detect_claude_install", return_value=None),
             patch(f"{_G}._detect_cursor_install", return_value=None),
             patch(f"{_G}._detect_codex_install", return_value=None),
+            patch(f"{_G}._detect_copilot_install", return_value=None),
         ):
             guard_module._run_status()
 
@@ -1893,28 +2164,32 @@ class TestRunStatus:
             CLAUDE_SETTINGS_PATH,
             CURSOR_HOOKS_PATH,
             CODEX_HOOKS_PATH,
+            COPILOT_HOOKS_PATH,
             CLAUDE_MANAGED_SETTINGS_PATH,
             CURSOR_MANAGED_HOOKS_PATH,
             CODEX_MANAGED_HOOKS_PATH,
+            COPILOT_MANAGED_HOOKS_PATH,
         ]
         positions = [output.index(str(path)) for path in expected_paths]
         assert positions == sorted(positions)
         assert output.index("User-level hooks:") < positions[0]
-        assert positions[2] < output.index("Managed hooks:") < positions[3]
+        assert positions[3] < output.index("Managed hooks:") < positions[4]
         lines = output.splitlines()
         assert sum(line.startswith("Claude Code   ") for line in lines) == 2
         assert sum(line.startswith("Cursor   ") for line in lines) == 2
         assert sum(line.startswith("Codex   ") for line in lines) == 2
+        assert sum(line.startswith("GitHub Copilot   ") for line in lines) == 2
 
     def test_all_not_installed(self, capsys):
         with (
             patch(f"{_G}._detect_claude_install", return_value=None),
             patch(f"{_G}._detect_cursor_install", return_value=None),
             patch(f"{_G}._detect_codex_install", return_value=None),
+            patch(f"{_G}._detect_copilot_install", return_value=None),
         ):
             guard_module._run_status()
 
-        assert capsys.readouterr().out.count("NOT INSTALLED") == 6
+        assert capsys.readouterr().out.count("NOT INSTALLED") == 8
 
     def test_installed_shows_host_masked_key_and_events(self, capsys):
         with (
@@ -3238,6 +3513,44 @@ class TestBashHookScript:
         )
         assert result.returncode == 0, result.stderr
         assert "/hidden/agent-monitor/hooks/codex" in _HookHandler.last_request["path"]
+
+    def test_github_copilot_endpoint(self, hook_server):
+        script = _get_script_path("snyk-agent-guard.sh")
+        payload = '{"hookEventName":"SessionStart","sessionId":"s1"}'
+        result = subprocess.run(
+            ["bash", str(script), "--client", "github-copilot"],
+            input=payload,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={
+                "PATH": "/usr/bin:/bin:/usr/local/bin",
+                "PUSH_KEY": "test-pk-copilot",
+                "REMOTE_HOOKS_BASE_URL": hook_server,
+                "MACHINE_ID": "machine-42",
+            },
+        )
+        assert result.returncode == 0, result.stderr
+        assert "/hidden/agent-monitor/hooks/github-copilot" in _HookHandler.last_request["path"]
+
+    def test_response_body_is_forwarded_unchanged(self, hook_server):
+        """The script is a pass-through: agent-monitor's body reaches the agent verbatim."""
+        script = _get_script_path("snyk-agent-guard.sh")
+        result = subprocess.run(
+            ["bash", str(script), "--client", "github-copilot"],
+            input='{"hookEventName":"PreToolUse","sessionId":"s1"}',
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={
+                "PATH": "/usr/bin:/bin:/usr/local/bin",
+                "PUSH_KEY": "test-pk-copilot",
+                "REMOTE_HOOKS_BASE_URL": hook_server,
+                "MACHINE_ID": "machine-42",
+            },
+        )
+        assert result.returncode == 0
+        assert json.loads(result.stdout) == {"ok": True}
 
     def test_machine_id_sets_x_user_identifier(self, hook_server):
         script = _get_script_path("snyk-agent-guard.sh")
@@ -5610,10 +5923,10 @@ class TestRunInstallSendsServersDiscovered:
         ):
             _run_install(self._args(tmp_path, client="all", file_override=False))
 
-        assert install_mock.call_count == 3
+        assert install_mock.call_count == 4
         assert send_mock.call_count == 1
         assert send_mock.call_args.args[2] == "claude-code"
-        assert order == ["install:claude", "install:cursor", "install:codex", "send"]
+        assert order == ["install:claude", "install:cursor", "install:codex", "install:github-copilot", "send"]
 
     def test_nothing_installed_does_not_send(self, tmp_path, monkeypatch):
         monkeypatch.setenv("PUSH_KEY", "headless-pk")
@@ -6038,6 +6351,15 @@ class TestPrepareHandlesUnknownEvents:
         assert "unknownEvent" in data["hooks"]
         assert data["hooks"]["unknownEvent"] == [_cursor_entry(CURSOR_OTHER_CMD)]
         assert "unknownEvent" not in diff["added"]
+        assert preserved == 0
+
+    def test_copilot_preserves_unknown_event(self, tmp_path):
+        path = tmp_path / "agent-guard.json"
+        _write(path, {"hooks": {"UnknownEvent": [{"type": "command", "command": COPILOT_OTHER_CMD}]}})
+        data, diff, preserved = _prepare_copilot_config(COPILOT_AGENT_SCAN_CMD, path)
+        assert "UnknownEvent" in data["hooks"]
+        assert data["hooks"]["UnknownEvent"] == [{"type": "command", "command": COPILOT_OTHER_CMD}]
+        assert "UnknownEvent" not in diff["added"]
         assert preserved == 0
 
     def test_codex_preserves_unknown_event(self, tmp_path):
