@@ -600,7 +600,11 @@ def add_server_arguments(parser):
         "--dangerously-run-mcp-servers",
         default=False,
         action="store_true",
-        help=("Skip the interactive consent prompt and start every stdio MCP server listed in the scanned configs."),
+        help=(
+            "Skip the interactive consent prompt and contact every MCP server "
+            "listed in the scanned configs, including starting stdio subprocesses "
+            "and connecting to remote URLs."
+        ),
     )
 
 
@@ -735,17 +739,18 @@ def is_interactive_run(args) -> bool:
 
 @dataclass(frozen=True)
 class HandshakeDecision:
-    # Whether to start stdio MCP server subprocesses to read their
-    # tool / prompt / resource catalogs.
+    # Whether to contact configured MCP servers to read their tool / prompt /
+    # resource catalogs. Direct remote URL scans are explicit connection
+    # requests and do not depend on this discovery-time authorization.
     do_stdio_handshake: bool
-    # Whether to run the interactive per-server y/n consent prompt
-    # before any subprocess is started.
+    # Whether to run the interactive per-server y/n consent prompt before any
+    # discovered subprocess is started or remote connection is made.
     collect_consent: bool
 
 
 def decide_handshake(args) -> HandshakeDecision:
     """
-    Command logic for stdio handshake + interactive consent.
+    Command logic for MCP server handshakes and interactive consent.
 
         command       push_key  --dangerously  do_stdio_handshake  collect_consent
         ------------  --------  -------------  ------------------  ---------------
@@ -761,8 +766,8 @@ def decide_handshake(args) -> HandshakeDecision:
     command = getattr(args, "command", None)
     dangerously_run_mcp_servers = bool(getattr(args, "dangerously_run_mcp_servers", False))
 
-    # 1. Explicit user opt-in via --dangerously-run-mcp-servers. Spawn
-    # every stdio MCP server and skip consent.
+    # 1. Explicit user opt-in via --dangerously-run-mcp-servers. Contact every
+    # configured MCP server and skip consent.
     if dangerously_run_mcp_servers:
         return HandshakeDecision(do_stdio_handshake=True, collect_consent=False)
 
@@ -785,9 +790,9 @@ def _print_dangerous_warning(suppress_io: bool) -> None:
     """Print the dangerous-flag banner. Tip is only relevant when stderr
     is actually being streamed (suppress_io=False)."""
     message = (
-        "[bold red]--dangerously-run-mcp-servers is set: starting every "
-        "stdio MCP server listed in the scanned configs without "
-        "prompting.[/bold red]\n"
+        "[bold red]--dangerously-run-mcp-servers is set: contacting every "
+        "MCP server listed in the scanned configs without prompting. "
+        "This starts stdio subprocesses and connects to remote URLs.[/bold red]\n"
     )
     if not suppress_io:
         message += "Tip: set --suppress-mcpserver-io=true to hide server stderr output.\n"
@@ -805,7 +810,7 @@ def resolve_server_io_default(args) -> None:
 
 def enforce_consent_requirements(args) -> None:
     """
-    --ci must opt into starting subprocesses explicitly, because CI runs
+    --ci must opt into contacting MCP servers explicitly, because CI runs
     cannot answer the interactive per-server consent prompt.
     """
     dangerously_run_mcp_servers = getattr(args, "dangerously_run_mcp_servers", False)
@@ -814,8 +819,8 @@ def enforce_consent_requirements(args) -> None:
     if ci_mode and not dangerously_run_mcp_servers:
         rich.print(
             "[bold red]Running with --ci requires --dangerously-run-mcp-servers.[/bold red]\n"
-            "Agent Scan starts subprocesses for every stdio MCP server it "
-            "scans, so CI runs must confirm trust explicitly.",
+            "Agent Scan starts stdio subprocesses and makes outbound requests "
+            "to remote MCP servers, so CI runs must confirm trust explicitly.",
             file=sys.stderr,
         )
         sys.exit(CLI_USAGE_ERROR_EXIT_CODE)
@@ -1157,8 +1162,8 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> ScanRespo
     1. Build InspectArgs from CLI args.
     2. Discover the clients/configs that would be inspected.
     3. If interactive and --dangerously-run-mcp-servers is not set, prompt
-       the user per stdio server for consent. Declined servers are recorded as
-       user_declined errors and never started.
+       the user per MCP server for consent. Declined servers are recorded as
+       user_declined errors and never contacted.
     4. Run the existing inspect / analyze / push pipeline with the filtered
        plan and optional live stderr streaming.
     """

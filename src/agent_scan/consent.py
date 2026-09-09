@@ -1,6 +1,4 @@
-"""
-Interactive consent for starting stdio MCP servers.
-"""
+"""Interactive consent for contacting MCP servers."""
 
 from __future__ import annotations
 
@@ -35,6 +33,13 @@ def _render_env_redacted(server: StdioServer) -> str | None:
     return ", ".join(f"{k}=***" for k in sorted(server.env.keys()))
 
 
+def _render_headers_redacted(server: RemoteServer) -> str | None:
+    """Render header names without exposing values from the configuration."""
+    if not server.headers:
+        return None
+    return ", ".join(f"{key}=***" for key in sorted(server.headers))
+
+
 def _read_yes_no(prompt: str) -> bool:
     """
     Prompt on stderr and read a line from stdin. Accepts ``Y``, ``y``, ``yes``
@@ -60,9 +65,8 @@ def collect_consent(
     clients_to_inspect: list[ClientToInspect],
 ) -> set[tuple[str, str]]:
     """
-    Prompt the user per stdio MCP server before any subprocess is started and
-    return the set of (mcp_config_path, server_name) pairs the user
-    declined.
+    Prompt before starting or connecting to each MCP server and return the
+    set of (mcp_config_path, server_name) pairs the user declined.
     """
     # First, enumerate everything we'd run, so the user sees the full plan.
     stdio_items: list[tuple[str, str, StdioServer]] = []  # (config_path, name, server)
@@ -82,9 +86,9 @@ def collect_consent(
         return set()
 
     _stderr_console.print(
-        "[bold]Agent Scan will launch stdio MCP servers as subprocesses to "
-        "inspect their tools.[/bold]\n"
-        "Review each command below and confirm whether Agent Scan may start it.\n"
+        "[bold]Agent Scan must contact MCP servers to inspect their tools.[/bold]\n"
+        "Stdio servers launch local subprocesses; remote servers make outbound network requests.\n"
+        "Review each server below and confirm whether Agent Scan may contact it.\n"
         "Tip: pass --dangerously-run-mcp-servers to skip these prompts, or "
         "set --suppress-mcpserver-io=true to hide server stderr output.\n"
     )
@@ -110,22 +114,36 @@ def collect_consent(
                 _stderr_console.print(f"      [green]Allowed: '{escape(server_name)}' will be started.[/green]")
 
     if remote_items:
-        _stderr_console.print("\n[bold]Remote MCP servers (no subprocess — auto-allowed):[/bold]")
-        for config_path, server_name, server in remote_items:
+        _stderr_console.print("\n[bold]Remote MCP servers (require consent):[/bold]")
+        for idx, (config_path, server_name, server) in enumerate(remote_items, start=1):
             type_str = server.type or "http"
-            _stderr_console.print(
-                f"  - [cyan]{escape(server_name)}[/cyan] ({type_str}, {escape(server.url)}) {escape(config_path)}"
-            )
+            _stderr_console.print(f"\n  [{idx}] [cyan]{escape(server_name)}[/cyan]")
+            _stderr_console.print(f"      config : {escape(config_path)}")
+            _stderr_console.print(f"      URL    : [yellow]{escape(server.url)}[/yellow]")
+            _stderr_console.print(f"      type   : {escape(type_str)}")
+            headers_str = _render_headers_redacted(server)
+            if headers_str:
+                _stderr_console.print(f"      headers: {escape(headers_str)}")
+            prompt = f"      Allow Agent Scan to connect to '{server_name}'? [y/N]: "
+            allowed = _read_yes_no(prompt)
+            if not allowed:
+                declined.add((config_path, server_name))
+                _stderr_console.print(
+                    f"      [yellow]Declined: '{escape(server_name)}' will not be contacted.[/yellow]"
+                )
+            else:
+                _stderr_console.print(f"      [green]Allowed: '{escape(server_name)}' will be contacted.[/green]")
 
-    allowed_count = len(stdio_items) - len(declined)
+    allowed_count = len(stdio_items) + len(remote_items) - len(declined)
+    total_count = len(stdio_items) + len(remote_items)
     _stderr_console.print(
-        f"\n[bold]Proceeding with {allowed_count} of {len(stdio_items)} stdio servers.[/bold]"
+        f"\n[bold]Proceeding with {allowed_count} of {total_count} MCP servers.[/bold]"
         + (f" Skipped: {len(declined)}." if declined else "")
         + "\n"
     )
     if declined:
         _stderr_console.print(
-            "Note: declined servers will not be started on this machine. "
+            "Note: declined servers will not be contacted by Agent Scan. "
             "Agent Scan may still show analysis results for them if Snyk recognizes the "
             "server from prior scans — these results are not based on your "
             "own machine's behavior.\n"
