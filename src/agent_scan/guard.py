@@ -1,4 +1,4 @@
-"""Agent Guard hook management for Claude Code, Cursor, and Codex."""
+"""Agent Guard hook management for Claude Code, Cursor, Codex, and GitHub Copilot."""
 
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ _T = TypeVar("_T")
 # Constants
 # ---------------------------------------------------------------------------
 
-ALL_CLIENTS = ["claude", "cursor", "codex"]
+ALL_CLIENTS = ["claude", "cursor", "codex", "github-copilot"]
 DEFAULT_REMOTE_URL = "https://api.snyk.io"
 _DETECTION_RE = re.compile(
     r"PUSH_KEY=.*snyk-agent-guard"
@@ -68,6 +68,8 @@ _DISCOVERY_TIMEOUT_SECONDS = 60.0
 CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 CURSOR_HOOKS_PATH = Path.home() / ".cursor" / "hooks.json"
 CODEX_HOOKS_PATH = Path.home() / ".codex" / "hooks.json"
+COPILOT_HOOKS_DIR = Path.home() / ".copilot" / "hooks"
+COPILOT_HOOKS_PATH = COPILOT_HOOKS_DIR / "agent-guard.json"
 
 # Managed (MDM / admin-deployed) config paths — OS-specific
 # Codex managed hooks use a requirements.toml file at a system location
@@ -76,14 +78,17 @@ if sys.platform == "darwin":
     CLAUDE_MANAGED_SETTINGS_PATH = Path("/Library/Application Support/ClaudeCode/managed-settings.json")
     CURSOR_MANAGED_HOOKS_PATH = Path("/Library/Application Support/Cursor/hooks.json")
     CODEX_MANAGED_HOOKS_PATH = Path("/etc/codex/requirements.toml")
+    COPILOT_MANAGED_HOOKS_PATH = Path("/etc/github-copilot/policy.d/agent-guard.json")
 elif sys.platform == "win32":
     CLAUDE_MANAGED_SETTINGS_PATH = Path("C:/Program Files/ClaudeCode/managed-settings.json")
     CURSOR_MANAGED_HOOKS_PATH = Path("C:/ProgramData/Cursor/hooks.json")
     CODEX_MANAGED_HOOKS_PATH = Path("C:/ProgramData/OpenAI/Codex/requirements.toml")
+    COPILOT_MANAGED_HOOKS_PATH = Path("C:/ProgramData/GitHub/Copilot/policy.d/agent-guard.json")
 else:  # Linux and others
     CLAUDE_MANAGED_SETTINGS_PATH = Path("/etc/claude-code/managed-settings.json")
     CURSOR_MANAGED_HOOKS_PATH = Path("/etc/cursor/hooks.json")
     CODEX_MANAGED_HOOKS_PATH = Path("/etc/codex/requirements.toml")
+    COPILOT_MANAGED_HOOKS_PATH = Path("/etc/github-copilot/policy.d/agent-guard.json")
 
 CLAUDE_HOOK_EVENTS = [
     "PreToolUse",
@@ -126,6 +131,17 @@ CURSOR_HOOK_EVENTS = [
     "sessionEnd",
     "subagentStart",
     "subagentStop",
+]
+
+COPILOT_HOOK_EVENTS = [
+    "SessionStart",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "PreCompact",
+    "SubagentStart",
+    "SubagentStop",
+    "Stop",
 ]
 
 # ---------------------------------------------------------------------------
@@ -438,6 +454,10 @@ def _prepare_client_config(
         prepared_config, hooks_diff, preserved = _prepare_cursor_config(
             command, config_path, discover_command=discover_command
         )
+    elif client == "github-copilot":
+        prepared_config, hooks_diff, preserved = _prepare_copilot_config(
+            command, config_path, discover_command=discover_command
+        )
     elif client == "codex":
         if _is_codex_requirements_toml(config_path):
             prepared_content, hooks_diff = _prepare_codex_managed_config(
@@ -454,6 +474,34 @@ def _prepare_client_config(
     return prepared_config, prepared_content, hooks_diff, preserved
 
 
+def _is_copilot_policy_path(path: Path) -> bool:
+    """Whether *path* is a Copilot policy (managed) config rather than a user-level one.
+
+    Keyed on the directory name rather than an equality check against
+    COPILOT_MANAGED_HOOKS_PATH so that a ``--file`` override pointing into a policy.d
+    directory is hardened too.
+    """
+    return path.parent.name == "policy.d"
+
+
+def _harden_policy_file(path: Path) -> None:
+    """Make a written file satisfy Copilot's policy-file requirements.
+
+    GitHub refuses to load a POSIX policy file that is group- or world-writable (and
+    requires root ownership, which follows from installing under sudo). The default
+    umask usually produces an acceptable mode already, but a permissive umask would
+    otherwise yield a silently ignored policy — so clear those bits explicitly rather
+    than depending on the caller's environment.
+    """
+    if IS_WINDOWS:
+        return
+    try:
+        mode = path.stat().st_mode
+        path.chmod(mode & ~(stat.S_IWGRP | stat.S_IWOTH))
+    except OSError as exc:
+        rich.print(f"[yellow]Warning:[/yellow] Could not tighten permissions on {path}: {exc}")
+
+
 def _write_client_config(
     client: str,
     config_path: Path,
@@ -468,7 +516,14 @@ def _write_client_config(
         assert prepared_content is not None
         return _write_codex_managed_config(prepared_content, config_path)
     assert prepared_config is not None
-    return _write_config(prepared_config, config_path, preserved)
+    changed = _write_config(prepared_config, config_path, preserved)
+    if _is_copilot_policy_path(config_path):
+        # Applied whether or not the config changed: an already-present file may have
+        # been written with a permissive umask, in which case Copilot ignores it.
+        _harden_policy_file(config_path)
+        for script in sorted(_hooks_dir(config_path).glob("snyk-agent-guard*")):
+            _harden_policy_file(script)
+    return changed
 
 
 def _detect_existing_install(client: str, config_path: Path) -> dict | None:
@@ -477,10 +532,18 @@ def _detect_existing_install(client: str, config_path: Path) -> dict | None:
         return _detect_claude_install(config_path)
     if client == "cursor":
         return _detect_cursor_install(config_path)
+    if client == "github-copilot":
+        return _detect_copilot_install(config_path)
     return _detect_codex_install(config_path)
 
 
 def _hooks_dir(config_path: Path) -> Path:
+    # Copilot's user-level config file already lives inside a directory literally named
+    # "hooks" (see COPILOT_HOOKS_DIR); avoid nesting another "hooks" folder inside it.
+    # The managed policy.d file does not, so the script lands in policy.d/hooks — a
+    # subdirectory, which Copilot's ``policy.d/*.json`` glob ignores.
+    if config_path.parent.name == "hooks":
+        return config_path.parent
     return config_path.parent / "hooks"
 
 
@@ -684,6 +747,45 @@ def _prepare_cursor_config(
     if discover_command:
         # Cursor sessionStart hooks are fire-and-forget without an explicit async marker.
         hooks["sessionStart"].append({"command": discover_command})
+
+    for event, entries in filtered.items():
+        if event not in hooks:
+            hooks[event] = entries
+
+    data["hooks"] = hooks
+    diff = _compute_hooks_diff(old_hooks, hooks)
+    return data, diff, preserved
+
+
+def _prepare_copilot_config(
+    command: str,
+    path: Path,
+    *,
+    discover_command: str | None = None,
+) -> tuple[dict, dict, int]:
+    """Build new GitHub Copilot hooks config and compute diff, without writing.
+
+    Returns (new_data, hooks_diff, preserved_count).
+    Copilot uses a flat hooks.json shape like Cursor's, but each entry needs an
+    explicit ``"type": "command"`` per its hooks schema. The same shape serves the
+    user-level file and the managed policy.d file; only the path differs.
+    """
+    data = _read_json_or_empty(path)
+    if "version" not in data:
+        data["version"] = 1
+    old_hooks = data.get("hooks", {})
+
+    filtered = _filter_cursor_hooks(old_hooks)
+    preserved = sum(len(filtered.get(event, [])) for event in COPILOT_HOOK_EVENTS)
+    hooks = {}
+
+    for event in COPILOT_HOOK_EVENTS:
+        existing = list(filtered.get(event, []))
+        existing.append({"type": "command", "command": command})
+        hooks[event] = existing
+
+    if discover_command:
+        hooks["SessionStart"].append({"type": "command", "command": discover_command})
 
     for event, entries in filtered.items():
         if event not in hooks:
@@ -959,7 +1061,7 @@ def _uninstall_single_client(client: str, args, managed: bool) -> None:
     elif client in ALL_CLIENTS:
         _uninstall_hooks(
             config_path,
-            filter_hooks=_filter_cursor_hooks if client == "cursor" else _filter_claude_hooks,
+            filter_hooks=_filter_cursor_hooks if client in ("cursor", "github-copilot") else _filter_claude_hooks,
             prune_empty_hooks=client != "cursor",
         )
 
@@ -1033,6 +1135,7 @@ def _run_status() -> None:
         ("Claude Code", CLAUDE_SETTINGS_PATH, CLAUDE_MANAGED_SETTINGS_PATH, _detect_claude_install),
         ("Cursor", CURSOR_HOOKS_PATH, CURSOR_MANAGED_HOOKS_PATH, _detect_cursor_install),
         ("Codex", CODEX_HOOKS_PATH, CODEX_MANAGED_HOOKS_PATH, _detect_codex_install),
+        ("GitHub Copilot", COPILOT_HOOKS_PATH, COPILOT_MANAGED_HOOKS_PATH, _detect_copilot_install),
     )
 
     rich.print("[bold]User-level hooks:[/bold]")
@@ -1100,6 +1203,10 @@ def _detect_codex_install(path: Path = CODEX_HOOKS_PATH) -> dict | None:
 
 def _detect_cursor_install(path: Path = CURSOR_HOOKS_PATH) -> dict | None:
     return _detect_install(path, CURSOR_HOOK_EVENTS, _flat_hook_commands)
+
+
+def _detect_copilot_install(path: Path = COPILOT_HOOKS_PATH) -> dict | None:
+    return _detect_install(path, COPILOT_HOOK_EVENTS, _flat_hook_commands)
 
 
 def _grouped_hook_commands(group: dict) -> Iterable[str]:
@@ -1487,14 +1594,25 @@ def _extract_env_from_cmd(cmd: str, key: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-_CLIENT_LABELS = {"claude": "Claude Code", "cursor": "Cursor", "codex": "Codex"}
-_HOOK_CLIENT_NAMES = {"claude": "claude-code", "cursor": "cursor", "codex": "codex"}
+_CLIENT_LABELS = {
+    "claude": "Claude Code",
+    "cursor": "Cursor",
+    "codex": "Codex",
+    "github-copilot": "GitHub Copilot",
+}
+_HOOK_CLIENT_NAMES = {
+    "claude": "claude-code",
+    "cursor": "cursor",
+    "codex": "codex",
+    "github-copilot": "github-copilot",
+}
 
 
 _CLIENT_INSTALL_PATHS = {
     "claude": Path.home() / ".claude",
     "cursor": Path.home() / ".cursor",
     "codex": Path.home() / ".codex",
+    "github-copilot": Path.home() / ".copilot",
 }
 
 
@@ -1527,11 +1645,15 @@ def _config_path(client: str, override: str | None = None, managed: bool = False
             return CLAUDE_MANAGED_SETTINGS_PATH
         if client == "cursor":
             return CURSOR_MANAGED_HOOKS_PATH
+        if client == "github-copilot":
+            return COPILOT_MANAGED_HOOKS_PATH
         return CODEX_MANAGED_HOOKS_PATH
     if client == "claude":
         return CLAUDE_SETTINGS_PATH
     if client == "cursor":
         return CURSOR_HOOKS_PATH
+    if client == "github-copilot":
+        return COPILOT_HOOKS_PATH
     return CODEX_HOOKS_PATH
 
 
