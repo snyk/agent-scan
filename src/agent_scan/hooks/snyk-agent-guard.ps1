@@ -118,7 +118,12 @@ $xUser = '{{"hostname":"{0}","username":"{1}","identifier":"{2}","cli_version":"
 # the inherited environment identifies them). Empty when the sender isn't Copilot, in
 # which case the header is omitted and agent-monitor falls back to its non-Copilot
 # agent name.
-$agentSurface = if ($env:AI_AGENT -eq "github_copilot_vscode_agent") {
+# Only reported for the Copilot client: these variables describe the environment rather
+# than the caller and are inherited, so another agent running inside a Copilot session
+# would otherwise claim a Copilot surface.
+$agentSurface = if ($Client -ne "github-copilot") {
+    ""
+} elseif ($env:AI_AGENT -eq "github_copilot_vscode_agent") {
     "copilot-vscode"
 } elseif ($env:AI_AGENT -like "github_copilot_*" -or $env:COPILOT_CLI) {
     "copilot"

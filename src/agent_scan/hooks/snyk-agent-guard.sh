@@ -83,7 +83,12 @@ get_username() {
 #   AI_AGENT=github_copilot_app_agent     -> Copilot desktop app    ("copilot")
 #   COPILOT_CLI set, no AI_AGENT          -> Copilot CLI            ("copilot")
 #
+# Only reported for the Copilot client: these variables describe the environment rather
+# than the caller and are inherited, so another agent running inside a Copilot session
+# would otherwise claim a Copilot surface.
 get_agent_surface() {
+  local client=${1:-}
+  [[ "$client" == "github-copilot" ]] || return 0
   if [[ "${AI_AGENT:-}" == "github_copilot_vscode_agent" ]]; then
     printf '%s' "copilot-vscode"
   elif [[ "${AI_AGENT:-}" == github_copilot_* || -n "${COPILOT_CLI:-}" ]]; then
@@ -164,7 +169,7 @@ hook_main() {
   marker="__SNYK_AGENT_SCAN_HOOK_HTTP_CODE__="
 
   local agent_surface
-  agent_surface="$(get_agent_surface)"
+  agent_surface="$(get_agent_surface "$client")"
 
   local -a curl_args
   curl_args=(

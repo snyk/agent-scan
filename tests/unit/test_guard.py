@@ -3533,6 +3533,40 @@ class TestBashHookScript:
         assert result.returncode == 0, result.stderr
         assert "/hidden/agent-monitor/hooks/github-copilot" in _HookHandler.last_request["path"]
 
+    @pytest.mark.parametrize(
+        ("client", "expected_surface"),
+        [
+            ("github-copilot", "copilot-vscode"),
+            # A Copilot-looking environment must not make another client's hook claim a
+            # Copilot surface: these variables are inherited, so running any agent from a
+            # shell a Copilot session spawned sets them, while the hook that fired belongs
+            # to whichever config invoked the script.
+            ("claude-code", None),
+            ("cursor", None),
+            ("codex", None),
+        ],
+    )
+    def test_surface_header_is_scoped_to_the_copilot_client(self, hook_server, client, expected_surface):
+        script = _get_script_path("snyk-agent-guard.sh")
+        result = subprocess.run(
+            ["bash", str(script), "--client", client],
+            input='{"hookEventName":"PreToolUse","sessionId":"s1"}',
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={
+                "PATH": "/usr/bin:/bin:/usr/local/bin",
+                "PUSH_KEY": "test-pk-surface",
+                "REMOTE_HOOKS_BASE_URL": hook_server,
+                "MACHINE_ID": "machine-42",
+                "AI_AGENT": "github_copilot_vscode_agent",
+                "COPILOT_CLI": "1",
+            },
+        )
+        assert result.returncode == 0, result.stderr
+        headers = _HookHandler.last_request["headers"]
+        assert headers.get("X-Agent-Surface") == expected_surface
+
     def test_response_body_is_forwarded_unchanged(self, hook_server):
         """The script is a pass-through: agent-monitor's body reaches the agent verbatim."""
         script = _get_script_path("snyk-agent-guard.sh")
