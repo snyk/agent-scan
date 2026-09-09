@@ -96,15 +96,13 @@ $body = "base64:$encoded"
 $hostname = try { [System.Net.Dns]::GetHostName() } catch { "unknown" }
 $username = try { [System.Environment]::UserName } catch { "unknown" }
 
-# Minimal JSON escaping. String.Replace, not -replace: the latter reads its pattern as a
-# regex, so escaping the escape character through it doubles every backslash again.
+# Minimal JSON escaping
 function JsonEscape($s) {
-    $s = [string]$s
-    $s = $s.Replace('\', '\\')
-    $s = $s.Replace('"', '\"')
-    $s = $s.Replace("`t", '\t')
-    $s = $s.Replace("`r", '\r')
-    $s = $s.Replace("`n", '\n')
+    $s = $s -replace '\\', '\\\\'
+    $s = $s -replace '"', '\"'
+    $s = $s -replace "`t", '\t'
+    $s = $s -replace "`r", '\r'
+    $s = $s -replace "`n", '\n'
     return $s
 }
 

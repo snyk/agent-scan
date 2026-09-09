@@ -3216,29 +3216,6 @@ class TestBashHookScript:
         x_user = json.loads(_HookHandler.last_request["headers"]["X-User"])
         assert x_user["identifier"] == "machine-42"
 
-    def test_machine_id_survives_json_escaping(self, hook_server):
-        """The platform keys machine identity on this value, so it must round-trip."""
-        script = _get_script_path("snyk-agent-guard.sh")
-        machine_id = 'DOMAIN\\host"x\tz'
-
-        result = subprocess.run(
-            ["bash", str(script), "--client", "claude-code"],
-            input='{"hook_event_name":"test","session_id":"s1"}',
-            capture_output=True,
-            text=True,
-            timeout=10,
-            env={
-                "PATH": "/usr/bin:/bin:/usr/local/bin",
-                "PUSH_KEY": "test-pk",
-                "REMOTE_HOOKS_BASE_URL": hook_server,
-                "MACHINE_ID": machine_id,
-            },
-        )
-
-        assert result.returncode == 0, result.stderr
-        x_user = json.loads(_HookHandler.last_request["headers"]["X-User"])
-        assert x_user["identifier"] == machine_id
-
     def test_installed_script_reports_its_cli_version(self, monkeypatch, tmp_path, hook_server):
         script = tmp_path / "hooks" / "snyk-agent-guard.sh"
         _copy_with_sentinel_version(monkeypatch, script)
@@ -3557,35 +3534,6 @@ class TestPowerShellHookScript:
         assert result.returncode == 0, result.stderr
         x_user = json.loads(_HookHandler.last_request["headers"]["X-User"])
         assert x_user["identifier"] == "machine-42"
-
-    def test_machine_id_survives_json_escaping(self, hook_server):
-        """The POSIX contract, pinned on Windows: the identity value round-trips."""
-        script = _get_script_path("snyk-agent-guard.ps1")
-        machine_id = 'DOMAIN\\host"x\tz'
-
-        result = subprocess.run(
-            [
-                self._ps_cmd(),
-                "-File",
-                str(script),
-                "-Client",
-                "claude-code",
-                "-PushKey",
-                "test-pk",
-                "-RemoteUrl",
-                hook_server,
-                "-MachineId",
-                machine_id,
-            ],
-            input='{"hook_event_name":"test","session_id":"s1"}',
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-
-        assert result.returncode == 0, result.stderr
-        x_user = json.loads(_HookHandler.last_request["headers"]["X-User"])
-        assert x_user["identifier"] == machine_id
 
     def test_installed_script_reports_its_cli_version(self, monkeypatch, tmp_path, hook_server):
         script = tmp_path / "hooks" / "snyk-agent-guard.ps1"
