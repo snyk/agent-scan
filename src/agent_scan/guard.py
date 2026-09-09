@@ -135,9 +135,11 @@ CURSOR_HOOK_EVENTS = [
 
 COPILOT_HOOK_EVENTS = [
     "SessionStart",
+    "SessionEnd",
     "UserPromptSubmit",
     "PreToolUse",
     "PostToolUse",
+    "PostToolUseFailure",
     "PreCompact",
     "SubagentStart",
     "SubagentStop",
