@@ -2906,19 +2906,42 @@ class TestCodexManagedRequirementsToml:
 _AGENT_MONITOR_CLI_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$")
 
 _FORWARDER_SCRIPTS = ("snyk-agent-guard.sh", "snyk-agent-guard.ps1")
+_TRAMPOLINE_SCRIPTS = ("snyk-agent-guard-discover.sh", "snyk-agent-guard-discover.ps1")
 
-# Both scripts fence their install-time variables with these markers. Only the tests read
-# them -- install substitutes over the whole file -- so they live here rather than in
-# guard.py, where they would be a constant nothing in the product uses.
-_SECTION_BEGIN = "# --- BEGIN install-time variables ---"
-_SECTION_END = "# --- END install-time variables ---"
+_SECTION_BEGIN = guard_module._SECTION_BEGIN.decode()
+_SECTION_END = guard_module._SECTION_END.decode()
+
+_PLACEHOLDER_RE = re.compile(r"__[A-Za-z0-9_]+__")
+
+
+def _split_on_section(text: str) -> tuple[str, str, str]:
+    """Split *text* around the install-time variables markers into head, body, tail."""
+    assert _SECTION_BEGIN in text
+    assert _SECTION_END in text
+    head, rest = text.split(_SECTION_BEGIN, 1)
+    section, tail = rest.split(_SECTION_END, 1)
+    return head, section, tail
 
 
 def _variables_section(text: str) -> str:
     """Return the body between the scripts' install-time variables markers."""
-    assert _SECTION_BEGIN in text
-    assert _SECTION_END in text
-    return text.split(_SECTION_BEGIN, 1)[1].split(_SECTION_END, 1)[0]
+    return _split_on_section(text)[1]
+
+
+# ``version_info`` is "unknown" wherever the distribution metadata is unresolvable, which
+# is also what the scripts report for a placeholder install never filled in. Asserting a
+# sentinel instead keeps the installed/uninstalled pair apart in such an environment.
+_SENTINEL_VERSION = "9.9.9-test"
+
+
+def _copy_with_sentinel_version(monkeypatch, dest: Path) -> None:
+    """Install *dest* carrying a version no fallback could have produced."""
+    monkeypatch.setattr(
+        guard_module,
+        "_hook_script_variables",
+        lambda: {b"__AGENT_SCAN_VERSION__": _SENTINEL_VERSION.encode()},
+    )
+    guard_module._copy_hook_script(dest)
 
 
 class TestHookScriptInstallTimeVariables:
@@ -2939,17 +2962,137 @@ class TestHookScriptInstallTimeVariables:
         assert f'"{version_info}"' in section
         # A placeholder left unsubstituted travels to the platform as a literal, so the
         # rendered section must hold no `__NAME__` -- including variables added later.
-        assert not re.search(r"__[A-Za-z0-9_]+__", section)
+        assert not _PLACEHOLDER_RE.search(section)
+
+    @pytest.mark.parametrize("name", _FORWARDER_SCRIPTS)
+    def test_copy_leaves_everything_outside_the_section_untouched(self, tmp_path, name):
+        """Install rewrites the section and nothing else.
+
+        The scripts hold `__NAME__`-shaped literals outside the section -- the fallbacks
+        below, and the sh script's curl status marker. A substitution that reached them
+        would silently change what the script does.
+        """
+        dest = tmp_path / "hooks" / name
+        guard_module._copy_hook_script(dest)
+
+        bundled_head, _, bundled_tail = _split_on_section(_get_script_path(name).read_text())
+        head, _, tail = _split_on_section(dest.read_text())
+
+        assert (head, tail) == (bundled_head, bundled_tail)
 
     @pytest.mark.parametrize("name", _FORWARDER_SCRIPTS)
     def test_every_placeholder_in_the_section_has_a_substitution(self, name):
         section = _variables_section(_get_script_path(name).read_text())
 
-        declared = set(re.findall(r"__[A-Za-z0-9_]+__", section))
+        declared = set(_PLACEHOLDER_RE.findall(section))
         assert declared == {key.decode() for key in guard_module._hook_script_variables()}
 
-    def test_emitted_version_matches_the_shape_agent_monitor_accepts(self):
-        assert _AGENT_MONITOR_CLI_VERSION_RE.fullmatch(version_info)
+    @pytest.mark.parametrize("name", _FORWARDER_SCRIPTS)
+    def test_every_placeholder_has_a_fallback_outside_the_section(self, name):
+        """Each script scrubs a variable install never filled in.
+
+        The comparison is against the literal placeholder, so it has to sit outside the
+        section: substituting over it would rewrite the very literal it tests for.
+        """
+        head, _, tail = _split_on_section(_get_script_path(name).read_text())
+
+        for placeholder in guard_module._hook_script_variables():
+            assert placeholder.decode() in head + tail
+
+
+class TestHookScriptVariableSubstitution:
+    """What install writes into the section is checked before it lands."""
+
+    _SCRIPT = b"".join(
+        (
+            b'head "__X__"\n',
+            guard_module._SECTION_BEGIN,
+            b'\nV="__X__"\n',
+            guard_module._SECTION_END,
+            b'\ntail "__X__"\n',
+        )
+    )
+
+    # Shapes a release can plausibly produce, all inert inside the double-quoted shell
+    # literal they land in.
+    _ACCEPTED = ("0.6.2", "0.6.2+g1234f00", "1.2.3.dev0", "unknown", "1")
+
+    # Values that would break the rendered script, execute at hook time, or reach the
+    # platform as something it drops.
+    _REJECTED = (
+        "",
+        '0.6.2"; id; x="',
+        "$(id)",
+        "`id`",
+        "back\\slash",
+        "two\nlines",
+        "with space",
+        "1!2.0",
+        "_leading",
+        "a" * 65,
+    )
+
+    @pytest.mark.parametrize("value", _ACCEPTED)
+    def test_accepts_a_release_shaped_value(self, monkeypatch, value):
+        monkeypatch.setattr(guard_module, "_hook_script_variables", lambda: {b"__X__": value.encode()})
+
+        rendered = guard_module._substitute_hook_script_variables(self._SCRIPT)
+
+        assert f'V="{value}"'.encode() in rendered
+        # Both consumers have to accept it: the shell that parses the script, and
+        # agent-monitor, which degrades anything outside its shape to "unknown".
+        assert _AGENT_MONITOR_CLI_VERSION_RE.fullmatch(value)
+
+    @pytest.mark.parametrize("value", _REJECTED)
+    def test_rejects_a_value_the_shell_or_the_platform_would_mangle(self, monkeypatch, value):
+        monkeypatch.setattr(guard_module, "_hook_script_variables", lambda: {b"__X__": value.encode()})
+
+        with pytest.raises(ValueError, match="install-time"):
+            guard_module._substitute_hook_script_variables(self._SCRIPT)
+
+        assert not _AGENT_MONITOR_CLI_VERSION_RE.fullmatch(value)
+
+    def test_rejects_a_placeholder_the_scripts_could_not_declare(self, monkeypatch):
+        """A name outside `__NAME__` is one the section tests above would not find."""
+        monkeypatch.setattr(guard_module, "_hook_script_variables", lambda: {b"__PUSH-KEY__": b"0.6.2"})
+
+        with pytest.raises(ValueError, match="install-time"):
+            guard_module._substitute_hook_script_variables(self._SCRIPT)
+
+    def test_substitutes_only_inside_the_section(self, monkeypatch):
+        monkeypatch.setattr(guard_module, "_hook_script_variables", lambda: {b"__X__": b"0.6.2"})
+
+        rendered = guard_module._substitute_hook_script_variables(self._SCRIPT)
+
+        assert rendered.count(b"__X__") == 2
+        assert rendered.startswith(b'head "__X__"\n')
+        assert rendered.endswith(b'tail "__X__"\n')
+
+    @pytest.mark.parametrize("content", [_SCRIPT.split(_SECTION_END.encode())[0], guard_module._SECTION_END])
+    def test_a_half_declared_section_fails_loudly(self, content):
+        with pytest.raises(ValueError, match="install-time"):
+            guard_module._substitute_hook_script_variables(content)
+
+    def test_the_shipped_variables_are_the_cli_version(self):
+        """The sentinel-driven tests prove the plumbing; this pins what actually ships."""
+        assert guard_module._hook_script_variables() == {b"__AGENT_SCAN_VERSION__": version_info.encode()}
+
+    @pytest.mark.parametrize("name", _TRAMPOLINE_SCRIPTS)
+    def test_trampolines_carry_no_install_time_variables(self, tmp_path, name):
+        """The trampolines exec the CLI, which reports its own version directly.
+
+        They declare no section, so install has nothing to fill in and copies them
+        verbatim. A variable one of them ever needs has to be declared here first.
+        """
+        bundled = _get_script_path(name).read_bytes()
+        assert guard_module._SECTION_BEGIN not in bundled
+        assert guard_module._SECTION_END not in bundled
+        assert not _PLACEHOLDER_RE.search(bundled.decode())
+
+        dest = tmp_path / "hooks" / name
+        guard_module._copy_hook_script(dest)
+
+        assert dest.read_bytes() == bundled
 
 
 @pytest.mark.skipif(IS_WINDOWS, reason="bash script; skipped on Windows")
@@ -3073,9 +3216,32 @@ class TestBashHookScript:
         x_user = json.loads(_HookHandler.last_request["headers"]["X-User"])
         assert x_user["identifier"] == "machine-42"
 
-    def test_installed_script_reports_its_cli_version(self, tmp_path, hook_server):
+    def test_machine_id_survives_json_escaping(self, hook_server):
+        """The platform keys machine identity on this value, so it must round-trip."""
+        script = _get_script_path("snyk-agent-guard.sh")
+        machine_id = 'DOMAIN\\host"x\tz'
+
+        result = subprocess.run(
+            ["bash", str(script), "--client", "claude-code"],
+            input='{"hook_event_name":"test","session_id":"s1"}',
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={
+                "PATH": "/usr/bin:/bin:/usr/local/bin",
+                "PUSH_KEY": "test-pk",
+                "REMOTE_HOOKS_BASE_URL": hook_server,
+                "MACHINE_ID": machine_id,
+            },
+        )
+
+        assert result.returncode == 0, result.stderr
+        x_user = json.loads(_HookHandler.last_request["headers"]["X-User"])
+        assert x_user["identifier"] == machine_id
+
+    def test_installed_script_reports_its_cli_version(self, monkeypatch, tmp_path, hook_server):
         script = tmp_path / "hooks" / "snyk-agent-guard.sh"
-        guard_module._copy_hook_script(script)
+        _copy_with_sentinel_version(monkeypatch, script)
 
         result = subprocess.run(
             ["bash", str(script), "--client", "claude-code"],
@@ -3093,15 +3259,11 @@ class TestBashHookScript:
 
         assert result.returncode == 0, result.stderr
         req = _HookHandler.last_request
-        assert json.loads(req["headers"]["X-User"])["cli_version"] == version_info
-        assert req["headers"]["User-Agent"].endswith(f"Agent Scan v{version_info}")
+        assert json.loads(req["headers"]["X-User"])["cli_version"] == _SENTINEL_VERSION
+        assert req["headers"]["User-Agent"].endswith(f"Agent Scan v{_SENTINEL_VERSION}")
 
     def test_uninstalled_script_reports_an_unknown_cli_version(self, hook_server):
-        """Run from the source tree the placeholder survives -- it must not reach the wire.
-
-        The same holds for a copy written by a CLI that predates a variable: agent-monitor
-        would reject the literal anyway, and an unparseable value is worse than ``unknown``.
-        """
+        """Run from the source tree the placeholder survives -- it must not reach the wire."""
         script = _get_script_path("snyk-agent-guard.sh")
 
         result = subprocess.run(
@@ -3396,9 +3558,38 @@ class TestPowerShellHookScript:
         x_user = json.loads(_HookHandler.last_request["headers"]["X-User"])
         assert x_user["identifier"] == "machine-42"
 
-    def test_installed_script_reports_its_cli_version(self, tmp_path, hook_server):
+    def test_machine_id_survives_json_escaping(self, hook_server):
+        """The POSIX contract, pinned on Windows: the identity value round-trips."""
+        script = _get_script_path("snyk-agent-guard.ps1")
+        machine_id = 'DOMAIN\\host"x\tz'
+
+        result = subprocess.run(
+            [
+                self._ps_cmd(),
+                "-File",
+                str(script),
+                "-Client",
+                "claude-code",
+                "-PushKey",
+                "test-pk",
+                "-RemoteUrl",
+                hook_server,
+                "-MachineId",
+                machine_id,
+            ],
+            input='{"hook_event_name":"test","session_id":"s1"}',
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+        assert result.returncode == 0, result.stderr
+        x_user = json.loads(_HookHandler.last_request["headers"]["X-User"])
+        assert x_user["identifier"] == machine_id
+
+    def test_installed_script_reports_its_cli_version(self, monkeypatch, tmp_path, hook_server):
         script = tmp_path / "hooks" / "snyk-agent-guard.ps1"
-        guard_module._copy_hook_script(script)
+        _copy_with_sentinel_version(monkeypatch, script)
 
         result = subprocess.run(
             [
@@ -3422,8 +3613,8 @@ class TestPowerShellHookScript:
 
         assert result.returncode == 0, result.stderr
         req = _HookHandler.last_request
-        assert json.loads(req["headers"]["X-User"])["cli_version"] == version_info
-        assert req["headers"]["User-Agent"].endswith(f"Agent Scan v{version_info}")
+        assert json.loads(req["headers"]["X-User"])["cli_version"] == _SENTINEL_VERSION
+        assert req["headers"]["User-Agent"].endswith(f"Agent Scan v{_SENTINEL_VERSION}")
 
     def test_uninstalled_script_reports_an_unknown_cli_version(self, hook_server):
         """The POSIX contract, pinned on Windows: an unsubstituted placeholder never ships."""

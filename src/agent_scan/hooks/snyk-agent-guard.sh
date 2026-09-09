@@ -45,13 +45,6 @@ json_quote() {
   printf '"%s"' "$(json_escape "${1:-}")"
 }
 
-script_var() {
-  case "${1-}" in
-    ""|__*__) printf '%s' "unknown" ;;
-    *) printf '%s' "$1" ;;
-  esac
-}
-
 get_hostname() {
   if [[ -n "${HOSTNAME:-}" ]]; then
     printf '%s' "$HOSTNAME"
@@ -100,7 +93,13 @@ hook_main() {
   [[ -n "${MACHINE_ID:-}" ]] || die "MACHINE_ID environment variable is not set"
 
   local cli_version user_agent
-  cli_version="$(script_var "$AGENT_SCAN_VERSION")"
+  cli_version="$AGENT_SCAN_VERSION"
+  # Only a copy install never filled in still holds the placeholder, and the literal must
+  # not reach the wire. This sits outside the variables section on purpose: substituting
+  # over it would rewrite the very literal it tests for.
+  if [[ "$cli_version" == "__AGENT_SCAN_VERSION__" ]]; then
+    cli_version="unknown"
+  fi
   user_agent="snyk/snyk-agent-guard.sh Agent Scan v${cli_version}"
 
   # Determine endpoint based on client

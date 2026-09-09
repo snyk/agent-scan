@@ -1764,12 +1764,29 @@ class _CopiedScript(NamedTuple):
     new_checksum: str
 
 
+# The forwarder scripts fence the values install fills in with these markers; the
+# discovery trampolines declare no section and are copied verbatim.
+_SECTION_BEGIN = b"# --- BEGIN install-time variables ---"
+_SECTION_END = b"# --- END install-time variables ---"
+
+# A name the scripts can declare and a reader can pick out of the section.
+_VARIABLE_NAME_RE = re.compile(rb"\A__[A-Za-z0-9_]+__\Z")
+
+# Deliberately agent-monitor's ``_CLI_VERSION_RE``
+# (src/agent_monitor/utils/guardrailing_context.py), which degrades anything else to
+# "unknown". A value the platform accepts is also inert inside the double-quoted bash and
+# PowerShell literals the placeholders sit in -- no quote, backslash, ``$``, backtick or
+# newline gets through -- so one check covers both consumers.
+_VARIABLE_VALUE_RE = re.compile(rb"\A[A-Za-z0-9][A-Za-z0-9._+-]{0,63}\Z")
+
+
 def _hook_script_variables() -> dict[bytes, bytes]:
     """Values substituted into the hook scripts' install-time variables section.
 
     Keyed by the ``__PLACEHOLDER__`` the scripts declare between their
     ``--- BEGIN/END install-time variables ---`` markers. To add a variable, add it here
-    and to the section in both snyk-agent-guard.sh and snyk-agent-guard.ps1.
+    and to the section in both snyk-agent-guard.sh and snyk-agent-guard.ps1; the discovery
+    trampolines carry none, as the CLI they exec reports its own version.
 
     Substituting at install time rather than passing the value through the client's hook
     config is deliberate: agent-monitor diffs the hook command strings between installs
@@ -1777,12 +1794,42 @@ def _hook_script_variables() -> dict[bytes, bytes]:
     would raise a finding on every machine on every upgrade. Script content is compared
     against what the previous install wrote, which tracks releases without complaint.
 
-    Every value must be the same for all machines on a given release, for the same
-    reason -- see the note in the scripts' variables section.
+    Every value must be the same for all machines on a given release: a per-machine value
+    would give every machine a different checksum for the same release, ruling out a
+    fleet-wide known-good.
     """
     from agent_scan.version import version_info
 
     return {b"__AGENT_SCAN_VERSION__": version_info.encode()}
+
+
+def _substitute_hook_script_variables(content: bytes) -> bytes:
+    """Fill in the install-time variables section of a bundled hook script.
+
+    Only the section is rewritten. Both forwarders compare their variables against the
+    literal placeholder to scrub a copy install never filled in, and the sh script keys
+    its curl status readback on a ``__NAME__``-shaped marker; substituting over the whole
+    file would rewrite those. A script that declares no section is returned unchanged.
+    """
+    variables = _hook_script_variables()
+    for placeholder, value in variables.items():
+        if not _VARIABLE_NAME_RE.match(placeholder):
+            raise ValueError(f"Malformed install-time variable name: {placeholder!r}")
+        if not _VARIABLE_VALUE_RE.match(value):
+            raise ValueError(f"Unusable install-time variable value for {placeholder!r}: {value!r}")
+
+    begin = content.find(_SECTION_BEGIN)
+    end = content.find(_SECTION_END)
+    if begin < 0 and end < 0:
+        return content
+    if begin < 0 or end < begin:
+        raise ValueError("Hook script declares a malformed install-time variables section")
+
+    start = begin + len(_SECTION_BEGIN)
+    section = content[start:end]
+    for placeholder, value in variables.items():
+        section = section.replace(placeholder, value)
+    return content[:start] + section + content[end:]
 
 
 def _copy_hook_script(dest: Path) -> _CopiedScript:
@@ -1794,9 +1841,7 @@ def _copy_hook_script(dest: Path) -> _CopiedScript:
     dest.parent.mkdir(parents=True, exist_ok=True)
 
     source = importlib_resources.files("agent_scan.hooks").joinpath(dest.name)
-    new_content = source.read_bytes()
-    for placeholder, value in _hook_script_variables().items():
-        new_content = new_content.replace(placeholder, value)
+    new_content = _substitute_hook_script_variables(source.read_bytes())
     new_checksum = hashlib.sha256(new_content).hexdigest()
 
     current_content = dest.read_bytes() if dest.exists() else None

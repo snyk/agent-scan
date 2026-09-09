@@ -34,11 +34,6 @@ $VERSION = "2025-11-11"
 $AGENT_SCAN_VERSION = "__AGENT_SCAN_VERSION__"
 # --- END install-time variables ---
 
-function Get-ScriptVar($value) {
-    if (-not $value -or $value -match '^__[A-Za-z0-9_]+__$') { return "unknown" }
-    return $value
-}
-
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -74,7 +69,13 @@ switch ($Client) {
     }
 }
 
-$cliVersion = Get-ScriptVar $AGENT_SCAN_VERSION
+$cliVersion = $AGENT_SCAN_VERSION
+# Only a copy install never filled in still holds the placeholder, and the literal must
+# not reach the wire. This sits outside the variables section on purpose: substituting
+# over it would rewrite the very literal it tests for.
+if ($cliVersion -eq '__AGENT_SCAN_VERSION__') {
+    $cliVersion = "unknown"
+}
 $userAgent = "snyk/snyk-agent-guard.ps1 Agent Scan v$cliVersion"
 $url = "${RemoteUrl}${endpoint}?version=$VERSION"
 
@@ -95,13 +96,15 @@ $body = "base64:$encoded"
 $hostname = try { [System.Net.Dns]::GetHostName() } catch { "unknown" }
 $username = try { [System.Environment]::UserName } catch { "unknown" }
 
-# Minimal JSON escaping
+# Minimal JSON escaping. String.Replace, not -replace: the latter reads its pattern as a
+# regex, so escaping the escape character through it doubles every backslash again.
 function JsonEscape($s) {
-    $s = $s -replace '\\', '\\\\'
-    $s = $s -replace '"', '\"'
-    $s = $s -replace "`t", '\t'
-    $s = $s -replace "`r", '\r'
-    $s = $s -replace "`n", '\n'
+    $s = [string]$s
+    $s = $s.Replace('\', '\\')
+    $s = $s.Replace('"', '\"')
+    $s = $s.Replace("`t", '\t')
+    $s = $s.Replace("`r", '\r')
+    $s = $s.Replace("`n", '\n')
     return $s
 }
 
