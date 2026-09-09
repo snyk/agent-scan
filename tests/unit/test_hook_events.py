@@ -114,6 +114,28 @@ def test_reports_the_agent_surface_from_the_environment(env, expected_surface):
     assert headers.get("X-Agent-Surface") == expected_surface
 
 
+@pytest.mark.parametrize("client", ["claude-code", "cursor", "codex"])
+def test_other_clients_never_claim_a_copilot_surface(client):
+    """The env describes the environment, not the caller, and it is inherited.
+
+    Run another agent from a shell a Copilot session spawned and its hooks see AI_AGENT
+    and COPILOT_CLI too — but the hook that fired belongs to whichever config invoked us,
+    so only the Copilot client may report a surface.
+    """
+    session = _FakeSession()
+    copilot_env = {"AI_AGENT": "github_copilot_vscode_agent", "COPILOT_CLI": "1"}
+
+    with (
+        patch.dict(os.environ, copilot_env, clear=True),
+        patch("agent_scan.hook_events.get_hostname", return_value="host-1"),
+        patch("agent_scan.hook_events.get_username", return_value="user-1"),
+        _patch_session(session),
+    ):
+        send_hook_event("https://api.snyk.io", client, "push-key", "{}", "machine-1")
+
+    assert "X-Agent-Surface" not in session.posts[0]["headers"]
+
+
 @pytest.mark.parametrize(
     "base_url, expected_base_url",
     [
