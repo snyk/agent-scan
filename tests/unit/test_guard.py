@@ -6469,6 +6469,31 @@ class TestRunInstallSkipsUninstalledClients:
         out = capsys.readouterr().out
         assert "not installed" in out.lower()
 
+    @pytest.mark.parametrize("client", ["claude", "codex", "all"])
+    @patch("agent_scan.guard._install_hooks")
+    @patch("agent_scan.guard.mint_push_key", return_value="minted-pk")
+    @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
+    def test_managed_install_ignores_the_invoking_users_home(
+        self, mock_fetch, mock_mint, mock_install, tmp_path, monkeypatch, capsys, client
+    ):
+        """A managed destination is system-wide, so the invoking account's home is irrelevant."""
+        monkeypatch.delenv("PUSH_KEY", raising=False)
+        monkeypatch.setenv("SNYK_TOKEN", "tok")
+        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, [])):
+            _run_install(
+                SimpleNamespace(
+                    client=client,
+                    url="https://api.snyk.io",
+                    tenant_id="tid-1",
+                    file=None,
+                    managed=True,
+                )
+            )
+        assert mock_install.called, "managed install was skipped"
+        out = capsys.readouterr().out
+        assert "not installed" not in out.lower()
+        assert "nothing to install" not in out.lower()
+
     @patch("agent_scan.guard._install_hooks")
     @patch("agent_scan.guard.mint_push_key", return_value="minted-pk")
     @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)

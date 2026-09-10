@@ -232,8 +232,10 @@ def _run_install(args) -> None:
         sys.exit(1)
 
     # Filter out clients whose agent is not installed on this machine.
-    # Skip this check when --file is explicitly provided (the caller knows where to write).
-    if not getattr(args, "file", None):
+    # Skipped when --file is explicitly provided (the caller knows where to write), and
+    # when --managed is requested: a managed install writes to a system-wide path that
+    # does not depend on the invoking account's home directory.
+    if not getattr(args, "file", None) and not managed:
         skipped = [c for c in clients if not _is_client_installed(c)]
         clients = [c for c in clients if _is_client_installed(c)]
         for c in skipped:
