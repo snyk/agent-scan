@@ -171,6 +171,22 @@ def _redaction_marker(plugin_name: str) -> str:
     return f"**REDACTED_SECRET_{plugin_name.upper()}**"
 
 
+_BEARER_TOKEN_RE = re.compile(r"bearer\s+[\w.\-~+/]+=*", re.IGNORECASE)
+
+
+def redact_bearer_tokens(text: str | None) -> str | None:
+    """Replace ``Bearer <token>`` values with the redaction marker.
+
+    OAuth access tokens are applied at the HTTP transport layer and do not reach
+    the captured MCP protocol messages, so this is defense-in-depth for the
+    ``server_output`` (and traceback) uploaded on errors — a 401 dump is the one
+    place a bearer token could plausibly surface.
+    """
+    if not text:
+        return text
+    return _BEARER_TOKEN_RE.sub(f"Bearer {REDACTED}", text)
+
+
 def redact_absolute_paths(text: str | None) -> str | None:
     """
     Redact all absolute file paths in a string.
@@ -735,14 +751,17 @@ def redact_text(text: str | None) -> str | None:
 def redact_error_text(text: str | None) -> str | None:
     """Redact a traceback or captured server output string.
 
-    These fields are diagnostic noise, not user content, so both absolute
-    paths and secret-shaped values are stripped: a traceback can embed a
-    local filesystem layout, and captured protocol traffic / stderr
+    These fields are diagnostic noise, not user content, so absolute paths,
+    secret-shaped values, and bearer tokens are all stripped: a traceback can
+    embed a local filesystem layout, and captured protocol traffic / stderr
     (``server_output``) can echo back a header, token, or other secret a
-    misbehaving server included in its response. Paths are stripped first
-    so the subsequent detect-secrets pass runs over already-shortened text.
+    misbehaving server included in its response -- a 401 dump is the one place
+    an OAuth bearer token could plausibly surface, since tokens are applied at
+    the HTTP transport layer and don't otherwise reach captured MCP protocol
+    messages. Paths are stripped first so the subsequent detect-secrets pass
+    runs over already-shortened text.
     """
-    return redact_text(redact_absolute_paths(text))
+    return redact_bearer_tokens(redact_text(redact_absolute_paths(text)))
 
 
 def redact_server_config(server: StdioServer | RemoteServer) -> StdioServer | RemoteServer:

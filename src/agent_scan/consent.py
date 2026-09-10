@@ -18,6 +18,7 @@ from agent_scan.models import (
     StdioServer,
     UnknownConfigFormat,
 )
+from agent_scan.utils import _ENV_VAR_PATTERN
 
 # The consent UI is diagnostic chrome, not scan output, so it is rendered on stderr.
 _stderr_console = Console(stderr=True)
@@ -29,10 +30,20 @@ def _render_command(server: StdioServer) -> str:
 
 
 def _render_env_redacted(server: StdioServer) -> str | None:
-    """Render env as ``KEY=***``. Values are never echoed back to the terminal."""
+    """Render env as ``KEY=***``, except a value that is exactly one ``${NAME}``
+    placeholder, which is rendered literally -- the placeholder itself is a
+    variable reference, not a secret, so showing it discloses which of the
+    user's own environment variables the server is about to read.
+    """
     if not server.env:
         return None
-    return ", ".join(f"{k}=***" for k in sorted(server.env.keys()))
+    parts = []
+    for k, v in sorted(server.env.items()):
+        if _ENV_VAR_PATTERN.fullmatch(v):
+            parts.append(f"{k}={v}")
+        else:
+            parts.append(f"{k}=***")
+    return ", ".join(parts)
 
 
 def _read_yes_no(prompt: str) -> bool:

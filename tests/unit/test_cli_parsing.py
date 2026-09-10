@@ -840,3 +840,64 @@ class TestControlServerUploadIntegration:
             analyze_args = mock_pipeline.call_args[0][1]
             assert push_args.skip_ssl_verify is True
             assert analyze_args.skip_ssl_verify is True
+
+
+class TestTargetArgumentParsing:
+    """add_target_arguments defines the shared --server/--url/--server-type surface.
+
+    Exercised against a bare parser because cli.main() builds its parser inline
+    and does not expose it for construction in isolation.
+    """
+
+    @staticmethod
+    def _parser(*, positional, include_type):
+        import argparse
+
+        from agent_scan.cli import add_target_arguments
+
+        parser = argparse.ArgumentParser(prog="test")
+        add_target_arguments(parser, positional=positional, include_type=include_type)
+        return parser
+
+    def test_scan_style_uses_flags_and_exposes_server_type(self):
+        args = self._parser(positional=False, include_type=True).parse_args(
+            ["--server", "snyk", "--server-type", "http"]
+        )
+
+        assert args.server == "snyk"
+        assert args.server_type == "http"
+
+    def test_url_and_server_may_be_combined(self):
+        """--url is the target; --server is only the display name, matching mcp-auth."""
+        args = self._parser(positional=False, include_type=True).parse_args(
+            ["--url", "https://a.test/mcp", "--server", "label"]
+        )
+
+        assert args.url == "https://a.test/mcp"
+        assert args.server == "label"
+
+    def test_defaults_are_none_so_ordinary_scans_are_unaffected(self):
+        args = self._parser(positional=False, include_type=True).parse_args([])
+
+        assert args.server is None
+        assert args.url is None
+        assert args.server_type is None
+
+    def test_unknown_transport_is_rejected(self):
+        with pytest.raises(SystemExit):
+            self._parser(positional=False, include_type=True).parse_args(["--server-type", "websocket"])
+
+    def test_mcp_auth_style_takes_the_server_name_positionally(self):
+        args = self._parser(positional=True, include_type=False).parse_args(["MY_SERVER", "--url", "https://a.test"])
+
+        assert args.server == "MY_SERVER"
+        assert args.url == "https://a.test"
+
+    def test_mcp_auth_style_omits_server_type(self):
+        with pytest.raises(SystemExit):
+            self._parser(positional=True, include_type=False).parse_args(["MY_SERVER", "--server-type", "http"])
+
+    def test_mcp_auth_server_name_stays_optional(self):
+        args = self._parser(positional=True, include_type=False).parse_args([])
+
+        assert args.server is None
