@@ -777,17 +777,17 @@ def _prepare_copilot_config(
         data["version"] = 1
     old_hooks = data.get("hooks", {})
 
-    filtered = _filter_cursor_hooks(old_hooks)
+    filtered = _filter_copilot_hooks(old_hooks)
     preserved = sum(len(filtered.get(event, [])) for event in COPILOT_HOOK_EVENTS)
     hooks = {}
 
     for event in COPILOT_HOOK_EVENTS:
         existing = list(filtered.get(event, []))
-        existing.append({"type": "command", "command": command})
+        existing.append(_copilot_command_entry(command))
         hooks[event] = existing
 
     if discover_command:
-        hooks["SessionStart"].append({"type": "command", "command": discover_command})
+        hooks["SessionStart"].append(_copilot_command_entry(discover_command))
 
     for event, entries in filtered.items():
         if event not in hooks:
@@ -1063,7 +1063,7 @@ def _uninstall_single_client(client: str, args, managed: bool) -> None:
     elif client in ALL_CLIENTS:
         _uninstall_hooks(
             config_path,
-            filter_hooks=_filter_cursor_hooks if client in ("cursor", "github-copilot") else _filter_claude_hooks,
+            filter_hooks=_uninstall_filter_for(client),
             prune_empty_hooks=client != "cursor",
         )
 
@@ -1208,7 +1208,7 @@ def _detect_cursor_install(path: Path = CURSOR_HOOKS_PATH) -> dict | None:
 
 
 def _detect_copilot_install(path: Path = COPILOT_HOOKS_PATH) -> dict | None:
-    return _detect_install(path, COPILOT_HOOK_EVENTS, _flat_hook_commands)
+    return _detect_install(path, COPILOT_HOOK_EVENTS, _copilot_hook_commands)
 
 
 def _grouped_hook_commands(group: dict) -> Iterable[str]:
@@ -1472,14 +1472,28 @@ def _normalize_push_keys(value: object) -> object:
     return value
 
 
+def _uninstall_filter_for(client: str) -> Callable[[dict], dict]:
+    """The hook filter that recognises *client*'s own entry shape."""
+    if client == "github-copilot":
+        return _filter_copilot_hooks
+    if client == "cursor":
+        return _filter_cursor_hooks
+    return _filter_claude_hooks
+
+
 def _extract_guard_hooks(entries: list) -> list:
-    """Extract only guard (agent-scan) hooks from a list of hook entries/groups."""
+    """Extract only guard (agent-scan) hooks from a list of hook entries/groups.
+
+    Flat entries are matched under any of the script keys a client may use, so a Copilot
+    diff sees our hooks whichever form they were written in. Clients that only ever use
+    `command` are unaffected — the extra keys are simply absent.
+    """
     result = []
     for item in entries:
         if isinstance(item, dict) and "hooks" in item:
             if any(_is_agent_scan_command(h.get("command", "")) for h in item.get("hooks", [])):
                 result.append(item)
-        elif isinstance(item, dict) and _is_agent_scan_command(item.get("command", "")):
+        elif isinstance(item, dict) and any(_is_agent_scan_command(c) for c in _copilot_hook_commands(item)):
             result.append(item)
     return result
 
@@ -1532,6 +1546,37 @@ def _filter_claude_hooks(hooks: dict) -> dict:
         filtered = [
             g for g in groups if not any(_is_agent_scan_command(h.get("command", "")) for h in g.get("hooks", []))
         ]
+        if filtered:
+            result[event] = filtered
+    return result
+
+
+# A Copilot command hook names its script under exactly one of these, per its config
+# schema: `bash` for Unix, `powershell` for Windows, or `command` as a cross-platform
+# fallback. All three are read on the way in — a config may hold any of them, including
+# ones a user wrote by hand — while the writer emits the platform-specific key, because
+# the command it renders is already platform-specific (a `bash …` line on POSIX, a
+# `powershell -File '…'` line on Windows, whose single-quoted paths are PowerShell
+# syntax rather than cmd's). `exec`/`args` is a fourth form we never write; its push key
+# lives in `env`, so it is not command text and nothing here needs to match it.
+_COPILOT_SCRIPT_KEYS = ("bash", "powershell", "command")
+
+
+def _copilot_command_entry(command: str) -> dict:
+    """Build a Copilot command-hook entry for this platform."""
+    return {"type": "command", "powershell" if IS_WINDOWS else "bash": command}
+
+
+def _copilot_hook_commands(entry: dict) -> Iterable[str]:
+    """Every command string a Copilot hook entry could carry."""
+    return tuple(str(entry.get(key, "")) for key in _COPILOT_SCRIPT_KEYS)
+
+
+def _filter_copilot_hooks(hooks: dict) -> dict:
+    """Drop our own hooks, whichever script key they were written under."""
+    result = {}
+    for event, entries in hooks.items():
+        filtered = [e for e in entries if not any(_is_agent_scan_command(c) for c in _copilot_hook_commands(e))]
         if filtered:
             result[event] = filtered
     return result

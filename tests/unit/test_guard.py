@@ -47,6 +47,7 @@ from agent_scan.guard import (
     _detect_cursor_install,
     _ensure_guard_enabled_for_tenant,
     _extract_env_from_cmd,
+    _extract_guard_hooks,
     _filter_claude_hooks,
     _filter_cursor_hooks,
     _install_hooks,
@@ -67,6 +68,7 @@ from agent_scan.guard import (
     _run_uninstall,
     _send_test_event,
     _shell_quote,
+    _uninstall_filter_for,
     _uninstall_hooks,
     _write_client_config,
     _write_codex_managed_config,
@@ -138,7 +140,7 @@ def _setup_codex_managed_hooks(cmd: str, path: Path) -> None:
 def _uninstall_test_client(client: str, path: Path) -> None:
     _uninstall_hooks(
         path,
-        filter_hooks=_filter_cursor_hooks if client in ("cursor", "github-copilot") else _filter_claude_hooks,
+        filter_hooks=_uninstall_filter_for(client),
         prune_empty_hooks=client != "cursor",
     )
 
@@ -807,6 +809,7 @@ COPILOT_AGENT_SCAN_CMD = (
 )
 
 COPILOT_OTHER_CMD = "some-other-hook --flag"
+COPILOT_SCRIPT_KEY = "powershell" if guard_module.IS_WINDOWS else "bash"
 
 COPILOT_AGENTGUARD_CMD = "PUSH_KEY='pk-old' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' '/usr/local/bin/agentguard' hook --client github-copilot"
 
@@ -823,7 +826,7 @@ class TestPrepareGitHubCopilotDiscoveryHook:
             discover_command=self.discover_command,
         )
 
-        assert data["hooks"]["SessionStart"][1] == {"type": "command", "command": self.discover_command}
+        assert data["hooks"]["SessionStart"][1] == {"type": "command", COPILOT_SCRIPT_KEY: self.discover_command}
 
     def test_none_preserves_current_hook_shape(self, tmp_path):
         data, _, _ = _prepare_copilot_config(
@@ -834,7 +837,7 @@ class TestPrepareGitHubCopilotDiscoveryHook:
 
         assert all(len(data["hooks"][event]) == 1 for event in COPILOT_HOOK_EVENTS)
         assert all(
-            data["hooks"][event][0] == {"type": "command", "command": COPILOT_AGENT_SCAN_CMD}
+            data["hooks"][event][0] == {"type": "command", COPILOT_SCRIPT_KEY: COPILOT_AGENT_SCAN_CMD}
             for event in COPILOT_HOOK_EVENTS
         )
 
@@ -1693,9 +1696,9 @@ class TestDetectCursor:
 # ===================================================================
 # GitHub Copilot: uninstall + detect
 #
-# Copilot's flat hooks.json shape is identical to Cursor's (bare {"command": ...}
-# entries plus an explicit "type": "command"), so it reuses
-# _filter_cursor_hooks / _flat_hook_commands rather than duplicating them.
+# Copilot's hooks.json is flat like Cursor's, but a command entry names its script
+# under one of three keys: "bash", "powershell", or the cross-platform "command".
+# We write the platform-specific one and must recognise all three on the way back in.
 # ===================================================================
 
 
@@ -1766,6 +1769,73 @@ class TestUninstallGitHubCopilot:
 
         assert "hooks" not in json.loads(path.read_text())
 
+    @pytest.mark.parametrize("key", ["bash", "powershell", "command"])
+    def test_removes_agent_scan_hooks_under_any_script_key(self, tmp_path, key):
+        path = tmp_path / "agent-guard.json"
+        _write(
+            path,
+            {
+                "hooks": {
+                    "Stop": [
+                        {"type": "command", key: COPILOT_OTHER_CMD},
+                        {"type": "command", key: COPILOT_AGENT_SCAN_CMD},
+                    ],
+                },
+            },
+        )
+        _uninstall_test_client("github-copilot", path)
+
+        entries = json.loads(path.read_text())["hooks"]["Stop"]
+        assert [e[key] for e in entries] == [COPILOT_OTHER_CMD]
+
+
+class TestGitHubCopilotCommandSerialization:
+    def test_writes_bash_key_on_posix(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(guard_module, "IS_WINDOWS", False)
+        path = tmp_path / "agent-guard.json"
+        _setup_copilot_hooks(COPILOT_AGENT_SCAN_CMD, path)
+
+        entry = json.loads(path.read_text())["hooks"]["Stop"][0]
+        assert entry == {"type": "command", "bash": COPILOT_AGENT_SCAN_CMD}
+
+    def test_writes_powershell_key_on_windows(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(guard_module, "IS_WINDOWS", True)
+        path = tmp_path / "agent-guard.json"
+        _setup_copilot_hooks(COPILOT_AGENT_SCAN_CMD, path)
+
+        entry = json.loads(path.read_text())["hooks"]["Stop"][0]
+        assert entry == {"type": "command", "powershell": COPILOT_AGENT_SCAN_CMD}
+
+    @pytest.mark.parametrize("key", ["bash", "powershell", "command"])
+    def test_reinstall_replaces_an_existing_hook_under_any_script_key(self, tmp_path, key):
+        """Ours is replaced whichever key it was written under; another vendor's survives."""
+        path = tmp_path / "agent-guard.json"
+        _write(
+            path,
+            {
+                "hooks": {
+                    "Stop": [
+                        {"type": "command", key: COPILOT_AGENT_SCAN_CMD},
+                        {"type": "command", key: COPILOT_AGENTGUARD_CMD},
+                    ],
+                },
+            },
+        )
+        _setup_copilot_hooks(COPILOT_AGENT_SCAN_CMD, path)
+
+        entries = json.loads(path.read_text())["hooks"]["Stop"]
+        commands = [c for e in entries for k, c in e.items() if k != "type"]
+        assert commands.count(COPILOT_AGENT_SCAN_CMD) == 1
+        assert COPILOT_AGENTGUARD_CMD in commands
+
+    @pytest.mark.parametrize("key", ["bash", "powershell", "command"])
+    def test_diff_sees_guard_hooks_under_any_script_key(self, key):
+        entries = [
+            {"type": "command", key: COPILOT_OTHER_CMD},
+            {"type": "command", key: COPILOT_AGENT_SCAN_CMD},
+        ]
+        assert _extract_guard_hooks(entries) == [{"type": "command", key: COPILOT_AGENT_SCAN_CMD}]
+
 
 class TestDetectGitHubCopilot:
     def test_missing_file(self, tmp_path):
@@ -1791,6 +1861,18 @@ class TestDetectGitHubCopilot:
         path = tmp_path / "agent-guard.json"
         _write(path, {"hooks": {"Stop": [{"type": "command", "command": COPILOT_AGENTGUARD_CMD}]}})
         assert _detect_copilot_install(path) is None
+
+    @pytest.mark.parametrize("key", ["bash", "powershell", "command"])
+    def test_detects_hooks_under_any_script_key(self, tmp_path, key):
+        path = tmp_path / "agent-guard.json"
+        _write(
+            path,
+            {"hooks": {event: [{"type": "command", key: COPILOT_AGENT_SCAN_CMD}] for event in COPILOT_HOOK_EVENTS}},
+        )
+
+        info = _detect_copilot_install(path)
+        assert info is not None
+        assert len(info["events"]) == len(COPILOT_HOOK_EVENTS)
 
     def test_invalid_json(self, tmp_path):
         path = tmp_path / "agent-guard.json"
@@ -1898,7 +1980,7 @@ class TestConfigPath:
         assert data["version"] == 1
         assert set(data["hooks"]) == set(COPILOT_HOOK_EVENTS)
         assert all(
-            data["hooks"][event] == [{"type": "command", "command": COPILOT_AGENT_SCAN_CMD}]
+            data["hooks"][event] == [{"type": "command", COPILOT_SCRIPT_KEY: COPILOT_AGENT_SCAN_CMD}]
             for event in COPILOT_HOOK_EVENTS
         )
 
