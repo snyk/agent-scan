@@ -140,6 +140,20 @@ class StdioServer(BaseModel):
     env: dict[str, str] | None = None
     binary_identifier: str | None = None
 
+    @field_validator("type", mode="before")
+    @classmethod
+    def _normalize_transport(cls, v: Any) -> Any:
+        """Fold documented stdio spellings onto ``"stdio"``.
+
+        GitHub Copilot CLI writes ``type: "local"`` for stdio servers in
+        ``~/.copilot/mcp-config.json`` (its transport vocabulary is
+        ``local``/``http``/``sse``). Matching is case-insensitive.
+        """
+        if not isinstance(v, str):
+            return v
+        normalized = v.strip().lower()
+        return "stdio" if normalized == "local" else normalized
+
     @model_validator(mode="after")
     def rebalance_command(self) -> "StdioServer":
         """Rebalance command and args on model creation."""
