@@ -15,6 +15,12 @@ response.json
 # Build artifacts
 dist/
 build/
+target/
+
+# Worktree-local Rust toolchains used for the experimental binary
+.cargo/
+.rustup/
+.toolchain/
 
 # Shiv artifacts
 *.pyz
