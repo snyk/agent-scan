@@ -380,7 +380,7 @@ async def _inspect_server(
 ) -> InspectedServer:
     if declined:
         error = UserDeclinedError(
-            message="Skipped by user consent (stdio server was not started)",
+            message="Skipped by user consent (MCP server was not contacted)",
             is_failure=True,
         )
         return InspectedServer(

@@ -143,16 +143,16 @@ Only the first configured control server received bootstrap. The request was res
 
 The bootstrap implementation was removed in v0.5.14. In v0.5.14 and later—including v0.6—the `--no-bootstrap` flag remains accepted for command-line compatibility but does not change behavior.
 
-#### Push keys and stdio MCP servers (`scan` only)
+#### Push keys and MCP servers (`scan` only)
 
 Enterprise uploads include a push key, either via `--push-key` (v0.6 and later) or the soon-to-be-deprecated `x-client-id` header in `--control-server-H`. Agent Scan treats this as an unattended run, so there is no terminal consent prompt.
 
-| `--dangerously-run-mcp-servers` | Consent prompts | Stdio MCP subprocesses |
+| `--dangerously-run-mcp-servers` | Consent prompts | Discovered MCP servers |
 | --- | --- | --- |
-| not set (default) | skipped | Not started; servers remain in the result as configured, while remote servers and skills are still inspected |
-| set | skipped | Started for every stdio server in the scanned configurations |
+| not set (default) | skipped | Stdio servers are not started; remote servers and skills are still inspected |
+| set | skipped | Every stdio server is started and every remote server is contacted |
 
-Use `--dangerously-run-mcp-servers` only when a trusted fleet or CI job must execute configured stdio MCP commands.
+Use `--dangerously-run-mcp-servers` only when a trusted fleet or CI job must contact configured MCP servers.
 
 <a id="push-keys-and-results"></a>
 
@@ -205,26 +205,28 @@ These options apply to `scan`, `inspect`, and `evo` in both CLI versions.
 | --- | --- | --- | --- |
 | `--server-timeout SECONDS` | float | `10` | Timeout for MCP server connections, including stdio handshakes and remote servers. |
 | `--suppress-mcpserver-io BOOL` | boolean | see below | Suppress stderr from stdio MCP servers. Stdout carries JSON-RPC and is never shown. Accepted values: `true`, `false`, `1`, `0`, `yes`, `no`, `y`, `n`, `t`, `f`. |
-| `--dangerously-run-mcp-servers` | boolean | `false` | Skip per-server consent and start every configured stdio MCP server. Required with `--ci` in CI/CD. Use only in trusted environments. |
+| `--dangerously-run-mcp-servers` | boolean | `false` | Skip foreground per-server consent and contact every configured MCP server. This starts stdio subprocesses; background remote inspection occurs with or without this flag. Required with `--ci` in CI/CD. Use only in trusted environments. |
 
 | Run type | Default for `--suppress-mcpserver-io` |
 | --- | --- |
 | Interactive (`inspect`, or `scan` without a push key) | `false`; stderr is streamed with a `[server-name]` prefix |
 | Unattended (push-key scan, `evo`, and similar flows) | `true`; stderr is hidden |
 
-**Handshake and consent matrix for stdio MCP servers:**
+**Handshake and consent matrix for discovered MCP servers:**
 
-| Command | Push key | `--dangerously-run-mcp-servers` | Start servers | Consent prompt |
-| --- | --- | --- | --- | --- |
-| `inspect` | — | no | yes | yes |
-| `inspect` | — | yes | yes | no |
-| `scan` | no | no | yes | yes |
-| `scan` | no | yes | yes | no |
-| `scan` | yes | no | no | no |
-| `scan` | yes | yes | yes | no |
-| `evo` | yes (automatic) | no | no | no |
+| Command | Push key | `--dangerously-run-mcp-servers` | Start stdio | Connect remote | Consent prompt |
+| --- | --- | --- | --- | --- | --- |
+| `inspect` | — | no | yes | yes | each server |
+| `inspect` | — | yes | yes | yes | no |
+| `scan` | no | no | yes | yes | each server |
+| `scan` | no | yes | yes | yes | no |
+| `scan` | yes | no | no | yes | no |
+| `scan` | yes | yes | yes | yes | no |
+| `evo` | yes (automatic) | no | no | yes | no |
 
-> Scanning MCP configurations executes the commands defined in them. Review consent prompts carefully or run inside a sandbox. See the README [Security Warning](../README.md#security-warning).
+Remote targets passed directly as `streamable-http:`, `streamable-https:`, or `sse:` arguments are contacted because the command-line target is an explicit connection request.
+
+> Scanning MCP configurations can execute stdio commands or make outbound requests to remote URLs. Review consent prompts carefully or run inside a sandbox. See the README [Security Warning](../README.md#security-warning).
 
 ## `scan`
 

@@ -17,7 +17,14 @@ from mcp.types import (
 )
 from pytest_lazy_fixtures import lf
 
-from agent_scan.mcp_client import _check_server_pass, check_server, scan_mcp_config_file
+from agent_scan.mcp_client import (
+    _check_server_pass,
+    _create_mcp_http_client_without_redirects,
+    check_server,
+    get_client,
+    scan_mcp_config_file,
+    streamablehttp_client_without_session,
+)
 from agent_scan.models import RemoteServer, StdioServer
 from agent_scan.utils import resolve_command_and_args
 
@@ -101,6 +108,48 @@ async def test_check_server_mocked(mock_stdio_client):
     assert len(signature.tools) == 3
 
 
+@pytest.mark.asyncio
+async def test_remote_mcp_http_client_does_not_follow_redirects():
+    client = _create_mcp_http_client_without_redirects()
+    assert client.follow_redirects is False
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_sse_client_uses_redirect_safe_http_client_factory():
+    client_cm = AsyncMock()
+    client_cm.__aenter__.return_value = (AsyncMock(), AsyncMock())
+    server = RemoteServer(url="https://example.test/sse", type="sse")
+
+    with patch("agent_scan.mcp_client.sse_client", return_value=client_cm) as make_sse_client:
+        async with get_client(server):
+            pass
+
+    assert make_sse_client.call_args.kwargs["httpx_client_factory"] is _create_mcp_http_client_without_redirects
+
+
+@pytest.mark.asyncio
+async def test_streamable_http_client_does_not_follow_redirects():
+    custom_client = Mock()
+    http_client_cm = AsyncMock()
+    http_client_cm.__aenter__.return_value = custom_client
+    stream_cm = AsyncMock()
+    stream_cm.__aenter__.return_value = (AsyncMock(), AsyncMock(), None)
+
+    with (
+        patch("agent_scan.mcp_client.httpx.AsyncClient", return_value=http_client_cm) as make_http_client,
+        patch("agent_scan.mcp_client.streamable_http_client", return_value=stream_cm),
+    ):
+        async with streamablehttp_client_without_session(
+            url="https://example.test/mcp",
+            headers={"X-Test": "value"},
+            timeout=10,
+        ):
+            pass
+
+    assert make_http_client.call_args.kwargs["follow_redirects"] is False
+
+
 @pytest.mark.parametrize(
     "input_url",
     [
@@ -127,12 +176,12 @@ async def test_remote_url_candidates_have_no_double_slash_and_include_clean(inpu
 
     server = RemoteServer(url=input_url)
     with patch("agent_scan.mcp_client._check_server_pass", side_effect=fake_check):
-        with pytest.raises(Exception, match="(?i)could not connect|boom"):
+        with pytest.raises(Exception, match=r"(?i)could not connect|boom"):
             await check_server(server, 1, False)
 
     assert tried, "expected the strategy to try at least one URL"
     for url in tried:
-        scheme, _, rest = url.partition("://")
+        _scheme, _, rest = url.partition("://")
         assert "//" not in rest, f"double slash leaked into candidate URL: {url}"
         assert "/mcp/mcp" not in url, f"duplicated /mcp suffix in candidate URL: {url}"
         assert "/sse/sse" not in url, f"duplicated /sse suffix in candidate URL: {url}"

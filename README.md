@@ -52,16 +52,16 @@ Agent Scan helps you discover all your installed agent components (harnesses, MC
 
 ## Security Warning
 
-> **⚠️ IMPORTANT: Scanning MCP configurations will execute the commands defined in them.**
+> **⚠️ IMPORTANT: Scanning MCP configurations can execute commands or make outbound network requests.**
 >
-> When Agent Scan scans an MCP configuration file, it starts the stdio MCP servers by executing the commands and arguments specified in the config. This is necessary to retrieve tool descriptions and perform security analysis.
+> To retrieve tool descriptions, Agent Scan starts stdio MCP servers by executing the commands in the config and connects to configured remote MCP server URLs with their configured headers.
 >
 > **Recommendations:**
 > - **Run scans inside a sandbox** (Docker container, VM, or disposable environment) when evaluating untrusted or third-party MCP configs
-> - **Review the consent prompt carefully** during interactive scans, it shows the exact command and arguments that will be executed for each server
-> - **Use `--dangerously-run-mcp-servers`** only in trusted environments where you've verified all MCP server commands
+> - **Review the consent prompt carefully** during interactive scans; it shows the command or remote URL for each server
+> - **Use `--dangerously-run-mcp-servers`** only in trusted environments where you've verified all MCP server commands and remote URLs
 >
-> By default, Agent Scan requires explicit user consent (y/n) before starting each stdio MCP server during interactive runs. This gives you control over what gets executed on your system.
+> By default, Agent Scan requires explicit user consent (y/n) before contacting each discovered MCP server during foreground interactive runs. Background and push-key scans continue to inspect remote servers automatically for fleet coverage, but do not start stdio servers unless `--dangerously-run-mcp-servers` is set.
 
 ## Quick Start
 
@@ -255,21 +255,21 @@ Agent Scan searches through your local agent's configuration files to find agent
 
 #### Interactive Consent for MCP Servers
 
-> **⚠️ Security Note**: Scanning an MCP config executes the commands defined in it. Always review what will be executed before approving.
+> **⚠️ Security Note**: Scanning an MCP config can execute its stdio commands or make outbound requests to its remote URLs. Always review what will be contacted before approving.
 
-By default, Agent Scan prompts for user consent before starting each stdio MCP server during interactive runs. This consent flow:
+By default, Agent Scan prompts for user consent before contacting each discovered MCP server during interactive runs. This consent flow:
 
-- Shows the server name, command, and environment variables (redacted) that will be executed
+- Shows the server name and its command or remote URL; environment variables and headers are redacted
 - Allows you to approve or decline each server individually
-- Prevents potentially untrusted servers from running without your explicit permission
-- Records declined servers with a `user_declined` error (they are never started)
+- Prevents potentially untrusted servers from being contacted without your explicit permission
+- Records declined servers with a `user_declined` error (they are never contacted)
 
 **Best Practices:**
-- Review the command and arguments carefully before approving
+- Review commands, arguments, and remote URLs carefully before approving
 - When scanning untrusted or third-party MCP configs, run Agent Scan inside a sandbox (Docker, VM, or disposable environment)
 - Decline any servers with unfamiliar or suspicious commands
 
-For non-interactive environments (e.g., CI/CD pipelines), you must use the `--dangerously-run-mcp-servers` flag to bypass the consent prompt and start all servers automatically. **Only use this flag in trusted environments where all MCP server commands have been verified.**
+Non-interactive environments (e.g., background and push-key scans) inspect remote MCP servers automatically. They do not start stdio servers unless `--dangerously-run-mcp-servers` is set. **Only use this flag in trusted environments where all MCP server commands and remote URLs have been verified.**
 
 #### Analysis and Validation
 
@@ -311,7 +311,7 @@ These options exist in both v0.5.x and v0.6 and later. Their command applicabili
 --ci                              Exit non-zero when findings or operational failures remain
 --server-timeout SECONDS          MCP connection timeout (default: 10)
 --suppress-mcpserver-io BOOL      Suppress stdio MCP server stderr
---dangerously-run-mcp-servers     Skip consent and start configured stdio MCP servers
+--dangerously-run-mcp-servers     Skip consent and contact all configured MCP servers
 --control-server URL              Upload destination (repeatable)
 --control-server-H HEADER         Header for the current control-server block
 --control-identifier ID           Identifier for the current control-server block

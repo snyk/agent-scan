@@ -154,7 +154,7 @@ async def test_inspect_client_uses_original_empty_server_name_for_oauth_token_lo
 
 
 @pytest.mark.asyncio
-async def test_inspect_client_returns_server_signature():
+async def test_inspect_client_returns_remote_signature_without_stdio_handshake():
     remote = RemoteServer(url="https://example.test/mcp", type="http")
     signature = ServerSignature(
         metadata=InitializeResult(
@@ -179,6 +179,34 @@ async def test_inspect_client_returns_server_signature():
 
 
 @pytest.mark.asyncio
+async def test_inspect_client_does_not_contact_declined_remote_server():
+    remote = RemoteServer(url="https://example.test/mcp", type="http")
+    client = ClientToInspect(
+        name="cursor",
+        client_path="/proj",
+        mcp_configs={"/proj/.mcp.json": [("remote", remote)]},
+        skills_dirs={},
+    )
+
+    with patch("agent_scan.inspect.check_server", new_callable=AsyncMock) as check:
+        result = await inspect_client(
+            client,
+            timeout=1,
+            tokens=[],
+            scan_skills=False,
+            declined_servers={("/proj/.mcp.json", "remote")},
+            do_stdio_handshake=True,
+        )
+
+    check.assert_not_awaited()
+    assert len(result.servers) == 1
+    assert result.servers[0].server == remote
+    assert result.servers[0].signature is None
+    assert result.servers[0].error is not None
+    assert result.servers[0].error.category == "user_declined"
+
+
+@pytest.mark.asyncio
 async def test_inspect_client_converts_server_http_error():
     request = Request("POST", "https://example.test/mcp")
     status_error = HTTPStatusError(
@@ -194,7 +222,13 @@ async def test_inspect_client_converts_server_http_error():
     )
 
     with patch("agent_scan.inspect.check_server", new_callable=AsyncMock, side_effect=status_error):
-        result = await inspect_client(client, timeout=1, tokens=[], scan_skills=False)
+        result = await inspect_client(
+            client,
+            timeout=1,
+            tokens=[],
+            scan_skills=False,
+            do_stdio_handshake=True,
+        )
 
     assert len(result.servers) == 1
     assert result.servers[0].signature is None
