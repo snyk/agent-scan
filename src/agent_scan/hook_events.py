@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
 from typing import NamedTuple
 
 import aiohttp
@@ -25,8 +26,35 @@ HOOK_CLIENTS = {
     "claude-code": HookClient("cwd", "session_id", "/hidden/agent-monitor/hooks/claude-code"),
     "cursor": HookClient("workspace_roots", "conversation_id", "/hidden/agent-monitor/hooks/cursor"),
     "codex": HookClient("cwd", "session_id", "/hidden/agent-monitor/hooks/codex"),
+    "github-copilot": HookClient("cwd", "session_id", "/hidden/agent-monitor/hooks/github-copilot"),
 }
 _HOOK_REQUEST_TIMEOUT_SECONDS = 15
+
+# Header naming the agent that fired the hook.
+AGENT_SURFACE_HEADER = "X-Agent-Surface"
+
+
+def agent_surface(hook_client: str) -> str | None:
+    """Identify the agent surface from the environment, or None if it isn't Copilot.
+
+    Reported only for the Copilot client. These variables describe the environment, not
+    the caller, and they are inherited: another agent running inside a Copilot session
+    sees them too, while the hook that fired belongs to whichever config invoked us.
+
+    Copilot's hosts each set AI_AGENT (github_copilot_vscode_agent inside VS Code,
+    github_copilot_app_agent for the desktop app) and all of them set COPILOT_CLI. The
+    desktop app and the CLI share a surface, since neither users nor enforcement
+    distinguish them; a future github_copilot_* host falls in with them rather than
+    going unrecognized.
+    """
+    if hook_client != "github-copilot":
+        return None
+    ai_agent = os.environ.get("AI_AGENT", "")
+    if ai_agent == "github_copilot_vscode_agent":
+        return "copilot-vscode"
+    if ai_agent.startswith("github_copilot_") or os.environ.get("COPILOT_CLI"):
+        return "copilot"
+    return None
 
 
 async def _post_hook_event(url: str, body: bytes, headers: dict[str, str], max_retries: int) -> tuple[bool, str]:
@@ -95,6 +123,9 @@ def send_hook_event(
         "Content-Type": "text/plain",
         "X-Client-Id": push_key,
     }
+    surface = agent_surface(hook_client)
+    if surface:
+        headers[AGENT_SURFACE_HEADER] = surface
 
     try:
         return asyncio.run(_post_hook_event(url, body, headers, max_retries))

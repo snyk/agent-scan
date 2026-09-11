@@ -5,7 +5,7 @@
 #
 param(
     [Parameter(Mandatory=$true)]
-    [ValidateSet("claude-code","cursor","codex")]
+    [ValidateSet("claude-code","cursor","codex","github-copilot")]
     [string]$Client,
 
     [Parameter(Mandatory=$false)]
