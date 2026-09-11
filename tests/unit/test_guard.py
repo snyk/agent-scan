@@ -5864,6 +5864,7 @@ class TestRunDiscover:
             ("claude-code", "session_id", "session_id"),
             ("cursor", "conversation_id", "conversation_id"),
             ("codex", "session_id", "session_id"),
+            ("github-copilot", "session_id", "session_id"),
         ],
     )
     @pytest.mark.parametrize(
