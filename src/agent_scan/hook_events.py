@@ -26,7 +26,7 @@ HOOK_CLIENTS = {
     "claude-code": HookClient("cwd", "session_id", "/hidden/agent-monitor/hooks/claude-code"),
     "cursor": HookClient("workspace_roots", "conversation_id", "/hidden/agent-monitor/hooks/cursor"),
     "codex": HookClient("cwd", "session_id", "/hidden/agent-monitor/hooks/codex"),
-    "github-copilot": HookClient("cwd", "sessionId", "/hidden/agent-monitor/hooks/github-copilot"),
+    "github-copilot": HookClient("cwd", "session_id", "/hidden/agent-monitor/hooks/github-copilot"),
 }
 _HOOK_REQUEST_TIMEOUT_SECONDS = 15
 
