@@ -69,7 +69,7 @@ CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 CURSOR_HOOKS_PATH = Path.home() / ".cursor" / "hooks.json"
 CODEX_HOOKS_PATH = Path.home() / ".codex" / "hooks.json"
 COPILOT_HOOKS_DIR = Path.home() / ".copilot" / "hooks"
-COPILOT_HOOKS_PATH = COPILOT_HOOKS_DIR / "agent-guard.json"
+COPILOT_HOOKS_PATH = COPILOT_HOOKS_DIR / "snyk-agent-guard.json"
 
 # Managed (MDM / admin-deployed) config paths — OS-specific
 # Codex managed hooks use a requirements.toml file at a system location
@@ -78,17 +78,17 @@ if sys.platform == "darwin":
     CLAUDE_MANAGED_SETTINGS_PATH = Path("/Library/Application Support/ClaudeCode/managed-settings.json")
     CURSOR_MANAGED_HOOKS_PATH = Path("/Library/Application Support/Cursor/hooks.json")
     CODEX_MANAGED_HOOKS_PATH = Path("/etc/codex/requirements.toml")
-    COPILOT_MANAGED_HOOKS_PATH = Path("/etc/github-copilot/policy.d/agent-guard.json")
+    COPILOT_MANAGED_HOOKS_PATH = Path("/etc/github-copilot/policy.d/snyk-agent-guard.json")
 elif sys.platform == "win32":
     CLAUDE_MANAGED_SETTINGS_PATH = Path("C:/Program Files/ClaudeCode/managed-settings.json")
     CURSOR_MANAGED_HOOKS_PATH = Path("C:/ProgramData/Cursor/hooks.json")
     CODEX_MANAGED_HOOKS_PATH = Path("C:/ProgramData/OpenAI/Codex/requirements.toml")
-    COPILOT_MANAGED_HOOKS_PATH = Path("C:/ProgramData/GitHub/Copilot/policy.d/agent-guard.json")
+    COPILOT_MANAGED_HOOKS_PATH = Path("C:/ProgramData/GitHub/Copilot/policy.d/snyk-agent-guard.json")
 else:  # Linux and others
     CLAUDE_MANAGED_SETTINGS_PATH = Path("/etc/claude-code/managed-settings.json")
     CURSOR_MANAGED_HOOKS_PATH = Path("/etc/cursor/hooks.json")
     CODEX_MANAGED_HOOKS_PATH = Path("/etc/codex/requirements.toml")
-    COPILOT_MANAGED_HOOKS_PATH = Path("/etc/github-copilot/policy.d/agent-guard.json")
+    COPILOT_MANAGED_HOOKS_PATH = Path("/etc/github-copilot/policy.d/snyk-agent-guard.json")
 
 CLAUDE_HOOK_EVENTS = [
     "PreToolUse",
