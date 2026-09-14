@@ -9366,3 +9366,52 @@ async def test_pipeline_null_byte_target_folder_is_skipped_without_aborting(tmp_
         )
 
     find.assert_called_once_with(home, target_folders=[good])
+
+
+# --- GitHub Copilot: well-known client entry ---
+
+
+def _install_copilot_home(home: Path) -> Path:
+    """Lay out a Copilot home the way the CLI and the desktop app do."""
+    copilot = home / ".copilot"
+    skill = copilot / "skills" / "demo"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: demo\ndescription: demo skill\n---\nbody\n")
+    (copilot / "mcp-config.json").write_text(
+        json.dumps({"mcpServers": {"playwright": {"command": "npx", "args": ["@playwright/mcp@latest"]}}})
+    )
+    return copilot
+
+
+@pytest.mark.asyncio
+async def test_github_copilot_configs_are_discovered_without_vscode(tmp_path):
+    """Copilot is reachable as a CLI and a desktop app, so its home must be scanned on a
+    machine that has never had VS Code installed."""
+    from agent_scan.inspect import get_mcp_config_per_home_directory
+    from agent_scan.well_known_clients import GITHUB_COPILOT_NAME, get_well_known_clients
+
+    copilot = _install_copilot_home(tmp_path)
+    clients = {client.name: client for client in get_well_known_clients()}
+
+    cti = await get_mcp_config_per_home_directory(clients[GITHUB_COPILOT_NAME], tmp_path)
+
+    assert cti is not None
+    assert (copilot / "mcp-config.json").resolve().as_posix() in cti.mcp_configs
+    assert (copilot / "skills").resolve().as_posix() in cti.skills_dirs
+    servers = cti.mcp_configs[(copilot / "mcp-config.json").resolve().as_posix()]
+    assert [name for name, _server in servers] == ["playwright"]
+
+
+@pytest.mark.asyncio
+async def test_vscode_entry_alone_leaves_copilot_unscanned(tmp_path):
+    """Why the entry above is needed: ``vscode`` claims the shared Copilot paths but is
+    gated on a VS Code install, so it finds nothing on a Copilot-only machine."""
+    from agent_scan.inspect import get_mcp_config_per_home_directory
+    from agent_scan.well_known_clients import get_well_known_clients
+
+    _install_copilot_home(tmp_path)
+    vscode_entries = [client for client in get_well_known_clients() if client.name == "vscode"]
+
+    assert vscode_entries
+    for entry in vscode_entries:
+        assert await get_mcp_config_per_home_directory(entry, tmp_path) is None

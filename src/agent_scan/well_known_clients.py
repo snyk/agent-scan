@@ -14,6 +14,13 @@ logger = logging.getLogger(__name__)
 # ``pipelines.discover_clients_to_inspect`` relies on these matching exactly.
 CLAUDE_CODE_NAME = "claude code"
 
+# GitHub Copilot's own home (``~/.copilot``), shared by the CLI, the desktop app and
+# Copilot inside VS Code. It is listed separately from ``vscode`` because Copilot is
+# reachable without VS Code at all, and the ``vscode`` entry only exists when VS Code
+# does; the two entries deliberately overlap on the shared paths, the same way
+# ``vscode`` and ``claude code`` both claim ``~/.claude/skills``.
+GITHUB_COPILOT_NAME = "github copilot"
+
 
 MACOS_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
     CandidateClient(
@@ -36,6 +43,12 @@ MACOS_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
             "~/.vscode/mcp.json",
             "~/Library/Application Support/Code/User/mcp.json",
         ],
+        skills_dir_paths=["~/.copilot/skills"],
+    ),
+    CandidateClient(
+        name=GITHUB_COPILOT_NAME,
+        client_exists_paths=["~/.copilot"],
+        mcp_config_paths=["~/.copilot/mcp-config.json"],
         skills_dir_paths=["~/.copilot/skills"],
     ),
     CandidateClient(
@@ -135,6 +148,12 @@ LINUX_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
         skills_dir_paths=["~/.copilot/skills"],
     ),
     CandidateClient(
+        name=GITHUB_COPILOT_NAME,
+        client_exists_paths=["~/.copilot"],
+        mcp_config_paths=["~/.copilot/mcp-config.json"],
+        skills_dir_paths=["~/.copilot/skills"],
+    ),
+    CandidateClient(
         name=CLAUDE_CODE_NAME,
         client_exists_paths=["~/.claude"],
         mcp_config_paths=["~/.claude.json"],
@@ -223,6 +242,12 @@ WINDOWS_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
             "~/.vscode/mcp.json",
             "~/AppData/Roaming/Code/User/mcp.json",
         ],
+        skills_dir_paths=["~/.copilot/skills"],
+    ),
+    CandidateClient(
+        name=GITHUB_COPILOT_NAME,
+        client_exists_paths=["~/.copilot"],
+        mcp_config_paths=["~/.copilot/mcp-config.json"],
         skills_dir_paths=["~/.copilot/skills"],
     ),
     CandidateClient(
