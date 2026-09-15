@@ -342,7 +342,7 @@ snyk-agent-scan scan --config-file agent-scan.yaml \
 
 ## `guard`
 
-Manage [Agent Guard](https://evo.ai.snyk.io) hooks for Claude Code, Cursor, and Codex:
+Manage [Agent Guard](https://evo.ai.snyk.io) hooks for Claude Code, Cursor, Codex, and Github Copilot:
 
 ```bash
 snyk-agent-scan guard [install|uninstall|discover] [OPTIONS]
@@ -352,7 +352,7 @@ snyk-agent-scan guard
 ### `guard install`
 
 ```bash
-snyk-agent-scan guard install {claude,cursor,codex,all} [OPTIONS]
+snyk-agent-scan guard install {claude,cursor,codex,github-copilot,all} [OPTIONS]
 ```
 
 After configuring the hooks, installation sends a `hooksConfiguredServerDiscovery` event. It also configures a
@@ -380,13 +380,13 @@ folder(s) from the selected client's hook payload, discovers MCP servers locally
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
 | `--url URL` | string | `https://api.snyk.io` | Remote hook base URL for the Snyk API environment. |
-| `--client {claude-code,cursor,codex}` | string | required | Hook client whose target-folder payload and endpoint conventions should be used. |
+| `--client {claude-code,cursor,codex,github-copilot}` | string | required | Hook client whose target-folder payload and endpoint conventions should be used. |
 | `--scope {servers,skills,all}` | string | `all` | Discovery data to collect. The session-start hook installed by `guard install` passes `servers`, because the event it sends carries MCP servers only. |
 
 ### `guard uninstall`
 
 ```bash
-snyk-agent-scan guard uninstall {claude,cursor,codex,all} [OPTIONS]
+snyk-agent-scan guard uninstall {claude,cursor,codex,github-copilot,all} [OPTIONS]
 ```
 
 | Flag | Type | Default | Description |
