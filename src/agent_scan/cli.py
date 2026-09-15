@@ -911,7 +911,7 @@ def main():
         "guard",
         allow_abbrev=False,
         help="Install, uninstall, or check status of Agent Guard hooks",
-        description="Manage Agent Guard hooks for Claude Code, Cursor, and Codex.",
+        description="Manage Agent Guard hooks for Claude Code, Cursor, Codex, and Github Copilot.",
     )
     guard_subparsers = guard_parser.add_subparsers(
         dest="guard_command",
