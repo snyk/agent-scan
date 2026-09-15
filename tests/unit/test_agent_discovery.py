@@ -9536,6 +9536,47 @@ def test_github_copilot_discoverer_project_folders_from_permissions_config(tmp_p
     assert [name for name, _ in mcp_configs[(project / ".mcp.json").as_posix()]] == ["recorded-server"]
 
 
+@pytest.mark.parametrize("location", [".", "../repo", "  ../repo  ", "  ", "relative/repo"])
+def test_github_copilot_discoverer_ignores_relative_permissions_locations(tmp_path, monkeypatch, location):
+    """A relative key would resolve against Agent Scan's own working directory, so it
+    would inventory whatever project happens to be there as a Copilot project root."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    copilot = tmp_path / ".copilot"
+    copilot.mkdir()
+    (copilot / "permissions-config.json").write_text(json.dumps({"locations": {location: {}}}))
+    # Stand the working directory up as a scannable project: were the relative key
+    # honoured, these are the files that would be attributed to Copilot.
+    cwd = tmp_path / "unrelated-cwd"
+    (cwd / ".github" / "skills" / "cwd-skill").mkdir(parents=True)
+    _skill(cwd / ".github" / "skills" / "cwd-skill", "cwd-skill")
+    (cwd / ".mcp.json").write_text(_wrapped_mcp("cwd-server"))
+    monkeypatch.chdir(cwd)
+
+    discoverer = GitHubCopilotDiscoverer(tmp_path)
+
+    assert discoverer._discover_project_folders() == []
+    assert discoverer.discover_mcp_servers() == {}
+    assert discoverer.discover_skills() == {}
+
+
+def test_github_copilot_discoverer_strips_padding_from_an_absolute_location(tmp_path):
+    """Stripping is what makes the absolute check meaningful: a padded absolute key is
+    still an absolute path, while a padded relative one is still relative."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    copilot = tmp_path / ".copilot"
+    copilot.mkdir()
+    project = tmp_path / "recorded-project"
+    project.mkdir()
+    (project / ".mcp.json").write_text(_wrapped_mcp("recorded-server"))
+    (copilot / "permissions-config.json").write_text(json.dumps({"locations": {f"  {project.as_posix()}  ": {}}}))
+
+    mcp_configs = GitHubCopilotDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert [name for name, _ in mcp_configs[(project / ".mcp.json").as_posix()]] == ["recorded-server"]
+
+
 @pytest.mark.parametrize("locations", [None, "not-a-dict", {}, {"   ": {}}])
 def test_github_copilot_discoverer_tolerates_unusable_permissions_config(tmp_path, locations):
     from agent_scan.agents import GitHubCopilotDiscoverer

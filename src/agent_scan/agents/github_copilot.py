@@ -342,11 +342,18 @@ class GitHubCopilotDiscoverer(AgentDiscoverer):
     def _discover_project_folders(self) -> list[Path]:
         """Project roots from the ``locations`` map in ``permissions-config.json``,
         which Copilot keys by absolute project path. The saved approvals under each key
-        are intentionally not read — every listed location is returned."""
+        are intentionally not read — every listed location is scanned."""
         data = self._load_json_file(self._copilot_home() / self._permissions_filename)
         if not isinstance(data, dict):
             return []
         locations = data.get("locations")
         if not isinstance(locations, dict):
             return []
-        return [Path(location) for location in locations if isinstance(location, str) and location.strip()]
+        folders: list[Path] = []
+        for location in locations:
+            if not isinstance(location, str) or not location.strip():
+                continue
+            candidate = Path(location.strip())
+            if candidate.is_absolute():
+                folders.append(candidate)
+        return folders
