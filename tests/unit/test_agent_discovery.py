@@ -9631,6 +9631,43 @@ def test_github_copilot_discoverer_honors_plugin_manifest_overrides(tmp_path):
     assert [s.name for s in skills_dirs[(plugin / "extra-skills").as_posix()]] == ["second"]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="symlink creation needs elevation on Windows")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("alias", ["home", "config"])
+async def test_github_copilot_symlinked_config_is_discovered_once(tmp_path, alias):
+    """Both phases read the same Copilot config, and the data-driven phase keys its
+    results by resolved path. A key here that kept the symlinked spelling would survive
+    the merge as a second entry and have the same server inspected twice.
+    """
+    from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
+
+    real = tmp_path / "real-copilot"
+    (real / "skills" / "demo").mkdir(parents=True)
+    _skill(real / "skills" / "demo", "demo")
+    (real / "mcp-config.json").write_text(_wrapped_mcp("aliased-server"))
+
+    home = tmp_path / "home"
+    if alias == "home":
+        # The whole Copilot home is a symlink.
+        home.mkdir()
+        (home / ".copilot").symlink_to(real)
+    else:
+        # The home is real but the config file inside it is a symlink.
+        (home / ".copilot" / "skills").mkdir(parents=True)
+        (home / ".copilot" / "mcp-config.json").symlink_to(real / "mcp-config.json")
+
+    with patch("agent_scan.pipelines.get_readable_home_directories", return_value=[(home, "alice")]):
+        clients, _unresolved, _users = await discover_clients_to_inspect(
+            InspectArgs(timeout=1, tokens=[], paths=[], scan_skills=True)
+        )
+
+    copilot = [client for client in clients if client.name == "github copilot"]
+    assert len(copilot) == 1
+    assert list(copilot[0].mcp_configs) == [(real / "mcp-config.json").resolve().as_posix()]
+    servers = [name for entry in copilot[0].mcp_configs.values() for name, _ in entry]
+    assert servers == ["aliased-server"]
+
+
 def test_github_copilot_discoverer_reads_inline_manifest_mcp_servers(tmp_path):
     """``mcpServers`` is documented as a path *or* inline server definitions; an inline
     map is the definition itself, so it is keyed on the manifest carrying it."""

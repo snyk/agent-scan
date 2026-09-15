@@ -76,6 +76,35 @@ def _plugin_root_for(manifest_path: Path) -> tuple[Path, int] | None:
     return None
 
 
+def _canonical_key(path: Path) -> str:
+    """Normalize a result key the way the data-driven phase does.
+
+    ``inspect.get_mcp_config_per_home_directory`` keys its results by ``Path.resolve()``,
+    so a key here that kept a symlinked spelling survives the merge in
+    ``pipelines.discover_clients_to_inspect`` as a second entry for the same file — and
+    the same server is then inspected twice. Resolution is best-effort: an unresolvable
+    path (an embedded NUL raises ``ValueError``, a symlink loop ``OSError``) keeps its
+    literal spelling rather than dropping out of the report.
+    """
+    try:
+        return path.resolve().as_posix()
+    except (OSError, RuntimeError, ValueError):
+        return path.as_posix()
+
+
+def _canonicalize_keys(result: dict) -> dict:
+    """Re-key a discovery result canonically, keeping first-seen order.
+
+    Applied once to each aggregate so every scope is keyed the same way — mixing
+    canonical and literal keys within one phase would itself alias, e.g. a manifest
+    naming ``.mcp.json`` against the walk that already found it.
+    """
+    canonical: dict = {}
+    for key, value in result.items():
+        canonical.setdefault(_canonical_key(Path(key)), value)
+    return canonical
+
+
 def _escapes_plugin_root(value: str) -> bool:
     r"""True when a manifest path value would resolve outside the plugin that declared it."""
     for flavour in (PurePosixPath, PureWindowsPath):
@@ -147,7 +176,7 @@ class GitHubCopilotDiscoverer(AgentDiscoverer):
         result.update(self._discover_project_mcp_servers())
         result.update(self._discover_plugin_mcp_servers())
         result.update(self._discover_plugin_manifest_mcp_servers())
-        return result
+        return _canonicalize_keys(result)
 
     def discover_skills(self) -> SkillsDirsResult:
         result: SkillsDirsResult = {}
@@ -155,7 +184,7 @@ class GitHubCopilotDiscoverer(AgentDiscoverer):
         result.update(self._discover_project_skills())
         result.update(self._discover_plugin_skills())
         result.update(self._discover_plugin_manifest_skills())
-        return result
+        return _canonicalize_keys(result)
 
     # --- private: MCP discovery ---
 
