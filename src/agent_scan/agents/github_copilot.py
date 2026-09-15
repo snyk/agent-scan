@@ -44,6 +44,38 @@ _COPILOT_MCP_FORMATS: tuple[type[MCPConfig], ...] = (
 )
 
 
+# Legacy plugin manifest locations, in the order Copilot searches them — the first hit
+# for a plugin wins. Agent Plugins 1.0 uses the bare ``plugin.json`` at the root. Paths
+# declared *inside* a manifest resolve against the plugin root, so the root is the
+# manifest path with its location suffix stripped rather than simply its parent: for
+# ``<root>/.claude-plugin/plugin.json`` the parent is the manifest's own directory.
+_PLUGIN_MANIFEST_LOCATIONS: tuple[tuple[str, ...], ...] = (
+    (".plugin", "plugin.json"),
+    ("plugin.json",),
+    (".github", "plugin", "plugin.json"),
+    (".claude-plugin", "plugin.json"),
+)
+# Matched longest-first so ``.github/plugin/plugin.json`` is not mistaken for a bare
+# ``plugin.json`` sitting in a directory called ``plugin``; the documented search order
+# above is kept separately as the precedence value.
+_PLUGIN_MANIFEST_MATCH_ORDER: tuple[tuple[int, tuple[str, ...]], ...] = tuple(
+    sorted(enumerate(_PLUGIN_MANIFEST_LOCATIONS), key=lambda item: len(item[1]), reverse=True)
+)
+
+
+def _plugin_root_for(manifest_path: Path) -> tuple[Path, int] | None:
+    """The plugin root a manifest belongs to, with its location's search precedence.
+
+    ``None`` when the file is not at one of the documented manifest locations, so a
+    stray ``plugin.json`` nested somewhere unrelated is not treated as a plugin.
+    """
+    parts = manifest_path.parts
+    for precedence, location in _PLUGIN_MANIFEST_MATCH_ORDER:
+        if len(parts) > len(location) and parts[-len(location) :] == location:
+            return manifest_path.parents[len(location) - 1], precedence
+    return None
+
+
 def _escapes_plugin_root(value: str) -> bool:
     r"""True when a manifest path value would resolve outside the plugin that declared it."""
     for flavour in (PurePosixPath, PureWindowsPath):
@@ -63,9 +95,11 @@ class GitHubCopilotDiscoverer(AgentDiscoverer):
     * **Project** — for every recorded and explicitly targeted root (and its ancestors):
       ``.mcp.json`` and ``.github/mcp.json``; skills in ``.github/skills`` plus the
       documented ``.claude/skills`` / ``.agents/skills`` compatibility paths.
-    * **Plugins** — ``<copilot_home>/installed-plugins`` walked for ``.mcp.json`` and
-      ``skills/``. A ``plugin.json`` manifest may point ``mcpServers`` / ``skills``
-      elsewhere inside the plugin; those relative overrides are honored additively.
+    * **Plugins** — ``<copilot_home>/installed-plugins`` walked for ``skills/`` and the
+      default MCP files (``.mcp.json`` for a legacy plugin, ``mcp.json`` for an Agent
+      Plugins 1.0 one). A legacy ``plugin.json`` manifest may relocate ``mcpServers`` /
+      ``skills`` inside the plugin, or define its MCP servers inline; both forms are
+      honored additively.
 
     Recorded project roots come from the ``locations`` map in
     ``<copilot_home>/permissions-config.json``, which Copilot keys by absolute project
@@ -143,9 +177,12 @@ class GitHubCopilotDiscoverer(AgentDiscoverer):
         return result
 
     def _discover_plugin_mcp_servers(self) -> McpConfigsResult:
-        """Walk installed plugins for ``.mcp.json``, the default location a plugin
-        declares MCP servers in."""
-        return self._discover_plugin_mcp_files(self._plugin_base_dirs(), (".mcp.json",), self._parse_plugin_mcp_json)
+        """Walk installed plugins for their default MCP files: ``.mcp.json`` for a legacy
+        plugin, and ``mcp.json`` for an Agent Plugins 1.0 one, whose component locations
+        are fixed and cannot be redeclared in the manifest."""
+        return self._discover_plugin_mcp_files(
+            self._plugin_base_dirs(), (".mcp.json", "mcp.json"), self._parse_plugin_mcp_json
+        )
 
     def _parse_plugin_mcp_json(self, path: Path) -> McpScanResult:
         """Parse a plugin MCP file opportunistically: the walk matches every file named
@@ -154,13 +191,24 @@ class GitHubCopilotDiscoverer(AgentDiscoverer):
         return self._parse_mcp_file(path, formats=_COPILOT_MCP_FORMATS, skip_unrecognized=True)
 
     def _discover_plugin_manifest_mcp_servers(self) -> McpConfigsResult:
-        """Honor a ``plugin.json`` manifest's ``mcpServers`` path(s): when a manifest
-        keeps its MCP config somewhere other than ``.mcp.json``, parse that file too.
-        Additive to the default walk — keyed by path, so an override naming
-        ``.mcp.json`` dedups with it."""
+        """Honor a manifest's ``mcpServers``, documented as a path *or* inline server
+        definitions.
+
+        A path names another file to parse; an inline map is the definition itself, so it
+        is keyed on the manifest that carries it — there is no other file to point at.
+        Additive to the default walk, and keyed by path, so a manifest naming
+        ``.mcp.json`` dedups with it.
+        """
         result: McpConfigsResult = {}
-        for plugin_root, manifest in self._plugin_manifests():
-            for resolved in self._manifest_relative_paths(plugin_root, manifest.get("mcpServers")):
+        for plugin_root, manifest_path, manifest in self._plugin_manifests():
+            servers = manifest.get("mcpServers")
+            if isinstance(servers, dict):
+                if servers:
+                    result[manifest_path.as_posix()] = self._validate_servers(
+                        servers, source=f"mcpServers in {manifest_path.as_posix()}"
+                    )
+                continue
+            for resolved in self._manifest_relative_paths(plugin_root, servers):
                 parsed = self._parse_plugin_mcp_json(resolved)
                 if parsed:
                     result[resolved.as_posix()] = parsed
@@ -203,7 +251,7 @@ class GitHubCopilotDiscoverer(AgentDiscoverer):
         """Honor a ``plugin.json`` manifest's ``skills`` path(s), which may be a single
         path or a list. Additive to the default ``skills/`` walk."""
         result: SkillsDirsResult = {}
-        for plugin_root, manifest in self._plugin_manifests():
+        for plugin_root, _manifest_path, manifest in self._plugin_manifests():
             for resolved in self._manifest_relative_paths(plugin_root, manifest.get("skills")):
                 entries = self._scan_skills_dir(resolved)
                 if entries is not None:
@@ -219,18 +267,43 @@ class GitHubCopilotDiscoverer(AgentDiscoverer):
         root is skipped by :func:`_walk_under_depth`."""
         return [self._copilot_home() / self._plugins_dir_name]
 
-    def _plugin_manifests(self) -> list[tuple[Path, dict]]:
-        """Locate installed plugin manifests, returning ``(plugin_root, manifest)`` for
-        each ``plugin.json`` found under the plugins root. Unparseable or non-dict
-        manifests are skipped."""
-        result: list[tuple[Path, dict]] = []
+    def _plugin_manifests(self) -> list[tuple[Path, Path, dict]]:
+        """Locate installed plugin manifests, returning ``(plugin_root, manifest_path,
+        manifest)`` for each one found under the plugins root.
+
+        A manifest is recognized only at one of the documented locations, and the plugin
+        root is derived by stripping that location (see :func:`_plugin_root_for`) so a
+        manifest in a subdirectory still resolves its declared paths against the plugin
+        itself, and must land on an installed plugin's own directory. A plugin shipping
+        more than one manifest keeps the highest-precedence location; unparseable or
+        non-dict manifests are skipped.
+        """
+        by_root: dict[Path, tuple[int, Path]] = {}
         for base in self._plugin_base_dirs():
             for manifest_path in _walk_under_depth(
                 base, self._plugin_manifest_filename, _MAX_PLUGIN_RGLOB_DEPTH, want_file=True
             ):
-                data = self._load_json_file(manifest_path)
-                if isinstance(data, dict):
-                    result.append((manifest_path.parent, data))
+                located = _plugin_root_for(manifest_path)
+                if located is None:
+                    continue
+                plugin_root, precedence = located
+                if plugin_root.parent.parent != base:
+                    # A plugin root sits at ``<installed-plugins>/<marketplace>/<plugin>``
+                    # (``_direct`` being the marketplace for a directly installed one), so a
+                    # ``plugin.json`` vendored deeper inside a plugin is another tool's file
+                    # rather than a manifest that may relocate this plugin's components. The
+                    # default ``skills/`` and ``.mcp.json`` / ``mcp.json`` walks are not
+                    # depth-limited, so a deeper layout still has its components found —
+                    # only a non-default *declared* path would be missed.
+                    continue
+                existing = by_root.get(plugin_root)
+                if existing is None or precedence < existing[0]:
+                    by_root[plugin_root] = (precedence, manifest_path)
+        result: list[tuple[Path, Path, dict]] = []
+        for plugin_root, (_precedence, manifest_path) in by_root.items():
+            data = self._load_json_file(manifest_path)
+            if isinstance(data, dict):
+                result.append((plugin_root, manifest_path, data))
         return result
 
     def _manifest_relative_paths(self, plugin_root: Path, value: object) -> list[Path]:

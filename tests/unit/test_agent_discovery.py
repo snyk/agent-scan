@@ -9590,6 +9590,112 @@ def test_github_copilot_discoverer_honors_plugin_manifest_overrides(tmp_path):
     assert [s.name for s in skills_dirs[(plugin / "extra-skills").as_posix()]] == ["second"]
 
 
+def test_github_copilot_discoverer_reads_inline_manifest_mcp_servers(tmp_path):
+    """``mcpServers`` is documented as a path *or* inline server definitions; an inline
+    map is the definition itself, so it is keyed on the manifest carrying it."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    plugin = tmp_path / ".copilot" / "installed-plugins" / "_direct" / "acme"
+    plugin.mkdir(parents=True)
+    (plugin / "plugin.json").write_text(
+        json.dumps({"name": "acme", "mcpServers": {"inline-server": {"command": "node", "args": ["server.js"]}}})
+    )
+
+    mcp_configs = GitHubCopilotDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert [name for name, _ in mcp_configs[(plugin / "plugin.json").as_posix()]] == ["inline-server"]
+
+
+def test_github_copilot_discoverer_ignores_an_empty_inline_manifest_mcp_block(tmp_path):
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    plugin = tmp_path / ".copilot" / "installed-plugins" / "_direct" / "acme"
+    plugin.mkdir(parents=True)
+    (plugin / "plugin.json").write_text(json.dumps({"name": "acme", "mcpServers": {}}))
+
+    assert GitHubCopilotDiscoverer(tmp_path).discover_mcp_servers() == {}
+
+
+def test_github_copilot_discoverer_reads_agent_plugins_1_0_mcp_json(tmp_path):
+    """Agent Plugins 1.0 fixes MCP servers at ``mcp.json`` — no leading dot — and its
+    component locations cannot be redeclared in the manifest."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    plugin = tmp_path / ".copilot" / "installed-plugins" / "acme-market" / "acme"
+    plugin.mkdir(parents=True)
+    (plugin / "plugin.json").write_text(
+        json.dumps({"$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json", "name": "acme"})
+    )
+    (plugin / "mcp.json").write_text(_wrapped_mcp("modern-server"))
+
+    mcp_configs = GitHubCopilotDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert [name for name, _ in mcp_configs[(plugin / "mcp.json").as_posix()]] == ["modern-server"]
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        ("plugin.json",),
+        (".plugin", "plugin.json"),
+        (".github", "plugin", "plugin.json"),
+        (".claude-plugin", "plugin.json"),
+    ],
+)
+def test_github_copilot_discoverer_resolves_manifest_paths_against_the_plugin_root(tmp_path, location):
+    """A manifest's declared paths resolve against the plugin root, not the manifest's
+    own directory — three of the four documented locations are subdirectories."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    plugin = tmp_path / ".copilot" / "installed-plugins" / "_direct" / "acme"
+    manifest_path = plugin.joinpath(*location)
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(json.dumps({"name": "acme", "mcpServers": "config/servers.json", "skills": "custom/"}))
+    (plugin / "config").mkdir()
+    (plugin / "config" / "servers.json").write_text(_wrapped_mcp("root-relative-server"))
+    _skill(plugin / "custom" / "root-relative-skill", "root-relative-skill")
+
+    discoverer = GitHubCopilotDiscoverer(tmp_path)
+
+    mcp_configs = discoverer.discover_mcp_servers()
+    assert [name for name, _ in mcp_configs[(plugin / "config" / "servers.json").as_posix()]] == [
+        "root-relative-server"
+    ]
+    skills_dirs = discoverer.discover_skills()
+    assert [s.name for s in skills_dirs[(plugin / "custom").as_posix()]] == ["root-relative-skill"]
+
+
+def test_github_copilot_discoverer_prefers_the_first_searched_manifest_location(tmp_path):
+    """Copilot searches the manifest locations in order, so a plugin shipping two keeps
+    the earlier one rather than merging both."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    plugin = tmp_path / ".copilot" / "installed-plugins" / "_direct" / "acme"
+    (plugin / ".plugin").mkdir(parents=True)
+    (plugin / ".plugin" / "plugin.json").write_text(
+        json.dumps({"name": "acme", "mcpServers": {"preferred": {"command": "node"}}})
+    )
+    (plugin / "plugin.json").write_text(json.dumps({"name": "acme", "mcpServers": {"ignored": {"command": "node"}}}))
+
+    mcp_configs = GitHubCopilotDiscoverer(tmp_path).discover_mcp_servers()
+
+    names = {name for value in mcp_configs.values() if isinstance(value, list) for name, _ in value}
+    assert names == {"preferred"}
+
+
+def test_github_copilot_discoverer_ignores_a_plugin_json_outside_a_manifest_location(tmp_path):
+    """A ``plugin.json`` nested somewhere undocumented is another tool's file, not a
+    plugin manifest, so its declared paths are not resolved."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    plugin = tmp_path / ".copilot" / "installed-plugins" / "_direct" / "acme"
+    stray = plugin / "node_modules" / "vendor" / "fixtures"
+    stray.mkdir(parents=True)
+    (stray / "plugin.json").write_text(json.dumps({"mcpServers": {"stray": {"command": "node"}}}))
+
+    assert GitHubCopilotDiscoverer(tmp_path).discover_mcp_servers() == {}
+
+
 @pytest.mark.parametrize(
     "override",
     [
