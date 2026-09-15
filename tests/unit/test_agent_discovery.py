@@ -1218,6 +1218,7 @@ def test_DISCOVERERS_registers_claude_code_and_vscode_family():
         "codex",
         "claude desktop",
         "opencode",
+        "github copilot",
     }
 
 
@@ -9434,3 +9435,428 @@ async def test_vscode_well_known_client_includes_copilot_mcp_config(tmp_path):
         assert (copilot / "mcp-config.json").resolve().as_posix() in cti.mcp_configs
         servers = cti.mcp_configs[(copilot / "mcp-config.json").resolve().as_posix()]
         assert [name for name, _server in servers] == ["playwright"]
+
+
+# --- GitHubCopilotDiscoverer ---
+
+
+def _skill(directory: Path, name: str) -> None:
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "SKILL.md").write_text(f"---\nname: {name}\ndescription: {name} skill\n---\nbody\n")
+
+
+def _wrapped_mcp(name: str) -> str:
+    return json.dumps({"mcpServers": {name: {"command": "npx", "args": ["server"]}}})
+
+
+def test_github_copilot_discoverer_detects_installation(tmp_path):
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    (tmp_path / ".copilot").mkdir()
+
+    assert GitHubCopilotDiscoverer(tmp_path).client_exists() == (tmp_path / ".copilot").as_posix()
+
+
+def test_github_copilot_discoverer_returns_none_when_absent(tmp_path):
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    assert GitHubCopilotDiscoverer(tmp_path).client_exists() is None
+    assert GitHubCopilotDiscoverer(tmp_path).discover() is None
+
+
+def test_github_copilot_discoverer_parses_user_mcp_config(tmp_path):
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    copilot = tmp_path / ".copilot"
+    copilot.mkdir()
+    (copilot / "mcp-config.json").write_text(_wrapped_mcp("playwright"))
+
+    mcp_configs = GitHubCopilotDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert [name for name, _ in mcp_configs[(copilot / "mcp-config.json").as_posix()]] == ["playwright"]
+
+
+def test_github_copilot_discoverer_parses_user_skills(tmp_path):
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    copilot = tmp_path / ".copilot"
+    copilot.mkdir()
+    _skill(copilot / "skills" / "demo", "demo")
+    _skill(tmp_path / ".agents" / "skills" / "shared", "shared")
+
+    skills_dirs = GitHubCopilotDiscoverer(tmp_path).discover_skills()
+
+    assert [s.name for s in skills_dirs[(copilot / "skills").as_posix()]] == ["demo"]
+    assert [s.name for s in skills_dirs[(tmp_path / ".agents" / "skills").as_posix()]] == ["shared"]
+
+
+def test_github_copilot_discoverer_scans_project_mcp_and_skills(tmp_path):
+    """Copilot loads repo-relative MCP files and skills; the target folder and its
+    ancestors are both scanned, so a monorepo root is reached from a sub-package."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    (tmp_path / ".copilot").mkdir()
+    repo = tmp_path / "repo"
+    package = repo / "package"
+    package.mkdir(parents=True)
+    (package / ".mcp.json").write_text(_wrapped_mcp("package-server"))
+    (repo / ".github").mkdir()
+    (repo / ".github" / "mcp.json").write_text(_wrapped_mcp("repo-server"))
+    _skill(repo / ".github" / "skills" / "repo-skill", "repo-skill")
+    _skill(package / ".claude" / "skills" / "compat-skill", "compat-skill")
+
+    discoverer = GitHubCopilotDiscoverer(tmp_path, target_folders=[package])
+    mcp_configs = discoverer.discover_mcp_servers()
+    skills_dirs = discoverer.discover_skills()
+
+    assert [name for name, _ in mcp_configs[(package / ".mcp.json").as_posix()]] == ["package-server"]
+    assert [name for name, _ in mcp_configs[(repo / ".github" / "mcp.json").as_posix()]] == ["repo-server"]
+    assert [s.name for s in skills_dirs[(repo / ".github" / "skills").as_posix()]] == ["repo-skill"]
+    assert [s.name for s in skills_dirs[(package / ".claude" / "skills").as_posix()]] == ["compat-skill"]
+
+
+def test_github_copilot_discoverer_project_folders_from_permissions_config(tmp_path):
+    """Copilot records every directory it has been used in under ``locations``; those
+    are project roots even when the scan passes no target folders."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    copilot = tmp_path / ".copilot"
+    copilot.mkdir()
+    project = tmp_path / "recorded-project"
+    project.mkdir()
+    (project / ".mcp.json").write_text(_wrapped_mcp("recorded-server"))
+    (copilot / "permissions-config.json").write_text(
+        json.dumps({"locations": {project.as_posix(): {"tool_approvals": [{"kind": "commands"}]}}})
+    )
+
+    discoverer = GitHubCopilotDiscoverer(tmp_path)
+
+    assert discoverer._discover_project_folders() == [Path(project.as_posix())]
+    mcp_configs = discoverer.discover_mcp_servers()
+    assert [name for name, _ in mcp_configs[(project / ".mcp.json").as_posix()]] == ["recorded-server"]
+
+
+@pytest.mark.parametrize("location", [".", "../repo", "  ../repo  ", "  ", "relative/repo"])
+def test_github_copilot_discoverer_ignores_relative_permissions_locations(tmp_path, monkeypatch, location):
+    """A relative key would resolve against Agent Scan's own working directory, so it
+    would inventory whatever project happens to be there as a Copilot project root."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    copilot = tmp_path / ".copilot"
+    copilot.mkdir()
+    (copilot / "permissions-config.json").write_text(json.dumps({"locations": {location: {}}}))
+    # Stand the working directory up as a scannable project: were the relative key
+    # honoured, these are the files that would be attributed to Copilot.
+    cwd = tmp_path / "unrelated-cwd"
+    (cwd / ".github" / "skills" / "cwd-skill").mkdir(parents=True)
+    _skill(cwd / ".github" / "skills" / "cwd-skill", "cwd-skill")
+    (cwd / ".mcp.json").write_text(_wrapped_mcp("cwd-server"))
+    monkeypatch.chdir(cwd)
+
+    discoverer = GitHubCopilotDiscoverer(tmp_path)
+
+    assert discoverer._discover_project_folders() == []
+    assert discoverer.discover_mcp_servers() == {}
+    assert discoverer.discover_skills() == {}
+
+
+def test_github_copilot_discoverer_strips_padding_from_an_absolute_location(tmp_path):
+    """Stripping is what makes the absolute check meaningful: a padded absolute key is
+    still an absolute path, while a padded relative one is still relative."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    copilot = tmp_path / ".copilot"
+    copilot.mkdir()
+    project = tmp_path / "recorded-project"
+    project.mkdir()
+    (project / ".mcp.json").write_text(_wrapped_mcp("recorded-server"))
+    (copilot / "permissions-config.json").write_text(json.dumps({"locations": {f"  {project.as_posix()}  ": {}}}))
+
+    mcp_configs = GitHubCopilotDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert [name for name, _ in mcp_configs[(project / ".mcp.json").as_posix()]] == ["recorded-server"]
+
+
+@pytest.mark.parametrize("locations", [None, "not-a-dict", {}, {"   ": {}}])
+def test_github_copilot_discoverer_tolerates_unusable_permissions_config(tmp_path, locations):
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    copilot = tmp_path / ".copilot"
+    copilot.mkdir()
+    (copilot / "permissions-config.json").write_text(json.dumps({"locations": locations}))
+
+    assert GitHubCopilotDiscoverer(tmp_path)._discover_project_folders() == []
+
+
+def test_github_copilot_discoverer_scans_installed_plugins(tmp_path):
+    """A plugin's default ``.mcp.json`` and ``skills/`` are found wherever the
+    marketplace layout puts the plugin root."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    plugin = tmp_path / ".copilot" / "installed-plugins" / "acme-market" / "acme"
+    plugin.mkdir(parents=True)
+    (plugin / "plugin.json").write_text(json.dumps({"name": "acme", "version": "1.0.0"}))
+    (plugin / ".mcp.json").write_text(_wrapped_mcp("plugin-server"))
+    _skill(plugin / "skills" / "plugin-skill", "plugin-skill")
+
+    discoverer = GitHubCopilotDiscoverer(tmp_path)
+
+    mcp_configs = discoverer.discover_mcp_servers()
+    assert [name for name, _ in mcp_configs[(plugin / ".mcp.json").as_posix()]] == ["plugin-server"]
+    skills_dirs = discoverer.discover_skills()
+    assert [s.name for s in skills_dirs[(plugin / "skills").as_posix()]] == ["plugin-skill"]
+
+
+def test_github_copilot_discoverer_honors_plugin_manifest_overrides(tmp_path):
+    """A manifest may relocate its MCP config and declare several skills roots, as a
+    single string or a list."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    plugin = tmp_path / ".copilot" / "installed-plugins" / "_direct" / "acme"
+    plugin.mkdir(parents=True)
+    (plugin / "plugin.json").write_text(
+        json.dumps({"name": "acme", "mcpServers": "config/servers.json", "skills": ["skills/", "extra-skills/"]})
+    )
+    (plugin / "config").mkdir()
+    (plugin / "config" / "servers.json").write_text(_wrapped_mcp("relocated-server"))
+    _skill(plugin / "skills" / "first", "first")
+    _skill(plugin / "extra-skills" / "second", "second")
+
+    discoverer = GitHubCopilotDiscoverer(tmp_path)
+
+    mcp_configs = discoverer.discover_mcp_servers()
+    assert [name for name, _ in mcp_configs[(plugin / "config" / "servers.json").as_posix()]] == ["relocated-server"]
+    skills_dirs = discoverer.discover_skills()
+    assert [s.name for s in skills_dirs[(plugin / "skills").as_posix()]] == ["first"]
+    assert [s.name for s in skills_dirs[(plugin / "extra-skills").as_posix()]] == ["second"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="symlink creation needs elevation on Windows")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("alias", ["home", "config"])
+async def test_github_copilot_symlinked_config_is_discovered_once(tmp_path, alias):
+    """Both phases read the same Copilot config, and the data-driven phase keys its
+    results by resolved path. A key here that kept the symlinked spelling would survive
+    the merge as a second entry and have the same server inspected twice.
+    """
+    from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
+
+    real = tmp_path / "real-copilot"
+    (real / "skills" / "demo").mkdir(parents=True)
+    _skill(real / "skills" / "demo", "demo")
+    (real / "mcp-config.json").write_text(_wrapped_mcp("aliased-server"))
+
+    home = tmp_path / "home"
+    if alias == "home":
+        # The whole Copilot home is a symlink.
+        home.mkdir()
+        (home / ".copilot").symlink_to(real)
+    else:
+        # The home is real but the config file inside it is a symlink.
+        (home / ".copilot" / "skills").mkdir(parents=True)
+        (home / ".copilot" / "mcp-config.json").symlink_to(real / "mcp-config.json")
+
+    with patch("agent_scan.pipelines.get_readable_home_directories", return_value=[(home, "alice")]):
+        clients, _unresolved, _users = await discover_clients_to_inspect(
+            InspectArgs(timeout=1, tokens=[], paths=[], scan_skills=True)
+        )
+
+    copilot = [client for client in clients if client.name == "github copilot"]
+    assert len(copilot) == 1
+    assert list(copilot[0].mcp_configs) == [(real / "mcp-config.json").resolve().as_posix()]
+    servers = [name for entry in copilot[0].mcp_configs.values() for name, _ in entry]
+    assert servers == ["aliased-server"]
+
+
+def test_github_copilot_discoverer_reads_inline_manifest_mcp_servers(tmp_path):
+    """``mcpServers`` is documented as a path *or* inline server definitions; an inline
+    map is the definition itself, so it is keyed on the manifest carrying it."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    plugin = tmp_path / ".copilot" / "installed-plugins" / "_direct" / "acme"
+    plugin.mkdir(parents=True)
+    (plugin / "plugin.json").write_text(
+        json.dumps({"name": "acme", "mcpServers": {"inline-server": {"command": "node", "args": ["server.js"]}}})
+    )
+
+    mcp_configs = GitHubCopilotDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert [name for name, _ in mcp_configs[(plugin / "plugin.json").as_posix()]] == ["inline-server"]
+
+
+def test_github_copilot_discoverer_ignores_an_empty_inline_manifest_mcp_block(tmp_path):
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    plugin = tmp_path / ".copilot" / "installed-plugins" / "_direct" / "acme"
+    plugin.mkdir(parents=True)
+    (plugin / "plugin.json").write_text(json.dumps({"name": "acme", "mcpServers": {}}))
+
+    assert GitHubCopilotDiscoverer(tmp_path).discover_mcp_servers() == {}
+
+
+def test_github_copilot_discoverer_reads_agent_plugins_1_0_mcp_json(tmp_path):
+    """Agent Plugins 1.0 fixes MCP servers at ``mcp.json`` — no leading dot — and its
+    component locations cannot be redeclared in the manifest."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    plugin = tmp_path / ".copilot" / "installed-plugins" / "acme-market" / "acme"
+    plugin.mkdir(parents=True)
+    (plugin / "plugin.json").write_text(
+        json.dumps({"$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json", "name": "acme"})
+    )
+    (plugin / "mcp.json").write_text(_wrapped_mcp("modern-server"))
+
+    mcp_configs = GitHubCopilotDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert [name for name, _ in mcp_configs[(plugin / "mcp.json").as_posix()]] == ["modern-server"]
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        ("plugin.json",),
+        (".plugin", "plugin.json"),
+        (".github", "plugin", "plugin.json"),
+        (".claude-plugin", "plugin.json"),
+    ],
+)
+def test_github_copilot_discoverer_resolves_manifest_paths_against_the_plugin_root(tmp_path, location):
+    """A manifest's declared paths resolve against the plugin root, not the manifest's
+    own directory — three of the four documented locations are subdirectories."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    plugin = tmp_path / ".copilot" / "installed-plugins" / "_direct" / "acme"
+    manifest_path = plugin.joinpath(*location)
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(json.dumps({"name": "acme", "mcpServers": "config/servers.json", "skills": "custom/"}))
+    (plugin / "config").mkdir()
+    (plugin / "config" / "servers.json").write_text(_wrapped_mcp("root-relative-server"))
+    _skill(plugin / "custom" / "root-relative-skill", "root-relative-skill")
+
+    discoverer = GitHubCopilotDiscoverer(tmp_path)
+
+    mcp_configs = discoverer.discover_mcp_servers()
+    assert [name for name, _ in mcp_configs[(plugin / "config" / "servers.json").as_posix()]] == [
+        "root-relative-server"
+    ]
+    skills_dirs = discoverer.discover_skills()
+    assert [s.name for s in skills_dirs[(plugin / "custom").as_posix()]] == ["root-relative-skill"]
+
+
+def test_github_copilot_discoverer_prefers_the_first_searched_manifest_location(tmp_path):
+    """Copilot searches the manifest locations in order, so a plugin shipping two keeps
+    the earlier one rather than merging both."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    plugin = tmp_path / ".copilot" / "installed-plugins" / "_direct" / "acme"
+    (plugin / ".plugin").mkdir(parents=True)
+    (plugin / ".plugin" / "plugin.json").write_text(
+        json.dumps({"name": "acme", "mcpServers": {"preferred": {"command": "node"}}})
+    )
+    (plugin / "plugin.json").write_text(json.dumps({"name": "acme", "mcpServers": {"ignored": {"command": "node"}}}))
+
+    mcp_configs = GitHubCopilotDiscoverer(tmp_path).discover_mcp_servers()
+
+    names = {name for value in mcp_configs.values() if isinstance(value, list) for name, _ in value}
+    assert names == {"preferred"}
+
+
+def test_github_copilot_discoverer_ignores_a_plugin_json_outside_a_manifest_location(tmp_path):
+    """A ``plugin.json`` nested somewhere undocumented is another tool's file, not a
+    plugin manifest, so its declared paths are not resolved."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    plugin = tmp_path / ".copilot" / "installed-plugins" / "_direct" / "acme"
+    stray = plugin / "node_modules" / "vendor" / "fixtures"
+    stray.mkdir(parents=True)
+    (stray / "plugin.json").write_text(json.dumps({"mcpServers": {"stray": {"command": "node"}}}))
+
+    assert GitHubCopilotDiscoverer(tmp_path).discover_mcp_servers() == {}
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        "/etc",
+        "../../../etc",
+        7,
+        "",
+        ["../escape"],
+        "C:/Windows/Temp",
+        "C:\\Windows\\Temp",
+        "..\\escape",
+        "\\\\server\\share",
+    ],
+)
+def test_github_copilot_discoverer_rejects_manifest_paths_outside_the_plugin(tmp_path, override):
+    """A manifest must not be able to point the scan at an arbitrary path on disk."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    plugin = tmp_path / ".copilot" / "installed-plugins" / "_direct" / "acme"
+    plugin.mkdir(parents=True)
+
+    resolved = GitHubCopilotDiscoverer(tmp_path)._manifest_relative_paths(plugin, override)
+
+    assert resolved == []
+
+
+def test_github_copilot_discoverer_skips_unrecognized_plugin_mcp_files(tmp_path):
+    """The plugin walk matches every file named ``.mcp.json``; one with no MCP shape is
+    skipped rather than reported as a malformed config."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    plugin = tmp_path / ".copilot" / "installed-plugins" / "_direct" / "acme"
+    plugin.mkdir(parents=True)
+    (plugin / ".mcp.json").write_text(json.dumps({"unrelated": "fixture"}))
+
+    assert GitHubCopilotDiscoverer(tmp_path).discover_mcp_servers() == {}
+
+
+def test_github_copilot_discoverer_honors_copilot_home_on_own_home_scan(tmp_path, monkeypatch):
+    """``COPILOT_HOME`` replaces the whole ``~/.copilot`` path on an own-home scan."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    relocated = tmp_path / "custom-copilot"
+    relocated.mkdir()
+    (relocated / "mcp-config.json").write_text(_wrapped_mcp("relocated"))
+    monkeypatch.setenv("COPILOT_HOME", str(relocated))
+
+    discoverer = GitHubCopilotDiscoverer(None)
+
+    assert discoverer.client_exists() == relocated.as_posix()
+    mcp_configs = discoverer.discover_mcp_servers()
+    assert [name for name, _ in mcp_configs[(relocated / "mcp-config.json").as_posix()]] == ["relocated"]
+
+
+def test_github_copilot_discoverer_ignores_copilot_home_when_home_passed(tmp_path, monkeypatch):
+    """Under a multi-user scan the scanning process's ``COPILOT_HOME`` must not
+    relocate the target user's config."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    relocated = tmp_path / "process-env-dir"
+    relocated.mkdir()
+    (relocated / "mcp-config.json").write_text(_wrapped_mcp("should-not-appear"))
+    monkeypatch.setenv("COPILOT_HOME", str(relocated))
+
+    home = tmp_path / "alice"
+    (home / ".copilot").mkdir(parents=True)
+    (home / ".copilot" / "mcp-config.json").write_text(_wrapped_mcp("alice-server"))
+
+    mcp_configs = GitHubCopilotDiscoverer(home).discover_mcp_servers()
+
+    names = {name for value in mcp_configs.values() if isinstance(value, list) for name, _ in value}
+    assert names == {"alice-server"}
+
+
+def test_github_copilot_discoverer_name_matches_well_known_client():
+    """The Phase-A/Phase-B merge keys on ``(name, username)``, so a drifted name would
+    split Copilot into two rows in scan output."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+    from agent_scan.well_known_clients import (
+        LINUX_WELL_KNOWN_CLIENTS,
+        MACOS_WELL_KNOWN_CLIENTS,
+        WINDOWS_WELL_KNOWN_CLIENTS,
+    )
+
+    for clients in (MACOS_WELL_KNOWN_CLIENTS, LINUX_WELL_KNOWN_CLIENTS, WINDOWS_WELL_KNOWN_CLIENTS):
+        assert GitHubCopilotDiscoverer.name in {client.name for client in clients}
