@@ -9590,7 +9590,20 @@ def test_github_copilot_discoverer_honors_plugin_manifest_overrides(tmp_path):
     assert [s.name for s in skills_dirs[(plugin / "extra-skills").as_posix()]] == ["second"]
 
 
-@pytest.mark.parametrize("override", ["/etc", "../../../etc", 7, "", ["../escape"]])
+@pytest.mark.parametrize(
+    "override",
+    [
+        "/etc",
+        "../../../etc",
+        7,
+        "",
+        ["../escape"],
+        "C:/Windows/Temp",
+        "C:\\Windows\\Temp",
+        "..\\escape",
+        "\\\\server\\share",
+    ],
+)
 def test_github_copilot_discoverer_rejects_manifest_paths_outside_the_plugin(tmp_path, override):
     """A manifest must not be able to point the scan at an arbitrary path on disk."""
     from agent_scan.agents import GitHubCopilotDiscoverer

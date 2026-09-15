@@ -12,7 +12,7 @@ https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-config-di
 
 import logging
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 from agent_scan.agents.base import (
     _MAX_PLUGIN_RGLOB_DEPTH,
@@ -42,6 +42,15 @@ _COPILOT_MCP_FORMATS: tuple[type[MCPConfig], ...] = (
     VSCodeMCPConfig,
     PluginMCPConfigFile,
 )
+
+
+def _escapes_plugin_root(value: str) -> bool:
+    r"""True when a manifest path value would resolve outside the plugin that declared it."""
+    for flavour in (PurePosixPath, PureWindowsPath):
+        candidate = flavour(value)
+        if candidate.is_absolute() or candidate.root or candidate.drive or ".." in candidate.parts:
+            return True
+    return False
 
 
 class GitHubCopilotDiscoverer(AgentDiscoverer):
@@ -227,18 +236,18 @@ class GitHubCopilotDiscoverer(AgentDiscoverer):
     def _manifest_relative_paths(self, plugin_root: Path, value: object) -> list[Path]:
         """Resolve a manifest ``mcpServers`` / ``skills`` value to absolute paths under
         ``plugin_root``. Copilot documents both a single path and a list of them
-        (``"skills": ["skills/", "extra-skills/"]``). An absolute path or one escaping
-        the plugin root via ``..`` is dropped, so a manifest cannot redirect the scan
-        somewhere else on disk."""
+        (``"skills": ["skills/", "extra-skills/"]``). A value that would land outside the
+        plugin root is dropped (see :func:`_escapes_plugin_root`), so a manifest cannot
+        redirect the scan somewhere else on disk."""
         values = value if isinstance(value, list) else [value]
         resolved: list[Path] = []
         for entry in values:
             if not isinstance(entry, str) or not entry.strip():
                 continue
-            candidate = Path(entry.strip())
-            if candidate.is_absolute() or ".." in candidate.parts:
+            text = entry.strip()
+            if _escapes_plugin_root(text):
                 continue
-            resolved.append(plugin_root / candidate)
+            resolved.append(plugin_root / Path(text))
         return resolved
 
     # --- COPILOT_HOME resolution ---
