@@ -9415,3 +9415,22 @@ async def test_vscode_entry_alone_leaves_copilot_unscanned(tmp_path):
     assert vscode_entries
     for entry in vscode_entries:
         assert await get_mcp_config_per_home_directory(entry, tmp_path) is None
+
+
+@pytest.mark.asyncio
+async def test_vscode_well_known_client_includes_copilot_mcp_config(tmp_path):
+    """Phase A ``vscode`` must list ``~/.copilot/mcp-config.json``, matching Phase B."""
+    from agent_scan.inspect import get_mcp_config_per_home_directory
+    from agent_scan.well_known_clients import get_well_known_clients
+
+    (tmp_path / ".vscode").mkdir()
+    copilot = _install_copilot_home(tmp_path)
+    vscode_entries = [client for client in get_well_known_clients() if client.name == "vscode"]
+
+    assert vscode_entries
+    for entry in vscode_entries:
+        cti = await get_mcp_config_per_home_directory(entry, tmp_path)
+        assert cti is not None
+        assert (copilot / "mcp-config.json").resolve().as_posix() in cti.mcp_configs
+        servers = cti.mcp_configs[(copilot / "mcp-config.json").resolve().as_posix()]
+        assert [name for name, _server in servers] == ["playwright"]
