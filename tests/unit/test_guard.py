@@ -122,6 +122,22 @@ def _setup_cursor_hooks(cmd: str, path: Path) -> None:
     _write_config(data, path, preserved)
 
 
+def _flat_hook_command_strings(path: Path) -> list[str]:
+    """Every command string in a flat hooks file, whichever script key carries it.
+
+    A Copilot entry keeps its script under ``bash`` or ``powershell`` (see
+    ``_copilot_command_entry``), so a read of ``command`` alone returns ``None`` for
+    every entry — an assertion built on it holds whether or not the hook is still there.
+    """
+    return [
+        value
+        for entries in json.loads(path.read_text()).get("hooks", {}).values()
+        for entry in entries
+        for key, value in entry.items()
+        if key != "type" and isinstance(value, str)
+    ]
+
+
 def _setup_copilot_hooks(cmd: str, path: Path) -> None:
     data, _, preserved = _prepare_copilot_config(cmd, path)
     _write_config(data, path, preserved)
@@ -866,14 +882,14 @@ class TestPrepareGitHubCopilotDiscoveryHook:
             discover_command=self.discover_command,
         )
         _write_config(data, path, preserved)
+        # Asserted before as well as after: the entry is written under the platform's
+        # script key, so a check that never sees that key would pass on an install that
+        # was left in place.
+        assert self.discover_command in _flat_hook_command_strings(path)
 
         _uninstall_test_client("github-copilot", path)
 
-        assert not any(
-            self.discover_command == entry.get("command")
-            for entries in json.loads(path.read_text()).get("hooks", {}).values()
-            for entry in entries
-        )
+        assert self.discover_command not in _flat_hook_command_strings(path)
 
 
 class TestPrepareCodexDiscoveryHook:
