@@ -911,7 +911,7 @@ def main():
         "guard",
         allow_abbrev=False,
         help="Install, uninstall, or check status of Agent Guard hooks",
-        description="Manage Agent Guard hooks for Claude Code, Cursor, and Codex.",
+        description="Manage Agent Guard hooks for Claude Code, Cursor, Codex, and Github Copilot.",
     )
     guard_subparsers = guard_parser.add_subparsers(
         dest="guard_command",
@@ -927,7 +927,7 @@ def main():
     )
     guard_install_parser.add_argument(
         "client",
-        choices=["claude", "cursor", "codex", "all"],
+        choices=["claude", "cursor", "codex", "github-copilot", "all"],
         help="Client to install hooks for",
     )
     guard_install_parser.add_argument(
@@ -987,7 +987,7 @@ def main():
     guard_discover_parser.add_argument(
         "--client",
         type=str,
-        choices=["claude-code", "cursor", "codex"],
+        choices=["claude-code", "cursor", "codex", "github-copilot"],
         required=True,
         metavar="CLIENT",
         help=("Required; read the selected agent's hook JSON payload from stdin and include its target folders"),
@@ -1005,7 +1005,7 @@ def main():
     )
     guard_uninstall_parser.add_argument(
         "client",
-        choices=["claude", "cursor", "codex", "all"],
+        choices=["claude", "cursor", "codex", "github-copilot", "all"],
         help="Client to uninstall hooks from",
     )
     guard_uninstall_parser.add_argument(
