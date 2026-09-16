@@ -130,7 +130,7 @@ Download the binary for your operating system and architecture from the [latest 
 ## Highlights
 
 - Auto-discover MCP configurations, agent tools, skills
-- Scanning of Claude, Cursor, Windsurf, Gemini CLI, Amp, Amazon Q, and other agents.
+- Scanning of Claude, Cursor, GitHub Copilot, Windsurf, Gemini CLI, Amp, Amazon Q, and other agents.
 
 ### Agent Scan v0.5.x
 
@@ -158,6 +158,7 @@ Agent Scan auto-discovers agents and their capabilities (MCP servers or skills) 
 | Windsurf | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Cursor | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | VS Code | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| GitHub Copilot | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Claude Desktop | ✓ | ✗ | — | — | ✓ | ✗ |
 | Claude Code | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Gemini CLI | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
@@ -187,6 +188,7 @@ Legend: **✓** detected · **✗** the agent supports this but Agent Scan does 
 | Windsurf | ✓ | N/A | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Cursor | N/A | N/A | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | VS Code | N/A | N/A | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| GitHub Copilot § | N/A | N/A | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Claude Desktop | N/A | N/A | ✗ | ✓ | N/A | N/A | N/A | ✗ |
 | Claude Code | ✗ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Gemini CLI | N/A | ✗ | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ |
@@ -201,6 +203,8 @@ Legend: **✓** detected · **✗** the agent supports this but Agent Scan does 
 † OpenClaw has no opened-project enumeration: its project/workspace skills are found only at the fixed `~/.openclaw/workspace/skills`
 
 ‡ Amp stores project/workspace skills at `.agents/skills` (and the `.claude/skills` compatibility path); only the user-scope `~/.config/agents/skills` is detected today, so project-scope skills are supported but not yet scanned.
+
+§ GitHub Copilot covers the CLI and the desktop app, which share the `~/.copilot` home with Copilot in VS Code, and is detected from that home rather than from a VS Code install. `COPILOT_HOME` relocations are honored when scanning your own home. Project scope covers the repo-relative `.mcp.json` / `.github/mcp.json` files and the `.github/skills`, `.claude/skills` and `.agents/skills` directories, for the folders passed to the scan and the directories Copilot has recorded in `permissions-config.json`, plus their ancestors. Plugin scope covers `~/.copilot/installed-plugins`, including `plugin.json` manifests that relocate their MCP config or declare extra skills roots. Not scanned: the per-session project roots in `session-state/*/workspace.yaml`. Copilot's user-level paths are also listed under VS Code, which reads the same files.
 
 ## Verifying Standalone Binaries
 

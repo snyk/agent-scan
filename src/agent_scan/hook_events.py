@@ -77,6 +77,9 @@ def send_hook_event(
             "hostname": hostname,
             "username": get_username(),
             "identifier": machine_id,
+            # The hook scripts read this out of their install-time variables section; here
+            # the running CLI is the sender, so it reports its own version directly.
+            "cli_version": version_info,
         },
         separators=(",", ":"),
     )

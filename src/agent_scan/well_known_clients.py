@@ -14,6 +14,18 @@ logger = logging.getLogger(__name__)
 # ``pipelines.discover_clients_to_inspect`` relies on these matching exactly.
 CLAUDE_CODE_NAME = "claude code"
 
+# GitHub Copilot's own home (``~/.copilot``), shared by the CLI, the desktop app and
+# Copilot inside VS Code. It is listed separately from ``vscode`` because Copilot is
+# reachable without VS Code at all, and the ``vscode`` entry only exists when VS Code
+# does; the two entries deliberately overlap on the shared paths, the same way
+# ``vscode`` and ``claude code`` both claim ``~/.claude/skills``.
+GITHUB_COPILOT_NAME = "github copilot"
+# Shared Copilot user-scope paths. Listed on both ``vscode`` (when VS Code is installed)
+# and ``github copilot`` (when ``~/.copilot`` exists) because Copilot in VS Code reads
+# the same files as the CLI and desktop app.
+COPILOT_USER_MCP_CONFIG = "~/.copilot/mcp-config.json"
+COPILOT_USER_SKILLS_DIR = "~/.copilot/skills"
+
 
 MACOS_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
     CandidateClient(
@@ -35,8 +47,15 @@ MACOS_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
             "~/Library/Application Support/Code/User/settings.json",
             "~/.vscode/mcp.json",
             "~/Library/Application Support/Code/User/mcp.json",
+            COPILOT_USER_MCP_CONFIG,
         ],
-        skills_dir_paths=["~/.copilot/skills"],
+        skills_dir_paths=[COPILOT_USER_SKILLS_DIR],
+    ),
+    CandidateClient(
+        name=GITHUB_COPILOT_NAME,
+        client_exists_paths=["~/.copilot"],
+        mcp_config_paths=[COPILOT_USER_MCP_CONFIG],
+        skills_dir_paths=[COPILOT_USER_SKILLS_DIR],
     ),
     CandidateClient(
         name="claude desktop",
@@ -131,8 +150,15 @@ LINUX_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
             "~/.config/Code/User/settings.json",
             "~/.vscode/mcp.json",
             "~/.config/Code/User/mcp.json",
+            COPILOT_USER_MCP_CONFIG,
         ],
-        skills_dir_paths=["~/.copilot/skills"],
+        skills_dir_paths=[COPILOT_USER_SKILLS_DIR],
+    ),
+    CandidateClient(
+        name=GITHUB_COPILOT_NAME,
+        client_exists_paths=["~/.copilot"],
+        mcp_config_paths=[COPILOT_USER_MCP_CONFIG],
+        skills_dir_paths=[COPILOT_USER_SKILLS_DIR],
     ),
     CandidateClient(
         name=CLAUDE_CODE_NAME,
@@ -222,8 +248,15 @@ WINDOWS_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
             "~/AppData/Roaming/Code/User/settings.json",
             "~/.vscode/mcp.json",
             "~/AppData/Roaming/Code/User/mcp.json",
+            COPILOT_USER_MCP_CONFIG,
         ],
-        skills_dir_paths=["~/.copilot/skills"],
+        skills_dir_paths=[COPILOT_USER_SKILLS_DIR],
+    ),
+    CandidateClient(
+        name=GITHUB_COPILOT_NAME,
+        client_exists_paths=["~/.copilot"],
+        mcp_config_paths=[COPILOT_USER_MCP_CONFIG],
+        skills_dir_paths=[COPILOT_USER_SKILLS_DIR],
     ),
     CandidateClient(
         name="claude desktop",

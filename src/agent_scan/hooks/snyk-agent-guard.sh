@@ -14,11 +14,13 @@
 #
 set -euo pipefail
 
-# Hook API version.
-VERSION="2025-11-11"
-
+# --- BEGIN install-time variables ---
 # Agent-scan CLI version (replaced at install time).
 AGENT_SCAN_VERSION="__AGENT_SCAN_VERSION__"
+# --- END install-time variables ---
+
+# Hook API version.
+VERSION="2025-11-11"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -90,21 +92,22 @@ hook_main() {
   [[ -n "$pushkey" ]] || die "PUSH_KEY environment variable is not set"
   [[ -n "${MACHINE_ID:-}" ]] || die "MACHINE_ID environment variable is not set"
 
-  # Determine endpoint and user-agent based on client
-  local endpoint user_agent
+  local cli_version user_agent
+  cli_version="$AGENT_SCAN_VERSION"
+  # Only a copy install never filled in still holds the placeholder, and the literal must
+  # not reach the wire. This sits outside the variables section on purpose: substituting
+  # over it would rewrite the very literal it tests for.
+  if [[ "$cli_version" == "__AGENT_SCAN_VERSION__" ]]; then
+    cli_version="unknown"
+  fi
+  user_agent="snyk/snyk-agent-guard.sh Agent Scan v${cli_version}"
+
+  # Determine endpoint based on client
+  local endpoint
   case "$client" in
-    claude-code)
-      endpoint="/hidden/agent-monitor/hooks/claude-code"
-      user_agent="snyk/snyk-agent-guard.sh Agent Scan v${AGENT_SCAN_VERSION}"
-      ;;
-    cursor)
-      endpoint="/hidden/agent-monitor/hooks/cursor"
-      user_agent="snyk/snyk-agent-guard.sh Agent Scan v${AGENT_SCAN_VERSION}"
-      ;;
-    codex)
-      endpoint="/hidden/agent-monitor/hooks/codex"
-      user_agent="snyk/snyk-agent-guard.sh Agent Scan v${AGENT_SCAN_VERSION}"
-      ;;
+    claude-code) endpoint="/hidden/agent-monitor/hooks/claude-code" ;;
+    cursor) endpoint="/hidden/agent-monitor/hooks/cursor" ;;
+    codex) endpoint="/hidden/agent-monitor/hooks/codex" ;;
     *) die "Unknown client: ${client}. Expected claude-code, cursor, or codex." ;;
   esac
 
@@ -127,10 +130,11 @@ hook_main() {
   hostname="$(get_hostname)"
   username="$(get_username)"
 
-  x_user="$(printf '{%s:%s,%s:%s,%s:%s}' \
+  x_user="$(printf '{%s:%s,%s:%s,%s:%s,%s:%s}' \
     "\"hostname\"" "$(json_quote "$hostname")" \
     "\"username\"" "$(json_quote "$username")" \
-    "\"identifier\"" "$(json_quote "$MACHINE_ID")")"
+    "\"identifier\"" "$(json_quote "$MACHINE_ID")" \
+    "\"cli_version\"" "$(json_quote "$cli_version")")"
 
   # Execute request
   local resp body http_code marker

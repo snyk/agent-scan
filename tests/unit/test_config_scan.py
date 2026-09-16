@@ -424,6 +424,53 @@ class TestHttpUrlAliasParsing:
         )
 
 
+class TestCopilotCLILocalTransport:
+    """GitHub Copilot CLI writes ``type: "local"`` for stdio servers in
+    ``~/.copilot/mcp-config.json``; it must fold onto ``stdio`` rather than
+    sinking the file into ``CouldNotParseMCPConfig``.
+    https://docs.github.com/en/copilot/how-tos/copilot-cli/customize-copilot/add-mcp-servers
+    """
+
+    @pytest.mark.asyncio
+    async def test_local_type_parses_as_stdio(self, tmp_path):
+        config = tmp_path / "mcp-config.json"
+        # Copied verbatim from the Playwright MCP docs, including the extra
+        # ``tools`` key Copilot CLI accepts.
+        config.write_text("""{
+            "mcpServers": {
+                "playwright": {
+                    "type": "local",
+                    "command": "npx",
+                    "tools": ["*"],
+                    "args": ["@playwright/mcp@latest"]
+                }
+            }
+        }""")
+
+        mcp_config = await scan_mcp_config_file(str(config))
+        servers = mcp_config.get_servers()
+        assert isinstance(servers["playwright"], StdioServer)
+        assert servers["playwright"].type == "stdio"
+        assert servers["playwright"].command == "npx"
+        assert servers["playwright"].args == ["@playwright/mcp@latest"]
+
+    @pytest.mark.asyncio
+    async def test_local_type_does_not_sink_valid_siblings(self, tmp_path):
+        config = tmp_path / "mcp-config.json"
+        config.write_text("""{
+            "mcpServers": {
+                "local-srv": {"type": "local", "command": "npx", "args": ["pkg"]},
+                "remote-srv": {"type": "http", "url": "https://example.com/mcp"}
+            }
+        }""")
+
+        mcp_config = await scan_mcp_config_file(str(config))
+        servers = mcp_config.get_servers()
+        assert len(servers) == 2
+        assert isinstance(servers["local-srv"], StdioServer)
+        assert isinstance(servers["remote-srv"], RemoteServer)
+
+
 class TestPluginMCPConfigFile:
     @pytest.mark.asyncio
     async def test_flat_stdio_server_config(self, tmp_path):

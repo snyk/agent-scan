@@ -1764,18 +1764,74 @@ class _CopiedScript(NamedTuple):
     new_checksum: str
 
 
+# The forwarder scripts fence the values install fills in with these markers
+_SECTION_BEGIN = b"# --- BEGIN install-time variables ---"
+_SECTION_END = b"# --- END install-time variables ---"
+
+_VARIABLE_VALUE_RE = re.compile(rb"\A[A-Za-z0-9][A-Za-z0-9._+-]{0,63}\Z")
+
+
+def _hook_script_variables() -> dict[bytes, bytes]:
+    """Values substituted into the hook scripts' install-time variables section.
+
+    Keyed by the ``__PLACEHOLDER__`` the scripts declare between their
+    ``--- BEGIN/END install-time variables ---`` markers. To add a variable, add it here
+    and to the section in both snyk-agent-guard.sh and snyk-agent-guard.ps1; the discovery
+    trampolines carry none, as the CLI they exec reports its own version.
+
+    Only the values are checked, because only they come from outside this repo: the
+    version is read from the installed distribution's metadata, and lands inside a
+    double-quoted shell literal. The variable names are committed alongside the scripts
+    that declare them, and tests pin the shape of both.
+    """
+    from agent_scan.version import version_info
+
+    variables = {b"__AGENT_SCAN_VERSION__": version_info.encode()}
+    for placeholder, value in variables.items():
+        if not _VARIABLE_VALUE_RE.match(value):
+            raise ValueError(f"Unusable install-time variable value for {placeholder!r}: {value!r}")
+    return variables
+
+
+def _substitute_hook_script_variables(content: bytes) -> bytes:
+    """Fill in the install-time variables section of a bundled hook script.
+
+    Only the section is rewritten. Both forwarders compare their variables against the
+    literal placeholder to scrub a copy install never filled in, and the sh script keys
+    its curl status readback on a ``__NAME__``-shaped marker; substituting over the whole
+    file would rewrite those. A script carrying no complete section -- the trampolines --
+    is returned unchanged.
+
+    The values are checked by ``_hook_script_variables`` before they get here; the markers
+    below are committed alongside the scripts that declare them, and tests pin their shape.
+    """
+    variables = _hook_script_variables()
+
+    begin = content.find(_SECTION_BEGIN)
+    if begin < 0:
+        return content
+
+    start = begin + len(_SECTION_BEGIN)
+    end = content.find(_SECTION_END, start)
+    if end < 0:
+        return content
+
+    section = content[start:end]
+    for placeholder, value in variables.items():
+        section = section.replace(placeholder, value)
+    return content[:start] + section + content[end:]
+
+
 def _copy_hook_script(dest: Path) -> _CopiedScript:
     """Copy the bundled hook script named ``dest.name`` to *dest*.
 
     Handles both the forwarding hook and the session-start discovery trampoline;
     the bundled resource and the destination share a basename.
     """
-    from agent_scan.version import version_info
-
     dest.parent.mkdir(parents=True, exist_ok=True)
 
     source = importlib_resources.files("agent_scan.hooks").joinpath(dest.name)
-    new_content = source.read_bytes().replace(b"__AGENT_SCAN_VERSION__", version_info.encode())
+    new_content = _substitute_hook_script_variables(source.read_bytes())
     new_checksum = hashlib.sha256(new_content).hexdigest()
 
     current_content = dest.read_bytes() if dest.exists() else None

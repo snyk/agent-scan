@@ -26,11 +26,13 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# Hook API version.
-$VERSION = "2025-11-11"
-
+# --- BEGIN install-time variables ---
 # Agent-scan CLI version (replaced at install time).
 $AGENT_SCAN_VERSION = "__AGENT_SCAN_VERSION__"
+# --- END install-time variables ---
+
+# Hook API version.
+$VERSION = "2025-11-11"
 
 # ---------------------------------------------------------------------------
 # Main
@@ -67,7 +69,14 @@ switch ($Client) {
     }
 }
 
-$userAgent = "snyk/snyk-agent-guard.ps1 Agent Scan v$AGENT_SCAN_VERSION"
+$cliVersion = $AGENT_SCAN_VERSION
+# Only a copy install never filled in still holds the placeholder, and the literal must
+# not reach the wire. This sits outside the variables section on purpose: substituting
+# over it would rewrite the very literal it tests for.
+if ($cliVersion -eq '__AGENT_SCAN_VERSION__') {
+    $cliVersion = "unknown"
+}
+$userAgent = "snyk/snyk-agent-guard.ps1 Agent Scan v$cliVersion"
 $url = "${RemoteUrl}${endpoint}?version=$VERSION"
 
 # Read payload from stdin as UTF-8 (strips BOM automatically)
@@ -97,8 +106,8 @@ function JsonEscape($s) {
     return $s
 }
 
-$xUser = '{{"hostname":"{0}","username":"{1}","identifier":"{2}"}}' -f `
-    (JsonEscape $hostname), (JsonEscape $username), (JsonEscape $MachineId)
+$xUser = '{{"hostname":"{0}","username":"{1}","identifier":"{2}","cli_version":"{3}"}}' -f `
+    (JsonEscape $hostname), (JsonEscape $username), (JsonEscape $MachineId), (JsonEscape $cliVersion)
 
 # Execute request
 try {
