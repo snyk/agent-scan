@@ -1231,7 +1231,9 @@ def test_claude_code_registry_missing_file_is_tolerated(tmp_path):
     assert next(iter(configs.values()))[0][0] == "cached"
 
 
-def test_claude_code_registry_malformed_json_is_tolerated(tmp_path):
+def test_claude_code_registry_malformed_json_is_tolerated(tmp_path, caplog):
+    import logging
+
     from agent_scan.agents import ClaudeCodeDiscoverer
 
     plugin = tmp_path / ".claude" / "plugins" / "cache" / "mp" / "cached"
@@ -1240,10 +1242,13 @@ def test_claude_code_registry_malformed_json_is_tolerated(tmp_path):
     registry = tmp_path / ".claude" / "plugins" / "installed_plugins.json"
     registry.write_text("{not json")
 
-    configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
+    with caplog.at_level(logging.WARNING):
+        configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
 
     assert registry.as_posix() not in configs
     assert next(iter(configs.values()))[0][0] == "cached"
+    assert f"Skipping malformed {registry.as_posix()}" in caplog.text
+    assert "Traceback" not in caplog.text
 
 
 @pytest.mark.parametrize("content", ["{not json", json.dumps({"bad": "not-a-dict", "empty": None})])
@@ -1284,12 +1289,55 @@ def test_claude_code_registry_tolerates_malformed_entry_shapes(tmp_path):
     assert ClaudeCodeDiscoverer(tmp_path)._installed_plugin_dirs() == []
 
 
-def test_claude_code_registry_rejects_relative_and_traversal_install_paths(tmp_path):
+@pytest.mark.parametrize(
+    "install_path",
+    ["relative/plugin", "../../etc", "~", "~/", "~/../../etc", "~root/.ssh", "/Users", "/home"],
+)
+def test_claude_code_registry_rejects_unsafe_or_overly_broad_install_paths(tmp_path, caplog, install_path):
+    import logging
+
     from agent_scan.agents import ClaudeCodeDiscoverer
 
-    _write_claude_plugin_registry(tmp_path, ["", "relative/plugin", "../../etc", None, 42])
+    _write_claude_plugin_registry(tmp_path, [install_path])
 
-    assert ClaudeCodeDiscoverer(tmp_path)._installed_plugin_dirs() == []
+    with caplog.at_level(logging.WARNING, logger="agent_scan.agents.claude_code"):
+        assert ClaudeCodeDiscoverer(tmp_path)._installed_plugin_dirs() == []
+
+    assert caplog.text.count("Skipping installed_plugins.json plugin root") == 1
+
+
+def test_claude_code_registry_rejects_target_home_as_install_path(tmp_path, caplog):
+    import logging
+
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    _write_claude_plugin_registry(tmp_path, [tmp_path.as_posix()])
+
+    with caplog.at_level(logging.WARNING, logger="agent_scan.agents.claude_code"):
+        assert ClaudeCodeDiscoverer(tmp_path)._installed_plugin_dirs() == []
+
+    assert caplog.text.count("Skipping installed_plugins.json plugin root") == 1
+
+
+def test_claude_code_rejects_ancestor_of_relocated_config_dir(tmp_path, monkeypatch, caplog):
+    import logging
+
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    home = tmp_path / "home"
+    home.mkdir()
+    relocated_parent = tmp_path / "relocated"
+    relocated = relocated_parent / "claude"
+    relocated.mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", relocated.as_posix())
+    discoverer = ClaudeCodeDiscoverer(home)
+
+    with caplog.at_level(logging.WARNING, logger="agent_scan.agents.claude_code"):
+        root = discoverer._sanitize_external_root(relocated_parent.as_posix(), source="installed_plugins.json")
+
+    assert root is None
+    assert caplog.text.count("Skipping installed_plugins.json plugin root") == 1
 
 
 def test_claude_code_registry_normalizes_absolute_install_paths(tmp_path):
@@ -1318,6 +1366,32 @@ def test_claude_code_registry_path_inside_cache_does_not_duplicate(tmp_path):
 
     assert plugin not in bases
     assert len(configs) == 1
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink semantics")
+def test_claude_code_registry_symlinked_plugin_inside_cache_is_walked_as_its_own_base(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    real = tmp_path / "src" / "linked-plugin"
+    manifest = real / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"mcpServers": {"inline": {"command": "inline"}}}')
+    config = real / ".mcp.json"
+    config.write_text('{"linked": {"command": "mcp"}}')
+    skills_dir = real / "skills"
+    _write_skill(skills_dir, "linked-skill")
+    cache = tmp_path / ".claude" / "plugins" / "cache" / "mp"
+    cache.mkdir(parents=True)
+    linked = cache / "linked-plugin"
+    linked.symlink_to(real, target_is_directory=True)
+    _write_claude_plugin_registry(tmp_path, [linked.as_posix()])
+
+    discoverer = ClaudeCodeDiscoverer(tmp_path)
+
+    assert linked in discoverer._plugin_base_dirs()
+    assert next(iter(discoverer._discover_plugin_mcp_servers().values()))[0][0] == "linked"
+    assert next(iter(discoverer._discover_plugin_manifest_mcp_servers().values()))[0][0] == "inline"
+    assert next(iter(discoverer._discover_plugin_skills().values()))[0].name == "linked-skill"
 
 
 def test_claude_code_registry_honored_for_other_user_home(tmp_path, monkeypatch):
@@ -1363,6 +1437,29 @@ def test_claude_code_local_directory_marketplace_root_is_scanned(tmp_path):
     configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
 
     assert plugin.joinpath(".mcp.json").as_posix() in configs
+
+
+def test_claude_code_directory_marketplace_catalog_clone_is_not_scanned(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    marketplace = tmp_path / ".claude" / "plugins" / "marketplaces" / "official"
+    marker = marketplace / ".claude-plugin" / "marketplace.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("{}")
+    plugin = marketplace / "plugins" / "not-installed"
+    plugin.mkdir(parents=True)
+    (plugin / ".mcp.json").write_text('{"catalog-only": {"command": "no"}}')
+    _write_claude_marketplaces(
+        tmp_path,
+        {
+            "official": {
+                "source": {"source": "directory", "path": marketplace.as_posix()},
+                "installLocation": marketplace.as_posix(),
+            }
+        },
+    )
+
+    assert ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers() == {}
 
 
 def test_claude_code_local_marketplace_without_marketplace_manifest_is_skipped(tmp_path):
@@ -1482,6 +1579,25 @@ def test_claude_code_registry_external_root_without_plugin_marker_is_skipped(tmp
     assert ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers() == {}
 
 
+@pytest.mark.parametrize(
+    "marker",
+    [".codex-plugin/plugin.json", ".cursor-plugin/plugin.json", "skills", "commands", "agents"],
+)
+def test_claude_code_registry_accepts_supported_plugin_markers(tmp_path, marker):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    root = tmp_path / "external" / marker.replace("/", "-").replace(".", "dot")
+    marker_path = root / marker
+    if marker.endswith("plugin.json"):
+        marker_path.parent.mkdir(parents=True)
+        marker_path.write_text("{}")
+    else:
+        marker_path.mkdir(parents=True)
+    _write_claude_plugin_registry(tmp_path, [root.as_posix()])
+
+    assert root in ClaudeCodeDiscoverer(tmp_path)._plugin_base_dirs()
+
+
 def test_claude_code_registry_install_path_picks_up_plugin_skills(tmp_path):
     from agent_scan.agents import ClaudeCodeDiscoverer
 
@@ -1532,6 +1648,69 @@ def test_claude_code_registry_cap_counts_external_roots_not_cache_entries(tmp_pa
     configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
 
     assert configs[external.joinpath(".mcp.json").as_posix()][0][0] == "in-place"
+
+
+def test_claude_code_registry_caps_examined_entries_independently(tmp_path, monkeypatch, caplog):
+    import logging
+
+    from agent_scan.agents import ClaudeCodeDiscoverer
+    from agent_scan.agents import claude_code as claude_code_module
+
+    monkeypatch.setattr(claude_code_module, "_MAX_REGISTRY_ENTRIES", 4)
+    external = tmp_path / "external" / "in-place"
+    external.mkdir(parents=True)
+    (external / ".mcp.json").write_text('{"in-place": {"command": "mcp"}}')
+    cache = tmp_path / ".claude" / "plugins" / "cache"
+    covered = [(cache / "mp" / f"plugin-{index}").as_posix() for index in range(4)]
+    _write_claude_plugin_registry(tmp_path, [*covered, external.as_posix()])
+
+    with caplog.at_level(logging.WARNING, logger="agent_scan.agents.claude_code"):
+        roots = ClaudeCodeDiscoverer(tmp_path)._installed_plugin_dirs()
+
+    assert external not in roots
+    assert "4" in caplog.text
+
+
+def test_claude_code_local_marketplace_caps_examined_entries_before_stat(tmp_path, monkeypatch, caplog):
+    import logging
+
+    from agent_scan.agents import ClaudeCodeDiscoverer
+    from agent_scan.agents import claude_code as claude_code_module
+
+    monkeypatch.setattr(claude_code_module, "_MAX_REGISTRY_ENTRIES", 3)
+    marketplaces = {
+        str(index): {
+            "source": {"source": "directory", "path": (tmp_path / "missing" / str(index)).as_posix()},
+            "installLocation": (tmp_path / "missing" / str(index)).as_posix(),
+        }
+        for index in range(3)
+    }
+    _write_claude_marketplaces(tmp_path, marketplaces)
+
+    with caplog.at_level(logging.WARNING, logger="agent_scan.agents.claude_code"):
+        roots = ClaudeCodeDiscoverer(tmp_path)._local_marketplace_dirs()
+
+    assert roots == []
+    assert "3" in caplog.text
+
+
+def test_claude_code_skills_dir_plugin_bases_are_capped(tmp_path, monkeypatch, caplog):
+    import logging
+
+    from agent_scan.agents import ClaudeCodeDiscoverer
+    from agent_scan.agents import claude_code as claude_code_module
+
+    monkeypatch.setattr(claude_code_module, "_MAX_EXTERNAL_PLUGIN_ROOTS", 2)
+    for index in range(3):
+        manifest = tmp_path / ".claude" / "skills" / f"plugin-{index}" / ".claude-plugin" / "plugin.json"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text("{}")
+
+    with caplog.at_level(logging.WARNING, logger="agent_scan.agents.claude_code"):
+        roots = ClaudeCodeDiscoverer(tmp_path)._skills_dir_plugin_bases()
+
+    assert len(roots) == 2
+    assert "2" in caplog.text
 
 
 def test_claude_code_local_marketplaces_cap_number_of_roots(tmp_path, caplog):
@@ -1591,6 +1770,45 @@ def test_claude_code_plugin_cache_env_dir_scanned_as_cache_when_no_root_markers(
     configs = ClaudeCodeDiscoverer(home)._discover_plugin_mcp_servers()
 
     assert next(iter(configs.values()))[0][0] == "direct-cache"
+
+
+def test_claude_code_plugin_cache_env_relative_path_warns_and_is_skipped(tmp_path, monkeypatch, caplog):
+    import logging
+
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setenv("CLAUDE_CODE_PLUGIN_CACHE_DIR", "relative/cache")
+
+    with caplog.at_level(logging.WARNING, logger="agent_scan.agents.claude_code"):
+        roots = ClaudeCodeDiscoverer(home)._plugin_root_dirs()
+
+    assert roots == [home / ".claude" / "plugins"]
+    assert caplog.text.count("Skipping CLAUDE_CODE_PLUGIN_CACHE_DIR plugin root") == 1
+
+
+def test_claude_code_reads_registry_from_env_plugin_root(tmp_path, monkeypatch):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", lambda: home)
+    plugin_root = tmp_path / "plugins-root"
+    plugin_root.mkdir()
+    monkeypatch.setenv("CLAUDE_CODE_PLUGIN_CACHE_DIR", plugin_root.as_posix())
+    plugin = tmp_path / "external" / "in-place"
+    plugin.mkdir(parents=True)
+    config = plugin / ".mcp.json"
+    config.write_text('{"env-registry": {"command": "mcp"}}')
+    (plugin_root / "installed_plugins.json").write_text(
+        json.dumps({"version": 2, "plugins": {"p@m": [{"installPath": plugin.as_posix()}]}})
+    )
+
+    configs = ClaudeCodeDiscoverer(home).discover_mcp_servers()
+
+    assert configs[config.resolve().as_posix()][0][0] == "env-registry"
 
 
 def test_claude_code_plugin_cache_env_dir_scanned_as_root_and_still_skips_marketplaces(tmp_path, monkeypatch):
@@ -1682,9 +1900,9 @@ def test_claude_code_symlinked_mcp_json_file_is_discovered(tmp_path):
     config = plugin / ".mcp.json"
     config.symlink_to(source)
 
-    configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
+    configs = ClaudeCodeDiscoverer(tmp_path).discover_mcp_servers()
 
-    assert configs[config.as_posix()][0][0] == "linked-mcp"
+    assert configs[source.resolve().as_posix()][0][0] == "linked-mcp"
 
 
 def test_claude_code_sibling_agent_plugin_json_is_still_discovered(tmp_path):
@@ -1710,6 +1928,29 @@ def test_claude_code_real_claude_plugin_dir_manifest_reported_once(tmp_path):
     manifests = ClaudeCodeDiscoverer(tmp_path)._plugin_manifests()
 
     assert [path for path, _ in manifests] == [manifest]
+
+
+def test_claude_code_plugin_manifests_are_memoized(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+    from agent_scan.agents import claude_code as claude_code_module
+
+    manifest = tmp_path / ".claude" / "plugins" / "cache" / "mp" / "plugin" / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text("{}")
+    discoverer = ClaudeCodeDiscoverer(tmp_path)
+
+    with patch.object(
+        claude_code_module,
+        "_walk_manifest_candidates",
+        wraps=claude_code_module._walk_manifest_candidates,
+    ) as walk:
+        first = discoverer._plugin_manifests()
+        first_call_count = walk.call_count
+        second = discoverer._plugin_manifests()
+
+    assert first is second
+    assert first_call_count > 0
+    assert walk.call_count == first_call_count
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink semantics")
@@ -6639,6 +6880,31 @@ def test_walk_under_depth_yields_hits_for_readable_tree(tmp_path):
     assert hits[0] == target / "mcp.json"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink semantics")
+def test_walk_manifest_candidates_finds_files_and_symlinked_named_dirs_in_one_walk(tmp_path):
+    import os
+
+    from agent_scan.agents import base as base_module
+
+    base = tmp_path / "base"
+    ordinary = base / "ordinary" / "plugin.json"
+    ordinary.parent.mkdir(parents=True)
+    ordinary.write_text("{}")
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "plugin.json").write_text("{}")
+    linked_dir = base / "linked" / ".claude-plugin"
+    linked_dir.parent.mkdir()
+    linked_dir.symlink_to(source, target_is_directory=True)
+    real_walk = os.walk
+
+    with patch.object(base_module.os, "walk", wraps=real_walk) as walk:
+        candidates = list(base_module._walk_manifest_candidates(base, "plugin.json", (".claude-plugin",), 10))
+
+    assert candidates == [ordinary, linked_dir / "plugin.json"]
+    assert walk.call_count == 1
+
+
 def test_vscode_extension_walks_unreadable_do_not_abort_discovery(tmp_path, monkeypatch):
     """An unreadable ``~/.vscode/extensions`` base (shared by the extension-MCP and
     extension-skills walks) must degrade gracefully, not abort the whole discoverer.
@@ -7824,6 +8090,23 @@ def test_codex_discoverer_honors_claude_plugin_manifest_fallback(tmp_path):
     keys = [k for k in mcp_configs if k.endswith("/claude-compat/1.0.0/servers.json")]
     assert len(keys) == 1
     assert mcp_configs[keys[0]][0][0] == "compat_srv"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink semantics")
+def test_codex_discoverer_reaches_symlinked_manifest_directory(tmp_path):
+    from agent_scan.agents import CodexDiscoverer
+
+    plugin = tmp_path / ".codex" / "plugins" / "cache" / "mkt" / "linked" / "1.0.0"
+    plugin.mkdir(parents=True)
+    source = tmp_path / "codex-manifest-source"
+    source.mkdir()
+    (source / "plugin.json").write_text('{"mcpServers": "./servers.json"}')
+    (plugin / "servers.json").write_text('{"linked-codex": {"command": "mcp"}}')
+    (plugin / ".codex-plugin").symlink_to(source, target_is_directory=True)
+
+    configs = CodexDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert next(iter(configs.values()))[0][0] == "linked-codex"
 
 
 @pytest.mark.parametrize(
@@ -10367,6 +10650,22 @@ def test_github_copilot_discoverer_resolves_manifest_paths_against_the_plugin_ro
     ]
     skills_dirs = discoverer.discover_skills()
     assert [s.name for s in skills_dirs[(plugin / "custom").as_posix()]] == ["root-relative-skill"]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink semantics")
+def test_github_copilot_discoverer_reaches_symlinked_manifest_directory(tmp_path):
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    plugin = tmp_path / ".copilot" / "installed-plugins" / "_direct" / "linked"
+    plugin.mkdir(parents=True)
+    source = tmp_path / "copilot-manifest-source"
+    source.mkdir()
+    (source / "plugin.json").write_text(json.dumps({"mcpServers": {"linked-copilot": {"command": "mcp"}}}))
+    (plugin / ".plugin").symlink_to(source, target_is_directory=True)
+
+    configs = GitHubCopilotDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert next(iter(configs.values()))[0][0] == "linked-copilot"
 
 
 def test_github_copilot_discoverer_prefers_the_first_searched_manifest_location(tmp_path):
