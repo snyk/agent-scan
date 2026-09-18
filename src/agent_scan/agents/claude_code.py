@@ -12,6 +12,7 @@ from agent_scan.agents.base import (
     McpConfigsResult,
     SkillsDirsResult,
     _canonicalize_keys,
+    _escapes_plugin_root,
     _walk_manifest_candidates,
 )
 from agent_scan.models import (
@@ -643,12 +644,6 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
             for manifest in _walk_manifest_candidates(
                 base, "plugin.json", self._plugin_manifest_dirs, _MAX_PLUGIN_RGLOB_DEPTH
             ):
-                try:
-                    is_file = manifest.is_file()
-                except (OSError, ValueError):
-                    is_file = False
-                if not is_file:
-                    continue
                 data = self._load_json_file(manifest, log_parse_errors=False)
                 if isinstance(data, dict):
                     manifests.append((manifest, data))
@@ -678,6 +673,14 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         """Scan skill dirs listed in each plugin's ``.claude-plugin/plugin.json``
         ``skills`` array. Paths are resolved relative to the plugin root (the
         parent of the ``.claude-plugin`` dir). Only string entries are honored.
+
+        An entry that would land outside the declaring plugin is dropped (see
+        :func:`_escapes_plugin_root`), matching Codex's ``./``-prefix rule and Copilot's
+        ``_manifest_relative_paths``. It matters more here than there: the manifests fed
+        to this arm come from the install registry, local marketplaces and
+        ``@skills-dir`` roots as well as the fixed install tree, so an absolute or
+        ``..``-bearing entry would otherwise have the scan report an arbitrary directory
+        on disk as that plugin's skills.
         """
         result: SkillsDirsResult = {}
         for manifest, data in self._plugin_manifests():
@@ -686,11 +689,15 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
                 continue
             plugin_root = manifest.parent.parent
             for rel in skills:
-                if not isinstance(rel, str):
+                if not isinstance(rel, str) or not rel.strip():
                     continue
-                skills_dir = plugin_root / rel
-                if skills_dir.is_dir():
-                    result[skills_dir.as_posix()] = inspect_skills_dir(str(skills_dir))
+                text = rel.strip()
+                if _escapes_plugin_root(text):
+                    continue
+                skills_dir = plugin_root / Path(text)
+                entries = self._scan_skills_dir(skills_dir)
+                if entries is not None:
+                    result[skills_dir.as_posix()] = entries
         return result
 
     # --- internal helpers ---

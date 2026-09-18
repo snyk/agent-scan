@@ -15,7 +15,7 @@ import traceback
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pyjson5
 
@@ -122,10 +122,21 @@ def _walk_under_depth(base: Path, name: str, max_path_depth: int, *, want_file: 
 def _walk_manifest_candidates(
     base: Path, filename: str, manifest_dirs: tuple[str, ...], max_path_depth: int
 ) -> Iterator[Path]:
-    """Yield ordinary manifests plus manifests inside named directory entries.
+    """Yield *existing* manifest files: ordinary ones plus those inside named directory
+    entries.
 
     The named-directory probe intentionally reaches a symlinked manifest directory
     without making the recursive walk follow arbitrary directory symlinks.
+
+    The candidate synthesized for a named directory is existence-checked here rather
+    than left to callers, because a caller cannot recover from a missing one: the
+    per-plugin-root collapse in ``CodexDiscoverer._plugin_manifests`` /
+    ``GitHubCopilotDiscoverer._plugin_manifests`` ranks candidates by location precedence
+    *before* reading them, so a synthesized candidate for a file that does not exist (a
+    directory named ``.codex-plugin`` / ``.plugin`` with no ``plugin.json`` inside) would
+    outrank the plugin's real lower-precedence manifest and drop the whole plugin from
+    the report. An unstattable candidate is skipped for the same reason ``_load_json_file``
+    tolerates one.
     """
     seen: set[Path] = set()
     for match in _walk_matches_under_depth(
@@ -138,6 +149,11 @@ def _walk_manifest_candidates(
         if candidate in seen:
             continue
         seen.add(candidate)
+        try:
+            if not candidate.is_file():
+                continue
+        except (OSError, ValueError):
+            continue
         yield candidate
 
 
@@ -171,16 +187,45 @@ def _canonicalize_keys(result: dict) -> dict:
     naming ``.mcp.json`` against the walk that already found it. When two literal
     keys resolve to one canonical location, distinct list entries are retained while
     identical entries are de-duplicated.
+
+    Real entries outrank an error sentinel: when one spelling carries a parsed
+    server/skill list and an aliased one a ``CouldNotParseMCPConfig`` /
+    ``FileNotFoundConfig`` / ``UnknownConfigFormat``, the list wins whichever order they
+    arrive in. Keeping first-seen instead would report "could not parse" for a location
+    whose contents another arm read successfully, discarding real findings. Two sentinels
+    for one location keep the first. The list is copied on first insert so merging never
+    mutates the caller's aggregate in place.
     """
     canonical: dict = {}
     for key, value in result.items():
         canonical_key = _canonical_key(Path(key))
-        existing = canonical.get(canonical_key)
-        if isinstance(existing, list) and isinstance(value, list):
+        if canonical_key not in canonical:
+            canonical[canonical_key] = list(value) if isinstance(value, list) else value
+            continue
+        existing = canonical[canonical_key]
+        if not isinstance(value, list):
+            continue
+        if isinstance(existing, list):
             existing.extend(entry for entry in value if entry not in existing)
         else:
-            canonical.setdefault(canonical_key, value)
+            canonical[canonical_key] = list(value)
     return canonical
+
+
+def _escapes_plugin_root(value: str) -> bool:
+    r"""True when a manifest path value would resolve outside the plugin that declared it.
+
+    Shared by every discoverer that resolves a manifest-declared ``mcpServers`` / ``skills``
+    path against a plugin root, so a manifest under an attacker-influenceable plugin tree
+    (the install-registry, marketplace and ``@skills-dir`` roots) cannot redirect the scan
+    somewhere else on disk. Both path flavours are tried because a scan on either platform
+    may read a manifest authored for the other.
+    """
+    for flavour in (PurePosixPath, PureWindowsPath):
+        candidate = flavour(value)
+        if candidate.is_absolute() or candidate.root or candidate.drive or ".." in candidate.parts:
+            return True
+    return False
 
 
 def _looks_like_mcp_payload(data: dict) -> bool:

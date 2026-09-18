@@ -6019,6 +6019,34 @@ def test_claude_code_discovers_inline_plugin_manifest_skills(tmp_path):
     assert {skill.name for skill in skills[keys[0]]} == {"special"}
 
 
+@pytest.mark.parametrize("form", ["absolute", "posix_parent", "windows_parent"])
+def test_claude_code_discoverer_rejects_manifest_skills_paths_outside_the_plugin(tmp_path, form):
+    """A manifest ``skills`` entry that would land outside the plugin that declared it is
+    dropped, so a manifest cannot redirect the skills scan somewhere else on disk. Mirrors
+    ``test_github_copilot_discoverer_rejects_manifest_paths_outside_the_plugin``."""
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    plugin = tmp_path / ".claude" / "plugins" / "cache" / "mp" / "evil"
+    manifest_dir = plugin / ".claude-plugin"
+    manifest_dir.mkdir(parents=True)
+    # Two escape targets, each holding a skill that must not be attributed to the plugin.
+    _write_skill(tmp_path / "outside-skills", "leaked")
+    _write_skill(plugin.parent / "sibling-skills", "leaked")
+    rel = {
+        "absolute": (tmp_path / "outside-skills").as_posix(),
+        "posix_parent": "../sibling-skills",
+        "windows_parent": "..\\sibling-skills",
+    }[form]
+    (manifest_dir / "plugin.json").write_text(json.dumps({"name": "evil", "skills": [rel]}))
+
+    skills = ClaudeCodeDiscoverer(tmp_path).discover_skills()
+
+    leaked = [
+        key for key, value in skills.items() if isinstance(value, list) and any(s.name == "leaked" for s in value)
+    ]
+    assert leaked == []
+
+
 # --- VSCode family: NEW gaps (agentSkillsLocations, devcontainer, .code-workspace,
 #     Insiders, portable mode) ---
 
@@ -6903,6 +6931,78 @@ def test_walk_manifest_candidates_finds_files_and_symlinked_named_dirs_in_one_wa
 
     assert candidates == [ordinary, linked_dir / "plugin.json"]
     assert walk.call_count == 1
+
+
+def test_walk_manifest_candidates_skips_named_dir_without_manifest(tmp_path):
+    """A named manifest *directory* holding no manifest file yields no candidate.
+
+    Consumers rank candidates by location precedence *before* reading them and keep one
+    per plugin root, so a synthesized candidate for a file that does not exist would
+    outrank -- and discard -- the plugin's real manifest.
+    """
+    from agent_scan.agents import base as base_module
+
+    base = tmp_path / "base"
+    real = base / "plugin-a" / ".claude-plugin" / "plugin.json"
+    real.parent.mkdir(parents=True)
+    real.write_text("{}")
+    (base / "plugin-b" / ".claude-plugin").mkdir(parents=True)
+
+    candidates = list(base_module._walk_manifest_candidates(base, "plugin.json", (".claude-plugin",), 10))
+
+    assert candidates == [real]
+
+
+def test_canonicalize_keys_prefers_parsed_servers_over_a_parse_error_sentinel(tmp_path):
+    """Two spellings of one file where one arm recorded a parse failure and another parsed
+    servers: the servers survive the merge in either order rather than being dropped."""
+    from agent_scan.agents import base as base_module
+
+    (tmp_path / "a").mkdir()
+    literal = (tmp_path / "a" / "mcp.json").as_posix()
+    aliased = (tmp_path / "a" / ".." / "a" / "mcp.json").as_posix()
+    error = CouldNotParseMCPConfig(message="boom", traceback=None)
+    entry = ("srv", StdioServer(command="mcp"))
+
+    sentinel_first = base_module._canonicalize_keys({literal: error, aliased: [entry]})
+    list_first = base_module._canonicalize_keys({aliased: [entry], literal: error})
+
+    assert sentinel_first == {literal: [entry]}
+    assert list_first == {literal: [entry]}
+
+
+def test_canonicalize_keys_prefers_discovered_skills_over_a_missing_dir_sentinel(tmp_path):
+    """The same rule holds for the skills aggregate, which mixes skill lists with a
+    ``FileNotFoundConfig`` sentinel."""
+    from agent_scan.agents import base as base_module
+    from agent_scan.models import FileNotFoundConfig
+
+    (tmp_path / "skills").mkdir()
+    literal = (tmp_path / "skills").as_posix()
+    aliased = (tmp_path / "skills" / ".." / "skills").as_posix()
+    missing = FileNotFoundConfig(message="absent")
+    skill = DiscoveredSkill(name="review", path=literal)
+
+    merged = base_module._canonicalize_keys({literal: missing, aliased: [skill]})
+
+    assert merged == {literal: [skill]}
+
+
+def test_canonicalize_keys_does_not_mutate_the_source_aggregate(tmp_path):
+    """Merging aliased keys must not extend the caller's own list in place."""
+    from agent_scan.agents import base as base_module
+
+    (tmp_path / "a").mkdir()
+    literal = (tmp_path / "a" / "mcp.json").as_posix()
+    aliased = (tmp_path / "a" / ".." / "a" / "mcp.json").as_posix()
+    first = ("one", StdioServer(command="one"))
+    second = ("two", StdioServer(command="two"))
+    source = {literal: [first], aliased: [second]}
+
+    merged = base_module._canonicalize_keys(source)
+
+    assert merged == {literal: [first, second]}
+    assert source[literal] == [first]
 
 
 def test_vscode_extension_walks_unreadable_do_not_abort_discovery(tmp_path, monkeypatch):
@@ -8107,6 +8207,26 @@ def test_codex_discoverer_reaches_symlinked_manifest_directory(tmp_path):
     configs = CodexDiscoverer(tmp_path).discover_mcp_servers()
 
     assert next(iter(configs.values()))[0][0] == "linked-codex"
+
+
+def test_codex_empty_manifest_dir_does_not_shadow_claude_compat_manifest(tmp_path):
+    """A ``.codex-plugin`` *directory* with no ``plugin.json`` inside is not a manifest, so
+    it must not outrank -- and discard -- the plugin's real ``.claude-plugin`` fallback."""
+    from agent_scan.agents import CodexDiscoverer
+
+    plugin_dir = tmp_path / ".codex" / "plugins" / "cache" / "mkt" / "compat-plugin" / "1.0.0"
+    (plugin_dir / ".codex-plugin").mkdir(parents=True)
+    _write_codex_manifest(
+        plugin_dir,
+        '{"name": "compat-plugin", "mcpServers": "./servers.json"}',
+        relpath=".claude-plugin/plugin.json",
+    )
+    (plugin_dir / "servers.json").write_text('{"compat_srv": {"command": "c"}}')
+
+    mcp_configs = CodexDiscoverer(tmp_path).discover_mcp_servers()
+
+    all_names = {n for v in mcp_configs.values() if isinstance(v, list) for n, _ in v}
+    assert "compat_srv" in all_names
 
 
 @pytest.mark.parametrize(
@@ -10675,6 +10795,21 @@ def test_github_copilot_discoverer_reaches_symlinked_manifest_directory(tmp_path
     configs = GitHubCopilotDiscoverer(tmp_path).discover_mcp_servers()
 
     assert next(iter(configs.values()))[0][0] == "linked-copilot"
+
+
+def test_github_copilot_empty_manifest_dir_does_not_shadow_bare_plugin_json(tmp_path):
+    """A ``.plugin`` *directory* with no ``plugin.json`` inside is not a manifest, so it must
+    not outrank -- and discard -- the plugin's real bare ``plugin.json``."""
+    from agent_scan.agents import GitHubCopilotDiscoverer
+
+    plugin = tmp_path / ".copilot" / "installed-plugins" / "_direct" / "acme"
+    (plugin / ".plugin").mkdir(parents=True)
+    (plugin / "plugin.json").write_text(json.dumps({"name": "acme", "mcpServers": {"bare": {"command": "node"}}}))
+
+    mcp_configs = GitHubCopilotDiscoverer(tmp_path).discover_mcp_servers()
+
+    names = {name for value in mcp_configs.values() if isinstance(value, list) for name, _ in value}
+    assert names == {"bare"}
 
 
 def test_github_copilot_discoverer_prefers_the_first_searched_manifest_location(tmp_path):

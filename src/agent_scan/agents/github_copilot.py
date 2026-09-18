@@ -12,7 +12,7 @@ https://docs.github.com/en/copilot/reference/copilot-cli-reference/cli-config-di
 
 import logging
 import os
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path
 
 from agent_scan.agents.base import (
     _MAX_PLUGIN_RGLOB_DEPTH,
@@ -21,6 +21,7 @@ from agent_scan.agents.base import (
     McpScanResult,
     SkillsDirsResult,
     _canonicalize_keys,
+    _escapes_plugin_root,
     _walk_manifest_candidates,
 )
 from agent_scan.models import (
@@ -75,15 +76,6 @@ def _plugin_root_for(manifest_path: Path) -> tuple[Path, int] | None:
         if len(parts) > len(location) and parts[-len(location) :] == location:
             return manifest_path.parents[len(location) - 1], precedence
     return None
-
-
-def _escapes_plugin_root(value: str) -> bool:
-    r"""True when a manifest path value would resolve outside the plugin that declared it."""
-    for flavour in (PurePosixPath, PureWindowsPath):
-        candidate = flavour(value)
-        if candidate.is_absolute() or candidate.root or candidate.drive or ".." in candidate.parts:
-            return True
-    return False
 
 
 class GitHubCopilotDiscoverer(AgentDiscoverer):
