@@ -2614,11 +2614,18 @@ async def test_discover_clients_to_inspect_skips_discoverer_whose_discover_raise
 
         def client_exists(self):
             # Returns truthy so it gets into find_discoverers' return list,
-            # then blows up inside discover_mcp_servers.
+            # then blows up inside discover().
             return "/fake/path"
 
+        def discover(self, scope=DiscoveryScope.ALL):
+            # Raise from discover() itself, not from one half: discover() isolates
+            # discover_mcp_servers()/discover_skills() individually (see
+            # ``test_discover_clients_to_inspect_keeps_the_half_that_succeeded``), so
+            # only an escape from discover() reaches the pipeline's catch-all.
+            raise RuntimeError("boom from discover")
+
         def discover_mcp_servers(self):
-            raise RuntimeError("boom from discover_mcp_servers")
+            return {}
 
         def discover_skills(self):
             return {}
@@ -2651,6 +2658,58 @@ async def test_discover_clients_to_inspect_skips_discoverer_whose_discover_raise
     names = {c.name for c in ctis}
     assert "claude code" in names
     assert "exploding-mid" not in names
+
+
+@pytest.mark.asyncio
+async def test_discover_clients_to_inspect_keeps_the_half_that_succeeded(tmp_path):
+    """When only one half of a discoverer raises, the client still reaches the
+    pipeline carrying the half that worked — the pipeline's catch-all is at
+    whole-``discover()`` granularity, so without the per-half isolation an
+    unreadable skills dir would silently cost every MCP server too."""
+    from agent_scan.agents import DISCOVERERS, AgentDiscoverer
+    from agent_scan.models import CandidateClient
+    from agent_scan.pipelines import InspectArgs, discover_clients_to_inspect
+
+    class HalfExplodingDiscoverer(AgentDiscoverer):
+        name = "exploding-half"
+
+        def client_exists(self):
+            return "/fake/path"
+
+        def discover_mcp_servers(self):
+            raise RuntimeError("boom from discover_mcp_servers")
+
+        def discover_skills(self):
+            return {"/fake/path/skills": [DiscoveredSkill(name="survivor", path="/fake/path/skills/survivor")]}
+
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude.json").write_text('{"mcpServers": {}}')
+
+    candidate = CandidateClient(
+        name="claude code",
+        client_exists_paths=["~/.claude"],
+        mcp_config_paths=["~/.claude.json"],
+        skills_dir_paths=["~/.claude/skills"],
+    )
+
+    DISCOVERERS["exploding-half"] = HalfExplodingDiscoverer
+    try:
+        with (
+            patch(
+                "agent_scan.pipelines.get_readable_home_directories",
+                return_value=[(tmp_path, "alice")],
+            ),
+            patch("agent_scan.pipelines.get_well_known_clients", return_value=[candidate]),
+        ):
+            args = InspectArgs(timeout=10, tokens=[], paths=[])
+            ctis, _, _ = await discover_clients_to_inspect(args)
+    finally:
+        del DISCOVERERS["exploding-half"]
+
+    surviving = [c for c in ctis if c.name == "exploding-half"]
+    assert len(surviving) == 1, f"the half that succeeded must still land; got {[c.name for c in ctis]}"
+    assert surviving[0].mcp_configs == {}
+    assert "/fake/path/skills" in surviving[0].skills_dirs
 
 
 # --- _load_json_file permission handling ---
@@ -6871,6 +6930,171 @@ def test_walk_under_depth_yields_hits_for_readable_tree(tmp_path):
 
     assert [h.name for h in hits] == ["mcp.json"]
     assert hits[0] == target / "mcp.json"
+
+
+# --- _scan_skills_dir: unreadable skills dirs must not abort discovery ---
+# ``_walk_under_depth`` (above) tolerates an unreadable *base*, but the skills
+# *inspection* that follows it was unguarded: ``inspect_skills_dir`` opens with a
+# bare ``os.listdir``, which raises for a directory that is traversable but not
+# readable (mode 0o111, or another user's dir under ``--scan-all-users``) even
+# though ``exists()``/``is_dir()`` both succeed. That propagated out of
+# ``discover()``, which the pipeline catches to drop the *whole* discoverer —
+# losing every already-collected reachable source for that client/user. These
+# tests deny ``os.listdir`` for one specific path so the real ``inspect_skills_dir``
+# raises, rather than patching the indirection under test.
+
+
+def _deny_listdir(monkeypatch, denied, error):
+    """Make ``os.listdir`` raise ``error`` for ``denied`` only, delegating otherwise."""
+    import os as os_module
+
+    real_listdir = os_module.listdir
+
+    def fake_listdir(path, *args, **kwargs):
+        if Path(path) == Path(denied):
+            raise error
+        return real_listdir(path, *args, **kwargs)
+
+    monkeypatch.setattr("agent_scan.skill_client.os.listdir", fake_listdir)
+
+
+_UNREADABLE_ERRORS = [
+    pytest.param(PermissionError(13, "Permission denied"), id="permission_error"),
+    pytest.param(OSError(5, "I/O error"), id="os_error"),
+    pytest.param(ValueError("embedded null byte"), id="value_error"),
+]
+
+
+@pytest.mark.parametrize("error", _UNREADABLE_ERRORS)
+def test_claude_code_manifest_skills_unreadable_dir_does_not_abort_discovery(tmp_path, monkeypatch, caplog, error):
+    """One unreadable manifest-declared skills dir is skipped with a warning; the
+    plugin's readable skills dir is still reported and ``discover_skills`` returns."""
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    plugin = tmp_path / ".claude" / "plugins" / "cache" / "my-plugin"
+    manifest_dir = plugin / ".claude-plugin"
+    manifest_dir.mkdir(parents=True)
+    (manifest_dir / "plugin.json").write_text(
+        json.dumps({"name": "my-plugin", "skills": ["locked-skills", "open-skills"]})
+    )
+    _write_skill(plugin / "locked-skills", "hidden")
+    _write_skill(plugin / "open-skills", "visible")
+
+    _deny_listdir(monkeypatch, plugin / "locked-skills", error)
+
+    with caplog.at_level("WARNING"):
+        skills = ClaudeCodeDiscoverer(tmp_path).discover_skills()
+
+    assert not any(k.endswith("/locked-skills") for k in skills), f"unreadable dir leaked: {list(skills)}"
+    open_keys = [k for k in skills if k.endswith("/open-skills")]
+    assert len(open_keys) == 1, f"readable sibling must survive; got {list(skills)}"
+    assert {skill.name for skill in skills[open_keys[0]]} == {"visible"}
+    assert "locked-skills" in caplog.text
+
+
+def test_claude_code_manifest_skills_unreadable_dir_keeps_mcp_configs(tmp_path, monkeypatch):
+    """The whole ``ClientToInspect`` must survive an unreadable skills dir — pre-fix
+    the raise escaped ``discover()`` and ``pipelines`` dropped every MCP config too."""
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    (tmp_path / ".claude.json").write_text('{"mcpServers": {"global-srv": {"command": "g"}}}')
+    plugin = tmp_path / ".claude" / "plugins" / "cache" / "my-plugin"
+    manifest_dir = plugin / ".claude-plugin"
+    manifest_dir.mkdir(parents=True)
+    (manifest_dir / "plugin.json").write_text(json.dumps({"name": "my-plugin", "skills": ["locked-skills"]}))
+    _write_skill(plugin / "locked-skills", "hidden")
+
+    _deny_listdir(monkeypatch, plugin / "locked-skills", PermissionError(13, "Permission denied"))
+
+    cti = ClaudeCodeDiscoverer(tmp_path).discover()
+
+    assert cti is not None
+    found = {name for value in cti.mcp_configs.values() if isinstance(value, list) for name, _server in value}
+    assert "global-srv" in found, f"MCP configs must survive; got {list(cti.mcp_configs)}"
+
+
+def test_claude_code_plugin_skills_walk_tolerates_unreadable_match(tmp_path, monkeypatch):
+    """``_discover_skill_and_command_dirs`` inspects every walk hit; one unreadable
+    hit must not cost the readable ones."""
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    cache = tmp_path / ".claude" / "plugins" / "cache" / "mp"
+    _write_skill(cache / "plugin-a" / "skills", "from-a")
+    _write_skill(cache / "plugin-b" / "skills", "from-b")
+
+    _deny_listdir(monkeypatch, cache / "plugin-a" / "skills", PermissionError(13, "Permission denied"))
+
+    skills = ClaudeCodeDiscoverer(tmp_path).discover_skills()
+
+    assert not any(k.endswith("/plugin-a/skills") for k in skills)
+    b_keys = [k for k in skills if k.endswith("/plugin-b/skills")]
+    assert len(b_keys) == 1, f"readable plugin must survive; got {list(skills)}"
+    assert {skill.name for skill in skills[b_keys[0]]} == {"from-b"}
+
+
+def test_vscode_extension_skills_tolerates_unreadable_dir(tmp_path, monkeypatch):
+    """The VSCode-family extension ``skills/`` walk inspects hits directly; an
+    unreadable extension must not abort the discoverer."""
+    from agent_scan.agents import VSCodeDiscoverer
+
+    exts = tmp_path / ".vscode" / "extensions"
+    _write_skill(exts / "p.locked-1.0.0" / "skills", "locked-skill")
+    _write_skill(exts / "p.open-1.0.0" / "skills", "open-skill")
+    (exts / "extensions.json").write_text(
+        json.dumps([{"relativeLocation": "p.locked-1.0.0"}, {"relativeLocation": "p.open-1.0.0"}])
+    )
+
+    _deny_listdir(monkeypatch, exts / "p.locked-1.0.0" / "skills", PermissionError(13, "Permission denied"))
+
+    skills = VSCodeDiscoverer(tmp_path).discover_skills()
+
+    assert not any(k.endswith("/p.locked-1.0.0/skills") for k in skills)
+    open_keys = [k for k in skills if k.endswith("/p.open-1.0.0/skills")]
+    assert len(open_keys) == 1, f"readable extension must survive; got {list(skills)}"
+    assert {skill.name for skill in skills[open_keys[0]]} == {"open-skill"}
+
+
+# --- discover(): one failing half must not discard the other ---
+# ``discover()`` holds ``mcp_configs`` and ``skills_dirs`` in locals and builds the
+# ``ClientToInspect`` only at the end, so a raise while computing the second threw
+# away the first. The pipeline's catch-all then dropped the client entirely.
+
+
+def test_discover_keeps_mcp_configs_when_discover_skills_raises(tmp_path, monkeypatch):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude.json").write_text('{"mcpServers": {"global-srv": {"command": "g"}}}')
+
+    def boom(self):
+        raise RuntimeError("skills discovery exploded")
+
+    monkeypatch.setattr(ClaudeCodeDiscoverer, "discover_skills", boom)
+
+    cti = ClaudeCodeDiscoverer(tmp_path).discover()
+
+    assert cti is not None
+    found = {name for value in cti.mcp_configs.values() if isinstance(value, list) for name, _server in value}
+    assert "global-srv" in found
+    assert cti.skills_dirs == {}
+
+
+def test_discover_keeps_skills_dirs_when_discover_mcp_servers_raises(tmp_path, monkeypatch):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    _write_skill(tmp_path / ".claude" / "skills", "user-skill")
+
+    def boom(self):
+        raise RuntimeError("mcp discovery exploded")
+
+    monkeypatch.setattr(ClaudeCodeDiscoverer, "discover_mcp_servers", boom)
+
+    cti = ClaudeCodeDiscoverer(tmp_path).discover()
+
+    assert cti is not None
+    assert cti.mcp_configs == {}
+    names = {skill.name for value in cti.skills_dirs.values() if isinstance(value, list) for skill in value}
+    assert "user-skill" in names
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink semantics")

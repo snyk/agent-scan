@@ -359,8 +359,25 @@ class AgentDiscoverer(ABC):
         if client_path is None:
             return None
         scope = DiscoveryScope(scope)
-        mcp_configs = self.discover_mcp_servers() if scope in (DiscoveryScope.SERVERS, DiscoveryScope.ALL) else {}
-        skills_dirs = self.discover_skills() if scope in (DiscoveryScope.SKILLS, DiscoveryScope.ALL) else {}
+        # Each half is isolated so a raise while collecting one does not discard the
+        # other: both are locals until the ClientToInspect below, and the pipeline's
+        # own catch-all is at whole-``discover()`` granularity, so an escaping
+        # exception silently costs every source for this client/user. This bounds the
+        # blast radius; it does not replace the per-source guards (``_load_json_file``,
+        # ``_walk_under_depth``, ``_scan_skills_dir``), and ``logger.exception`` keeps
+        # the traceback loud rather than swallowing it.
+        mcp_configs: McpConfigsResult = {}
+        skills_dirs: SkillsDirsResult = {}
+        if scope in (DiscoveryScope.SERVERS, DiscoveryScope.ALL):
+            try:
+                mcp_configs = self.discover_mcp_servers()
+            except Exception:
+                logger.exception("%s.discover_mcp_servers() raised; keeping skills", type(self).__name__)
+        if scope in (DiscoveryScope.SKILLS, DiscoveryScope.ALL):
+            try:
+                skills_dirs = self.discover_skills()
+            except Exception:
+                logger.exception("%s.discover_skills() raised; keeping servers", type(self).__name__)
         return ClientToInspect(
             name=self.name,
             client_path=client_path,
@@ -525,16 +542,36 @@ class AgentDiscoverer(ABC):
             is_failure=True,
         )
 
-    def _scan_skills_dir(self, path: Path) -> list[DiscoveredSkill] | None:
-        """Return the parsed skill list for ``path`` if it's an existing directory,
-        else ``None``. Thin wrapper that hides the existence check from callers.
+    def _scan_skills_dir(
+        self,
+        path: Path,
+        inspect_fn: Callable[[str], list[DiscoveredSkill]] = inspect_skills_dir,
+    ) -> list[DiscoveredSkill] | None:
+        """Return the parsed skill list for ``path`` if it's an existing, readable
+        directory, else ``None``. Hides the existence check *and* the inspection
+        from callers so neither can abort discovery.
+
+        ``inspect_fn`` defaults to ``inspect_skills_dir``; the plugin/extension
+        walks pass ``inspect_commands_dir`` for flat command files.
+
+        The inspection runs *inside* the guard, not just the probes: a directory
+        that is traversable but not readable (mode ``0o111``, or another user's
+        under ``--scan-all-users``) satisfies ``exists()``/``is_dir()`` and then
+        raises from ``inspect_skills_dir``'s ``os.listdir``. Unguarded, that
+        propagates out of ``discover()`` and the pipeline drops the *whole*
+        discoverer — see the ``_walk_under_depth`` docstring for why that is a
+        silent total false negative. Tolerance set matches
+        ``_walk_matches_under_depth``: ``OSError`` for ENOTDIR/ELOOP/EIO,
+        ``ValueError`` for embedded-NUL paths and ``skill_client``'s
+        symlink-cycle rejection.
         """
         try:
             if not path.exists() or not path.is_dir():
                 return None
-        except PermissionError:
+            return inspect_fn(str(path))
+        except (PermissionError, OSError, ValueError):
+            logger.warning("Skipping unreadable skills dir %s", path.as_posix())
             return None
-        return inspect_skills_dir(str(path))
 
     def _discover_skill_and_command_dirs(
         self,
@@ -548,13 +585,16 @@ class AgentDiscoverer(ABC):
         VSCode-family extension ``skills`` walk — all iterate identically:
         ``_walk_under_depth`` for the named directory under each base (skipping
         unreadable bases, see its docstring), then run ``inspect_fn``
-        (``inspect_skills_dir`` or ``inspect_commands_dir``) on each match.
+        (``inspect_skills_dir`` or ``inspect_commands_dir``) on each match via
+        ``_scan_skills_dir``, so an unreadable *match* costs that one directory
+        rather than the whole discoverer.
         """
         result: SkillsDirsResult = {}
         for base in bases:
             for found in _walk_under_depth(base, subdir_name, _MAX_PLUGIN_RGLOB_DEPTH, want_file=False):
-                if found.is_dir():
-                    result[found.as_posix()] = inspect_fn(str(found))
+                entries = self._scan_skills_dir(found, inspect_fn)
+                if entries is not None:
+                    result[found.as_posix()] = entries
         return result
 
     def _discover_plugin_mcp_files(

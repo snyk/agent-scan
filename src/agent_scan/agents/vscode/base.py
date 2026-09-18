@@ -38,7 +38,6 @@ from agent_scan.models import (
     VSCodeConfigFile,
     VSCodeMCPConfig,
 )
-from agent_scan.skill_client import inspect_skills_dir
 from agent_scan.well_known_clients import expand_path
 
 logger = logging.getLogger(__name__)
@@ -852,8 +851,9 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         result: SkillsDirsResult = {}
         for root in self._extension_scan_roots():
             for skills_dir in _walk_under_depth(root, "skills", _MAX_PLUGIN_RGLOB_DEPTH, want_file=False):
-                if skills_dir.is_dir():
-                    result[skills_dir.as_posix()] = inspect_skills_dir(str(skills_dir))
+                entries = self._scan_skills_dir(skills_dir)
+                if entries is not None:
+                    result[skills_dir.as_posix()] = entries
         return result
 
     # --- private: chat.agentSkillsLocations ---
