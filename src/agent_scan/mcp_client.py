@@ -39,6 +39,20 @@ from agent_scan.utils import resolve_command_and_args
 logger = logging.getLogger(__name__)
 
 
+def _create_mcp_http_client_without_redirects(
+    headers: dict[str, str] | None = None,
+    timeout: httpx.Timeout | None = None,
+    auth: httpx.Auth | None = None,
+) -> httpx.AsyncClient:
+    """Create a remote MCP client that never forwards requests across redirects."""
+    return httpx.AsyncClient(
+        auth=auth,
+        follow_redirects=False,
+        headers=headers,
+        timeout=timeout,
+    )
+
+
 @asynccontextmanager
 async def streamablehttp_client_without_session(
     url: str,
@@ -68,7 +82,7 @@ async def streamablehttp_client_without_session(
     else:
         oauth_client_provider = None
     async with httpx.AsyncClient(
-        auth=oauth_client_provider, follow_redirects=True, headers=headers, timeout=timeout
+        auth=oauth_client_provider, follow_redirects=False, headers=headers, timeout=timeout
     ) as custom_client:
         async with streamable_http_client(url=url, http_client=custom_client) as (read, write, _):
             yield read, write
@@ -101,6 +115,7 @@ async def get_client(
             headers=server_config.headers,
             # env=server_config.env, #Not supported by MCP yet, but present in vscode
             timeout=timeout,
+            httpx_client_factory=_create_mcp_http_client_without_redirects,
         )
     elif isinstance(server_config, RemoteServer) and server_config.type == "http":
         logger.debug(

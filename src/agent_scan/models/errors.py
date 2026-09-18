@@ -13,7 +13,7 @@ ErrorCategory = Literal[
     "server_http_error",  # MCP server returned HTTP error
     "analysis_error",  # Could not reach/use analysis server
     "skill_scan_error",  # Could not scan skill
-    "user_declined",  # User declined to start a stdio server during consent prompt
+    "user_declined",  # User declined to contact an MCP server during consent prompt
 ]
 
 
