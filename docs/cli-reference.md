@@ -171,7 +171,7 @@ Pass `--show-analysis-results` to force synchronous analysis instead, so the sca
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
 | `--ci` | boolean | `false` | Exit with code `1` if analysis issues or runtime failures remain. |
-| `--ignore-issues-codes CODES` | string | — | Comma-separated issue and failure codes to ignore for CI, such as `W001,W015,X001`. Only valid with `--ci`; ignored codes are also removed from JSON output in CI mode. |
+| `--ignore-issues-codes CODES` | string | — | Comma-separated issue and failure codes to ignore for CI, such as `E001,W015,X001`. Only valid with `--ci`; ignored codes are also removed from JSON output in CI mode. |
 
 | Code | Meaning |
 | --- | --- |
@@ -186,7 +186,7 @@ Pass `--show-analysis-results` to force synchronous analysis instead, so the sca
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
 | `--ci` | boolean | `false` | Exit with code `1` if security risks or operational failures remain. |
-| `--ignore-risks NAMES` | string | — | Comma-separated [risk names](risks.md) to omit from output and CI evaluation, such as `dangerous_words,suspicious_download_url`. Only valid with `--ci`. |
+| `--ignore-risks NAMES` | string | — | Comma-separated [risk names](risks.md) to omit from output and CI evaluation, such as `private_data,suspicious_download_url`. Only valid with `--ci`. |
 | `--ignore-failure-codes CODES` | string | — | Comma-separated [failure codes](failure-codes.md) to omit from CI evaluation, such as `X001,X007`. Errors remain visible in output. Only valid with `--ci`. |
 
 Risk names and failure codes are case-sensitive. Unknown values produce a warning and are not applied. `inspect` supports `--ignore-failure-codes` because it can encounter operational failures but has no risks to ignore. `evo` supports neither ignore flag.
@@ -482,11 +482,11 @@ snyk-agent-scan inspect
 
 # v0.5.x CI with selected issue/failure codes ignored
 snyk-agent-scan --ci --dangerously-run-mcp-servers \
-  --ignore-issues-codes W001,X001
+  --ignore-issues-codes W015,X001
 
 # v0.6+ CI with selected risks and failures ignored
 snyk-agent-scan --ci --dangerously-run-mcp-servers \
-  --ignore-risks dangerous_words,suspicious_download_url \
+  --ignore-risks private_data,suspicious_download_url \
   --ignore-failure-codes X001
 
 # Load flags from a YAML config file (CLI flags still override it)

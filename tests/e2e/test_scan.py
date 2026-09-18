@@ -55,11 +55,16 @@ class _V20260710AnalysisHandler(BaseHTTPRequestHandler):
                     "name": server["name"],
                     "entities": type(self).server_entities,
                     "risk_indexes": {
+                        "dangerous_words": {
+                            "score": 100,
+                            "evidence": "Legacy backend result",
+                            "affected_tools": [0],
+                        },
                         "private_data": {
                             "score": 750,
                             "evidence": "Reads private records",
                             "affected_tools": [0],
-                        }
+                        },
                     },
                     **({"error": type(self).server_error} if type(self).server_error else {}),
                 }
@@ -143,7 +148,9 @@ class TestFullScanFlow:
 
         assert result.returncode == 1, result.stderr
         output = json.loads(result.stdout)
-        risk = output["scan_path_responses"][0]["server_risks"][0]["risk_indexes"]["private_data"]
+        risk_indexes = output["scan_path_responses"][0]["server_risks"][0]["risk_indexes"]
+        assert "dangerous_words" not in risk_indexes
+        risk = risk_indexes["private_data"]
         assert risk == {"score": 750, "evidence": "Reads private records", "affected_tools": [0]}
         request = _V20260710AnalysisHandler.requests[0]
         assert len(request["scan_path_requests"]) == 1
@@ -225,7 +232,7 @@ class TestFullScanFlow:
     @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
     @pytest.mark.parametrize(
         ("ignored_risk", "expected_exit"),
-        [("private_data", 0), ("dangerous_words", 1)],
+        [("private_data", 0), ("untrusted_content", 1)],
     )
     def test_ignore_risks_filters_output_and_ci_exit(
         self,

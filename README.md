@@ -140,8 +140,8 @@ Download the binary for your operating system and architecture from the [latest 
 
 ### Agent Scan v0.6 and later
 
-- Detects [15 distinct security risks](docs/risks.md) across MCP servers and agent skills:
-  - MCP: [Prompt injection](docs/risks.md#prompt_injection_tool_desc), [dangerous words](docs/risks.md#dangerous_words), [untrusted content](docs/risks.md#untrusted_content), [private data](docs/risks.md#private_data), and [destructive capabilities](docs/risks.md#destructive_capabilities)
+- Detects [14 distinct security risks](docs/risks.md) across MCP servers and agent skills:
+  - MCP: [Prompt injection](docs/risks.md#prompt_injection_tool_desc), [untrusted content](docs/risks.md#untrusted_content), [private data](docs/risks.md#private_data), and [destructive capabilities](docs/risks.md#destructive_capabilities)
   - Skills: [prompt injection](docs/risks.md#prompt_injection_skill_instructions), [suspicious downloads](docs/risks.md#suspicious_download_url), [malicious code](docs/risks.md#malicious_code), [credential handling](docs/risks.md#insecure_credential_handling), [secret detection](docs/risks.md#secret_detection), and more
 
 ## Supported agents and capabilities

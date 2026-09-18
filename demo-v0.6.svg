@@ -9,6 +9,7 @@
     .muted { fill: #9a9aa2; }
     .clean { fill: #28a745; }
     .low { fill: #ECD9FF; }
+    .medium { fill: #D7B1FF; }
     .high { fill: #C794FF; }
     .critical { fill: #B36DFF; }
   </style>
@@ -27,7 +28,7 @@
     <text x="24" y="159">├── <tspan class="bold critical">github</tspan> 2 risks</text>
     <text x="58" y="187" class="critical">● <tspan class="bold">Prompt injection in tool (1000/1000)</tspan><tspan class="text">: Hidden instructions target the agent.</tspan></text>
     <text x="78" y="213"><tspan class="bold muted">Affected tools: </tspan>create_pull_request</text>
-    <text x="58" y="241" class="low">● <tspan class="bold">Dangerous words (100/1000)</tspan><tspan class="text">: Manipulative wording found.</tspan></text>
+    <text x="58" y="241" class="medium">● <tspan class="bold">Untrusted content (300/1000)</tspan><tspan class="text">: Processes attacker-controlled data.</tspan></text>
     <text x="78" y="267"><tspan class="bold muted">Affected tools: </tspan>search_code</text>
     <text x="58" y="295">├── tool         <tspan class="bold">create_pull_request</tspan></text>
     <text x="58" y="321">├── tool         <tspan class="bold">search_code</tspan></text>

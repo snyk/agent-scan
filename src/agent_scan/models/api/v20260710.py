@@ -141,7 +141,6 @@ class RiskScore(BaseModel):
 
 
 class McpServerRiskIndexes(BaseModel):
-    dangerous_words: RiskScore | None = None
     prompt_injection_tool_desc: RiskScore | None = None
     untrusted_content: RiskScore | None = None
     private_data: RiskScore | None = None
@@ -149,7 +148,6 @@ class McpServerRiskIndexes(BaseModel):
 
 
 MCP_SERVER_RISK_DISPLAY_NAMES: dict[str, str] = {
-    "dangerous_words": "Dangerous words",
     "prompt_injection_tool_desc": "Prompt injection in tool",
     "untrusted_content": "Untrusted content",
     "private_data": "Private data",

@@ -46,7 +46,7 @@ def test_scan_parser_defaults_to_v20260710_and_rejects_removed_issue_flag():
 
     assert parser.parse_args([]).analysis_url.endswith("?version=2026-07-10")
     with pytest.raises(SystemExit, match="2"):
-        parser.parse_args(["--ignore-issues-codes", "W001"])
+        parser.parse_args(["--ignore-issues-codes", "W015"])
 
 
 def test_scan_parser_describes_print_full_descriptions_flag():
@@ -157,7 +157,7 @@ async def test_scan_ci_exits_for_server_or_skill_risk():
                         McpServerRiskResponse(
                             name="server",
                             risk_indexes=McpServerRiskIndexes(
-                                dangerous_words=RiskScore(score=200, evidence="dangerous word")
+                                private_data=RiskScore(score=200, evidence="reads private data")
                             ),
                         )
                     ],
@@ -297,7 +297,7 @@ async def test_non_ignored_risk_still_prints_and_fails_ci(capsys):
                     McpServerRiskResponse(
                         name="server",
                         risk_indexes=McpServerRiskIndexes(
-                            dangerous_words=RiskScore(score=100, evidence="dangerous word"),
+                            untrusted_content=RiskScore(score=100, evidence="reads untrusted content"),
                             private_data=RiskScore(score=300, evidence="reads private data"),
                         ),
                     )
@@ -315,7 +315,7 @@ async def test_non_ignored_risk_still_prints_and_fails_ci(capsys):
 
     captured = capsys.readouterr()
     assert "Private data" not in captured.out
-    assert "Dangerous words" in captured.out
+    assert "Untrusted content" in captured.out
     assert "risks found" in captured.err
 
 
@@ -471,7 +471,7 @@ async def test_ignore_failure_codes_is_case_sensitive(capsys):
                             McpServerRiskResponse(
                                 name="server",
                                 risk_indexes=McpServerRiskIndexes(
-                                    dangerous_words=RiskScore(score=100, evidence="dangerous word")
+                                    private_data=RiskScore(score=100, evidence="reads private data")
                                 ),
                             )
                         ],

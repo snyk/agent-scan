@@ -27,14 +27,6 @@ A tool from one MCP server references a tool belonging to a different server. MC
 
 This is a [tool shadowing attack](https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks), where a malicious server overrides or interferes with the behavior of a legitimate tool from another server.
 
-<a id="W001"></a>
-
-### ![W001 | low](https://img.shields.io/badge/W001-low-lightgray) ![MCP](https://img.shields.io/badge/MCP-blue) Suspicious words in tool description
-
-The tool description contains words commonly associated with prompt injection attempts, such as "important", "crucial", "critical", "vital", "urgent", "ignore", "disregard", "override", or "bypass". These words are often used in tool poisoning attacks to draw the agent's attention and override its normal decision-making process.
-
-While the presence of these words alone does not confirm malicious intent, it is a signal worth investigating, especially when combined with unusual tool descriptions.
-
 ---
 
 <a id="ToxicFlows">

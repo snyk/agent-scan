@@ -9,7 +9,7 @@ Failure codes can appear beside an MCP server, skill, or scan path in the human-
 > [!IMPORTANT]
 > Agent Scan v0.5.x is planned for deprecation. This remains the correct failure-code reference for current v0.5.x users.
 
-In v0.5.x, security finding codes and operational failure codes share the `--ignore-issues-codes` flag. For example, `--ignore-issues-codes W001,X001` ignores one security finding and one operational failure during `--ci` evaluation. The `X*` codes themselves are operational and are not security issues.
+In v0.5.x, security finding codes and operational failure codes share the `--ignore-issues-codes` flag. For example, `--ignore-issues-codes W015,X001` ignores one security finding and one operational failure during `--ci` evaluation. The `X*` codes themselves are operational and are not security issues.
 
 See the [v0.5.x CI flags](cli-reference.md#ci-mode) and [v0.5.x JSON errors](json-output.md#runtime-failure-codes-x) for details.
 

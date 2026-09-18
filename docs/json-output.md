@@ -159,7 +159,7 @@ When inspection and analysis succeeded, read the `issues` array.
 | Prefix | Meaning | Example |
 | --- | --- | --- |
 | **`E`** | Error — high-severity security finding | `E001` prompt injection in MCP tool |
-| **`W`** | Warning — lower-severity or informational finding | `W001` suspicious words in tool description |
+| **`W`** | Warning — lower-severity or informational finding | `W015` untrusted content detected |
 
 Full reference: [Issue codes](issue-codes.md).
 
@@ -191,7 +191,7 @@ uvx snyk-agent-scan@0.5.17 \
 | `1` | Issues or unignored runtime failures present |
 | `2` | Invalid flags (e.g. `--ci` without `--dangerously-run-mcp-servers`) |
 
-Ignore specific codes in CI with `--ignore-issues-codes W001,W015` (requires `--ci`). Ignored codes are removed from the JSON payload before the exit check.
+Ignore specific codes in CI with `--ignore-issues-codes W015,W017` (requires `--ci`). Ignored codes are removed from the JSON payload before the exit check.
 
 See [CLI reference — CI mode](cli-reference.md#ci-mode).
 
@@ -544,7 +544,7 @@ uvx snyk-agent-scan@latest \
 
 The two ignore mechanisms are intentionally separate:
 
-- `--ignore-risks dangerous_words,suspicious_download_url` removes those risk fields before both rendering and CI evaluation.
+- `--ignore-risks private_data,suspicious_download_url` removes those risk fields before both rendering and CI evaluation.
 - `--ignore-failure-codes X001,X007` excludes those operational codes from CI evaluation but preserves their errors in the output.
 
 Both flags require `--ci`, are case-sensitive, and warn about unknown values. See [CLI reference — CI mode](cli-reference.md#v06-ci-mode).
