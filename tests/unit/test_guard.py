@@ -5132,6 +5132,34 @@ class TestServersDiscoveredPayload:
         ]
         assert result[1]["servers"] == []
 
+    def test_registry_sourced_server_reaches_discovery_payload(self, tmp_path):
+        plugin = tmp_path / "external" / "jira"
+        plugin.mkdir(parents=True)
+        config = plugin / ".mcp.json"
+        config.write_text('{"jira": {"command": "jira-mcp"}}')
+        (tmp_path / ".claude").mkdir()
+        registry = tmp_path / ".claude" / "plugins" / "installed_plugins.json"
+        registry.parent.mkdir(parents=True)
+        registry.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "plugins": {"jira@prodsec": [{"installPath": plugin.as_posix()}]},
+                }
+            )
+        )
+
+        with (
+            patch("agent_scan.pipelines.get_readable_home_directories", return_value=[(tmp_path, "tester")]),
+            patch("agent_scan.pipelines.get_well_known_clients", return_value=[]),
+        ):
+            result = guard_module._discover_servers_payload()
+
+        claude = next(entry for entry in result if entry["client"] == "claude code")
+        assert [(server["name"], server["config_path"]) for server in claude["servers"]] == [
+            ("jira", config.as_posix())
+        ]
+
     def test_reports_config_discovery_errors(self):
         client = self._client(
             mcp_configs={

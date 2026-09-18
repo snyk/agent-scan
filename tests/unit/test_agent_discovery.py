@@ -1120,6 +1120,458 @@ def test_claude_code_ignores_plugin_env_dirs_under_multiuser_scan(tmp_path, monk
     assert "should-not-appear" not in names
 
 
+def _write_claude_plugin_registry(home, install_paths, *, version=2):
+    registry = home / ".claude" / "plugins" / "installed_plugins.json"
+    registry.parent.mkdir(parents=True, exist_ok=True)
+    registry.write_text(
+        json.dumps(
+            {
+                "version": version,
+                "plugins": {
+                    "test@marketplace": [
+                        {"scope": "user", "installPath": install_path} for install_path in install_paths
+                    ]
+                },
+            }
+        )
+    )
+    return registry
+
+
+def _write_claude_marketplaces(home, marketplaces):
+    path = home / ".claude" / "plugins" / "known_marketplaces.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(marketplaces))
+    return path
+
+
+def test_claude_code_discoverer_plugin_mcp_servers_scans_synced_dir(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    plugin = tmp_path / ".claude" / "plugins" / "synced" / "synced-plugin"
+    plugin.mkdir(parents=True)
+    (plugin / ".mcp.json").write_text('{"synced-srv": {"command": "sync"}}')
+
+    configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
+
+    assert any("/plugins/synced/" in key for key in configs)
+
+
+def test_claude_code_discoverer_plugin_skills_scans_synced_dir(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    skills_dir = tmp_path / ".claude" / "plugins" / "synced" / "p" / "skills"
+    _write_skill(skills_dir, "synced-skill")
+
+    skills = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_skills()
+
+    assert any("/plugins/synced/" in key for key in skills)
+
+
+def test_claude_code_registry_discovers_external_install_path(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    plugin = tmp_path / "src" / "prodsec-plugins" / "jira"
+    plugin.mkdir(parents=True)
+    (plugin / ".mcp.json").write_text('{"jira": {"command": "jira-mcp"}}')
+    _write_claude_plugin_registry(tmp_path, [plugin.as_posix()])
+
+    configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
+
+    assert configs[plugin.joinpath(".mcp.json").as_posix()][0][0] == "jira"
+
+
+def test_claude_code_registry_install_path_inline_manifest(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    plugin = tmp_path / "external" / "inline-plugin"
+    manifest = plugin / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"mcpServers": {"inline": {"command": "inline-mcp"}}}')
+    _write_claude_plugin_registry(tmp_path, [plugin.as_posix()])
+
+    configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_manifest_mcp_servers()
+
+    assert configs[manifest.as_posix()][0][0] == "inline"
+
+
+def test_claude_code_registry_missing_file_is_tolerated(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    plugin = tmp_path / ".claude" / "plugins" / "cache" / "mp" / "cached"
+    plugin.mkdir(parents=True)
+    (plugin / ".mcp.json").write_text('{"cached": {"command": "cached-mcp"}}')
+
+    configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
+
+    assert next(iter(configs.values()))[0][0] == "cached"
+
+
+def test_claude_code_registry_malformed_json_is_tolerated(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    plugin = tmp_path / ".claude" / "plugins" / "cache" / "mp" / "cached"
+    plugin.mkdir(parents=True)
+    (plugin / ".mcp.json").write_text('{"cached": {"command": "cached-mcp"}}')
+    registry = tmp_path / ".claude" / "plugins" / "installed_plugins.json"
+    registry.write_text("{not json")
+
+    configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
+
+    assert registry.as_posix() not in configs
+    assert next(iter(configs.values()))[0][0] == "cached"
+
+
+def test_claude_code_registry_rejects_relative_and_traversal_install_paths(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    _write_claude_plugin_registry(tmp_path, ["", "relative/plugin", "../../etc", None, 42])
+
+    assert ClaudeCodeDiscoverer(tmp_path)._installed_plugin_dirs() == []
+
+
+def test_claude_code_registry_normalizes_absolute_install_paths(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    plugin = tmp_path / "external" / "plugin"
+    plugin.mkdir(parents=True)
+    (plugin / ".mcp.json").write_text('{"normalized": {"command": "mcp"}}')
+    raw = plugin.parent / "discarded" / ".." / plugin.name
+    _write_claude_plugin_registry(tmp_path, [raw.as_posix(), raw.as_posix()])
+
+    assert ClaudeCodeDiscoverer(tmp_path)._installed_plugin_dirs() == [plugin]
+
+
+def test_claude_code_registry_path_inside_cache_does_not_duplicate(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    plugin = tmp_path / ".claude" / "plugins" / "cache" / "mp" / "plugin"
+    plugin.mkdir(parents=True)
+    (plugin / ".mcp.json").write_text('{"cached": {"command": "mcp"}}')
+    _write_claude_plugin_registry(tmp_path, [plugin.as_posix()])
+    discoverer = ClaudeCodeDiscoverer(tmp_path)
+
+    bases = discoverer._plugin_base_dirs()
+    configs = discoverer._discover_plugin_mcp_servers()
+
+    assert plugin not in bases
+    assert len(configs) == 1
+
+
+def test_claude_code_registry_honored_for_other_user_home(tmp_path, monkeypatch):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "scanner-home")
+    rogue = tmp_path / "rogue-cache"
+    rogue.mkdir()
+    (rogue / ".mcp.json").write_text('{"rogue": {"command": "rogue"}}')
+    monkeypatch.setenv("CLAUDE_CODE_PLUGIN_CACHE_DIR", rogue.as_posix())
+    alice = tmp_path / "alice"
+    plugin = tmp_path / "alice-source" / "plugin"
+    plugin.mkdir(parents=True)
+    (plugin / ".mcp.json").write_text('{"alice": {"command": "alice"}}')
+    _write_claude_plugin_registry(alice, [plugin.as_posix()])
+
+    configs = ClaudeCodeDiscoverer(alice)._discover_plugin_mcp_servers()
+    names = {name for entries in configs.values() if isinstance(entries, list) for name, _ in entries}
+
+    assert names == {"alice"}
+
+
+def test_claude_code_local_directory_marketplace_root_is_scanned(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    marketplace = tmp_path / "src" / "prodsec-marketplace"
+    marker = marketplace / ".claude-plugin" / "marketplace.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("{}")
+    plugin = marketplace / "plugins" / "jira"
+    plugin.mkdir(parents=True)
+    (plugin / ".mcp.json").write_text('{"local-jira": {"command": "jira"}}')
+    _write_claude_marketplaces(
+        tmp_path,
+        {
+            "prodsec": {
+                "source": {"source": "directory", "path": marketplace.as_posix()},
+                "installLocation": marketplace.as_posix(),
+            }
+        },
+    )
+
+    configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
+
+    assert plugin.joinpath(".mcp.json").as_posix() in configs
+
+
+def test_claude_code_github_marketplace_install_location_not_scanned(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    marketplace = tmp_path / ".claude" / "plugins" / "marketplaces" / "official"
+    marker = marketplace / ".claude-plugin" / "marketplace.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("{}")
+    plugin = marketplace / "plugins" / "not-installed"
+    plugin.mkdir(parents=True)
+    (plugin / ".mcp.json").write_text('{"catalog-only": {"command": "no"}}')
+    _write_claude_marketplaces(
+        tmp_path,
+        {
+            "official": {
+                "source": {"source": "github", "repo": "anthropics/claude-plugins-official"},
+                "installLocation": marketplace.as_posix(),
+            }
+        },
+    )
+
+    configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
+
+    assert configs == {}
+
+
+def test_claude_code_skills_dir_plugin_with_manifest_contributes_mcp_servers(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    plugin = tmp_path / ".claude" / "skills" / "skills-dir-plugin"
+    manifest = plugin / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"mcpServers": {"skills-dir": {"command": "mcp"}}}')
+
+    configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_manifest_mcp_servers()
+
+    assert configs[manifest.as_posix()][0][0] == "skills-dir"
+
+
+def test_claude_code_skills_dir_folder_without_manifest_is_not_treated_as_plugin(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    ordinary_skill = tmp_path / ".claude" / "skills" / "ordinary-skill"
+    ordinary_skill.mkdir(parents=True)
+    (ordinary_skill / "SKILL.md").write_text("---\nname: ordinary\ndescription: ordinary\n---\n")
+    (ordinary_skill / ".mcp.json").write_text('{"not-a-plugin": {"command": "no"}}')
+
+    assert ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers() == {}
+
+
+def test_claude_code_registry_unknown_version_is_still_read(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    plugin = tmp_path / "external" / "future-plugin"
+    plugin.mkdir(parents=True)
+    (plugin / ".mcp.json").write_text('{"future": {"command": "mcp"}}')
+    _write_claude_plugin_registry(tmp_path, [plugin.as_posix()], version=99)
+
+    configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
+
+    assert next(iter(configs.values()))[0][0] == "future"
+
+
+def test_claude_code_registry_rejects_filesystem_anchor_install_path(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    _write_claude_plugin_registry(tmp_path, [tmp_path.anchor])
+
+    assert ClaudeCodeDiscoverer(tmp_path)._installed_plugin_dirs() == []
+
+
+def test_claude_code_registry_external_root_without_plugin_marker_is_skipped(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    root = tmp_path / "external" / "stale-plugin"
+    nested = root / "nested"
+    nested.mkdir(parents=True)
+    (nested / ".mcp.json").write_text('{"nested": {"command": "no"}}')
+    _write_claude_plugin_registry(tmp_path, [root.as_posix()])
+
+    assert ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers() == {}
+
+
+def test_claude_code_registry_caps_number_of_external_roots(tmp_path, caplog):
+    import logging
+
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    roots = [(tmp_path / "external" / f"plugin-{index}").as_posix() for index in range(257)]
+    _write_claude_plugin_registry(tmp_path, roots)
+
+    with caplog.at_level(logging.WARNING, logger="agent_scan.agents.claude_code"):
+        installed = ClaudeCodeDiscoverer(tmp_path)._installed_plugin_dirs()
+
+    assert len(installed) == 256
+    assert "256" in caplog.text
+
+
+def test_claude_code_stale_cached_versions_still_reported_with_registry_present(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    plugin = tmp_path / ".claude" / "plugins" / "cache" / "official" / "slack"
+    old = plugin / "1.2.0"
+    current = plugin / "1.3.0"
+    old.mkdir(parents=True)
+    current.mkdir()
+    (old / ".mcp.json").write_text('{"slack-old": {"command": "old"}}')
+    (current / ".mcp.json").write_text('{"slack-current": {"command": "current"}}')
+    _write_claude_plugin_registry(tmp_path, [current.as_posix()])
+
+    configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
+    names = {name for entries in configs.values() if isinstance(entries, list) for name, _ in entries}
+
+    assert names == {"slack-old", "slack-current"}
+
+
+def test_claude_code_plugin_cache_env_dir_scanned_as_cache_when_no_root_markers(tmp_path, monkeypatch):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", lambda: home)
+    cache = tmp_path / "direct-cache"
+    plugin = cache / "official" / "plugin"
+    plugin.mkdir(parents=True)
+    (plugin / ".mcp.json").write_text('{"direct-cache": {"command": "mcp"}}')
+    monkeypatch.setenv("CLAUDE_CODE_PLUGIN_CACHE_DIR", cache.as_posix())
+
+    configs = ClaudeCodeDiscoverer(home)._discover_plugin_mcp_servers()
+
+    assert next(iter(configs.values()))[0][0] == "direct-cache"
+
+
+def test_claude_code_plugin_cache_env_dir_scanned_as_root_and_still_skips_marketplaces(tmp_path, monkeypatch):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", lambda: home)
+    root = tmp_path / "plugins-root"
+    cached = root / "cache" / "mp" / "installed"
+    catalog = root / "marketplaces" / "mp" / "not-installed"
+    cached.mkdir(parents=True)
+    catalog.mkdir(parents=True)
+    (cached / ".mcp.json").write_text('{"installed": {"command": "yes"}}')
+    (catalog / ".mcp.json").write_text('{"catalog": {"command": "no"}}')
+    monkeypatch.setenv("CLAUDE_CODE_PLUGIN_CACHE_DIR", root.as_posix())
+
+    configs = ClaudeCodeDiscoverer(home)._discover_plugin_mcp_servers()
+    names = {name for entries in configs.values() if isinstance(entries, list) for name, _ in entries}
+
+    assert names == {"installed"}
+
+
+def test_claude_code_plugin_cache_env_direct_base_ignored_under_multiuser_scan(tmp_path, monkeypatch):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "scanner-home")
+    cache = tmp_path / "direct-cache"
+    plugin = cache / "mp" / "plugin"
+    plugin.mkdir(parents=True)
+    (plugin / ".mcp.json").write_text('{"rogue": {"command": "no"}}')
+    monkeypatch.setenv("CLAUDE_CODE_PLUGIN_CACHE_DIR", cache.as_posix())
+    alice = tmp_path / "alice"
+    (alice / ".claude").mkdir(parents=True)
+
+    assert ClaudeCodeDiscoverer(alice)._discover_plugin_mcp_servers() == {}
+
+
+def test_claude_code_global_skills_dir_is_not_double_reported(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    skills_dir = tmp_path / ".claude" / "skills"
+    _write_skill(skills_dir, "ordinary-skill")
+
+    skills = ClaudeCodeDiscoverer(tmp_path).discover_skills()
+
+    assert list(skills) == [skills_dir.as_posix()]
+
+
+def test_claude_code_plugin_base_dirs_exclude_project_skill_dirs(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    project = tmp_path / "project"
+    plugin = project / ".claude" / "skills" / "project-plugin"
+    manifest = plugin / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"mcpServers": {"project-plugin": {"command": "no"}}}')
+    (tmp_path / ".claude.json").write_text(json.dumps({"projects": {project.as_posix(): {}}}))
+
+    configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_manifest_mcp_servers()
+
+    assert manifest.as_posix() not in configs
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink semantics")
+def test_claude_code_symlinked_claude_plugin_dir_manifest_is_discovered(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    outside = tmp_path / "manifest-source"
+    outside.mkdir()
+    (outside / "plugin.json").write_text('{"mcpServers": {"linked": {"command": "mcp"}}}')
+    plugin = tmp_path / ".claude" / "plugins" / "cache" / "mp" / "linked-plugin"
+    plugin.mkdir(parents=True)
+    (plugin / ".claude-plugin").symlink_to(outside, target_is_directory=True)
+
+    configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_manifest_mcp_servers()
+
+    assert next(iter(configs.values()))[0][0] == "linked"
+
+
+def test_claude_code_sibling_agent_plugin_json_is_still_discovered(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    plugin = tmp_path / ".claude" / "plugins" / "cache" / "mp" / "shared-plugin"
+    manifest = plugin / ".cursor-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"mcpServers": {"cursor-manifest": {"command": "mcp"}}}')
+
+    configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_manifest_mcp_servers()
+
+    assert configs[manifest.as_posix()][0][0] == "cursor-manifest"
+
+
+def test_claude_code_real_claude_plugin_dir_manifest_reported_once(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    manifest = tmp_path / ".claude" / "plugins" / "cache" / "mp" / "plugin" / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"mcpServers": {"once": {"command": "mcp"}}}')
+
+    manifests = ClaudeCodeDiscoverer(tmp_path)._plugin_manifests()
+
+    assert [path for path, _ in manifests] == [manifest]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink semantics")
+def test_claude_code_plugin_walk_does_not_follow_symlinked_subdir_out_of_tree(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / ".mcp.json").write_text('{"outside": {"command": "no"}}')
+    cache = tmp_path / ".claude" / "plugins" / "cache"
+    cache.mkdir(parents=True)
+    (cache / "escape").symlink_to(outside, target_is_directory=True)
+
+    assert ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers() == {}
+
+
+def test_claude_code_registry_root_depth_cap_measured_from_install_path(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    plugin = tmp_path / "very" / "deep" / "external" / "plugin"
+    plugin.mkdir(parents=True)
+    (plugin / ".mcp.json").write_text('{"marker": {"command": "marker"}}')
+    at_limit = plugin.joinpath(*(["nested"] * 9))
+    beyond_limit = at_limit / "too-deep"
+    at_limit.mkdir(parents=True)
+    beyond_limit.mkdir()
+    (at_limit / ".mcp.json").write_text('{"at-limit": {"command": "yes"}}')
+    (beyond_limit / ".mcp.json").write_text('{"too-deep": {"command": "no"}}')
+    _write_claude_plugin_registry(tmp_path, [plugin.as_posix()])
+
+    configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
+    names = {name for entries in configs.values() if isinstance(entries, list) for name, _ in entries}
+
+    assert names == {"marker", "at-limit"}
+
+
 # --- ClaudeCodeDiscoverer: end-to-end discover() ---
 
 

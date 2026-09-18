@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 # (``ClaudeConfigFile``) first, then the wrapper-less flat ``{name: serverConfig}``
 # shape (``PluginMCPConfigFile``). Mirrors ``vscode.base._VSCODE_FAMILY_FORMATS``.
 _CLAUDE_MCP_FORMATS: tuple[type[MCPConfig], ...] = (ClaudeConfigFile, PluginMCPConfigFile)
+_MAX_EXTERNAL_PLUGIN_ROOTS = 256
 
 
 class ClaudeCodeDiscoverer(AgentDiscoverer):
@@ -63,8 +64,8 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
     # installed plugin is copied into — regardless of user/project/local scope,
     # per the plugins-reference "plugin cache" note
     # (https://code.claude.com/docs/en/plugins-reference); ``repos`` is the legacy
-    # name kept for back-compat with older installs. Both can host MCP servers /
-    # skills / commands.
+    # name kept for back-compat with older installs; ``synced`` holds plugins
+    # downloaded from claude.ai. All three can host MCP servers / skills / commands.
     #
     # ``marketplaces/`` is deliberately NOT scanned: it is the cloned marketplace
     # *catalog* — every plugin a marketplace offers, almost all of which the user
@@ -72,7 +73,8 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
     # nothing; only plugins the user installs are copied into ``cache``/``repos``.
     # Walking the catalog would surface skills/MCP for plugins that were never
     # installed (see https://code.claude.com/docs/en/discover-plugins).
-    _plugin_subdirs: tuple[str, ...] = ("cache", "repos")
+    _plugin_subdirs: tuple[str, ...] = ("cache", "repos", "synced")
+    _plugin_base_dirs_cache: list[Path] | None = None
 
     # --- public (override AgentDiscoverer abstracts) ---
 
@@ -260,24 +262,31 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
 
     def _plugin_root_dirs(self) -> list[Path]:
         """Plugin *root* directories — each holds the installed-plugin ``cache``/
-        ``repos`` subtrees scanned per :attr:`_plugin_subdirs` (and the
+        ``repos``/``synced`` subtrees scanned per :attr:`_plugin_subdirs` (and the
         ``marketplaces`` catalog clone, which that attribute deliberately skips).
 
         The always-present root is ``<base>/plugins`` for each global folder
         (``base`` already honors ``CLAUDE_CONFIG_DIR``). Two env vars add *further*
         roots — they are appended to the default, not substituted for it, so the
         default ``<base>/plugins`` is always scanned alongside them. Their values
-        are used as-is (already at the plugins-root level, so no ``/plugins`` is
-        appended). Like ``CLAUDE_CONFIG_DIR`` they reflect the *scanning process's*
+        are already at the plugins-root level, so no ``/plugins`` is appended.
+        Like ``CLAUDE_CONFIG_DIR`` they reflect the *scanning process's*
         environment, so they are honored only on an own-home scan (see
         :meth:`_scans_own_home`) — under ``--scan-all-users`` the scanner can't
         know another user's env:
 
-        * ``CLAUDE_CODE_PLUGIN_CACHE_DIR`` — an additional plugins root (despite the
-          name it is the parent dir; the ``cache``/``repos`` install subtrees live
-          beneath it).
+        * ``CLAUDE_CODE_PLUGIN_CACHE_DIR`` — documented ambiguously as either an
+          additional plugins root or the cache directory itself. This method keeps
+          the root interpretation; :meth:`_ambiguous_plugin_cache_bases` adds the
+          direct-cache interpretation when the directory has no root-layout markers.
         * ``CLAUDE_CODE_PLUGIN_SEED_DIR`` — ``os.pathsep``-separated read-only seed
-          roots mirroring the plugins layout (container/CI pre-population).
+          roots mirroring the plugins layout (container/CI pre-population), so it
+          remains root-only.
+
+        These env-var arms are own-home-only because they describe the scanner's
+        environment. The install and marketplace registries read by the base-dir
+        helpers live inside the target home and are therefore honored for every
+        scanned home, including ``--scan-all-users``.
 
         All resolved roots are scanned; results key by absolute path so any overlap
         with the default dedupes, and a non-existent root is skipped downstream.
@@ -285,16 +294,178 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         roots = [folder / "plugins" for folder in self._discover_global_folders()]
         if self._scans_own_home():
             cache_dir = os.environ.get("CLAUDE_CODE_PLUGIN_CACHE_DIR")
-            if cache_dir:
-                roots.append(Path(cache_dir))
+            sanitized_cache_dir = self._sanitize_external_root(cache_dir)
+            if sanitized_cache_dir is not None:
+                roots.append(sanitized_cache_dir)
             seed_dir = os.environ.get("CLAUDE_CODE_PLUGIN_SEED_DIR")
             if seed_dir:
                 roots.extend(Path(p) for p in seed_dir.split(os.pathsep) if p)
         return roots
 
     def _plugin_base_dirs(self) -> list[Path]:
-        """Every ``<plugin-root>/<subdir>`` to scan for plugin MCP servers and skills."""
-        return [root / sub for root in self._plugin_root_dirs() for sub in self._plugin_subdirs]
+        """Every bounded base to scan for plugin MCP servers and skills.
+
+        The documented install subdirectories remain the fail-open backstop. The
+        internal registries are purely additive: cache entries already covered by a
+        fixed base are filtered only to avoid duplicate walks, while plausible
+        in-place install roots are added directly (never crossed with subdir names).
+        The result is cached because all four plugin discovery arms consume it.
+        """
+        if self._plugin_base_dirs_cache is not None:
+            return self._plugin_base_dirs_cache
+
+        fixed = [root / sub for root in self._plugin_root_dirs() for sub in self._plugin_subdirs]
+        extra = [
+            *self._ambiguous_plugin_cache_bases(),
+            *self._skills_dir_plugin_bases(),
+            *self._local_marketplace_dirs(),
+        ]
+        covered = (*fixed, *extra)
+        external = [
+            root
+            for root in self._installed_plugin_dirs()
+            if not any(self._is_under(root, base) for base in covered) and self._external_root_has_marker(root)
+        ]
+        self._plugin_base_dirs_cache = list(dict.fromkeys((*fixed, *extra, *external)))
+        return self._plugin_base_dirs_cache
+
+    def _installed_plugin_dirs(self) -> list[Path]:
+        """Read additive plugin roots from each target home's install registry.
+
+        ``installed_plugins.json`` is undocumented internal state, so a missing,
+        malformed, or future-version registry contributes no extra roots and never
+        suppresses the documented directory walk. ``installPath`` is authoritative
+        for cache and in-place installs alike, including paths outside the target
+        home. Unknown versions are intentionally accepted.
+        """
+        roots: list[Path] = []
+        seen: set[Path] = set()
+        for folder in self._discover_global_folders():
+            data = self._load_json_file(folder / "plugins" / "installed_plugins.json")
+            if not isinstance(data, dict):
+                continue
+            plugins = data.get("plugins")
+            if not isinstance(plugins, dict):
+                continue
+            for entries in plugins.values():
+                if not isinstance(entries, list):
+                    continue
+                for entry in entries:
+                    if not isinstance(entry, dict):
+                        continue
+                    root = self._sanitize_external_root(entry.get("installPath"))
+                    if root is None or root in seen:
+                        continue
+                    if len(roots) >= _MAX_EXTERNAL_PLUGIN_ROOTS:
+                        logger.warning(
+                            "Plugin install registry exceeds the %d external-root cap; ignoring remaining entries",
+                            _MAX_EXTERNAL_PLUGIN_ROOTS,
+                        )
+                        return roots
+                    seen.add(root)
+                    roots.append(root)
+        return roots
+
+    def _local_marketplace_dirs(self) -> list[Path]:
+        """Return valid local-directory marketplace roots from the target home.
+
+        Only ``source.source == 'directory'`` is eligible. Git/GitHub/URL catalog
+        clones remain excluded because walking them would report plugins the user
+        never installed. Both the authoritative install location and declared
+        source path are considered to tolerate a moved local checkout.
+        """
+        roots: list[Path] = []
+        for folder in self._discover_global_folders():
+            data = self._load_json_file(folder / "plugins" / "known_marketplaces.json")
+            if not isinstance(data, dict):
+                continue
+            for marketplace in data.values():
+                if not isinstance(marketplace, dict):
+                    continue
+                source = marketplace.get("source")
+                if not isinstance(source, dict) or source.get("source") != "directory":
+                    continue
+                for raw in (marketplace.get("installLocation"), source.get("path")):
+                    root = self._sanitize_external_root(raw)
+                    if root is None:
+                        continue
+                    try:
+                        has_marker = (root / ".claude-plugin" / "marketplace.json").is_file()
+                    except (OSError, ValueError):
+                        has_marker = False
+                    if has_marker:
+                        roots.append(root)
+        return list(dict.fromkeys(roots))
+
+    def _skills_dir_plugin_bases(self) -> list[Path]:
+        """Return immediate ``@skills-dir`` children carrying a plugin manifest.
+
+        Gating at the child keeps an ordinary skill folder that happens to contain
+        a stray ``.mcp.json`` from being promoted into a plugin root.
+        """
+        roots: list[Path] = []
+        for folder in self._discover_global_folders():
+            skills_dir = folder / self._skills_subdir
+            try:
+                children = list(skills_dir.iterdir())
+            except (OSError, ValueError):
+                continue
+            for child in children:
+                try:
+                    if (child / ".claude-plugin" / "plugin.json").is_file():
+                        roots.append(child)
+                except (OSError, ValueError):
+                    continue
+        return roots
+
+    def _ambiguous_plugin_cache_bases(self) -> list[Path]:
+        """Interpret ``CLAUDE_CODE_PLUGIN_CACHE_DIR`` as a direct cache when needed.
+
+        If a known plugins-root marker exists beneath the value, the fixed
+        root/subdir walk already covers it. Otherwise the value itself is added as a
+        base. As with the root interpretation, this scanner-environment value is
+        ignored when scanning another user's home.
+        """
+        if not self._scans_own_home():
+            return []
+        root = self._sanitize_external_root(os.environ.get("CLAUDE_CODE_PLUGIN_CACHE_DIR"))
+        if root is None:
+            return []
+        try:
+            if any((root / marker).is_dir() for marker in ("cache", "repos", "synced", "marketplaces")):
+                return []
+        except (OSError, ValueError):
+            return []
+        return [root]
+
+    def _sanitize_external_root(self, raw: object) -> Path | None:
+        """Lexically normalize one untrusted external root, rejecting unsafe forms."""
+        if not isinstance(raw, str) or not raw.strip():
+            return None
+        try:
+            candidate = expand_path(Path(raw.strip()), self.home_directory)
+            candidate = Path(os.path.normpath(candidate))
+        except (OSError, ValueError):
+            return None
+        if not candidate.is_absolute() or candidate.parent == candidate:
+            return None
+        return candidate
+
+    @staticmethod
+    def _external_root_has_marker(root: Path) -> bool:
+        """True when an external registry root plausibly contains one plugin."""
+        try:
+            return (root / ".claude-plugin" / "plugin.json").is_file() or (root / ".mcp.json").is_file()
+        except (OSError, ValueError):
+            return False
+
+    @staticmethod
+    def _is_under(path: Path, base: Path) -> bool:
+        """Purely lexical containment used only to suppress duplicate walks."""
+        try:
+            return path == base or path.is_relative_to(base)
+        except ValueError:
+            return False
 
     def _discover_plugin_mcp_servers(self) -> McpConfigsResult:
         """Scan plugin ``.mcp.json`` files (flat ``{name: serverConfig}`` or wrapped
@@ -308,7 +479,12 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         )
 
     def _discover_plugin_skills(self) -> SkillsDirsResult:
-        """Scan ``skills/`` subdirs under every plugin base dir."""
+        """Scan ``skills/`` subdirs under every plugin base dir.
+
+        A symlinked ``skills`` directory is yielded from its parent's directory
+        listing and ``is_dir`` follows the link, without making the recursive walk
+        follow arbitrary symlinked subtrees.
+        """
         return self._discover_skill_and_command_dirs(self._plugin_base_dirs(), "skills", inspect_skills_dir)
 
     # --- private: enterprise/managed MCP discovery ---
@@ -355,16 +531,37 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         """``(manifest_path, parsed_dict)`` for every readable ``plugin.json`` under
         the plugin base dirs.
 
-        Recomputed on each call: the plugin base dirs are walked and every
-        ``plugin.json`` is read and JSON-decoded. The inline-MCP and skills
-        manifest scans each call it, so the walk runs once per consumer.
+        Recomputed on each call: the cached plugin base dirs are walked and every
+        ``plugin.json`` is read and JSON-decoded. A second bounded probe reaches a
+        symlinked ``.claude-plugin`` directory without enabling recursive symlink
+        following. The inline-MCP and skills manifest scans each call this helper.
         Malformed or non-dict manifests are skipped (so a bad ``plugin.json`` is
         silently ignored, as before).
         """
         manifests: list[tuple[Path, dict]] = []
+        seen: set[str] = set()
         for base in self._plugin_base_dirs():
             for manifest in _walk_under_depth(base, "plugin.json", _MAX_PLUGIN_RGLOB_DEPTH, want_file=True):
+                key = manifest.as_posix()
+                if key in seen:
+                    continue
+                seen.add(key)
                 if not manifest.is_file():
+                    continue
+                data = self._load_json_file(manifest)
+                if isinstance(data, dict):
+                    manifests.append((manifest, data))
+            for plugin_dir in _walk_under_depth(base, ".claude-plugin", _MAX_PLUGIN_RGLOB_DEPTH, want_file=False):
+                manifest = plugin_dir / "plugin.json"
+                key = manifest.as_posix()
+                if key in seen:
+                    continue
+                seen.add(key)
+                try:
+                    is_file = manifest.is_file()
+                except (OSError, ValueError):
+                    is_file = False
+                if not is_file:
                     continue
                 data = self._load_json_file(manifest)
                 if isinstance(data, dict):
