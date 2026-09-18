@@ -62,6 +62,35 @@ _MAX_PLUGIN_RGLOB_DEPTH = 10
 _MAX_CONFIG_FILE_BYTES = 20 * 1024 * 1024  # 20 MiB
 
 
+def _walk_matches_under_depth(
+    base: Path,
+    max_path_depth: int,
+    *,
+    file_names: tuple[str, ...] = (),
+    dir_names: tuple[str, ...] = (),
+) -> Iterator[Path]:
+    """Yield matching files and directories from one depth-bounded walk."""
+    file_name_set = set(file_names)
+    dir_name_set = set(dir_names)
+    try:
+        if not base.exists():
+            return
+        hits: list[Path] = []
+        for root_str, dirs, files in os.walk(base):
+            root = Path(root_str)
+            dir_depth = len(root.relative_to(base).parts)
+            hits.extend(root / name for name in files if name in file_name_set)
+            hits.extend(root / name for name in dirs if name in dir_name_set)
+            # The dir we're in is at depth `dir_depth`; an entry inside it sits at
+            # depth+1. Prune once depth+1 reaches the cap so we don't descend further.
+            if dir_depth + 1 >= max_path_depth:
+                dirs.clear()
+    except (PermissionError, OSError, ValueError):
+        logger.warning("Permission error walking %s", base.as_posix())
+        return
+    yield from hits
+
+
 def _walk_under_depth(base: Path, name: str, max_path_depth: int, *, want_file: bool) -> Iterator[Path]:
     """Yield paths named ``name`` under ``base``, pruning traversal so each yielded
     path's relative parts count is at most ``max_path_depth``.
@@ -83,24 +112,68 @@ def _walk_under_depth(base: Path, name: str, max_path_depth: int, *, want_file: 
     leading ``exists()`` probe. Mirrors the tolerance ``_load_json_file`` and
     ``profiles_dir.iterdir`` already apply.
     """
+    if want_file:
+        yield from _walk_matches_under_depth(base, max_path_depth, file_names=(name,))
+    else:
+        yield from _walk_matches_under_depth(base, max_path_depth, dir_names=(name,))
+
+
+def _walk_manifest_candidates(
+    base: Path, filename: str, manifest_dirs: tuple[str, ...], max_path_depth: int
+) -> Iterator[Path]:
+    """Yield ordinary manifests plus manifests inside named directory entries.
+
+    The named-directory probe intentionally reaches a symlinked manifest directory
+    without making the recursive walk follow arbitrary directory symlinks.
+    """
+    seen: set[Path] = set()
+    for match in _walk_matches_under_depth(
+        base,
+        max_path_depth,
+        file_names=(filename,),
+        dir_names=manifest_dirs,
+    ):
+        candidate = match if match.name == filename else match / filename
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        yield candidate
+
+
+def _canonical_key(path: Path) -> str:
+    """Normalize a result key the way the data-driven phase does.
+
+    ``inspect.get_mcp_config_per_home_directory`` keys its results by ``Path.resolve()``,
+    so a key here that kept a symlinked spelling survives the merge in
+    ``pipelines.discover_clients_to_inspect`` as a second entry for the same file — and
+    the same server is then inspected twice. Resolution is best-effort: an unresolvable
+    path (an embedded NUL raises ``ValueError``, a symlink loop ``OSError``) keeps its
+    literal spelling rather than dropping out of the report.
+    """
     try:
-        if not base.exists():
-            return
-        hits: list[Path] = []
-        for root_str, dirs, files in os.walk(base):
-            root = Path(root_str)
-            dir_depth = len(root.relative_to(base).parts)
-            candidates = files if want_file else dirs
-            if name in candidates:
-                hits.append(root / name)
-            # The dir we're in is at depth `dir_depth`; an entry inside it sits at
-            # depth+1. Prune once depth+1 reaches the cap so we don't descend further.
-            if dir_depth + 1 >= max_path_depth:
-                dirs.clear()
-    except (PermissionError, OSError):
-        logger.warning("Permission error walking %s", base.as_posix())
-        return
-    yield from hits
+        return path.resolve().as_posix()
+    except (OSError, RuntimeError, ValueError):
+        return path.as_posix()
+
+
+def _canonicalize_keys(result: dict) -> dict:
+    """Re-key a discovery result canonically, keeping first-seen order.
+
+    Applied once to each aggregate so every scope is keyed the same way — mixing
+    canonical and literal keys within one phase would itself alias, e.g. a manifest
+    naming ``.mcp.json`` against the walk that already found it. When two literal
+    keys resolve to one canonical location, distinct list entries are retained while
+    identical entries are de-duplicated.
+    """
+    canonical: dict = {}
+    for key, value in result.items():
+        canonical_key = _canonical_key(Path(key))
+        existing = canonical.get(canonical_key)
+        if isinstance(existing, list) and isinstance(value, list):
+            existing.extend(entry for entry in value if entry not in existing)
+        else:
+            canonical.setdefault(canonical_key, value)
+    return canonical
 
 
 def _looks_like_mcp_payload(data: dict) -> bool:
@@ -245,7 +318,7 @@ class AgentDiscoverer(ABC):
 
     # --- shared helpers (inherited by every concrete subclass) ---
 
-    def _load_json_file(self, path: Path) -> dict | CouldNotParseMCPConfig | None:
+    def _load_json_file(self, path: Path, *, log_parse_errors: bool = True) -> dict | CouldNotParseMCPConfig | None:
         """JSON-decode an arbitrary file. ``None`` if missing, unreadable (denied
         permissions), or over the ``_MAX_CONFIG_FILE_BYTES`` cap; parsed dict on
         success; ``CouldNotParseMCPConfig`` on malformed JSON.
@@ -279,7 +352,10 @@ class AgentDiscoverer(ABC):
             logger.warning("Permission denied reading %s", path.as_posix())
             return None
         except Exception as e:
-            logger.exception("Error reading %s: %s", path.as_posix(), e)
+            if log_parse_errors:
+                logger.exception("Error reading %s: %s", path.as_posix(), e)
+            else:
+                logger.warning("Skipping malformed %s", path.as_posix())
             return CouldNotParseMCPConfig(
                 message=f"could not parse file {path.as_posix()}",
                 traceback=traceback.format_exc(),
