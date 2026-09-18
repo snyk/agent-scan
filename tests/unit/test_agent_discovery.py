@@ -10540,6 +10540,15 @@ def test_github_copilot_discoverer_honors_plugin_manifest_overrides(tmp_path):
     assert [s.name for s in skills_dirs[(plugin / "extra-skills").as_posix()]] == ["second"]
 
 
+def test_canonical_key_preserves_drive_less_rooted_path_on_windows(monkeypatch):
+    from agent_scan.agents import base
+
+    path = Path("/work/repo")
+    monkeypatch.setattr(base.sys, "platform", "win32")
+    with patch.object(Path, "resolve", side_effect=AssertionError("must not attach the current Windows drive")):
+        assert base._canonical_key(path) == "/work/repo"
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="symlink creation needs elevation on Windows")
 @pytest.mark.asyncio
 @pytest.mark.parametrize("alias", ["home", "config"])

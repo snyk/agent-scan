@@ -10,6 +10,7 @@ by the concrete discoverers in sibling modules.
 
 import logging
 import os
+import sys
 import traceback
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
@@ -150,6 +151,12 @@ def _canonical_key(path: Path) -> str:
     path (an embedded NUL raises ``ValueError``, a symlink loop ``OSError``) keeps its
     literal spelling rather than dropping out of the report.
     """
+    # A drive-less rooted spelling such as ``/work/repo`` is valid persisted
+    # cross-platform data, but Windows ``Path.resolve`` attaches the runner's
+    # current drive (for example ``D:/work/repo``). Preserve that spelling: it
+    # is not a native absolute filesystem path whose symlinks we can resolve.
+    if sys.platform == "win32" and path.root and not path.drive:
+        return path.as_posix()
     try:
         return path.resolve().as_posix()
     except (OSError, RuntimeError, ValueError):
