@@ -20,7 +20,8 @@ from agent_scan.agents.base import (
     McpConfigsResult,
     McpScanResult,
     SkillsDirsResult,
-    _walk_under_depth,
+    _canonicalize_keys,
+    _walk_manifest_candidates,
 )
 from agent_scan.models import (
     ClaudeConfigFile,
@@ -74,35 +75,6 @@ def _plugin_root_for(manifest_path: Path) -> tuple[Path, int] | None:
         if len(parts) > len(location) and parts[-len(location) :] == location:
             return manifest_path.parents[len(location) - 1], precedence
     return None
-
-
-def _canonical_key(path: Path) -> str:
-    """Normalize a result key the way the data-driven phase does.
-
-    ``inspect.get_mcp_config_per_home_directory`` keys its results by ``Path.resolve()``,
-    so a key here that kept a symlinked spelling survives the merge in
-    ``pipelines.discover_clients_to_inspect`` as a second entry for the same file — and
-    the same server is then inspected twice. Resolution is best-effort: an unresolvable
-    path (an embedded NUL raises ``ValueError``, a symlink loop ``OSError``) keeps its
-    literal spelling rather than dropping out of the report.
-    """
-    try:
-        return path.resolve().as_posix()
-    except (OSError, RuntimeError, ValueError):
-        return path.as_posix()
-
-
-def _canonicalize_keys(result: dict) -> dict:
-    """Re-key a discovery result canonically, keeping first-seen order.
-
-    Applied once to each aggregate so every scope is keyed the same way — mixing
-    canonical and literal keys within one phase would itself alias, e.g. a manifest
-    naming ``.mcp.json`` against the walk that already found it.
-    """
-    canonical: dict = {}
-    for key, value in result.items():
-        canonical.setdefault(_canonical_key(Path(key)), value)
-    return canonical
 
 
 def _escapes_plugin_root(value: str) -> bool:
@@ -309,8 +281,11 @@ class GitHubCopilotDiscoverer(AgentDiscoverer):
         """
         by_root: dict[Path, tuple[int, Path]] = {}
         for base in self._plugin_base_dirs():
-            for manifest_path in _walk_under_depth(
-                base, self._plugin_manifest_filename, _MAX_PLUGIN_RGLOB_DEPTH, want_file=True
+            for manifest_path in _walk_manifest_candidates(
+                base,
+                self._plugin_manifest_filename,
+                (".plugin", "plugin", ".claude-plugin"),
+                _MAX_PLUGIN_RGLOB_DEPTH,
             ):
                 located = _plugin_root_for(manifest_path)
                 if located is None:
@@ -330,7 +305,7 @@ class GitHubCopilotDiscoverer(AgentDiscoverer):
                     by_root[plugin_root] = (precedence, manifest_path)
         result: list[tuple[Path, Path, dict]] = []
         for plugin_root, (_precedence, manifest_path) in by_root.items():
-            data = self._load_json_file(manifest_path)
+            data = self._load_json_file(manifest_path, log_parse_errors=False)
             if isinstance(data, dict):
                 result.append((plugin_root, manifest_path, data))
         return result
