@@ -1414,31 +1414,6 @@ def test_claude_code_registry_honored_for_other_user_home(tmp_path, monkeypatch)
     assert names == {"alice"}
 
 
-def test_claude_code_local_directory_marketplace_root_is_scanned(tmp_path):
-    from agent_scan.agents import ClaudeCodeDiscoverer
-
-    marketplace = tmp_path / "src" / "prodsec-marketplace"
-    marker = marketplace / ".claude-plugin" / "marketplace.json"
-    marker.parent.mkdir(parents=True)
-    marker.write_text("{}")
-    plugin = marketplace / "plugins" / "jira"
-    plugin.mkdir(parents=True)
-    (plugin / ".mcp.json").write_text('{"local-jira": {"command": "jira"}}')
-    _write_claude_marketplaces(
-        tmp_path,
-        {
-            "prodsec": {
-                "source": {"source": "directory", "path": marketplace.as_posix()},
-                "installLocation": marketplace.as_posix(),
-            }
-        },
-    )
-
-    configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
-
-    assert plugin.joinpath(".mcp.json").as_posix() in configs
-
-
 def test_claude_code_directory_marketplace_catalog_clone_is_not_scanned(tmp_path):
     from agent_scan.agents import ClaudeCodeDiscoverer
 
@@ -1480,6 +1455,43 @@ def test_claude_code_local_marketplace_without_marketplace_manifest_is_skipped(t
     )
 
     assert ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers() == {}
+
+
+def test_claude_code_local_marketplace_root_is_not_scanned(tmp_path):
+    """A registered local marketplace must never become a walk base.
+
+    Its checkout is arbitrary user territory — ``node_modules``, vendored repos and
+    repro cases inside it are not the user's configured MCP servers. Installing from
+    a local-directory marketplace copies the plugin into ``cache`` (verified against
+    a real ``claude plugin install``), which the documented walk already covers, so
+    the root buys no coverage and only widens the blast radius.
+    """
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    marketplace = tmp_path / "src" / "prodsec-marketplace"
+    marker = marketplace / ".claude-plugin" / "marketplace.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("{}")
+    unrelated = marketplace / "node_modules" / "@acme" / "sdk"
+    unrelated.mkdir(parents=True)
+    (unrelated / ".mcp.json").write_text('{"acme-vendor": {"command": "acme"}}')
+    _write_claude_marketplaces(
+        tmp_path,
+        {
+            "prodsec": {
+                "source": {"source": "directory", "path": marketplace.as_posix()},
+                "installLocation": marketplace.as_posix(),
+            }
+        },
+    )
+    installed = tmp_path / ".claude" / "plugins" / "cache" / "prodsec" / "jira" / "1.0.0"
+    installed.mkdir(parents=True)
+    (installed / ".mcp.json").write_text('{"jira": {"command": "jira"}}')
+
+    configs = ClaudeCodeDiscoverer(tmp_path)._discover_plugin_mcp_servers()
+
+    names = {name for value in configs.values() if isinstance(value, list) for name, _ in value}
+    assert names == {"jira"}, f"unrelated servers leaked from the marketplace checkout; got: {sorted(names)}"
 
 
 def test_claude_code_github_marketplace_install_location_not_scanned(tmp_path):
@@ -1671,29 +1683,6 @@ def test_claude_code_registry_caps_examined_entries_independently(tmp_path, monk
     assert "4" in caplog.text
 
 
-def test_claude_code_local_marketplace_caps_examined_entries_before_stat(tmp_path, monkeypatch, caplog):
-    import logging
-
-    from agent_scan.agents import ClaudeCodeDiscoverer
-    from agent_scan.agents import claude_code as claude_code_module
-
-    monkeypatch.setattr(claude_code_module, "_MAX_REGISTRY_ENTRIES", 3)
-    marketplaces = {
-        str(index): {
-            "source": {"source": "directory", "path": (tmp_path / "missing" / str(index)).as_posix()},
-            "installLocation": (tmp_path / "missing" / str(index)).as_posix(),
-        }
-        for index in range(3)
-    }
-    _write_claude_marketplaces(tmp_path, marketplaces)
-
-    with caplog.at_level(logging.WARNING, logger="agent_scan.agents.claude_code"):
-        roots = ClaudeCodeDiscoverer(tmp_path)._local_marketplace_dirs()
-
-    assert roots == []
-    assert "3" in caplog.text
-
-
 def test_claude_code_skills_dir_plugin_bases_are_capped(tmp_path, monkeypatch, caplog):
     import logging
 
@@ -1711,30 +1700,6 @@ def test_claude_code_skills_dir_plugin_bases_are_capped(tmp_path, monkeypatch, c
 
     assert len(roots) == 2
     assert "2" in caplog.text
-
-
-def test_claude_code_local_marketplaces_cap_number_of_roots(tmp_path, caplog):
-    import logging
-
-    from agent_scan.agents import ClaudeCodeDiscoverer
-
-    marketplaces = {}
-    for index in range(257):
-        root = tmp_path / "marketplaces" / f"marketplace-{index}"
-        marker = root / ".claude-plugin" / "marketplace.json"
-        marker.parent.mkdir(parents=True)
-        marker.write_text("{}")
-        marketplaces[str(index)] = {
-            "source": {"source": "directory", "path": root.as_posix()},
-            "installLocation": root.as_posix(),
-        }
-    _write_claude_marketplaces(tmp_path, marketplaces)
-
-    with caplog.at_level(logging.WARNING, logger="agent_scan.agents.claude_code"):
-        roots = ClaudeCodeDiscoverer(tmp_path)._local_marketplace_dirs()
-
-    assert len(roots) == 256
-    assert "256" in caplog.text
 
 
 def test_claude_code_stale_cached_versions_still_reported_with_registry_present(tmp_path):

@@ -65,11 +65,19 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
     _project_skills_relative: tuple[str, ...] = (".claude/skills", ".agents/skills")
     # Subtrees under a plugin *root* (see ``_plugin_root_dirs``) that hold installed
     # plugins. ``cache`` is the hydrated install tree, ``repos`` is its legacy name,
-    # and ``synced`` holds plugins downloaded from claude.ai. Local-directory
-    # marketplaces are also scanned when recorded in ``known_marketplaces.json``,
-    # while catalog clones beneath a plugin root's ``marketplaces`` directory are
-    # explicitly filtered. ``installed_plugins.json`` is authoritative for in-place
-    # installs that never reach these fixed subtrees.
+    # and ``synced`` holds plugins downloaded from claude.ai.
+    # ``installed_plugins.json`` is authoritative for in-place installs that never
+    # reach these fixed subtrees.
+    #
+    # ``marketplaces`` is deliberately absent, and ``known_marketplaces.json`` is
+    # deliberately not read. A marketplace is a *catalog*, so its root holds plugins
+    # the user never installed — plus, for a local-directory marketplace, whatever
+    # else lives in that checkout (``node_modules``, vendored repos, repro cases),
+    # none of which are configured MCP servers. Verified against a real
+    # ``claude plugin install`` from a local-directory marketplace with a
+    # relative-path source: the plugin is *copied* into
+    # ``cache/<marketplace>/<plugin>/<version>/``, so the fixed subtrees below
+    # already cover it and the marketplace root would add reach without coverage.
     #
     # Residual multi-user risk: a registry entry can point into another user's home.
     # Requiring a plugin marker, plus the traversal-depth and root-count caps, bounds
@@ -333,7 +341,6 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         extra = [
             *self._ambiguous_plugin_cache_bases(),
             *self._skills_dir_plugin_bases(),
-            *self._local_marketplace_dirs(),
         ]
         covered = (*fixed, *extra)
         external: list[Path] = []
@@ -388,58 +395,6 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
                     root = self._sanitize_external_root(entry.get("installPath"), source="installed_plugins.json")
                     if root is None or root in seen:
                         continue
-                    seen.add(root)
-                    roots.append(root)
-        return roots
-
-    def _local_marketplace_dirs(self) -> list[Path]:
-        """Return valid local-directory marketplace roots from the target home.
-
-        Only ``source.source == 'directory'`` is eligible. Git/GitHub/URL catalog
-        clones remain excluded because walking them would report plugins the user
-        never installed. Both the authoritative install location and declared
-        source path are considered to tolerate a moved local checkout.
-        """
-        roots: list[Path] = []
-        seen: set[Path] = set()
-        examined = 0
-        plugin_roots = self._plugin_root_dirs()
-        registry_paths = dict.fromkeys(root / "known_marketplaces.json" for root in plugin_roots)
-        for registry_path in registry_paths:
-            data = self._load_json_file(registry_path, log_parse_errors=False)
-            if not isinstance(data, dict):
-                continue
-            for marketplace in data.values():
-                if not isinstance(marketplace, dict):
-                    continue
-                source = marketplace.get("source")
-                if not isinstance(source, dict) or source.get("source") != "directory":
-                    continue
-                for raw in (marketplace.get("installLocation"), source.get("path")):
-                    if examined >= _MAX_REGISTRY_ENTRIES:
-                        logger.warning(
-                            "Known marketplaces registry exceeds the %d registry-entry cap; ignoring remaining entries",
-                            _MAX_REGISTRY_ENTRIES,
-                        )
-                        return roots
-                    examined += 1
-                    root = self._sanitize_external_root(raw, source="known_marketplaces.json")
-                    if root is None:
-                        continue
-                    if any(self._is_under(root, plugin_root / "marketplaces") for plugin_root in plugin_roots):
-                        continue
-                    try:
-                        has_marker = (root / ".claude-plugin" / "marketplace.json").is_file()
-                    except (OSError, ValueError):
-                        has_marker = False
-                    if not has_marker or root in seen:
-                        continue
-                    if len(roots) >= _MAX_EXTERNAL_PLUGIN_ROOTS:
-                        logger.warning(
-                            "Known marketplaces registry exceeds the %d external-root cap; ignoring remaining entries",
-                            _MAX_EXTERNAL_PLUGIN_ROOTS,
-                        )
-                        return roots
                     seen.add(root)
                     roots.append(root)
         return roots
