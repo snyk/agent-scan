@@ -122,6 +122,7 @@ class GitHubCopilotDiscoverer(AgentDiscoverer):
     _permissions_filename = "permissions-config.json"
     _plugins_dir_name = "installed-plugins"
     _plugin_manifest_filename = "plugin.json"
+    _plugin_manifest_dirs = (".plugin", "plugin", ".claude-plugin")
     # Cross-agent user skills dir Copilot reads outside its own home.
     _user_skills_relative = "~/.agents/skills"
     # Repo-relative MCP files, per the Copilot CLI MCP docs: Copilot walks from the
@@ -284,7 +285,7 @@ class GitHubCopilotDiscoverer(AgentDiscoverer):
             for manifest_path in _walk_manifest_candidates(
                 base,
                 self._plugin_manifest_filename,
-                (".plugin", "plugin", ".claude-plugin"),
+                self._plugin_manifest_dirs,
                 _MAX_PLUGIN_RGLOB_DEPTH,
             ):
                 located = _plugin_root_for(manifest_path)
