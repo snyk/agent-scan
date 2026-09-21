@@ -12,6 +12,7 @@ from agent_scan.redact import (
     _is_uuid_like,
     redact_absolute_paths,
     redact_args,
+    redact_bearer_tokens,
     redact_data,
     redact_inspected_path,
     redact_push_keys,
@@ -1367,3 +1368,27 @@ class TestRedactPushKeysInData:
             in data["modified"]["PreToolUse"]["expected_value"][0]["hooks"][0]["command"]
         )
         assert data["session_id"] == "hooks-setup"
+
+
+class TestRedactBearerTokens:
+    def test_redacts_authorization_bearer(self):
+        # Deliberately not JWT-shaped (no "eyJ..." base64 header lookalike) so this
+        # fixture doesn't itself get flagged as a real bearer token by secret scanners.
+        text = "SENT: GET /mcp\nAuthorization: Bearer NOT-A-REAL.tok-en_val+ue/=="
+        out = redact_bearer_tokens(text)
+        assert "NOT-A-REAL.tok-en_val+ue/==" not in out
+        assert "Bearer **REDACTED**" in out
+
+    def test_redacts_lowercase_and_leaves_rest(self):
+        out = redact_bearer_tokens("prefix bearer TOKEN123 suffix")
+        assert out == "prefix Bearer **REDACTED** suffix"
+
+    def test_redacts_other_case_variants(self):
+        # RFC 7235 s2.1: the auth-scheme token is case-insensitive.
+        assert redact_bearer_tokens("Authorization: BEARER TOKEN123") == "Authorization: Bearer **REDACTED**"
+        assert redact_bearer_tokens("Authorization: BeArEr TOKEN123") == "Authorization: Bearer **REDACTED**"
+
+    def test_passthrough_when_no_token(self):
+        assert redact_bearer_tokens("no credentials here") == "no credentials here"
+        assert redact_bearer_tokens(None) is None
+        assert redact_bearer_tokens("") == ""

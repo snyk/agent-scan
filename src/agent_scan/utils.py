@@ -5,6 +5,7 @@ import logging
 import ntpath
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -245,6 +246,41 @@ def resolve_command_and_args(server_config: StdioServer) -> tuple[str, list[str]
 
     logger.warning(f"Command {command} not found in any fallback location")
     raise ValueError(f"Command {command} not found")
+
+
+_ENV_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def expand_env_vars(env: dict[str, str] | None) -> dict[str, str] | None:
+    """Substitute ${NAME} references in stdio-server env values with the
+    scanning process's own environment variables.
+
+    Lets a config commit a placeholder like {"AUTH_HEADER": "${AUTH_HEADER}"}
+    instead of a real secret: the real value is resolved only here, at spawn
+    time, from whichever shell is running the scan, and the result is never
+    written back onto the parsed config -- callers must treat the return
+    value as a throwaway dict for immediate use, not something to persist.
+
+    A ${NAME} reference to a variable that isn't set (or is empty) in the
+    scanning process's environment is left unexpanded and logged as a
+    warning (visible with --verbose), rather than silently connecting with
+    a blank credential.
+    """
+    if env is None:
+        return None
+
+    def _substitute(match: re.Match[str]) -> str:
+        name = match.group(1)
+        value = os.environ.get(name)
+        if not value:
+            logger.warning(
+                f"Env var '{name}' referenced in a server config's env block but not set (or empty) in "
+                f"the scanning environment; leaving '{match.group(0)}' unexpanded"
+            )
+            return match.group(0)
+        return value
+
+    return {key: _ENV_VAR_PATTERN.sub(_substitute, value) for key, value in env.items()}
 
 
 @contextlib.contextmanager
