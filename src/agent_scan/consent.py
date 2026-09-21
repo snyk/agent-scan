@@ -40,6 +40,15 @@ def _render_headers_redacted(server: RemoteServer) -> str | None:
     return ", ".join(f"{key}=***" for key in sorted(server.headers))
 
 
+def _render_url_redacted(url: str) -> str:
+    destination, fragment_separator, fragment = url.partition("#")
+    base, query_separator, query = destination.partition("?")
+    if not query_separator:
+        return url
+    redacted_query = "&".join(f"{part.partition('=')[0]}=***" if part else "" for part in query.split("&"))
+    return f"{base}{query_separator}{redacted_query}{fragment_separator}{fragment}"
+
+
 def _read_yes_no(prompt: str) -> bool:
     """
     Prompt on stderr and read a line from stdin. Accepts ``Y``, ``y``, ``yes``
@@ -119,7 +128,7 @@ def collect_consent(
             type_str = server.type or "http"
             _stderr_console.print(f"\n  [{idx}] [cyan]{escape(server_name)}[/cyan]")
             _stderr_console.print(f"      config : {escape(config_path)}")
-            _stderr_console.print(f"      URL    : [yellow]{escape(server.url)}[/yellow]")
+            _stderr_console.print(f"      URL    : [yellow]{escape(_render_url_redacted(server.url))}[/yellow]")
             _stderr_console.print(f"      type   : {escape(type_str)}")
             headers_str = _render_headers_redacted(server)
             if headers_str:
