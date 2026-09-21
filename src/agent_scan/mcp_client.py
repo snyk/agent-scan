@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 
 def _create_mcp_http_client_without_redirects(
     headers: dict[str, str] | None = None,
-    timeout: httpx.Timeout | None = None,
+    timeout: httpx.Timeout | float | None = None,
     auth: httpx.Auth | None = None,
 ) -> httpx.AsyncClient:
     """Create a remote MCP client that never forwards requests across redirects."""
@@ -81,8 +81,8 @@ async def streamablehttp_client_without_session(
         )
     else:
         oauth_client_provider = None
-    async with httpx.AsyncClient(
-        auth=oauth_client_provider, follow_redirects=False, headers=headers, timeout=timeout
+    async with _create_mcp_http_client_without_redirects(
+        auth=oauth_client_provider, headers=headers, timeout=timeout
     ) as custom_client:
         async with streamable_http_client(url=url, http_client=custom_client) as (read, write, _):
             yield read, write
