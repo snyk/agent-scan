@@ -475,7 +475,7 @@ def test_plain_scan_output_sorts_only_risks_by_descending_score(capsys):
                             McpEntitySummary(name="second-tool", type="tool"),
                         ],
                         risk_indexes=McpServerRiskIndexes(
-                            dangerous_words=RiskScore(score=100, evidence="low risk"),
+                            untrusted_content=RiskScore(score=100, evidence="low risk"),
                             private_data=RiskScore(score=600, evidence="high risk"),
                         ),
                     )
@@ -500,7 +500,7 @@ def test_plain_scan_output_sorts_only_risks_by_descending_score(capsys):
     print_scan_response(response, show_all=True)
 
     output = capsys.readouterr().out
-    assert output.index("Private data") < output.index("Dangerous words")
+    assert output.index("Private data") < output.index("Untrusted content")
     assert output.index("Secret detection") < output.index("Malicious code")
     assert output.index("first-tool") < output.index("second-tool")
     assert output.index("first-file.md") < output.index("second-file.py")
@@ -516,7 +516,7 @@ def test_plain_scan_output_prints_every_component_and_analysis_error(capsys):
                     McpServerRiskResponse(
                         name=name,
                         risk_indexes=McpServerRiskIndexes(
-                            dangerous_words=RiskScore(score=100, evidence=f"evidence for {name}")
+                            untrusted_content=RiskScore(score=100, evidence=f"evidence for {name}")
                         ),
                     )
                     for name in ("first-server", "second-server")

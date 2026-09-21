@@ -10,11 +10,12 @@ by the concrete discoverers in sibling modules.
 
 import logging
 import os
+import sys
 import traceback
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pyjson5
 
@@ -62,6 +63,35 @@ _MAX_PLUGIN_RGLOB_DEPTH = 10
 _MAX_CONFIG_FILE_BYTES = 20 * 1024 * 1024  # 20 MiB
 
 
+def _walk_matches_under_depth(
+    base: Path,
+    max_path_depth: int,
+    *,
+    file_names: tuple[str, ...] = (),
+    dir_names: tuple[str, ...] = (),
+) -> Iterator[Path]:
+    """Yield matching files and directories from one depth-bounded walk."""
+    file_name_set = set(file_names)
+    dir_name_set = set(dir_names)
+    try:
+        if not base.exists():
+            return
+        hits: list[Path] = []
+        for root_str, dirs, files in os.walk(base):
+            root = Path(root_str)
+            dir_depth = len(root.relative_to(base).parts)
+            hits.extend(root / name for name in files if name in file_name_set)
+            hits.extend(root / name for name in dirs if name in dir_name_set)
+            # The dir we're in is at depth `dir_depth`; an entry inside it sits at
+            # depth+1. Prune once depth+1 reaches the cap so we don't descend further.
+            if dir_depth + 1 >= max_path_depth:
+                dirs.clear()
+    except (PermissionError, OSError, ValueError):
+        logger.warning("Permission error walking %s", base.as_posix())
+        return
+    yield from hits
+
+
 def _walk_under_depth(base: Path, name: str, max_path_depth: int, *, want_file: bool) -> Iterator[Path]:
     """Yield paths named ``name`` under ``base``, pruning traversal so each yielded
     path's relative parts count is at most ``max_path_depth``.
@@ -83,24 +113,119 @@ def _walk_under_depth(base: Path, name: str, max_path_depth: int, *, want_file: 
     leading ``exists()`` probe. Mirrors the tolerance ``_load_json_file`` and
     ``profiles_dir.iterdir`` already apply.
     """
+    if want_file:
+        yield from _walk_matches_under_depth(base, max_path_depth, file_names=(name,))
+    else:
+        yield from _walk_matches_under_depth(base, max_path_depth, dir_names=(name,))
+
+
+def _walk_manifest_candidates(
+    base: Path, filename: str, manifest_dirs: tuple[str, ...], max_path_depth: int
+) -> Iterator[Path]:
+    """Yield *existing* manifest files: ordinary ones plus those inside named directory
+    entries.
+
+    The named-directory probe intentionally reaches a symlinked manifest directory
+    without making the recursive walk follow arbitrary directory symlinks.
+
+    The candidate synthesized for a named directory is existence-checked here rather
+    than left to callers, because a caller cannot recover from a missing one: the
+    per-plugin-root collapse in ``CodexDiscoverer._plugin_manifests`` /
+    ``GitHubCopilotDiscoverer._plugin_manifests`` ranks candidates by location precedence
+    *before* reading them, so a synthesized candidate for a file that does not exist (a
+    directory named ``.codex-plugin`` / ``.plugin`` with no ``plugin.json`` inside) would
+    outrank the plugin's real lower-precedence manifest and drop the whole plugin from
+    the report. An unstattable candidate is skipped for the same reason ``_load_json_file``
+    tolerates one.
+    """
+    seen: set[Path] = set()
+    for match in _walk_matches_under_depth(
+        base,
+        max_path_depth,
+        file_names=(filename,),
+        dir_names=manifest_dirs,
+    ):
+        candidate = match if match.name == filename else match / filename
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            if not candidate.is_file():
+                continue
+        except (OSError, ValueError):
+            continue
+        yield candidate
+
+
+def _canonical_key(path: Path) -> str:
+    """Normalize a result key the way the data-driven phase does.
+
+    ``inspect.get_mcp_config_per_home_directory`` keys its results by ``Path.resolve()``,
+    so a key here that kept a symlinked spelling survives the merge in
+    ``pipelines.discover_clients_to_inspect`` as a second entry for the same file — and
+    the same server is then inspected twice. Resolution is best-effort: an unresolvable
+    path (an embedded NUL raises ``ValueError``, a symlink loop ``OSError``) keeps its
+    literal spelling rather than dropping out of the report.
+    """
+    # A drive-less rooted spelling such as ``/work/repo`` is valid persisted
+    # cross-platform data, but Windows ``Path.resolve`` attaches the runner's
+    # current drive (for example ``D:/work/repo``). Preserve that spelling: it
+    # is not a native absolute filesystem path whose symlinks we can resolve.
+    if sys.platform == "win32" and path.root and not path.drive:
+        return path.as_posix()
     try:
-        if not base.exists():
-            return
-        hits: list[Path] = []
-        for root_str, dirs, files in os.walk(base):
-            root = Path(root_str)
-            dir_depth = len(root.relative_to(base).parts)
-            candidates = files if want_file else dirs
-            if name in candidates:
-                hits.append(root / name)
-            # The dir we're in is at depth `dir_depth`; an entry inside it sits at
-            # depth+1. Prune once depth+1 reaches the cap so we don't descend further.
-            if dir_depth + 1 >= max_path_depth:
-                dirs.clear()
-    except (PermissionError, OSError):
-        logger.warning("Permission error walking %s", base.as_posix())
-        return
-    yield from hits
+        return path.resolve().as_posix()
+    except (OSError, RuntimeError, ValueError):
+        return path.as_posix()
+
+
+def _canonicalize_keys(result: dict) -> dict:
+    """Re-key a discovery result canonically, keeping first-seen order.
+
+    Applied once to each aggregate so every scope is keyed the same way — mixing
+    canonical and literal keys within one phase would itself alias, e.g. a manifest
+    naming ``.mcp.json`` against the walk that already found it. When two literal
+    keys resolve to one canonical location, distinct list entries are retained while
+    identical entries are de-duplicated.
+
+    Real entries outrank an error sentinel: when one spelling carries a parsed
+    server/skill list and an aliased one a ``CouldNotParseMCPConfig`` /
+    ``FileNotFoundConfig`` / ``UnknownConfigFormat``, the list wins whichever order they
+    arrive in. Keeping first-seen instead would report "could not parse" for a location
+    whose contents another arm read successfully, discarding real findings. Two sentinels
+    for one location keep the first. The list is copied on first insert so merging never
+    mutates the caller's aggregate in place.
+    """
+    canonical: dict = {}
+    for key, value in result.items():
+        canonical_key = _canonical_key(Path(key))
+        if canonical_key not in canonical:
+            canonical[canonical_key] = list(value) if isinstance(value, list) else value
+            continue
+        existing = canonical[canonical_key]
+        if not isinstance(value, list):
+            continue
+        if isinstance(existing, list):
+            existing.extend(entry for entry in value if entry not in existing)
+        else:
+            canonical[canonical_key] = list(value)
+    return canonical
+
+
+def _escapes_plugin_root(value: str) -> bool:
+    r"""True when a manifest path value would resolve outside the plugin that declared it.
+
+    Shared by every discoverer that resolves a manifest-declared ``mcpServers`` / ``skills``
+    path against a plugin root, so a manifest under an attacker-influenceable plugin tree
+    (the install-registry, marketplace and ``@skills-dir`` roots) cannot redirect the scan
+    somewhere else on disk. Both path flavours are tried because a scan on either platform
+    may read a manifest authored for the other.
+    """
+    for flavour in (PurePosixPath, PureWindowsPath):
+        candidate = flavour(value)
+        if candidate.is_absolute() or candidate.root or candidate.drive or ".." in candidate.parts:
+            return True
+    return False
 
 
 def _looks_like_mcp_payload(data: dict) -> bool:
@@ -234,8 +359,25 @@ class AgentDiscoverer(ABC):
         if client_path is None:
             return None
         scope = DiscoveryScope(scope)
-        mcp_configs = self.discover_mcp_servers() if scope in (DiscoveryScope.SERVERS, DiscoveryScope.ALL) else {}
-        skills_dirs = self.discover_skills() if scope in (DiscoveryScope.SKILLS, DiscoveryScope.ALL) else {}
+        # Each half is isolated so a raise while collecting one does not discard the
+        # other: both are locals until the ClientToInspect below, and the pipeline's
+        # own catch-all is at whole-``discover()`` granularity, so an escaping
+        # exception silently costs every source for this client/user. This bounds the
+        # blast radius; it does not replace the per-source guards (``_load_json_file``,
+        # ``_walk_under_depth``, ``_scan_skills_dir``), and ``logger.exception`` keeps
+        # the traceback loud rather than swallowing it.
+        mcp_configs: McpConfigsResult = {}
+        skills_dirs: SkillsDirsResult = {}
+        if scope in (DiscoveryScope.SERVERS, DiscoveryScope.ALL):
+            try:
+                mcp_configs = self.discover_mcp_servers()
+            except Exception:
+                logger.exception("%s.discover_mcp_servers() raised; keeping skills", type(self).__name__)
+        if scope in (DiscoveryScope.SKILLS, DiscoveryScope.ALL):
+            try:
+                skills_dirs = self.discover_skills()
+            except Exception:
+                logger.exception("%s.discover_skills() raised; keeping servers", type(self).__name__)
         return ClientToInspect(
             name=self.name,
             client_path=client_path,
@@ -245,7 +387,7 @@ class AgentDiscoverer(ABC):
 
     # --- shared helpers (inherited by every concrete subclass) ---
 
-    def _load_json_file(self, path: Path) -> dict | CouldNotParseMCPConfig | None:
+    def _load_json_file(self, path: Path, *, log_parse_errors: bool = True) -> dict | CouldNotParseMCPConfig | None:
         """JSON-decode an arbitrary file. ``None`` if missing, unreadable (denied
         permissions), or over the ``_MAX_CONFIG_FILE_BYTES`` cap; parsed dict on
         success; ``CouldNotParseMCPConfig`` on malformed JSON.
@@ -279,7 +421,10 @@ class AgentDiscoverer(ABC):
             logger.warning("Permission denied reading %s", path.as_posix())
             return None
         except Exception as e:
-            logger.exception("Error reading %s: %s", path.as_posix(), e)
+            if log_parse_errors:
+                logger.exception("Error reading %s: %s", path.as_posix(), e)
+            else:
+                logger.warning("Skipping malformed %s", path.as_posix())
             return CouldNotParseMCPConfig(
                 message=f"could not parse file {path.as_posix()}",
                 traceback=traceback.format_exc(),
@@ -397,16 +542,36 @@ class AgentDiscoverer(ABC):
             is_failure=True,
         )
 
-    def _scan_skills_dir(self, path: Path) -> list[DiscoveredSkill] | None:
-        """Return the parsed skill list for ``path`` if it's an existing directory,
-        else ``None``. Thin wrapper that hides the existence check from callers.
+    def _scan_skills_dir(
+        self,
+        path: Path,
+        inspect_fn: Callable[[str], list[DiscoveredSkill]] = inspect_skills_dir,
+    ) -> list[DiscoveredSkill] | None:
+        """Return the parsed skill list for ``path`` if it's an existing, readable
+        directory, else ``None``. Hides the existence check *and* the inspection
+        from callers so neither can abort discovery.
+
+        ``inspect_fn`` defaults to ``inspect_skills_dir``; the plugin/extension
+        walks pass ``inspect_commands_dir`` for flat command files.
+
+        The inspection runs *inside* the guard, not just the probes: a directory
+        that is traversable but not readable (mode ``0o111``, or another user's
+        under ``--scan-all-users``) satisfies ``exists()``/``is_dir()`` and then
+        raises from ``inspect_skills_dir``'s ``os.listdir``. Unguarded, that
+        propagates out of ``discover()`` and the pipeline drops the *whole*
+        discoverer — see the ``_walk_under_depth`` docstring for why that is a
+        silent total false negative. Tolerance set matches
+        ``_walk_matches_under_depth``: ``OSError`` for ENOTDIR/ELOOP/EIO,
+        ``ValueError`` for embedded-NUL paths and ``skill_client``'s
+        symlink-cycle rejection.
         """
         try:
             if not path.exists() or not path.is_dir():
                 return None
-        except PermissionError:
+            return inspect_fn(str(path))
+        except (PermissionError, OSError, ValueError):
+            logger.warning("Skipping unreadable skills dir %s", path.as_posix())
             return None
-        return inspect_skills_dir(str(path))
 
     def _discover_skill_and_command_dirs(
         self,
@@ -420,13 +585,16 @@ class AgentDiscoverer(ABC):
         VSCode-family extension ``skills`` walk — all iterate identically:
         ``_walk_under_depth`` for the named directory under each base (skipping
         unreadable bases, see its docstring), then run ``inspect_fn``
-        (``inspect_skills_dir`` or ``inspect_commands_dir``) on each match.
+        (``inspect_skills_dir`` or ``inspect_commands_dir``) on each match via
+        ``_scan_skills_dir``, so an unreadable *match* costs that one directory
+        rather than the whole discoverer.
         """
         result: SkillsDirsResult = {}
         for base in bases:
             for found in _walk_under_depth(base, subdir_name, _MAX_PLUGIN_RGLOB_DEPTH, want_file=False):
-                if found.is_dir():
-                    result[found.as_posix()] = inspect_fn(str(found))
+                entries = self._scan_skills_dir(found, inspect_fn)
+                if entries is not None:
+                    result[found.as_posix()] = entries
         return result
 
     def _discover_plugin_mcp_files(

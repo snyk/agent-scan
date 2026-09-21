@@ -21,6 +21,7 @@ from agent_scan.skill_client import (
     SkillInspectionError,
     collect_skill_files,
     inspect_commands_dir,
+    inspect_skills_dir,
     parse_skill_frontmatter,
     resolve_skill_name,
 )
@@ -440,3 +441,27 @@ def test_resolve_skill_name_preserves_command_name_regardless_of_frontmatter(tmp
     command_path.write_text(content)
 
     assert resolve_skill_name(DiscoveredSkill(name="git:commit", path=str(command_path))) == "git:commit"
+
+
+def test_inspect_skills_dir_skips_unreadable_child_skill(tmp_path, monkeypatch, caplog):
+    """``get_skill_md_path`` does a bare ``os.listdir`` on every candidate child, so one
+    unreadable skill dir used to cost every sibling in the same skills dir."""
+    skills = tmp_path / "skills"
+    for name in ("locked", "readable"):
+        (skills / name).mkdir(parents=True)
+        (skills / name / "SKILL.md").write_text(f"---\nname: {name}\ndescription: d\n---\n\nbody\n")
+
+    real_listdir = os.listdir
+
+    def fake_listdir(path, *args, **kwargs):
+        if Path(path) == skills / "locked":
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_listdir(path, *args, **kwargs)
+
+    monkeypatch.setattr("agent_scan.skill_client.os.listdir", fake_listdir)
+
+    with caplog.at_level("WARNING"):
+        found = inspect_skills_dir(str(skills))
+
+    assert {skill.name for skill in found} == {"readable"}
+    assert "locked" in caplog.text

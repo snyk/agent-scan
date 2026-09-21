@@ -171,7 +171,7 @@ Pass `--show-analysis-results` to force synchronous analysis instead, so the sca
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
 | `--ci` | boolean | `false` | Exit with code `1` if analysis issues or runtime failures remain. |
-| `--ignore-issues-codes CODES` | string | — | Comma-separated issue and failure codes to ignore for CI, such as `W001,W015,X001`. Only valid with `--ci`; ignored codes are also removed from JSON output in CI mode. |
+| `--ignore-issues-codes CODES` | string | — | Comma-separated issue and failure codes to ignore for CI, such as `E001,W015,X001`. Only valid with `--ci`; ignored codes are also removed from JSON output in CI mode. |
 
 | Code | Meaning |
 | --- | --- |
@@ -186,7 +186,7 @@ Pass `--show-analysis-results` to force synchronous analysis instead, so the sca
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
 | `--ci` | boolean | `false` | Exit with code `1` if security risks or operational failures remain. |
-| `--ignore-risks NAMES` | string | — | Comma-separated [risk names](risks.md) to omit from output and CI evaluation, such as `dangerous_words,suspicious_download_url`. Only valid with `--ci`. |
+| `--ignore-risks NAMES` | string | — | Comma-separated [risk names](risks.md) to omit from output and CI evaluation, such as `private_data,suspicious_download_url`. Only valid with `--ci`. |
 | `--ignore-failure-codes CODES` | string | — | Comma-separated [failure codes](failure-codes.md) to omit from CI evaluation, such as `X001,X007`. Errors remain visible in output. Only valid with `--ci`. |
 
 Risk names and failure codes are case-sensitive. Unknown values produce a warning and are not applied. `inspect` supports `--ignore-failure-codes` because it can encounter operational failures but has no risks to ignore. `evo` supports neither ignore flag.
@@ -346,7 +346,7 @@ snyk-agent-scan scan --config-file agent-scan.yaml \
 
 ## `guard`
 
-Manage [Agent Guard](https://evo.ai.snyk.io) hooks for Claude Code, Cursor, and Codex:
+Manage [Agent Guard](https://evo.ai.snyk.io) hooks for Claude Code, Cursor, Codex, and Github Copilot:
 
 ```bash
 snyk-agent-scan guard [install|uninstall|discover] [OPTIONS]
@@ -356,7 +356,7 @@ snyk-agent-scan guard
 ### `guard install`
 
 ```bash
-snyk-agent-scan guard install {claude,cursor,codex,all} [OPTIONS]
+snyk-agent-scan guard install {claude,cursor,codex,github-copilot,all} [OPTIONS]
 ```
 
 After configuring the hooks, installation sends a `hooksConfiguredServerDiscovery` event. It also configures a
@@ -384,13 +384,13 @@ folder(s) from the selected client's hook payload, discovers MCP servers locally
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
 | `--url URL` | string | `https://api.snyk.io` | Remote hook base URL for the Snyk API environment. |
-| `--client {claude-code,cursor,codex}` | string | required | Hook client whose target-folder payload and endpoint conventions should be used. |
+| `--client {claude-code,cursor,codex,github-copilot}` | string | required | Hook client whose target-folder payload and endpoint conventions should be used. |
 | `--scope {servers,skills,all}` | string | `all` | Discovery data to collect. The session-start hook installed by `guard install` passes `servers`, because the event it sends carries MCP servers only. |
 
 ### `guard uninstall`
 
 ```bash
-snyk-agent-scan guard uninstall {claude,cursor,codex,all} [OPTIONS]
+snyk-agent-scan guard uninstall {claude,cursor,codex,github-copilot,all} [OPTIONS]
 ```
 
 | Flag | Type | Default | Description |
@@ -486,11 +486,11 @@ snyk-agent-scan inspect
 
 # v0.5.x CI with selected issue/failure codes ignored
 snyk-agent-scan --ci --dangerously-run-mcp-servers \
-  --ignore-issues-codes W001,X001
+  --ignore-issues-codes W015,X001
 
 # v0.6+ CI with selected risks and failures ignored
 snyk-agent-scan --ci --dangerously-run-mcp-servers \
-  --ignore-risks dangerous_words,suspicious_download_url \
+  --ignore-risks private_data,suspicious_download_url \
   --ignore-failure-codes X001
 
 # Load flags from a YAML config file (CLI flags still override it)

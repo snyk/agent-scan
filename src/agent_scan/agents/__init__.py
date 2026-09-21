@@ -12,6 +12,7 @@ from agent_scan.agents.base import AgentDiscoverer, DiscoveryScope
 from agent_scan.agents.claude_code import ClaudeCodeDiscoverer
 from agent_scan.agents.claude_desktop import ClaudeDesktopDiscoverer
 from agent_scan.agents.codex import CodexDiscoverer
+from agent_scan.agents.github_copilot import GitHubCopilotDiscoverer
 from agent_scan.agents.opencode import OpenCodeDiscoverer
 from agent_scan.agents.vscode import (
     AntigravityDiscoverer,
@@ -33,6 +34,7 @@ DISCOVERERS: dict[str, type[AgentDiscoverer]] = {
     KiroDiscoverer.name: KiroDiscoverer,
     AntigravityDiscoverer.name: AntigravityDiscoverer,
     CodexDiscoverer.name: CodexDiscoverer,
+    GitHubCopilotDiscoverer.name: GitHubCopilotDiscoverer,
     OpenCodeDiscoverer.name: OpenCodeDiscoverer,
 }
 
@@ -68,6 +70,7 @@ __all__ = [
     "CodexDiscoverer",
     "CursorDiscoverer",
     "DiscoveryScope",
+    "GitHubCopilotDiscoverer",
     "KiroDiscoverer",
     "OpenCodeDiscoverer",
     "VSCodeDiscoverer",

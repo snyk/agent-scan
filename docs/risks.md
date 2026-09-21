@@ -26,12 +26,6 @@ The JSON schema accepts any integer from 0 through 1000 so that the scoring mode
 
 MCP server indicators appear under `server_risks[].risk_indexes` in scan JSON. Their `affected_tools` field contains indexes into that server's `entities` array; the human-readable report resolves those indexes to tool names.
 
-<a id="dangerous_words"></a>
-
-### `dangerous_words` — Dangerous words
-
-Tool descriptions contain manipulative language intended to influence an agent's decisions, inflate a tool's priority, or encourage the agent to disregard its normal instructions. Review the affected descriptions and remove or sanitize the server if the language is not necessary and trustworthy.
-
 <a id="prompt_injection_tool_desc"></a>
 
 ### `prompt_injection_tool_desc` — Prompt injection in tool

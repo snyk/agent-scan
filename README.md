@@ -132,7 +132,7 @@ Download the binary for your operating system and architecture from the [latest 
 ## Highlights
 
 - Auto-discover MCP configurations, agent tools, skills
-- Scanning of Claude, Cursor, Windsurf, Gemini CLI, Amp, Amazon Q, and other agents.
+- Scanning of Claude, Cursor, GitHub Copilot, Windsurf, Gemini CLI, Amp, Amazon Q, and other agents.
 
 ### Agent Scan v0.5.x
 
@@ -142,8 +142,8 @@ Download the binary for your operating system and architecture from the [latest 
 
 ### Agent Scan v0.6 and later
 
-- Detects [15 distinct security risks](docs/risks.md) across MCP servers and agent skills:
-  - MCP: [Prompt injection](docs/risks.md#prompt_injection_tool_desc), [dangerous words](docs/risks.md#dangerous_words), [untrusted content](docs/risks.md#untrusted_content), [private data](docs/risks.md#private_data), and [destructive capabilities](docs/risks.md#destructive_capabilities)
+- Detects [14 distinct security risks](docs/risks.md) across MCP servers and agent skills:
+  - MCP: [Prompt injection](docs/risks.md#prompt_injection_tool_desc), [untrusted content](docs/risks.md#untrusted_content), [private data](docs/risks.md#private_data), and [destructive capabilities](docs/risks.md#destructive_capabilities)
   - Skills: [prompt injection](docs/risks.md#prompt_injection_skill_instructions), [suspicious downloads](docs/risks.md#suspicious_download_url), [malicious code](docs/risks.md#malicious_code), [credential handling](docs/risks.md#insecure_credential_handling), [secret detection](docs/risks.md#secret_detection), and more
 
 ## Supported agents and capabilities
@@ -160,6 +160,7 @@ Agent Scan auto-discovers agents and their capabilities (MCP servers or skills) 
 | Windsurf | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Cursor | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | VS Code | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| GitHub Copilot | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Claude Desktop | ✓ | ✗ | — | — | ✓ | ✗ |
 | Claude Code | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Gemini CLI | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
@@ -189,6 +190,7 @@ Legend: **✓** detected · **✗** the agent supports this but Agent Scan does 
 | Windsurf | ✓ | N/A | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Cursor | N/A | N/A | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | VS Code | N/A | N/A | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| GitHub Copilot § | N/A | N/A | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Claude Desktop | N/A | N/A | ✗ | ✓ | N/A | N/A | N/A | ✗ |
 | Claude Code | ✗ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Gemini CLI | N/A | ✗ | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ |
@@ -203,6 +205,8 @@ Legend: **✓** detected · **✗** the agent supports this but Agent Scan does 
 † OpenClaw has no opened-project enumeration: its project/workspace skills are found only at the fixed `~/.openclaw/workspace/skills`
 
 ‡ Amp stores project/workspace skills at `.agents/skills` (and the `.claude/skills` compatibility path); only the user-scope `~/.config/agents/skills` is detected today, so project-scope skills are supported but not yet scanned.
+
+§ GitHub Copilot covers the CLI and the desktop app, which share the `~/.copilot` home with Copilot in VS Code, and is detected from that home rather than from a VS Code install. `COPILOT_HOME` relocations are honored when scanning your own home. Project scope covers the repo-relative `.mcp.json` / `.github/mcp.json` files and the `.github/skills`, `.claude/skills` and `.agents/skills` directories, for the folders passed to the scan and the directories Copilot has recorded in `permissions-config.json`, plus their ancestors. Plugin scope covers `~/.copilot/installed-plugins`, including `plugin.json` manifests that relocate their MCP config or declare extra skills roots. Not scanned: the per-session project roots in `session-state/*/workspace.yaml`. Copilot's user-level paths are also listed under VS Code, which reads the same files.
 
 ## Verifying Standalone Binaries
 

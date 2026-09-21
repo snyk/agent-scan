@@ -125,6 +125,18 @@ class TestInspectionResults:
         assert InspectedPath(path="current").servers == []
         assert ScanResponse(scan_path_responses=[]).scan_path_responses == []
 
+    def test_v20260710_ignores_retired_dangerous_words_risk(self):
+        from agent_scan.models.api.v20260710 import McpServerRiskIndexes
+
+        risks = McpServerRiskIndexes.model_validate(
+            {
+                "dangerous_words": {"score": 100, "evidence": "Legacy backend result"},
+                "private_data": {"score": 300, "evidence": "Active result"},
+            }
+        )
+
+        assert risks.model_dump(exclude_none=True) == {"private_data": {"score": 300, "evidence": "Active result"}}
+
 
 class TestRemoteServerUrlAlias:
     """Test that RemoteServer accepts both 'url' and 'serverUrl' field names."""

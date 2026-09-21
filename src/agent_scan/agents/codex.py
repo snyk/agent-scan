@@ -28,7 +28,7 @@ from agent_scan.agents.base import (
     McpConfigsResult,
     McpScanResult,
     SkillsDirsResult,
-    _walk_under_depth,
+    _walk_manifest_candidates,
 )
 from agent_scan.models import (
     ClaudeConfigFile,
@@ -208,8 +208,11 @@ class CodexDiscoverer(AgentDiscoverer):
         precedence = self._plugin_manifest_dirs
         by_root: dict[Path, Path] = {}
         for base in self._plugin_base_dirs():
-            for manifest_path in _walk_under_depth(
-                base, self._plugin_manifest_filename, _MAX_PLUGIN_RGLOB_DEPTH, want_file=True
+            for manifest_path in _walk_manifest_candidates(
+                base,
+                self._plugin_manifest_filename,
+                self._plugin_manifest_dirs,
+                _MAX_PLUGIN_RGLOB_DEPTH,
             ):
                 dir_name = manifest_path.parent.name
                 if dir_name not in precedence:
@@ -220,7 +223,7 @@ class CodexDiscoverer(AgentDiscoverer):
                     by_root[plugin_root] = manifest_path
         result: list[tuple[Path, dict]] = []
         for plugin_root, manifest_path in by_root.items():
-            data = self._load_json_file(manifest_path)
+            data = self._load_json_file(manifest_path, log_parse_errors=False)
             if isinstance(data, dict):
                 result.append((plugin_root, data))
         return result

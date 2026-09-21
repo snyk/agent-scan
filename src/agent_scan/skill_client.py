@@ -208,11 +208,19 @@ def inspect_skills_dir(path: str) -> list[DiscoveredSkill]:
     skills: list[DiscoveredSkill] = []
     for candidate_skill_dir in candidate_skills_dirs:
         candidate_skill_dir_full_path = os.path.join(expanded_path, candidate_skill_dir)
-        if os.path.isdir(candidate_skill_dir_full_path):
+        if not os.path.isdir(candidate_skill_dir_full_path):
+            continue
+        try:
             skill_md_path = get_skill_md_path(candidate_skill_dir_full_path)
-            if skill_md_path is None:
-                continue
-            skills.append(DiscoveredSkill(name=candidate_skill_dir, path=candidate_skill_dir_full_path))
+        except (PermissionError, OSError, ValueError):
+            # ``get_skill_md_path`` lists the candidate, so an unreadable child (mode
+            # 0o111, or another user's under ``--scan-all-users``) would otherwise cost
+            # every readable sibling in this skills dir.
+            logger.warning("Skipping unreadable skill dir: %s", candidate_skill_dir_full_path)
+            continue
+        if skill_md_path is None:
+            continue
+        skills.append(DiscoveredSkill(name=candidate_skill_dir, path=candidate_skill_dir_full_path))
     logger.info("Found %d skills", len(skills))
     return skills
 

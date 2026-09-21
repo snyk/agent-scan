@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 from unittest.mock import patch
 
 import aiohttp
@@ -79,6 +80,60 @@ def test_sends_existing_hook_wire_contract(client):
         "identifier": "machine-1",
         "cli_version": version_info,
     }
+
+
+@pytest.mark.parametrize(
+    ("env", "expected_surface"),
+    [
+        # A process the agent spawned inherits its environment, which is the only thing
+        # identifying the sender: one hook config serves every Copilot surface.
+        ({"AI_AGENT": "github_copilot_vscode_agent"}, "copilot-vscode"),
+        ({"AI_AGENT": "github_copilot_app_agent"}, "copilot"),
+        ({"COPILOT_CLI": "1"}, "copilot"),
+        # A future Copilot host joins the app/CLI surface rather than going unrecognized.
+        ({"AI_AGENT": "github_copilot_future_agent"}, "copilot"),
+        # Run from a plain shell (`guard install`): no surface, so the header is omitted
+        # and agent-monitor attributes the event by its type instead.
+        ({}, None),
+        # Copilot sets CLAUDE_PROJECT_DIR itself, so CLAUDE_* says nothing about the agent.
+        ({"CLAUDE_PROJECT_DIR": "/repo"}, None),
+    ],
+)
+def test_reports_the_agent_surface_from_the_environment(env, expected_surface):
+    session = _FakeSession()
+
+    with (
+        patch.dict(os.environ, env, clear=True),
+        patch("agent_scan.hook_events.get_hostname", return_value="host-1"),
+        patch("agent_scan.hook_events.get_username", return_value="user-1"),
+        _patch_session(session),
+    ):
+        send_hook_event("https://api.snyk.io", "github-copilot", "push-key", "{}", "machine-1")
+
+    headers = session.posts[0]["headers"]
+    assert headers.get("X-Agent-Surface") == expected_surface
+
+
+@pytest.mark.parametrize("client", ["claude-code", "cursor", "codex"])
+def test_other_clients_never_claim_a_copilot_surface(client):
+    """The env describes the environment, not the caller, and it is inherited.
+
+    Run another agent from a shell a Copilot session spawned and its hooks see AI_AGENT
+    and COPILOT_CLI too — but the hook that fired belongs to whichever config invoked us,
+    so only the Copilot client may report a surface.
+    """
+    session = _FakeSession()
+    copilot_env = {"AI_AGENT": "github_copilot_vscode_agent", "COPILOT_CLI": "1"}
+
+    with (
+        patch.dict(os.environ, copilot_env, clear=True),
+        patch("agent_scan.hook_events.get_hostname", return_value="host-1"),
+        patch("agent_scan.hook_events.get_username", return_value="user-1"),
+        _patch_session(session),
+    ):
+        send_hook_event("https://api.snyk.io", client, "push-key", "{}", "machine-1")
+
+    assert "X-Agent-Surface" not in session.posts[0]["headers"]
 
 
 @pytest.mark.parametrize(
