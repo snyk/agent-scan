@@ -1,5 +1,6 @@
 import asyncio
 import socket
+import sys
 from unittest.mock import AsyncMock, patch
 
 import httpx
@@ -46,6 +47,8 @@ async def test_both_transports_refuse_blocked_destinations(transport, address, h
 @pytest.mark.asyncio
 @pytest.mark.parametrize("host", ["169.254.169.254", "2852039166", "025177524776", "[::ffff:169.254.169.254]"])
 async def test_system_resolver_catches_literal_and_encoded_metadata(host):
+    if sys.platform == "win32" and host in {"2852039166", "025177524776"}:
+        pytest.skip("Windows getaddrinfo does not resolve decimal or octal IP notation")
     with patch.object(httpx.AsyncHTTPTransport, "handle_async_request", new_callable=AsyncMock) as send:
         async with _create_mcp_http_client_without_redirects() as client:
             with pytest.raises(UnsafeMCPDestination, match="Connection refused"):
