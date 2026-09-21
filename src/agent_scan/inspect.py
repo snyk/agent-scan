@@ -6,7 +6,7 @@ from pathlib import Path
 from httpx import HTTPStatusError
 
 from agent_scan.agents.base import DiscoveryScope
-from agent_scan.mcp_client import check_server, scan_mcp_config_file
+from agent_scan.mcp_client import UnsafeMCPDestination, check_server, scan_mcp_config_file
 from agent_scan.models import (
     CandidateClient,
     ClientToInspect,
@@ -340,9 +340,15 @@ async def _inspect_remote_server(
             server=fixed_config,
             signature=signature,
         )
+    except UnsafeMCPDestination as exception:
+        error: ServerHTTPError | ServerStartupError = ServerStartupError(
+            message=f"MCP server {name!r}: {exception}",
+            sub_exception_message=str(exception),
+            is_failure=True,
+        )
     except HTTPStatusError as exception:
         config.type = "http" if config.type is None else config.type
-        error: ServerHTTPError | ServerStartupError = ServerHTTPError(
+        error = ServerHTTPError(
             message="server returned HTTP status code",
             traceback=traceback.format_exc(),
             is_failure=True,

@@ -1,9 +1,11 @@
 import asyncio
 import logging
 import os
+import socket
 import sys
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from ipaddress import ip_address, ip_network
 from typing import Literal
 from urllib.parse import urlparse
 
@@ -39,6 +41,42 @@ from agent_scan.utils import resolve_command_and_args
 logger = logging.getLogger(__name__)
 
 
+# Refuse link-local and named metadata endpoints; loopback and private ranges are intentionally permitted.
+_BLOCKED_MCP_NETWORKS = tuple(
+    ip_network(network) for network in ("169.254.0.0/16", "fe80::/10", "fd00:ec2::254/128", "100.100.100.200/32")
+)
+
+
+class UnsafeMCPDestination(httpx.ConnectError):
+    """A remote MCP destination resolved to a prohibited address."""
+
+
+def _find_unsafe_destination(exception: BaseException) -> UnsafeMCPDestination | None:
+    if isinstance(exception, UnsafeMCPDestination):
+        return exception
+    for child in getattr(exception, "exceptions", ()):
+        if refused := _find_unsafe_destination(child):
+            return refused
+    return None
+
+
+async def _guard_mcp_destination(request: httpx.Request) -> None:
+    host = request.url.host
+    addresses = await asyncio.get_running_loop().getaddrinfo(
+        host, request.url.port or (443 if request.url.scheme == "https" else 80), type=socket.SOCK_STREAM
+    )
+    for _, _, _, _, sockaddr in addresses:
+        address = ip_address(sockaddr[0])
+        address = getattr(address, "ipv4_mapped", None) or address
+        if any(address in network for network in _BLOCKED_MCP_NETWORKS):
+            raise UnsafeMCPDestination(
+                f"Connection refused: {host} resolves to blocked link-local or cloud-metadata address {address}. "
+                "Configure this MCP server with a non-metadata, non-link-local destination.",
+                request=request,
+            )
+    # The transport resolves again when connecting, leaving a residual DNS-rebinding window.
+
+
 def _create_mcp_http_client_without_redirects(
     headers: dict[str, str] | None = None,
     timeout: httpx.Timeout | float | None = None,
@@ -48,6 +86,7 @@ def _create_mcp_http_client_without_redirects(
     return httpx.AsyncClient(
         auth=auth,
         follow_redirects=False,
+        event_hooks={"request": [_guard_mcp_destination]},
         headers=headers,
         timeout=timeout,
     )
@@ -326,6 +365,10 @@ async def check_server(
                 exceptions.append(e)
                 continue
             except Exception as e:
+                if refused := _find_unsafe_destination(e):
+                    server_config.url = original_url
+                    server_config.type = original_type
+                    raise refused from e
                 logger.debug("Server check failed")
                 exceptions.append(e)
                 continue

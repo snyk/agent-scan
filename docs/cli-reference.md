@@ -212,6 +212,8 @@ These options apply to `scan`, `inspect`, and `evo` in both CLI versions.
 | Interactive (`inspect`, or `scan` without a push key) | `false`; stderr is streamed with a `[server-name]` prefix |
 | Unattended (push-key scan, `evo`, and similar flows) | `true`; stderr is hidden |
 
+Remote MCP requests refuse destinations resolving to link-local addresses or known cloud-metadata endpoints (`169.254.0.0/16`, `fe80::/10`, `fd00:ec2::254`, and `100.100.100.200`), including unattended runs and runs using `--dangerously-run-mcp-servers`. Loopback and private addresses remain allowed. HTTP redirects are not followed. Validation runs before each request, but the subsequent connection resolves DNS again, leaving a DNS-rebinding window.
+
 **Handshake and consent matrix for discovered MCP servers:**
 
 | Command | Push key | `--dangerously-run-mcp-servers` | Start stdio | Connect remote | Consent prompt |

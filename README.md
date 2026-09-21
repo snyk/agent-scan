@@ -61,6 +61,8 @@ Agent Scan helps you discover all your installed agent components (harnesses, MC
 > - **Review the consent prompt carefully** during interactive scans; it shows the command or remote URL for each server
 > - **Use `--dangerously-run-mcp-servers`** only in trusted environments where you've verified all MCP server commands and remote URLs
 >
+> Remote MCP requests refuse destinations resolving to link-local addresses or known cloud-metadata endpoints (`169.254.0.0/16`, `fe80::/10`, `fd00:ec2::254`, and `100.100.100.200`). Loopback and private addresses remain allowed for local and internal MCP servers. HTTP redirects are not followed. DNS is validated before each request, but resolution again at connection time leaves a DNS-rebinding window.
+>
 > By default, Agent Scan requires explicit user consent (y/n) before contacting each discovered MCP server during foreground interactive runs. Background and push-key scans continue to inspect remote servers automatically for fleet coverage, but do not start stdio servers unless `--dangerously-run-mcp-servers` is set.
 
 ## Quick Start
