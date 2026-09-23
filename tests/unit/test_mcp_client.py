@@ -316,3 +316,38 @@ async def test_stdio_client_uses_discoverer_resolved_runtime_context():
     assert dumped["command"] == configured_command
     assert "runtime_command" not in dumped
     assert "runtime_cwd" not in dumped
+
+
+@pytest.mark.asyncio
+async def test_resolved_stdio_server_keeps_args_when_nested_in_client_to_inspect():
+    from agent_scan.models.inspect import ClientToInspect
+
+    client_cm = AsyncMock()
+    client_cm.__aenter__.return_value = (AsyncMock(), AsyncMock())
+    configured_command = "./Codex Computer Use.app/Contents/MacOS/server"
+    server = StdioServer(
+        command="placeholder",
+        args=["mcp"],
+        runtime_command="/Users/test/.codex/computer-use/Codex Computer Use.app/Contents/MacOS/server",
+        runtime_cwd="/Users/test/.codex/computer-use",
+    )
+    server.command = configured_command
+
+    client = ClientToInspect(
+        name="codex",
+        client_path="~/.codex",
+        mcp_configs={"~/.codex/config.toml": [("computer-use", server)]},
+        skills_dirs={},
+    )
+    nested = client.mcp_configs["~/.codex/config.toml"][0][1]
+    assert isinstance(nested, StdioServer)
+    assert nested.command == configured_command
+    assert nested.args == ["mcp"]
+
+    with patch("agent_scan.mcp_client.stdio_client", return_value=client_cm) as make_stdio_client:
+        async with get_client(nested):
+            pass
+
+    params = make_stdio_client.call_args.args[0]
+    assert params.command == server.runtime_command
+    assert params.args == ["mcp"]

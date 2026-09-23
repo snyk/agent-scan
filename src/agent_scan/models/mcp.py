@@ -161,6 +161,11 @@ class StdioServer(BaseModel):
     @model_validator(mode="after")
     def rebalance_command(self) -> "StdioServer":
         """Rebalance command and args on model creation."""
+        # After-validators also run when an instance is nested into another model
+        # (e.g. ``ClientToInspect``). Discoverer-resolved servers already carry
+        # structured command/args, so re-splitting would leak path fragments into args.
+        if self.runtime_command is not None:
+            return self
         self.command, self.args = rebalance_command_args(self.command, self.args)
         return self
 
