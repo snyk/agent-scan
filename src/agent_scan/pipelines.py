@@ -1,6 +1,8 @@
 import getpass
+import json
 import logging
 import os
+import time
 from pathlib import Path
 
 from pydantic import BaseModel, Field
@@ -19,6 +21,7 @@ from agent_scan.models import (
     InspectedPath,
     ScanError,
     ScanResponse,
+    StdioServer,
     TokenAndClientInfo,
 )
 from agent_scan.redact import redact_inspected_path
@@ -65,6 +68,29 @@ async def discover_clients_to_inspect(
     Discover the clients/configs that would be inspected, without actually
     starting any MCP servers.
     """
+    # region agent log
+    try:
+        open("/opt/cursor/logs/debug.log", "a").write(
+            json.dumps(
+                {
+                    "hypothesisId": "A,E",
+                    "location": "pipelines.py:discover_clients_to_inspect:entry",
+                    "message": "Discovery invocation selected",
+                    "data": {
+                        "instrumentationRevision": "pr487-debug-1",
+                        "explicitPathCount": len(inspect_args.paths),
+                        "explicitBasenames": [Path(path).name for path in inspect_args.paths],
+                        "allUsers": inspect_args.all_users,
+                        "scope": str(inspect_args.discovery_scope),
+                    },
+                    "timestamp": time.time_ns() // 1_000_000,
+                }
+            )
+            + "\n"
+        )
+    except OSError:
+        pass
+    # endregion
     home_dirs_with_users = get_readable_home_directories(all_users=inspect_args.all_users)
     all_usernames: list[str] = [username for _path, username in home_dirs_with_users]
 
@@ -159,6 +185,43 @@ async def discover_clients_to_inspect(
     else:
         scanned_usernames = [getpass.getuser()]
 
+    computer_use_servers = [
+        {
+            "client": client.name,
+            "configBasename": Path(config_path).name,
+            "binaryIdentifier": server.binary_identifier,
+            "commandBasename": Path(server.command).name,
+            "commandHasSpaces": " " in server.command,
+            "commandEndsWithSkyClient": server.command.endswith("SkyComputerUseClient"),
+            "argCount": len(server.args),
+            "firstArgIsMcp": bool(server.args) and server.args[0] == "mcp",
+        }
+        for client in clients_to_inspect
+        for config_path, configs in client.mcp_configs.items()
+        if isinstance(configs, list)
+        for name, server in configs
+        if name == "computer-use" and isinstance(server, StdioServer)
+    ]
+    # region agent log
+    try:
+        open("/opt/cursor/logs/debug.log", "a").write(
+            json.dumps(
+                {
+                    "hypothesisId": "A,B,C,D",
+                    "location": "pipelines.py:discover_clients_to_inspect:exit",
+                    "message": "Discovered computer-use server summary",
+                    "data": {
+                        "clientCount": len(clients_to_inspect),
+                        "computerUseServers": computer_use_servers,
+                    },
+                    "timestamp": time.time_ns() // 1_000_000,
+                }
+            )
+            + "\n"
+        )
+    except OSError:
+        pass
+    # endregion
     return clients_to_inspect, unresolved_paths, scanned_usernames
 
 

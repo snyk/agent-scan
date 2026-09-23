@@ -5,9 +5,11 @@ JSON-only data-driven pipeline can't parse, so they're invisible to it; this
 discoverer closes that gap. Paths follow developers.openai.com/codex.
 """
 
+import json
 import logging
 import os
 import sys
+import time
 import traceback
 from pathlib import Path
 
@@ -322,10 +324,37 @@ class CodexDiscoverer(AgentDiscoverer):
         servers = data.get("mcp_servers")
         if not isinstance(servers, dict) or not servers:
             return {}
+        signature_commands = self._managed_signature_commands(servers, config_path)
+        computer_use = servers.get("computer-use")
+        # region agent log
+        try:
+            open("/opt/cursor/logs/debug.log", "a").write(
+                json.dumps(
+                    {
+                        "hypothesisId": "B",
+                        "location": "agents/codex.py:_mcp_servers_from_data",
+                        "message": "Codex computer-use resolver boundary",
+                        "data": {
+                            "isUserConfig": config_path == self._codex_home() / self._config_filename,
+                            "hasComputerUse": isinstance(computer_use, dict),
+                            "cwdIsDot": isinstance(computer_use, dict) and computer_use.get("cwd") in (".", "./"),
+                            "commandIsRelative": isinstance(computer_use, dict)
+                            and isinstance(computer_use.get("command"), str)
+                            and not Path(computer_use["command"]).is_absolute(),
+                            "managedOverride": "computer-use" in signature_commands,
+                        },
+                        "timestamp": time.time_ns() // 1_000_000,
+                    }
+                )
+                + "\n"
+            )
+        except OSError:
+            pass
+        # endregion
         entries = self._validate_servers(
             servers,
             source=f"mcp_servers in {config_path.as_posix()}",
-            signature_commands=self._managed_signature_commands(servers, config_path),
+            signature_commands=signature_commands,
         )
         return {config_path.as_posix(): entries}
 
