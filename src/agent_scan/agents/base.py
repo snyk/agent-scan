@@ -485,6 +485,7 @@ class AgentDiscoverer(ABC):
         *,
         formats: tuple[type[MCPConfig], ...],
         skip_unrecognized: bool = False,
+        signature_commands: Mapping[str, str] | None = None,
     ) -> list[tuple[str, StdioServer | RemoteServer]] | CouldNotParseMCPConfig | None:
         """Load ``path``, try each ``MCPConfig`` subclass in order, return the first
         that validates.
@@ -508,6 +509,9 @@ class AgentDiscoverer(ABC):
         malformed; a wrapper-keyed file that then fails to validate is still
         surfaced. Callers parsing an explicitly-named config (e.g.
         ``~/.vscode/mcp.json``) leave it off so genuine malformations are reported.
+
+        ``signature_commands`` optionally supplies effective executable paths for
+        code-signing only; parsed commands and startup behavior remain unchanged.
         """
         data = self._load_json_file(path)
         if data is None:
@@ -537,7 +541,7 @@ class AgentDiscoverer(ABC):
             except Exception as e:
                 last_error = e
                 continue
-            return self._servers_to_signed_list(validated)
+            return self._servers_to_signed_list(validated, signature_commands)
 
         # None of the formats validated — record as parse failure. Use logger.error
         # (not logger.exception): this runs outside any active except handler, so

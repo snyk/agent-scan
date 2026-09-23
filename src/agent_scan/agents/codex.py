@@ -5,11 +5,9 @@ JSON-only data-driven pipeline can't parse, so they're invisible to it; this
 discoverer closes that gap. Paths follow developers.openai.com/codex.
 """
 
-import json
 import logging
 import os
 import sys
-import time
 import traceback
 from pathlib import Path
 
@@ -294,12 +292,26 @@ class CodexDiscoverer(AgentDiscoverer):
         data = self._load_json_file(path)
         if data is None or isinstance(data, CouldNotParseMCPConfig):
             return data
+        plugin_root = self._plugin_root_for_config(path)
         if isinstance(data, dict) and isinstance(data.get("mcp_servers"), dict):
             servers = data["mcp_servers"]
             if not servers:
                 return None
-            return self._validate_servers(servers, source=f"mcp_servers in {path.as_posix()}")
-        return self._parse_mcp_file(path, formats=(ClaudeConfigFile, PluginMCPConfigFile), skip_unrecognized=True)
+            return self._validate_servers(
+                servers,
+                source=f"mcp_servers in {path.as_posix()}",
+                signature_commands=self._relative_signature_commands(servers, path, plugin_root),
+            )
+        if isinstance(data, dict) and isinstance(data.get("mcpServers"), dict):
+            raw_servers = data["mcpServers"]
+        else:
+            raw_servers = data if isinstance(data, dict) else {}
+        return self._parse_mcp_file(
+            path,
+            formats=(ClaudeConfigFile, PluginMCPConfigFile),
+            skip_unrecognized=True,
+            signature_commands=self._relative_signature_commands(raw_servers, path, plugin_root),
+        )
 
     def _discover_project_mcp_servers(self) -> McpConfigsResult:
         """Parse ``<project>/.codex/config.toml`` servers for every registered project
@@ -324,68 +336,91 @@ class CodexDiscoverer(AgentDiscoverer):
         servers = data.get("mcp_servers")
         if not isinstance(servers, dict) or not servers:
             return {}
-        signature_commands = self._managed_signature_commands(servers, config_path)
-        computer_use = servers.get("computer-use")
-        # region agent log
-        try:  # noqa: SIM105
-            open("/opt/cursor/logs/debug.log", "a").write(  # noqa: SIM115
-                json.dumps(
-                    {
-                        "hypothesisId": "B",
-                        "location": "agents/codex.py:_mcp_servers_from_data",
-                        "message": "Codex computer-use resolver boundary",
-                        "data": {
-                            "isUserConfig": config_path == self._codex_home() / self._config_filename,
-                            "hasComputerUse": isinstance(computer_use, dict),
-                            "cwdIsDot": isinstance(computer_use, dict) and computer_use.get("cwd") in (".", "./"),
-                            "commandIsRelative": isinstance(computer_use, dict)
-                            and isinstance(computer_use.get("command"), str)
-                            and not Path(computer_use["command"]).is_absolute(),
-                            "managedOverride": "computer-use" in signature_commands,
-                        },
-                        "timestamp": time.time_ns() // 1_000_000,
-                    }
-                )
-                + "\n"
-            )
-        except OSError:
-            pass
-        # endregion
         entries = self._validate_servers(
             servers,
             source=f"mcp_servers in {config_path.as_posix()}",
-            signature_commands=signature_commands,
+            signature_commands=self._relative_signature_commands(servers, config_path),
         )
         return {config_path.as_posix(): entries}
 
-    def _managed_signature_commands(self, servers: dict, config_path: Path) -> dict[str, str]:
-        """Resolve Codex-managed binaries solely for signature inspection.
+    def _plugin_root_for_config(self, config_path: Path) -> Path | None:
+        """Return the deepest installed plugin root containing ``config_path``."""
+        roots = [
+            root
+            for root, _manifest in self._plugin_manifests()
+            if config_path == root or config_path.is_relative_to(root)
+        ]
+        return max(roots, key=lambda root: len(root.parts), default=None)
 
-        Codex writes its built-in Computer Use server to the user ``config.toml``
-        with ``cwd = "."`` and a command relative to the separately managed
-        ``<codex_home>/computer-use`` directory. Agent Scan does not otherwise use
-        that cwd when starting MCP servers; this resolver deliberately leaves the
-        configured command and all startup behavior unchanged.
+    def _relative_signature_commands(
+        self,
+        servers: dict,
+        config_path: Path,
+        plugin_root: Path | None = None,
+    ) -> dict[str, str]:
+        """Resolve every relative Codex stdio command solely for code signing.
+
+        Codex plugin ``cwd`` values are rooted at the installed plugin. Managed
+        user-level servers commonly live under ``<codex_home>/<server-name>``;
+        ordinary configs may keep a relative executable beside their config root.
+        A path is used only when exactly one candidate exists and remains inside
+        its source root. MCP startup and enabled-state behavior are untouched.
         """
-        if config_path != self._codex_home() / self._config_filename:
-            return {}
+        resolved: dict[str, str] = {}
+        for name, raw in servers.items():
+            if not isinstance(name, str) or not isinstance(raw, dict):
+                continue
+            command = raw.get("command")
+            cwd = raw.get("cwd")
+            if (
+                not isinstance(command, str)
+                or not command
+                or Path(command).is_absolute()
+                or ("/" not in command and "\\" not in command)
+                or not isinstance(cwd, str)
+                or not cwd
+            ):
+                continue
 
-        raw = servers.get("computer-use")
-        if not isinstance(raw, dict) or raw.get("cwd") not in (".", "./"):
-            return {}
-        command = raw.get("command")
-        if not isinstance(command, str) or not command or Path(command).is_absolute():
-            return {}
+            candidates = self._relative_signature_candidates(name, command, cwd, config_path, plugin_root)
+            if len(candidates) == 1:
+                resolved[name] = candidates[0].as_posix()
+        return resolved
 
-        try:
-            managed_root = (self._codex_home() / "computer-use").resolve()
-            candidate = (managed_root / command).resolve()
-            is_managed_binary = candidate.is_relative_to(managed_root) and candidate.is_file()
-        except (OSError, RuntimeError, ValueError):
-            return {}
-        if not is_managed_binary:
-            return {}
-        return {"computer-use": candidate.as_posix()}
+    def _relative_signature_candidates(
+        self,
+        name: str,
+        command: str,
+        cwd: str,
+        config_path: Path,
+        plugin_root: Path | None,
+    ) -> list[Path]:
+        """Return unique existing executables for one relative Codex command."""
+        cwd_path = Path(cwd)
+        if cwd_path.is_absolute():
+            roots = [cwd_path]
+        elif plugin_root is not None:
+            roots = [plugin_root]
+        else:
+            config_root = config_path.parent
+            if config_root == self._codex_home():
+                roots = [config_root / name, config_root]
+            elif config_root.name == ".codex":
+                roots = [config_root.parent, config_root]
+            else:
+                roots = [config_root / name, config_root]
+
+        candidates: set[Path] = set()
+        for raw_root in roots:
+            try:
+                root = raw_root.resolve()
+                working_directory = root if cwd_path.is_absolute() else (root / cwd_path).resolve()
+                candidate = (working_directory / command).resolve()
+                if candidate.is_relative_to(root) and candidate.is_file():
+                    candidates.add(candidate)
+            except (OSError, RuntimeError, ValueError):
+                continue
+        return sorted(candidates)
 
     # --- private: project enumeration ---
 

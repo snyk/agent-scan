@@ -1,12 +1,10 @@
 import asyncio
 import getpass
 import gzip
-import json
 import logging
 import os
 import ssl
 import sys
-import time
 import traceback
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -30,7 +28,7 @@ from agent_scan.models.api.v20260710 import (
 )
 from agent_scan.models.errors import ScanError
 from agent_scan.models.inspect import InspectedPath
-from agent_scan.models.mcp import Entity, StdioServer
+from agent_scan.models.mcp import Entity
 from agent_scan.utils import get_environment, get_relative_path
 from agent_scan.well_known_clients import get_client_from_path
 
@@ -60,41 +58,6 @@ def build_scan_request(
     for inspected_path, path_request in zip(inspected_paths, request.scan_path_requests, strict=True):
         path_request.client = get_client_from_path(inspected_path.path) or path_request.client or inspected_path.path
         path_request.path = get_relative_path(path_request.path)
-    computer_use_servers = [
-        {
-            "client": path.client,
-            "binaryIdentifier": server.server.binary_identifier,
-            "wireHasBinaryIdentifier": "binary_identifier" in server.server.model_dump(mode="json"),
-            "commandBasename": os.path.basename(server.server.command),
-            "commandHasSpaces": " " in server.server.command,
-            "commandEndsWithSkyClient": server.server.command.endswith("SkyComputerUseClient"),
-            "argCount": len(server.server.args),
-            "firstArgIsMcp": bool(server.server.args) and server.server.args[0] == "mcp",
-        }
-        for path in request.scan_path_requests
-        for server in path.servers
-        if server.name == "computer-use" and isinstance(server.server, StdioServer)
-    ]
-    # region agent log
-    try:  # noqa: SIM105
-        open("/opt/cursor/logs/debug.log", "a").write(  # noqa: SIM115
-            json.dumps(
-                {
-                    "hypothesisId": "C,E",
-                    "location": "verify_api.py:build_scan_request",
-                    "message": "Outbound computer-use payload summary",
-                    "data": {
-                        "apiVersion": _ANALYSIS_API_VERSION,
-                        "computerUseServers": computer_use_servers,
-                    },
-                    "timestamp": time.time_ns() // 1_000_000,
-                }
-            )
-            + "\n"
-        )
-    except OSError:
-        pass
-    # endregion
     return request
 
 
