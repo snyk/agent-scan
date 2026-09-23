@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
 
@@ -39,15 +40,26 @@ def check_server_signature(server: StdioServer) -> StdioServer:
         return server
     try:
         command, _ = resolve_command_and_args(server)
+        binary_path = os.path.realpath(shutil.which(command) or command)
 
-        if _is_code_launcher(command):
+        if _is_code_launcher(binary_path):
             logger.info(
-                f"Binary {server.command} ({command}) is a code launcher — "
+                f"Binary {server.command} ({binary_path}) is a code launcher — "
                 "signature does not imply trust in the executed code"
             )
             return server
 
-        result = subprocess.run(["codesign", "-dvvv", command], capture_output=True, text=True, check=False)
+        verification = subprocess.run(
+            ["codesign", "--verify", "--strict", "--verbose=3", binary_path],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if verification.returncode != 0:
+            logger.info(f"Binary signature verification failed for server {server.command}")
+            return server
+
+        result = subprocess.run(["codesign", "-dvvv", binary_path], capture_output=True, text=True, check=False)
         if result.returncode != 0:
             return server
 
