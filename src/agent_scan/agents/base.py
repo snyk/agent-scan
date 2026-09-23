@@ -13,7 +13,7 @@ import os
 import sys
 import traceback
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from enum import Enum
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
@@ -431,12 +431,18 @@ class AgentDiscoverer(ABC):
                 is_failure=True,
             )
 
-    def _servers_to_signed_list(self, validated: MCPConfig) -> list[tuple[str, StdioServer | RemoteServer]]:
+    def _servers_to_signed_list(
+        self,
+        validated: MCPConfig,
+        signature_commands: Mapping[str, str] | None = None,
+    ) -> list[tuple[str, StdioServer | RemoteServer]]:
         """Materialize a validated config's servers into ``(name, server)`` tuples,
         replacing each Stdio entry with its signature-checked form.
 
         Shared by :meth:`_validate_servers` and :meth:`_parse_mcp_file` so the
-        signature-check step stays in one place.
+        signature-check step stays in one place. A discoverer may provide an
+        effective executable path per server without changing the configured
+        command that is later used to start it.
 
         Operates on a shallow copy: ``get_servers()`` may return the validated
         model's live dict (e.g. ``MCPServerMap.servers``), and this helper must not
@@ -445,11 +451,16 @@ class AgentDiscoverer(ABC):
         servers = dict(validated.get_servers())
         for name, server_config in servers.items():
             if isinstance(server_config, StdioServer):
-                servers[name] = check_server_signature(server_config)
+                signature_command = signature_commands.get(name) if signature_commands is not None else None
+                servers[name] = check_server_signature(server_config, signature_command=signature_command)
         return list(servers.items())
 
     def _validate_servers(
-        self, raw: dict, source: str
+        self,
+        raw: dict,
+        source: str,
+        *,
+        signature_commands: Mapping[str, str] | None = None,
     ) -> list[tuple[str, StdioServer | RemoteServer]] | CouldNotParseMCPConfig:
         """Validate a raw ``mcpServers`` mapping into typed Stdio/Remote server entries.
 
@@ -466,7 +477,7 @@ class AgentDiscoverer(ABC):
                 traceback=traceback.format_exc(),
                 is_failure=True,
             )
-        return self._servers_to_signed_list(validated)
+        return self._servers_to_signed_list(validated, signature_commands)
 
     def _parse_mcp_file(
         self,

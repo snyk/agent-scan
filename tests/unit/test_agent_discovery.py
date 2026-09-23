@@ -3,7 +3,8 @@
 import json
 import sys
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from subprocess import CompletedProcess
+from unittest.mock import AsyncMock, call, patch
 
 import pytest
 
@@ -7758,6 +7759,57 @@ def test_codex_discoverer_extra_codex_keys_do_not_sink_validation(tmp_path):
     assert name == "ctx"
     assert isinstance(server, StdioServer)
     assert server.command == "npx"
+
+
+def test_codex_discoverer_signs_managed_computer_use_binary_without_changing_command(tmp_path):
+    from agent_scan.agents import CodexDiscoverer
+
+    codex_home = tmp_path / ".codex"
+    relative_command = (
+        "./Codex Computer Use.app/Contents/SharedSupport/SkyComputerUseClient.app/Contents/MacOS/SkyComputerUseClient"
+    )
+    binary = codex_home / "computer-use" / relative_command
+    binary.parent.mkdir(parents=True)
+    binary.write_text("binary")
+    (codex_home / "config.toml").write_text(
+        f'[mcp_servers.computer-use]\ncommand = "{relative_command}"\nargs = ["mcp"]\ncwd = "."\nenabled = false\n'
+    )
+    details = "\n".join(
+        (
+            "Identifier=com.openai.sky.SkyComputerUseClient",
+            "Authority=Developer ID Application: OpenAI, L.L.C.",
+            "Authority=Apple Root CA",
+        )
+    )
+
+    with (
+        patch("agent_scan.signed_binary.sys.platform", "darwin"),
+        patch(
+            "agent_scan.signed_binary.subprocess.run",
+            side_effect=(
+                CompletedProcess(args=[], returncode=0),
+                CompletedProcess(args=[], returncode=0, stderr=details),
+            ),
+        ) as run,
+    ):
+        mcp_configs = CodexDiscoverer(tmp_path).discover_mcp_servers()
+
+    config_path = (codex_home / "config.toml").as_posix()
+    name, server = mcp_configs[config_path][0]
+    assert name == "computer-use"
+    assert isinstance(server, StdioServer)
+    assert server.command == relative_command
+    assert server.binary_identifier == "com.openai.sky.SkyComputerUseClient"
+    binary_path = str(binary.resolve())
+    assert run.call_args_list == [
+        call(
+            ["codesign", "--verify", "--strict", "--verbose=3", binary_path],
+            capture_output=True,
+            text=True,
+            check=False,
+        ),
+        call(["codesign", "-dvvv", binary_path], capture_output=True, text=True, check=False),
+    ]
 
 
 def test_codex_discoverer_degrades_without_toml_support(tmp_path, monkeypatch):

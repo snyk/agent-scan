@@ -33,13 +33,19 @@ def _is_code_launcher(command: str) -> bool:
     return any(p.match(basename) for p in _CODE_LAUNCHER_PATTERNS)
 
 
-def check_server_signature(server: StdioServer) -> StdioServer:
-    """Get detailed code signing information."""
+def check_server_signature(server: StdioServer, *, signature_command: str | None = None) -> StdioServer:
+    """Get detailed code signing information.
+
+    ``signature_command`` lets a discoverer supply the effective executable path
+    without changing the configured command used to start the server.
+    """
     if sys.platform != "darwin":
         logger.info(f"Binary signature check not supported on {sys.platform}. Only supported on macOS.")
         return server
     try:
-        command, _ = resolve_command_and_args(server)
+        command, _ = (
+            (signature_command, server.args) if signature_command is not None else resolve_command_and_args(server)
+        )
         binary_path = os.path.realpath(shutil.which(command) or command)
 
         if _is_code_launcher(binary_path):

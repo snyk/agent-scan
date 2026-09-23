@@ -322,8 +322,41 @@ class CodexDiscoverer(AgentDiscoverer):
         servers = data.get("mcp_servers")
         if not isinstance(servers, dict) or not servers:
             return {}
-        entries = self._validate_servers(servers, source=f"mcp_servers in {config_path.as_posix()}")
+        entries = self._validate_servers(
+            servers,
+            source=f"mcp_servers in {config_path.as_posix()}",
+            signature_commands=self._managed_signature_commands(servers, config_path),
+        )
         return {config_path.as_posix(): entries}
+
+    def _managed_signature_commands(self, servers: dict, config_path: Path) -> dict[str, str]:
+        """Resolve Codex-managed binaries solely for signature inspection.
+
+        Codex writes its built-in Computer Use server to the user ``config.toml``
+        with ``cwd = "."`` and a command relative to the separately managed
+        ``<codex_home>/computer-use`` directory. Agent Scan does not otherwise use
+        that cwd when starting MCP servers; this resolver deliberately leaves the
+        configured command and all startup behavior unchanged.
+        """
+        if config_path != self._codex_home() / self._config_filename:
+            return {}
+
+        raw = servers.get("computer-use")
+        if not isinstance(raw, dict) or raw.get("cwd") not in (".", "./"):
+            return {}
+        command = raw.get("command")
+        if not isinstance(command, str) or not command or Path(command).is_absolute():
+            return {}
+
+        try:
+            managed_root = (self._codex_home() / "computer-use").resolve()
+            candidate = (managed_root / command).resolve()
+            is_managed_binary = candidate.is_relative_to(managed_root) and candidate.is_file()
+        except (OSError, RuntimeError, ValueError):
+            return {}
+        if not is_managed_binary:
+            return {}
+        return {"computer-use": candidate.as_posix()}
 
     # --- private: project enumeration ---
 
