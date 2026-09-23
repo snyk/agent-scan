@@ -7761,7 +7761,7 @@ def test_codex_discoverer_extra_codex_keys_do_not_sink_validation(tmp_path):
     assert server.command == "npx"
 
 
-def test_codex_discoverer_signs_managed_computer_use_binary_without_changing_command(tmp_path):
+def test_codex_discoverer_signs_managed_computer_use_binary_without_changing_startup_config(tmp_path):
     from agent_scan.agents import CodexDiscoverer
 
     codex_home = tmp_path / ".codex"
@@ -7771,6 +7771,7 @@ def test_codex_discoverer_signs_managed_computer_use_binary_without_changing_com
     binary = codex_home / "computer-use" / relative_command
     binary.parent.mkdir(parents=True)
     binary.write_text("binary")
+    expected_startup = StdioServer(command=relative_command, args=["mcp"])
     (codex_home / "config.toml").write_text(
         f'[mcp_servers.computer-use]\ncommand = "{relative_command}"\nargs = ["mcp"]\ncwd = "."\nenabled = false\n'
     )
@@ -7798,7 +7799,8 @@ def test_codex_discoverer_signs_managed_computer_use_binary_without_changing_com
     name, server = mcp_configs[config_path][0]
     assert name == "computer-use"
     assert isinstance(server, StdioServer)
-    assert server.command == relative_command
+    assert server.command == expected_startup.command
+    assert server.args == expected_startup.args
     assert server.binary_identifier == "com.openai.sky.SkyComputerUseClient"
     binary_path = str(binary.resolve())
     assert run.call_args_list == [
