@@ -1,3 +1,7 @@
+import stat
+import subprocess
+from unittest.mock import patch
+
 import pytest
 
 from agent_scan.models import StdioServer
@@ -36,3 +40,31 @@ def test_check_server_signature(command: str):
 )
 def test_is_code_launcher(command: str, is_code_launcher: bool):
     assert _is_code_launcher(command) == is_code_launcher
+
+
+def test_check_server_signature_resolves_path_command_on_path(tmp_path, monkeypatch):
+    """PATH-only commands must be passed to codesign as an absolute executable path."""
+    snyk = tmp_path / "snyk"
+    snyk.write_text("#!/bin/sh\necho snyk\n")
+    snyk.chmod(snyk.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("PATH", str(tmp_path), prepend=False)
+
+    codesign_output = (
+        "Authority=Developer ID Application: Snyk Ltd\n"
+        "Authority=Developer ID Certification Authority\n"
+        "Authority=Apple Root CA\n"
+        "Identifier=com.snyk.cli\n"
+    )
+    captured: list[list[str]] = []
+
+    def fake_codesign(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        captured.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, "", codesign_output)
+
+    with patch.object(subprocess, "run", side_effect=fake_codesign):
+        with patch("agent_scan.signed_binary.sys.platform", "darwin"):
+            server = check_server_signature(StdioServer(command="snyk", args=None))
+
+    assert captured == [["codesign", "-dvvv", str(snyk)]]
+    assert server.command == "snyk"
+    assert server.binary_identifier == "com.snyk.cli"

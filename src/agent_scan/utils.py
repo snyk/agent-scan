@@ -198,7 +198,12 @@ def resolve_command_and_args(server_config: StdioServer) -> tuple[str, list[str]
     """
     # check if command points to an executable and whether it exists absolute or on the path
     if check_executable_exists(server_config.command):
-        return server_config.command, server_config.args
+        command = server_config.command
+        if not Path(command).exists():
+            resolved = shutil.which(command)
+            if resolved is not None:
+                command = resolved
+        return command, server_config.args
 
     command, args = server_config.command, server_config.args
     if os.path.sep in command:
