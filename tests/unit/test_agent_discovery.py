@@ -7761,7 +7761,7 @@ def test_codex_discoverer_extra_codex_keys_do_not_sink_validation(tmp_path):
     assert server.command == "npx"
 
 
-def test_codex_discoverer_signs_all_managed_relative_binaries_without_changing_startup_config(tmp_path):
+def test_codex_discoverer_resolves_all_managed_relative_binaries_for_signing_and_startup(tmp_path):
     from agent_scan.agents import CodexDiscoverer
 
     codex_home = tmp_path / ".codex"
@@ -7775,8 +7775,6 @@ def test_codex_discoverer_signs_all_managed_relative_binaries_without_changing_s
     helper_binary = codex_home / "native-helper" / helper_command
     helper_binary.parent.mkdir(parents=True)
     helper_binary.write_text("binary")
-    expected_computer_use = StdioServer(command=computer_use_command, args=["mcp"])
-    expected_helper = StdioServer(command=helper_command, args=["serve"])
     (codex_home / "config.toml").write_text(
         f'[mcp_servers.computer-use]\ncommand = "{computer_use_command}"\n'
         'args = ["mcp"]\ncwd = "."\nenabled = false\n\n'
@@ -7811,13 +7809,17 @@ def test_codex_discoverer_signs_all_managed_relative_binaries_without_changing_s
     computer_use = by_name["computer-use"]
     helper = by_name["native-helper"]
     assert isinstance(computer_use, StdioServer)
-    assert computer_use.command == expected_computer_use.command
-    assert computer_use.args == expected_computer_use.args
+    assert computer_use.command == computer_use_command
+    assert computer_use.args == ["mcp"]
     assert computer_use.binary_identifier == "SkyComputerUseClient"
+    assert computer_use.runtime_command == str(computer_use_binary.resolve())
+    assert computer_use.runtime_cwd == str((codex_home / "computer-use").resolve())
     assert isinstance(helper, StdioServer)
-    assert helper.command == expected_helper.command
-    assert helper.args == expected_helper.args
+    assert helper.command == helper_command
+    assert helper.args == ["serve"]
     assert helper.binary_identifier == "native-helper"
+    assert helper.runtime_command == str(helper_binary.resolve())
+    assert helper.runtime_cwd == str((codex_home / "native-helper").resolve())
     computer_use_path = str(computer_use_binary.resolve())
     helper_path = str(helper_binary.resolve())
     assert run.call_args_list == [
@@ -7860,6 +7862,8 @@ def test_codex_discoverer_does_not_guess_between_multiple_relative_binary_candid
     _name, server = mcp_configs[config_path][0]
     assert isinstance(server, StdioServer)
     assert server.binary_identifier is None
+    assert server.runtime_command is None
+    assert server.runtime_cwd is None
     run.assert_not_called()
 
 
@@ -8378,6 +8382,8 @@ def test_codex_discoverer_signs_relative_plugin_binary_from_plugin_root(tmp_path
     assert server.command == "./bin/native-mcp"
     assert server.args == ["serve"]
     assert server.binary_identifier == "native-mcp"
+    assert server.runtime_command == str(binary.resolve())
+    assert server.runtime_cwd == str(plugin_dir.resolve())
     binary_path = str(binary.resolve())
     assert run.call_args_list == [
         call(

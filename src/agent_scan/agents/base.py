@@ -14,6 +14,7 @@ import sys
 import traceback
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator, Mapping
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
@@ -44,6 +45,16 @@ SkillsDirsResult = dict[str, list[DiscoveredSkill] | FileNotFoundConfig]
 # ``_parse_settings_mcp_gated``): parsed servers, a parse failure, or ``None``
 # when the file is absent/empty/not-MCP.
 McpScanResult = list[tuple[str, StdioServer | RemoteServer]] | CouldNotParseMCPConfig | None
+
+
+@dataclass(frozen=True)
+class StdioServerResolution:
+    """Codex/source-aware executable context kept out of uploaded inventory."""
+
+    configured_command: str
+    configured_args: tuple[str, ...]
+    runtime_command: str
+    runtime_cwd: str
 
 
 class DiscoveryScope(str, Enum):
@@ -434,15 +445,15 @@ class AgentDiscoverer(ABC):
     def _servers_to_signed_list(
         self,
         validated: MCPConfig,
-        signature_commands: Mapping[str, str] | None = None,
+        stdio_resolutions: Mapping[str, StdioServerResolution] | None = None,
     ) -> list[tuple[str, StdioServer | RemoteServer]]:
         """Materialize a validated config's servers into ``(name, server)`` tuples,
         replacing each Stdio entry with its signature-checked form.
 
         Shared by :meth:`_validate_servers` and :meth:`_parse_mcp_file` so the
-        signature-check step stays in one place. A discoverer may provide an
-        effective executable path per server without changing the configured
-        command that is later used to start it.
+        signature-check step stays in one place. A discoverer may provide
+        source-aware runtime context without replacing the configured command in
+        uploaded inventory.
 
         Operates on a shallow copy: ``get_servers()`` may return the validated
         model's live dict (e.g. ``MCPServerMap.servers``), and this helper must not
@@ -451,8 +462,19 @@ class AgentDiscoverer(ABC):
         servers = dict(validated.get_servers())
         for name, server_config in servers.items():
             if isinstance(server_config, StdioServer):
-                signature_command = signature_commands.get(name) if signature_commands is not None else None
-                servers[name] = check_server_signature(server_config, signature_command=signature_command)
+                resolution = stdio_resolutions.get(name) if stdio_resolutions is not None else None
+                if resolution is not None:
+                    # Validation may have rebalanced a command containing spaces
+                    # before the discoverer could resolve it. Restore the structured
+                    # Codex values while keeping the absolute runtime context local.
+                    server_config.command = resolution.configured_command
+                    server_config.args = list(resolution.configured_args)
+                    server_config.runtime_command = resolution.runtime_command
+                    server_config.runtime_cwd = resolution.runtime_cwd
+                servers[name] = check_server_signature(
+                    server_config,
+                    signature_command=resolution.runtime_command if resolution is not None else None,
+                )
         return list(servers.items())
 
     def _validate_servers(
@@ -460,7 +482,7 @@ class AgentDiscoverer(ABC):
         raw: dict,
         source: str,
         *,
-        signature_commands: Mapping[str, str] | None = None,
+        stdio_resolutions: Mapping[str, StdioServerResolution] | None = None,
     ) -> list[tuple[str, StdioServer | RemoteServer]] | CouldNotParseMCPConfig:
         """Validate a raw ``mcpServers`` mapping into typed Stdio/Remote server entries.
 
@@ -477,7 +499,7 @@ class AgentDiscoverer(ABC):
                 traceback=traceback.format_exc(),
                 is_failure=True,
             )
-        return self._servers_to_signed_list(validated, signature_commands)
+        return self._servers_to_signed_list(validated, stdio_resolutions)
 
     def _parse_mcp_file(
         self,
@@ -485,7 +507,7 @@ class AgentDiscoverer(ABC):
         *,
         formats: tuple[type[MCPConfig], ...],
         skip_unrecognized: bool = False,
-        signature_commands: Mapping[str, str] | None = None,
+        stdio_resolutions: Mapping[str, StdioServerResolution] | None = None,
     ) -> list[tuple[str, StdioServer | RemoteServer]] | CouldNotParseMCPConfig | None:
         """Load ``path``, try each ``MCPConfig`` subclass in order, return the first
         that validates.
@@ -510,8 +532,8 @@ class AgentDiscoverer(ABC):
         surfaced. Callers parsing an explicitly-named config (e.g.
         ``~/.vscode/mcp.json``) leave it off so genuine malformations are reported.
 
-        ``signature_commands`` optionally supplies effective executable paths for
-        code-signing only; parsed commands and startup behavior remain unchanged.
+        ``stdio_resolutions`` optionally supplies source-aware executable paths and
+        working directories for local runtime use.
         """
         data = self._load_json_file(path)
         if data is None:
@@ -541,7 +563,7 @@ class AgentDiscoverer(ABC):
             except Exception as e:
                 last_error = e
                 continue
-            return self._servers_to_signed_list(validated, signature_commands)
+            return self._servers_to_signed_list(validated, stdio_resolutions)
 
         # None of the formats validated — record as parse failure. Use logger.error
         # (not logger.exception): this runs outside any active except handler, so

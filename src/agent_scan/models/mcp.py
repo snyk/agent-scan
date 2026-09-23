@@ -139,6 +139,10 @@ class StdioServer(BaseModel):
     type: Literal["stdio"] | None = "stdio"
     env: dict[str, str] | None = None
     binary_identifier: str | None = None
+    # Discoverer-resolved launch context. These fields are local runtime state:
+    # they must not replace the user's configured command in uploaded inventory.
+    runtime_command: str | None = Field(default=None, exclude=True, repr=False)
+    runtime_cwd: str | None = Field(default=None, exclude=True, repr=False)
 
     @field_validator("type", mode="before")
     @classmethod

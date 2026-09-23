@@ -28,6 +28,7 @@ from agent_scan.agents.base import (
     McpConfigsResult,
     McpScanResult,
     SkillsDirsResult,
+    StdioServerResolution,
     _walk_manifest_candidates,
 )
 from agent_scan.models import (
@@ -300,7 +301,7 @@ class CodexDiscoverer(AgentDiscoverer):
             return self._validate_servers(
                 servers,
                 source=f"mcp_servers in {path.as_posix()}",
-                signature_commands=self._relative_signature_commands(servers, path, plugin_root),
+                stdio_resolutions=self._relative_stdio_resolutions(servers, path, plugin_root),
             )
         if isinstance(data, dict) and isinstance(data.get("mcpServers"), dict):
             raw_servers = data["mcpServers"]
@@ -310,7 +311,7 @@ class CodexDiscoverer(AgentDiscoverer):
             path,
             formats=(ClaudeConfigFile, PluginMCPConfigFile),
             skip_unrecognized=True,
-            signature_commands=self._relative_signature_commands(raw_servers, path, plugin_root),
+            stdio_resolutions=self._relative_stdio_resolutions(raw_servers, path, plugin_root),
         )
 
     def _discover_project_mcp_servers(self) -> McpConfigsResult:
@@ -339,7 +340,7 @@ class CodexDiscoverer(AgentDiscoverer):
         entries = self._validate_servers(
             servers,
             source=f"mcp_servers in {config_path.as_posix()}",
-            signature_commands=self._relative_signature_commands(servers, config_path),
+            stdio_resolutions=self._relative_stdio_resolutions(servers, config_path),
         )
         return {config_path.as_posix(): entries}
 
@@ -352,21 +353,21 @@ class CodexDiscoverer(AgentDiscoverer):
         ]
         return max(roots, key=lambda root: len(root.parts), default=None)
 
-    def _relative_signature_commands(
+    def _relative_stdio_resolutions(
         self,
         servers: dict,
         config_path: Path,
         plugin_root: Path | None = None,
-    ) -> dict[str, str]:
-        """Resolve every relative Codex stdio command solely for code signing.
+    ) -> dict[str, StdioServerResolution]:
+        """Resolve relative Codex stdio commands for signing and local startup.
 
         Codex plugin ``cwd`` values are rooted at the installed plugin. Managed
         user-level servers commonly live under ``<codex_home>/<server-name>``;
         ordinary configs may keep a relative executable beside their config root.
         A path is used only when exactly one candidate exists and remains inside
-        its source root. MCP startup and enabled-state behavior are untouched.
+        its source root. Enabled-state behavior is untouched.
         """
-        resolved: dict[str, str] = {}
+        resolved: dict[str, StdioServerResolution] = {}
         for name, raw in servers.items():
             if not isinstance(name, str) or not isinstance(raw, dict):
                 continue
@@ -381,21 +382,32 @@ class CodexDiscoverer(AgentDiscoverer):
                 or not cwd
             ):
                 continue
+            args = raw.get("args", [])
+            if args is None:
+                args = []
+            if not isinstance(args, list) or not all(isinstance(arg, str) for arg in args):
+                continue
 
-            candidates = self._relative_signature_candidates(name, command, cwd, config_path, plugin_root)
+            candidates = self._relative_stdio_candidates(name, command, cwd, config_path, plugin_root)
             if len(candidates) == 1:
-                resolved[name] = candidates[0].as_posix()
+                runtime_command, runtime_cwd = candidates[0]
+                resolved[name] = StdioServerResolution(
+                    configured_command=command,
+                    configured_args=tuple(args),
+                    runtime_command=runtime_command.as_posix(),
+                    runtime_cwd=runtime_cwd.as_posix(),
+                )
         return resolved
 
-    def _relative_signature_candidates(
+    def _relative_stdio_candidates(
         self,
         name: str,
         command: str,
         cwd: str,
         config_path: Path,
         plugin_root: Path | None,
-    ) -> list[Path]:
-        """Return unique existing executables for one relative Codex command."""
+    ) -> list[tuple[Path, Path]]:
+        """Return unique ``(executable, cwd)`` pairs for one Codex command."""
         cwd_path = Path(cwd)
         if cwd_path.is_absolute():
             roots = [cwd_path]
@@ -410,14 +422,14 @@ class CodexDiscoverer(AgentDiscoverer):
             else:
                 roots = [config_root / name, config_root]
 
-        candidates: set[Path] = set()
+        candidates: set[tuple[Path, Path]] = set()
         for raw_root in roots:
             try:
                 root = raw_root.resolve()
                 working_directory = root if cwd_path.is_absolute() else (root / cwd_path).resolve()
                 candidate = (working_directory / command).resolve()
                 if candidate.is_relative_to(root) and candidate.is_file():
-                    candidates.add(candidate)
+                    candidates.add((candidate, working_directory))
             except (OSError, RuntimeError, ValueError):
                 continue
         return sorted(candidates)

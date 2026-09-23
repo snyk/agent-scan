@@ -289,3 +289,30 @@ class TestResolveCommandAndArgsRegression:
         assert args == []
         assert command == str(script)
         assert params.args == []
+
+
+@pytest.mark.asyncio
+async def test_stdio_client_uses_discoverer_resolved_runtime_context():
+    client_cm = AsyncMock()
+    client_cm.__aenter__.return_value = (AsyncMock(), AsyncMock())
+    configured_command = "./Codex Computer Use.app/Contents/MacOS/server"
+    server = StdioServer(
+        command="placeholder",
+        args=["mcp"],
+        runtime_command="/Users/test/.codex/computer-use/Codex Computer Use.app/Contents/MacOS/server",
+        runtime_cwd="/Users/test/.codex/computer-use",
+    )
+    server.command = configured_command
+
+    with patch("agent_scan.mcp_client.stdio_client", return_value=client_cm) as make_stdio_client:
+        async with get_client(server):
+            pass
+
+    params = make_stdio_client.call_args.args[0]
+    assert params.command == server.runtime_command
+    assert params.args == ["mcp"]
+    assert params.cwd == server.runtime_cwd
+    dumped = server.model_dump(mode="json")
+    assert dumped["command"] == configured_command
+    assert "runtime_command" not in dumped
+    assert "runtime_cwd" not in dumped

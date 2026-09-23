@@ -169,11 +169,15 @@ async def get_client(
     elif isinstance(server_config, StdioServer):
         logger.debug("Creating stdio client")
 
-        command, args = resolve_command_and_args(server_config)
+        if server_config.runtime_command is not None:
+            command, args = server_config.runtime_command, server_config.args
+        else:
+            command, args = resolve_command_and_args(server_config)
         server_params = StdioServerParameters(
             command=command,
             args=args,
             env=server_config.env,
+            cwd=server_config.runtime_cwd,
         )
         # Create stderr capture with real pipe if traffic capture is enabled.
         # When streaming is requested, the capture also forwards each line to
