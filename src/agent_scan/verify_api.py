@@ -76,8 +76,8 @@ def build_scan_request(
         if server.name == "computer-use" and isinstance(server.server, StdioServer)
     ]
     # region agent log
-    try:
-        open("/opt/cursor/logs/debug.log", "a").write(
+    try:  # noqa: SIM105
+        open("/opt/cursor/logs/debug.log", "a").write(  # noqa: SIM115
             json.dumps(
                 {
                     "hypothesisId": "C,E",

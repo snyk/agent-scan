@@ -69,8 +69,8 @@ async def discover_clients_to_inspect(
     starting any MCP servers.
     """
     # region agent log
-    try:
-        open("/opt/cursor/logs/debug.log", "a").write(
+    try:  # noqa: SIM105
+        open("/opt/cursor/logs/debug.log", "a").write(  # noqa: SIM115
             json.dumps(
                 {
                     "hypothesisId": "A,E",
@@ -203,8 +203,8 @@ async def discover_clients_to_inspect(
         if name == "computer-use" and isinstance(server, StdioServer)
     ]
     # region agent log
-    try:
-        open("/opt/cursor/logs/debug.log", "a").write(
+    try:  # noqa: SIM105
+        open("/opt/cursor/logs/debug.log", "a").write(  # noqa: SIM115
             json.dumps(
                 {
                     "hypothesisId": "A,B,C,D",

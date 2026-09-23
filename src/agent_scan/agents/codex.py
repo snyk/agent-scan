@@ -327,8 +327,8 @@ class CodexDiscoverer(AgentDiscoverer):
         signature_commands = self._managed_signature_commands(servers, config_path)
         computer_use = servers.get("computer-use")
         # region agent log
-        try:
-            open("/opt/cursor/logs/debug.log", "a").write(
+        try:  # noqa: SIM105
+            open("/opt/cursor/logs/debug.log", "a").write(  # noqa: SIM115
                 json.dumps(
                     {
                         "hypothesisId": "B",
