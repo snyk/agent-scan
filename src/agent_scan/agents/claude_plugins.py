@@ -66,7 +66,7 @@ class _FlatPluginConfig(PluginMCPConfigFile):
 class ClaudePluginDiscoverer(AgentDiscoverer, abstract=True):
     """Share plugin parsing while each client supplies its own installation roots."""
 
-    _plugin_manifest_dirs = (".claude-plugin", ".codex-plugin", ".cursor-plugin")
+    _plugin_manifest_dirs: tuple[str, ...] = (".claude-plugin", ".codex-plugin", ".cursor-plugin")
     _confine_plugin_paths = False
 
     def __init__(self, home_directory: Path | None, target_folders: list[Path] | None = None) -> None:
