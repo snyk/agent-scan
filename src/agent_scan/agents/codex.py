@@ -396,8 +396,8 @@ class CodexDiscoverer(AgentDiscoverer):
                 resolved[name] = StdioServerResolution(
                     configured_command=command,
                     configured_args=tuple(args),
-                    runtime_command=runtime_command.as_posix(),
-                    runtime_cwd=runtime_cwd.as_posix(),
+                    runtime_command=str(runtime_command),
+                    runtime_cwd=str(runtime_cwd),
                 )
         return resolved
 
