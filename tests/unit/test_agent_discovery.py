@@ -1898,7 +1898,7 @@ def test_claude_code_real_claude_plugin_dir_manifest_reported_once(tmp_path):
 
 def test_claude_code_plugin_manifests_are_memoized(tmp_path):
     from agent_scan.agents import ClaudeCodeDiscoverer
-    from agent_scan.agents import claude_code as claude_code_module
+    from agent_scan.agents import claude_plugins as claude_plugins_module
 
     manifest = tmp_path / ".claude" / "plugins" / "cache" / "mp" / "plugin" / ".claude-plugin" / "plugin.json"
     manifest.parent.mkdir(parents=True)
@@ -1906,9 +1906,9 @@ def test_claude_code_plugin_manifests_are_memoized(tmp_path):
     discoverer = ClaudeCodeDiscoverer(tmp_path)
 
     with patch.object(
-        claude_code_module,
+        claude_plugins_module,
         "_walk_manifest_candidates",
-        wraps=claude_code_module._walk_manifest_candidates,
+        wraps=claude_plugins_module._walk_manifest_candidates,
     ) as walk:
         first = discoverer._plugin_manifests()
         first_call_count = walk.call_count
@@ -8702,12 +8702,6 @@ def test_codex_discoverer_malformed_manifest_does_not_break_default_walk(tmp_pat
 
 
 # --- ClaudeDesktopDiscoverer: per-OS config (claude_desktop_config.json) ---
-#
-# Claude Desktop stores MCP servers in a single per-OS file
-# (``claude_desktop_config.json``) in the wrapped ``{"mcpServers": {...}}`` form.
-# It has no project scope, no skills feature, and no documented extension / env-var
-# paths. ``sys.platform`` is monkeypatched in every path-dependent test so they are
-# deterministic regardless of the OS running the suite (e.g. Linux CI).
 
 
 def _claude_desktop_dir(home, platform):
@@ -8844,9 +8838,7 @@ def test_claude_desktop_discoverer_returns_empty_when_config_absent(tmp_path, mo
     assert mcp_configs == {}
 
 
-def test_claude_desktop_discoverer_has_no_skills(tmp_path, monkeypatch):
-    """Claude Desktop's Skills are cloud-stored (uploaded via Settings), with no
-    documented local filesystem path -- so there is nothing on disk to discover."""
+def test_claude_desktop_discoverer_has_no_skills_without_plugins(tmp_path, monkeypatch):
     from agent_scan.agents import claude_desktop as claude_desktop_module
 
     monkeypatch.setattr(claude_desktop_module.sys, "platform", "darwin")

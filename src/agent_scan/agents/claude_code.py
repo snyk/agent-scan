@@ -7,36 +7,22 @@ import sys
 from pathlib import Path
 
 from agent_scan.agents.base import (
-    _MAX_PLUGIN_RGLOB_DEPTH,
-    AgentDiscoverer,
     McpConfigsResult,
     SkillsDirsResult,
     _canonicalize_keys,
-    _escapes_plugin_root,
-    _walk_manifest_candidates,
 )
-from agent_scan.models import (
-    ClaudeConfigFile,
-    CouldNotParseMCPConfig,
-    MCPConfig,
-    PluginMCPConfigFile,
-)
-from agent_scan.skill_client import inspect_skills_dir
+from agent_scan.agents.claude_plugins import _CLAUDE_MCP_FORMATS, ClaudePluginDiscoverer
+from agent_scan.models import ClaudeConfigFile, CouldNotParseMCPConfig
 from agent_scan.well_known_clients import CLAUDE_CODE_NAME, expand_path
 
 logger = logging.getLogger(__name__)
 
-# Format-union for Claude Code ``.mcp.json`` files (project + plugin scope), tried
-# in order by ``_parse_mcp_file``: the wrapped ``{"mcpServers": {...}}`` shape
-# (``ClaudeConfigFile``) first, then the wrapper-less flat ``{name: serverConfig}``
-# shape (``PluginMCPConfigFile``). Mirrors ``vscode.base._VSCODE_FAMILY_FORMATS``.
-_CLAUDE_MCP_FORMATS: tuple[type[MCPConfig], ...] = (ClaudeConfigFile, PluginMCPConfigFile)
 _MAX_EXTERNAL_PLUGIN_ROOTS = 256
 _MAX_REGISTRY_ENTRIES = 4096
 _UNSET = object()
 
 
-class ClaudeCodeDiscoverer(AgentDiscoverer):
+class ClaudeCodeDiscoverer(ClaudePluginDiscoverer):
     """Claude Code discovery: ``~/.claude.json`` + ``~/.claude/skills/`` + per-project scopes.
 
     The public ``discover_mcp_servers`` / ``discover_skills`` methods orchestrate six
@@ -83,12 +69,10 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
     # Requiring a plugin marker, plus the traversal-depth and root-count caps, bounds
     # that reach because this discoverer does not know every other readable home.
     _plugin_subdirs: tuple[str, ...] = ("cache", "repos", "synced")
-    _plugin_manifest_dirs: tuple[str, ...] = (".claude-plugin", ".codex-plugin", ".cursor-plugin")
 
     def __init__(self, home_directory: Path | None, target_folders: list[Path] | None = None) -> None:
         super().__init__(home_directory, target_folders)
         self._plugin_base_dirs_cache: list[Path] | None = None
-        self._plugin_manifests_cache: list[tuple[Path, dict]] | None = None
         self._env_plugin_cache_dir_cache: Path | None | object = _UNSET
 
     # --- public (override AgentDiscoverer abstracts) ---
@@ -522,26 +506,6 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         except ValueError:
             return False
 
-    def _discover_plugin_mcp_servers(self) -> McpConfigsResult:
-        """Scan plugin ``.mcp.json`` files (flat ``{name: serverConfig}`` or wrapped
-        ``mcpServers``) via the shared :meth:`_discover_plugin_mcp_files`; only the
-        format union is Claude-Code-specific.
-        """
-        return self._discover_plugin_mcp_files(
-            self._plugin_base_dirs(),
-            (".mcp.json",),
-            lambda f: self._parse_mcp_file(f, formats=_CLAUDE_MCP_FORMATS),
-        )
-
-    def _discover_plugin_skills(self) -> SkillsDirsResult:
-        """Scan ``skills/`` subdirs under every plugin base dir.
-
-        A symlinked ``skills`` directory is yielded from its parent's directory
-        listing and ``is_dir`` follows the link, without making the recursive walk
-        follow arbitrary symlinked subtrees.
-        """
-        return self._discover_skill_and_command_dirs(self._plugin_base_dirs(), "skills", inspect_skills_dir)
-
     # --- private: enterprise/managed MCP discovery ---
 
     def _managed_mcp_path(self) -> Path | None:
@@ -579,81 +543,6 @@ class ClaudeCodeDiscoverer(AgentDiscoverer):
         if parsed is None:
             return {}
         return {path.as_posix(): parsed}
-
-    # --- private: inline plugin manifest discovery ---
-
-    def _plugin_manifests(self) -> list[tuple[Path, dict]]:
-        """``(manifest_path, parsed_dict)`` for every readable ``plugin.json`` under
-        the plugin base dirs.
-
-        The result is memoized because the inline-MCP and skills manifest arms share
-        it. A named-directory probe reaches symlinked manifest directories without
-        enabling recursive symlink following. Malformed or non-dict manifests are
-        skipped.
-        """
-        if self._plugin_manifests_cache is not None:
-            return self._plugin_manifests_cache
-
-        manifests: list[tuple[Path, dict]] = []
-        for base in self._plugin_base_dirs():
-            for manifest in _walk_manifest_candidates(
-                base, "plugin.json", self._plugin_manifest_dirs, _MAX_PLUGIN_RGLOB_DEPTH
-            ):
-                data = self._load_json_file(manifest, log_parse_errors=False)
-                if isinstance(data, dict):
-                    manifests.append((manifest, data))
-        self._plugin_manifests_cache = manifests
-        return self._plugin_manifests_cache
-
-    def _discover_plugin_manifest_mcp_servers(self) -> McpConfigsResult:
-        """Parse inline ``mcpServers`` from each plugin's
-        ``.claude-plugin/plugin.json`` manifest.
-
-        A plugin can declare its MCP servers inline in the manifest instead of a
-        standalone ``.mcp.json``. The ``mcpServers`` value may also be a *string*
-        path referencing a separate file — those are already covered by the
-        ``.mcp.json`` walk, so only the inline dict form is handled here.
-        """
-        result: McpConfigsResult = {}
-        for manifest, data in self._plugin_manifests():
-            inline = data.get("mcpServers")
-            if not isinstance(inline, dict) or not inline:
-                continue
-            result[manifest.as_posix()] = self._validate_servers(
-                inline, source=f"plugin manifest {manifest.as_posix()}"
-            )
-        return result
-
-    def _discover_plugin_manifest_skills(self) -> SkillsDirsResult:
-        """Scan skill dirs listed in each plugin's ``.claude-plugin/plugin.json``
-        ``skills`` array. Paths are resolved relative to the plugin root (the
-        parent of the ``.claude-plugin`` dir). Only string entries are honored.
-
-        An entry that would land outside the declaring plugin is dropped (see
-        :func:`_escapes_plugin_root`), matching Codex's ``./``-prefix rule and Copilot's
-        ``_manifest_relative_paths``. It matters more here than there: the manifests fed
-        to this arm come from the install registry, local marketplaces and
-        ``@skills-dir`` roots as well as the fixed install tree, so an absolute or
-        ``..``-bearing entry would otherwise have the scan report an arbitrary directory
-        on disk as that plugin's skills.
-        """
-        result: SkillsDirsResult = {}
-        for manifest, data in self._plugin_manifests():
-            skills = data.get("skills")
-            if not isinstance(skills, list):
-                continue
-            plugin_root = manifest.parent.parent
-            for rel in skills:
-                if not isinstance(rel, str) or not rel.strip():
-                    continue
-                text = rel.strip()
-                if _escapes_plugin_root(text):
-                    continue
-                skills_dir = plugin_root / Path(text)
-                entries = self._scan_skills_dir(skills_dir)
-                if entries is not None:
-                    result[skills_dir.as_posix()] = entries
-        return result
 
     # --- internal helpers ---
 

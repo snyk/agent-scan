@@ -3,6 +3,7 @@ import logging
 import os
 import stat
 from collections.abc import Iterator
+from pathlib import Path
 
 import yaml
 from yaml.error import YAMLError
@@ -200,19 +201,29 @@ def collect_skill_files(skill_path: str) -> list[SkillFile]:
     return files
 
 
-def inspect_skills_dir(path: str) -> list[DiscoveredSkill]:
+def inspect_skills_dir(path: str, *, boundary: str | None = None) -> list[DiscoveredSkill]:
     logger.info("Scanning skills dir: %s", path)
 
     expanded_path = os.path.expanduser(path)
     candidate_skills_dirs = os.listdir(expanded_path)
+    resolved_boundary = Path(boundary).resolve() if boundary is not None else None
     skills: list[DiscoveredSkill] = []
     for candidate_skill_dir in candidate_skills_dirs:
         candidate_skill_dir_full_path = os.path.join(expanded_path, candidate_skill_dir)
         if not os.path.isdir(candidate_skill_dir_full_path):
             continue
         try:
+            candidate = Path(candidate_skill_dir_full_path)
+            if resolved_boundary is not None and not candidate.resolve().is_relative_to(resolved_boundary):
+                continue
             skill_md_path = get_skill_md_path(candidate_skill_dir_full_path)
-        except (PermissionError, OSError, ValueError):
+            if (
+                resolved_boundary is not None
+                and skill_md_path is not None
+                and not (candidate / skill_md_path).resolve().is_relative_to(resolved_boundary)
+            ):
+                continue
+        except (OSError, RuntimeError, ValueError):
             # ``get_skill_md_path`` lists the candidate, so an unreadable child (mode
             # 0o111, or another user's under ``--scan-all-users``) would otherwise cost
             # every readable sibling in this skills dir.
