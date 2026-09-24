@@ -56,19 +56,19 @@ def test_desktop_plugin_skills_and_mcp_are_attributed_to_desktop(desktop):
     )
     client = desktop.discover()
     assert client.name == "claude desktop"
-    assert client.skills_dirs[str(skill.parent.resolve())][0].name == "gossamer"
-    assert client.skills_dirs[str(skill.parent.resolve())][0].path == str(skill)
-    servers = dict(client.mcp_configs[str(mcp.resolve())])
+    assert client.skills_dirs[skill.parent.resolve().as_posix()][0].name == "gossamer"
+    assert client.skills_dirs[skill.parent.resolve().as_posix()][0].path == str(skill)
+    servers = dict(client.mcp_configs[mcp.resolve().as_posix()])
     assert isinstance(servers["slack"], RemoteServer)
     assert servers["slack"].url == "https://example.com/mcp"
 
 
 @pytest.mark.parametrize("source", ["wrapped", "flat", "inline"])
 @pytest.mark.parametrize("client", ["desktop", "code"])
-def test_plugin_connectors_without_url_do_not_hide_configured_servers(desktop, tmp_path, source, client):
+def test_plugin_connectors_without_url_do_not_hide_configured_servers(tmp_path, request, source, client):
     if client == "desktop":
-        discoverer = desktop
-        plugin = install_plugin(desktop)
+        discoverer = request.getfixturevalue("desktop")
+        plugin = install_plugin(discoverer)
     else:
         discoverer = ClaudeCodeDiscoverer(tmp_path)
         plugin = tmp_path / ".claude/plugins/cache/test"
@@ -82,7 +82,7 @@ def test_plugin_connectors_without_url_do_not_hide_configured_servers(desktop, t
     else:
         path = write_json(plugin / ".mcp.json", {"mcpServers": servers} if source == "wrapped" else servers)
         result = discoverer._discover_plugin_mcp_servers()
-    assert set(dict(result[str(path)])) == {"slack"}
+    assert set(dict(result[path.as_posix()])) == {"slack"}
 
 
 @pytest.mark.parametrize("wrapped", [True, False])
@@ -103,8 +103,8 @@ def test_desktop_plugin_manifest_skills_and_inline_servers(desktop):
             "mcpServers": {"inline": {"url": "https://example.com/mcp"}},
         },
     )
-    assert set(desktop.discover_skills()) == {str(skill.parent.resolve())}
-    assert set(dict(desktop.discover_mcp_servers()[str(manifest.resolve())])) == {"inline"}
+    assert set(desktop.discover_skills()) == {skill.parent.resolve().as_posix()}
+    assert set(dict(desktop.discover_mcp_servers()[manifest.resolve().as_posix()])) == {"inline"}
 
 
 def test_desktop_reads_only_listed_plugins_and_not_session_files(desktop):
@@ -140,14 +140,14 @@ def test_malformed_registry_does_not_hide_other_accounts(desktop, contents):
     add_skill(broken / "plugin_unlisted", name="unlisted")
     plugin = install_plugin(desktop, account="account-b", org="org-b")
     skill = add_skill(plugin)
-    assert set(desktop.discover_skills()) == {str(skill.parent.resolve())}
+    assert set(desktop.discover_skills()) == {skill.parent.resolve().as_posix()}
 
 
 def test_multiple_accounts_and_orgs_and_missing_plugins(desktop):
     expected = set()
     for account, org in [("account-a", "org-a"), ("account-a", "org-b"), ("account-b", "org-a")]:
         plugin = install_plugin(desktop, account=account, org=org)
-        expected.add(str(add_skill(plugin).parent.resolve()))
+        expected.add(add_skill(plugin).parent.resolve().as_posix())
         write_json(
             plugin.parent / "manifest.json", {"plugins": [{"id": plugin.name}, {"id": plugin.name}, {"id": "missing"}]}
         )
@@ -217,8 +217,8 @@ def test_bad_global_config_and_plugin_manifest_do_not_hide_plugin_files(desktop)
     (plugin / ".claude-plugin/plugin.json").write_text("{broken")
     path = write_json(plugin / ".mcp.json", {"mcpServers": {"remote": {"url": "https://example.com"}}})
     result = desktop.discover_mcp_servers()
-    assert isinstance(result[str(desktop._config_path().resolve())], CouldNotParseMCPConfig)
-    assert set(dict(result[str(path.resolve())])) == {"remote"}
+    assert isinstance(result[desktop._config_path().resolve().as_posix()], CouldNotParseMCPConfig)
+    assert set(dict(result[path.resolve().as_posix()])) == {"remote"}
     assert any(desktop.discover_skills().values())
 
 
