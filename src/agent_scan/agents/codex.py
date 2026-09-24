@@ -351,7 +351,9 @@ class CodexDiscoverer(AgentDiscoverer):
             for root, _manifest in self._plugin_manifests()
             if config_path == root or config_path.is_relative_to(root)
         ]
-        return max(roots, key=lambda root: len(root.parts), default=None)
+        if not roots:
+            return None
+        return max(roots, key=lambda root: len(root.parts))
 
     def _relative_stdio_resolutions(
         self,
