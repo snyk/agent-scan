@@ -7119,7 +7119,8 @@ def test_walk_manifest_candidates_finds_files_and_symlinked_named_dirs_in_one_wa
     with patch.object(base_module.os, "walk", wraps=real_walk) as walk:
         candidates = list(base_module._walk_manifest_candidates(base, "plugin.json", (".claude-plugin",), 10))
 
-    assert candidates == [ordinary, linked_dir / "plugin.json"]
+    # os.walk yields siblings in filesystem order, which is not stable across runners.
+    assert sorted(candidates) == sorted([ordinary, linked_dir / "plugin.json"])
     assert walk.call_count == 1
 
 
