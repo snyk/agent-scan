@@ -7867,6 +7867,42 @@ def test_codex_discoverer_does_not_guess_between_multiple_relative_binary_candid
     run.assert_not_called()
 
 
+def test_codex_discoverer_ignores_config_supplied_runtime_context(tmp_path):
+    from agent_scan.agents import CodexDiscoverer
+
+    codex_home = tmp_path / ".codex"
+    codex_home.mkdir()
+    declared = tmp_path / "declared-mcp"
+    declared.write_text("binary")
+    different = tmp_path / "different-mcp"
+    different.write_text("binary")
+    (codex_home / "config.toml").write_text(
+        f'[mcp_servers.override]\ncommand = "{declared.as_posix()}"\nargs = ["serve"]\n'
+        f'runtime_command = "{different.as_posix()}"\nruntime_cwd = "{tmp_path.as_posix()}"\n'
+    )
+
+    with (
+        patch("agent_scan.signed_binary.sys.platform", "darwin"),
+        patch(
+            "agent_scan.signed_binary.subprocess.run",
+            return_value=CompletedProcess(args=[], returncode=1, stderr="not signed"),
+        ) as run,
+    ):
+        mcp_configs = CodexDiscoverer(tmp_path).discover_mcp_servers()
+
+    _name, server = mcp_configs[(codex_home / "config.toml").as_posix()][0]
+    assert isinstance(server, StdioServer)
+    assert server.command == declared.as_posix()
+    assert server.runtime_command is None
+    assert server.runtime_cwd is None
+    run.assert_called_once_with(
+        ["codesign", "--verify", "--strict", "--verbose=3", str(declared.resolve())],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
 def test_codex_discoverer_degrades_without_toml_support(tmp_path, monkeypatch):
     """With no TOML decoder available (Python < 3.11 and no ``tomli`` backport),
     Codex TOML discovery degrades to no servers rather than raising."""

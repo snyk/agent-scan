@@ -13,6 +13,7 @@ from pydantic import (
     BeforeValidator,
     ConfigDict,
     Field,
+    PrivateAttr,
     field_validator,
     model_validator,
 )
@@ -139,10 +140,24 @@ class StdioServer(BaseModel):
     type: Literal["stdio"] | None = "stdio"
     env: dict[str, str] | None = None
     binary_identifier: str | None = None
-    # Discoverer-resolved launch context. These fields are local runtime state:
-    # they must not replace the user's configured command in uploaded inventory.
-    runtime_command: str | None = Field(default=None, exclude=True, repr=False)
-    runtime_cwd: str | None = Field(default=None, exclude=True, repr=False)
+    # Discoverer-resolved launch context. Private so that config input can never
+    # set it: the launched executable must be the one whose signature was checked
+    # and whose command the user saw.
+    _runtime_command: str | None = PrivateAttr(default=None)
+    _runtime_cwd: str | None = PrivateAttr(default=None)
+
+    @property
+    def runtime_command(self) -> str | None:
+        return self._runtime_command
+
+    @property
+    def runtime_cwd(self) -> str | None:
+        return self._runtime_cwd
+
+    def set_runtime_context(self, command: str, cwd: str) -> None:
+        """Record the discoverer-resolved executable and working directory."""
+        self._runtime_command = command
+        self._runtime_cwd = cwd
 
     @field_validator("type", mode="before")
     @classmethod
@@ -164,7 +179,7 @@ class StdioServer(BaseModel):
         # After-validators also run when an instance is nested into another model
         # (e.g. ``ClientToInspect``). Discoverer-resolved servers already carry
         # structured command/args, so re-splitting would leak path fragments into args.
-        if self.runtime_command is not None:
+        if getattr(self, "_runtime_command", None) is not None:
             return self
         self.command, self.args = rebalance_command_args(self.command, self.args)
         return self

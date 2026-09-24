@@ -469,8 +469,7 @@ class AgentDiscoverer(ABC):
                     # Codex values while keeping the absolute runtime context local.
                     server_config.command = resolution.configured_command
                     server_config.args = list(resolution.configured_args)
-                    server_config.runtime_command = resolution.runtime_command
-                    server_config.runtime_cwd = resolution.runtime_cwd
+                    server_config.set_runtime_context(resolution.runtime_command, resolution.runtime_cwd)
                 servers[name] = check_server_signature(
                     server_config,
                     signature_command=resolution.runtime_command if resolution is not None else None,
