@@ -235,8 +235,9 @@ def _inspect_skill(skill: DiscoveredSkill) -> InspectedSkill:
     files: list[SkillFile] = []
     skill_name = skill.name
     error: ScanError | None = None
+    file_errors: list[str] = []
     try:
-        files = collect_skill_files(skill.path)
+        files = collect_skill_files(skill.path, errors=file_errors)
     except Exception as collection_error:
         error = ScanError(
             message="could not collect skill files",
@@ -265,6 +266,15 @@ def _inspect_skill(skill: DiscoveredSkill) -> InspectedSkill:
                 is_failure=True,
                 category="skill_scan_error",
             )
+    if file_errors:
+        messages = [error.message] if error is not None and error.message else []
+        error = ScanError(
+            message="; ".join([*messages, *file_errors]),
+            exception=error.exception if error is not None else None,
+            traceback=error.traceback if error is not None else None,
+            is_failure=True,
+            category="skill_scan_error",
+        )
     return InspectedSkill(
         name=_inspection_component_name(skill_name, "skill", skill.path),
         installation_path=skill.path,

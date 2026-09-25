@@ -41,7 +41,7 @@ TEST_CANDIDATE_CLIENT = CandidateClient(
 
 
 @pytest.mark.asyncio
-async def test_inspect_client_follows_symlinked_skill_md(tmp_path):
+async def test_inspect_client_rejects_escaping_symlinked_skill_md(tmp_path):
     skill_dir = tmp_path / "skill"
     skill_dir.mkdir()
     outside_file = tmp_path / "outside.md"
@@ -58,9 +58,13 @@ async def test_inspect_client_follows_symlinked_skill_md(tmp_path):
     result = await inspect_client(client, timeout=1, tokens=[], scan_skills=True)
 
     assert len(result.skills) == 1
-    assert result.skills[0].name == "linked-skill"
-    assert [(file.path, file.content) for file in result.skills[0].files] == [("SKILL.md", content)]
-    assert result.skills[0].error is None
+    assert result.skills[0].name == "skill"
+    assert result.skills[0].files == []
+    assert result.skills[0].error is not None
+    assert result.skills[0].error.category == "skill_scan_error"
+    assert "SKILL.md" in result.skills[0].error.message
+    assert "outside the skill root" in result.skills[0].error.message
+    assert "linked-skill" not in result.model_dump_json()
 
 
 @pytest.mark.asyncio

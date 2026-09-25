@@ -131,6 +131,15 @@ def toml_unescape(value: str) -> str:
     return "".join(unescaped)
 
 
+def is_path_within_boundary(path: str | Path, boundary: str | Path) -> bool:
+    """Check resolved containment, including when the boundary itself is a symlink."""
+    try:
+        root = os.path.realpath(boundary)
+        return os.path.commonpath((os.path.realpath(path), root)) == root
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
 def get_relative_path(path: str) -> str:
     try:
         original_path = path.replace("\\", "/")

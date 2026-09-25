@@ -709,6 +709,18 @@ def _redact_secrets_in_line(line: str, entropy_plugins: list) -> str:
     return "".join(parts)
 
 
+_PRIVATE_KEY_BLOCK_RE = re.compile(
+    r"-----BEGIN (?P<kind>(?:[A-Z0-9]+ )*PRIVATE KEY)-----.*?(?:-----END (?P=kind)-----|\Z)",
+    re.DOTALL,
+)
+_NETRC_LINE_RE = re.compile(r"^[ \t]*(?:machine|default|login|password)\b", re.IGNORECASE)
+_NETRC_FIELD_RE = re.compile(
+    r"(?P<prefix>(?<!\S)(?:machine|login|password)[ \t]+)"
+    r"(?:\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'|[^\s]+)",
+    re.IGNORECASE,
+)
+
+
 def redact_text(text: str | None) -> str | None:
     """Redact secrets from a block of free text.
 
@@ -728,8 +740,14 @@ def redact_text(text: str | None) -> str | None:
     """
     if not text:
         return text
+    text = _PRIVATE_KEY_BLOCK_RE.sub(_redaction_marker("PrivateKeyDetector"), text)
     _, entropy_plugins = _get_cached_plugins_split()
-    return "\n".join(_redact_secrets_in_line(line, entropy_plugins) for line in text.split("\n"))
+    lines = []
+    for line in text.split("\n"):
+        if _NETRC_LINE_RE.match(line):
+            line = _NETRC_FIELD_RE.sub(lambda match: match.group("prefix") + _redaction_marker("NetrcCredential"), line)
+        lines.append(_redact_secrets_in_line(line, entropy_plugins))
+    return "\n".join(lines)
 
 
 def redact_error_text(text: str | None) -> str | None:

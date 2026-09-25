@@ -223,35 +223,37 @@ def test_collect_skill_files_follows_symlinked_skill_directory(tmp_path):
 
 
 def test_collect_skill_files_follows_symlinked_file_inside_skill(tmp_path):
-    outside = tmp_path / "outside.txt"
-    outside.write_text("linked reference")
     skill = tmp_path / "skill"
     skill.mkdir()
+    target = skill / "target.txt"
+    target.write_text("linked reference")
     (skill / "SKILL.md").write_text("instructions")
-    (skill / "reference.txt").symlink_to(outside)
+    (skill / "reference.txt").symlink_to(target)
 
     by_path = {file.path: file.content for file in collect_skill_files(str(skill))}
 
     assert by_path == {
         "SKILL.md": "instructions",
         "reference.txt": "linked reference",
+        "target.txt": "linked reference",
     }
 
 
 def test_collect_skill_files_follows_symlinked_directory_inside_skill(tmp_path):
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    (outside / "reference.md").write_text("linked reference")
     skill = tmp_path / "skill"
     skill.mkdir()
+    target = skill / "target"
+    target.mkdir()
+    (target / "reference.md").write_text("linked reference")
     (skill / "SKILL.md").write_text("instructions")
-    (skill / "references").symlink_to(outside, target_is_directory=True)
+    (skill / "references").symlink_to(target, target_is_directory=True)
 
     by_path = {file.path: file.content for file in collect_skill_files(str(skill))}
 
     assert by_path == {
         "SKILL.md": "instructions",
         "references/reference.md": "linked reference",
+        "target/reference.md": "linked reference",
     }
 
 
@@ -282,27 +284,29 @@ def test_collect_skill_files_rejects_symlink_cycle(tmp_path):
 
     result = _collect_skill_files_in_subprocess(skill)
 
-    assert result.returncode != 0
+    assert result.returncode == 0
     assert "symbolic link cycle" in result.stderr
+    assert [file.path for file in collect_skill_files(str(skill))] == ["SKILL.md"]
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs are not available on this platform")
 def test_collect_skill_files_rejects_symlink_to_fifo(tmp_path):
-    fifo = tmp_path / "input"
-    os.mkfifo(fifo)
     skill = tmp_path / "skill"
     skill.mkdir()
+    fifo = skill / "input"
+    os.mkfifo(fifo)
     (skill / "SKILL.md").write_text("instructions")
     (skill / "input.txt").symlink_to(fifo)
 
     result = _collect_skill_files_in_subprocess(skill)
 
-    assert result.returncode != 0
+    assert result.returncode == 0
     assert "not a regular file" in result.stderr
+    assert [file.path for file in collect_skill_files(str(skill))] == ["SKILL.md"]
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX directory permissions required")
-def test_collect_skill_files_propagates_directory_traversal_error(tmp_path):
+def test_collect_skill_files_preserves_files_on_directory_traversal_error(tmp_path):
     skill = tmp_path / "skill"
     skill.mkdir()
     (skill / "SKILL.md").write_text("instructions")
@@ -314,8 +318,10 @@ def test_collect_skill_files_propagates_directory_traversal_error(tmp_path):
         pytest.skip("Current user can read mode-000 directories")
 
     try:
-        with pytest.raises(PermissionError):
-            collect_skill_files(str(skill))
+        errors = []
+        assert [file.path for file in collect_skill_files(str(skill), errors=errors)] == ["SKILL.md"]
+        assert len(errors) == 1
+        assert "Skipped unreadable: Permission denied" in errors[0]
     finally:
         unreadable.chmod(0o700)
 

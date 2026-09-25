@@ -99,3 +99,4 @@
 - `0.6.5` Ask for confirmation before contacting each configured remote MCP server in interactive scans; use `--dangerously-run-mcp-servers` to skip prompts and contact every configured MCP server, including remote URLs. Unattended scans keep their existing consent behavior. Stop following HTTP redirects for remote MCP connections and refuse link-local and known cloud-metadata addresses, while still allowing loopback and private network addresses. Resolve and verify macOS signed binaries configured by command name so they receive stable identities across machines.
 - `0.6.5.1` Verify and start Codex MCP servers configured with a relative command and working directory, such as the built-in Computer Use server, so they receive stable signed-binary identities and complete scan results.
 - `0.6.5.2` Discover Claude Desktop plugins on macOS, including their skills and MCP servers, from the installed-plugin list.
+- `0.6.6` Reliability fixes.

@@ -23,6 +23,7 @@ from agent_scan.models import (
     PluginMCPConfigFile,
 )
 from agent_scan.skill_client import inspect_skills_dir
+from agent_scan.utils import is_path_within_boundary
 
 logger = logging.getLogger(__name__)
 
@@ -80,10 +81,7 @@ class ClaudePluginDiscoverer(AgentDiscoverer, abstract=True):
     def _plugin_path_allowed(self, path: Path, root: Path) -> bool:
         if not self._confine_plugin_paths:
             return True
-        try:
-            return path.resolve().is_relative_to(root.resolve())
-        except (OSError, RuntimeError, ValueError):
-            return False
+        return is_path_within_boundary(path, root)
 
     def _discover_plugin_mcp_servers(self) -> McpConfigsResult:
         result: McpConfigsResult = {}
