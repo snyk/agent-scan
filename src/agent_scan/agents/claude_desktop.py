@@ -1,12 +1,15 @@
-"""Claude Desktop's MCP config, local macOS plugins and logged connectors.
+"""Claude Desktop's MCP config, local macOS/Linux plugins and logged connectors.
 
 Desktop plugins are listed in
 ``local-agent-mode-sessions/*/*/rpm/manifest.json`` beneath the Desktop base.
 Only listed plugin directories are scanned. Guard discovery also reads connector
-metadata from Claude Code and Cowork session files on macOS and Windows; the
-Windows session layout is assumed to match macOS and has not been verified.
-Plugin discovery is macOS-only. Cloud skills, extensions and MDM settings remain
-out of scope. Claude Code's separate configuration belongs to its own discoverer.
+metadata from Claude Code and Cowork session files on macOS, Linux and Windows;
+the Windows session layout is assumed to match macOS and has not been verified.
+The Linux beta keeps the macOS layout under its Electron ``userData`` directory
+(``~/.config/Claude``; ``XDG_CONFIG_HOME`` relocation is not honored). Plugin
+discovery is macOS- and Linux-only. Cloud skills, extensions and MDM settings
+remain out of scope. Claude Code's separate configuration belongs to its own
+discoverer.
 """
 
 import logging
@@ -33,6 +36,7 @@ class ClaudeDesktopDiscoverer(ClaudePluginDiscoverer):
     _config_filename = "claude_desktop_config.json"
     _macos_dir = "~/Library/Application Support/Claude"
     _windows_dir = "~/AppData/Roaming/Claude"
+    _linux_dir = "~/.config/Claude"
     _plugin_manifest_dirs = (".claude-plugin",)
     _confine_plugin_paths = True
 
@@ -134,7 +138,7 @@ class ClaudeDesktopDiscoverer(ClaudePluginDiscoverer):
             return self._plugin_base_dirs_cache
         self._plugin_base_dirs_cache = []
         install_dir = self._install_dir()
-        if sys.platform != "darwin" or install_dir is None:
+        if sys.platform not in ("darwin", "linux", "linux2") or install_dir is None:
             return self._plugin_base_dirs_cache
         try:
             manifests = list(install_dir.glob("local-agent-mode-sessions/*/*/rpm/manifest.json"))
@@ -175,6 +179,8 @@ class ClaudeDesktopDiscoverer(ClaudePluginDiscoverer):
             return expand_path(Path(self._macos_dir), self.home_directory)
         if sys.platform == "win32":
             return expand_path(Path(self._windows_dir), self.home_directory)
+        if sys.platform in ("linux", "linux2"):
+            return expand_path(Path(self._linux_dir), self.home_directory)
         return None
 
     def _config_path(self) -> Path | None:

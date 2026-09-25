@@ -161,6 +161,12 @@ LINUX_WELL_KNOWN_CLIENTS: list[CandidateClient] = [
         skills_dir_paths=[COPILOT_USER_SKILLS_DIR],
     ),
     CandidateClient(
+        name="claude desktop",
+        client_exists_paths=["~/.config/Claude"],
+        mcp_config_paths=["~/.config/Claude/claude_desktop_config.json"],
+        skills_dir_paths=[],
+    ),
+    CandidateClient(
         name=CLAUDE_CODE_NAME,
         client_exists_paths=["~/.claude"],
         mcp_config_paths=["~/.claude.json"],

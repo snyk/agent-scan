@@ -8710,6 +8710,8 @@ def _claude_desktop_dir(home, platform):
         return home / "Library" / "Application Support" / "Claude"
     if platform == "win32":
         return home / "AppData" / "Roaming" / "Claude"
+    if platform == "linux":
+        return home / ".config" / "Claude"
     raise ValueError(f"unsupported platform: {platform}")
 
 
@@ -8736,20 +8738,37 @@ def test_claude_desktop_discoverer_returns_none_when_absent(tmp_path, monkeypatc
 
 
 def test_claude_desktop_discoverer_returns_none_on_unsupported_platform(tmp_path, monkeypatch):
-    """Claude Desktop is macOS/Windows only; on Linux there is no documented path,
-    so detection returns None even if a same-named dir happens to exist."""
+    """Outside macOS, Windows and Linux there is no Desktop path, so detection
+    returns None even if a same-named dir happens to exist."""
     from agent_scan.agents import claude_desktop as claude_desktop_module
 
-    monkeypatch.setattr(claude_desktop_module.sys, "platform", "linux")
-    # Plant both candidate layouts; neither must be honored on an unsupported OS.
-    (tmp_path / "Library" / "Application Support" / "Claude").mkdir(parents=True)
-    (tmp_path / "AppData" / "Roaming" / "Claude").mkdir(parents=True)
+    monkeypatch.setattr(claude_desktop_module.sys, "platform", "freebsd14")
+    for platform in ("darwin", "win32", "linux"):
+        _claude_desktop_dir(tmp_path, platform).mkdir(parents=True)
 
     disc = claude_desktop_module.ClaudeDesktopDiscoverer(tmp_path)
 
     assert disc.client_exists() is None
     assert disc._config_path() is None
     assert disc.discover_mcp_servers() == {}
+
+
+def test_claude_desktop_discoverer_linux_path(tmp_path, monkeypatch):
+    from agent_scan.agents import claude_desktop as claude_desktop_module
+
+    monkeypatch.setattr(claude_desktop_module.sys, "platform", "linux")
+    # The macOS and Windows layouts must not be honored on Linux.
+    (tmp_path / "Library" / "Application Support" / "Claude").mkdir(parents=True)
+    (tmp_path / "AppData" / "Roaming" / "Claude").mkdir(parents=True)
+    install = _claude_desktop_dir(tmp_path, "linux")
+    install.mkdir(parents=True)
+    (install / "claude_desktop_config.json").write_text('{"mcpServers": {"lin": {"command": "l"}}}')
+
+    disc = claude_desktop_module.ClaudeDesktopDiscoverer(tmp_path)
+    assert disc.client_exists().endswith("/.config/Claude")
+    mcp_configs = disc.discover_mcp_servers()
+    assert list(mcp_configs) == [(install / "claude_desktop_config.json").resolve().as_posix()]
+    assert mcp_configs[next(iter(mcp_configs))][0][0] == "lin"
 
 
 def test_claude_desktop_discoverer_parses_stdio_mcp_server(tmp_path, monkeypatch):
@@ -8893,9 +8912,23 @@ def test_claude_desktop_config_path_is_per_os(tmp_path, monkeypatch):
     monkeypatch.setattr(claude_desktop_module.sys, "platform", "win32")
     assert disc._config_path() == tmp_path / "AppData" / "Roaming" / "Claude" / "claude_desktop_config.json"
 
-    # Linux is not an officially supported Claude Desktop platform -> no path.
     monkeypatch.setattr(claude_desktop_module.sys, "platform", "linux")
-    assert disc._config_path() is None
+    assert disc._config_path() == tmp_path / ".config" / "Claude" / "claude_desktop_config.json"
+
+
+def test_get_client_from_path_attributes_linux_claude_desktop_config(tmp_path, monkeypatch):
+    """An explicitly scanned Linux Desktop config must be attributed to ``claude desktop``."""
+    from agent_scan import well_known_clients
+
+    monkeypatch.setattr(well_known_clients.sys, "platform", "linux")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    config = _claude_desktop_dir(tmp_path, "linux") / "claude_desktop_config.json"
+    config.parent.mkdir(parents=True)
+    config.write_text('{"mcpServers": {}}')
+
+    assert well_known_clients.get_client_from_path(str(config)) == "claude desktop"
+    assert well_known_clients.get_client_from_path("~/.config/Claude/claude_desktop_config.json") == "claude desktop"
 
 
 def test_find_discoverers_returns_claude_desktop_when_installed(tmp_path, monkeypatch):

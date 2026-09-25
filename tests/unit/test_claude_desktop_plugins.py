@@ -9,9 +9,9 @@ from agent_scan.agents.claude_code import ClaudeCodeDiscoverer
 from agent_scan.models import CouldNotParseMCPConfig, RemoteServer
 
 
-@pytest.fixture
-def desktop(tmp_path, monkeypatch):
-    monkeypatch.setattr(claude_desktop.sys, "platform", "darwin")
+@pytest.fixture(params=["darwin", "linux"])
+def desktop(tmp_path, monkeypatch, request):
+    monkeypatch.setattr(claude_desktop.sys, "platform", request.param)
     return claude_desktop.ClaudeDesktopDiscoverer(tmp_path)
 
 
@@ -64,10 +64,11 @@ def test_desktop_plugin_skills_and_mcp_are_attributed_to_desktop(desktop):
 
 
 @pytest.mark.parametrize("source", ["wrapped", "flat", "inline"])
-@pytest.mark.parametrize("client", ["desktop", "code"])
-def test_plugin_connectors_without_url_do_not_hide_configured_servers(tmp_path, request, source, client):
-    if client == "desktop":
-        discoverer = request.getfixturevalue("desktop")
+@pytest.mark.parametrize("client", ["desktop-darwin", "desktop-linux", "code"])
+def test_plugin_connectors_without_url_do_not_hide_configured_servers(tmp_path, monkeypatch, source, client):
+    if client.startswith("desktop-"):
+        monkeypatch.setattr(claude_desktop.sys, "platform", client.removeprefix("desktop-"))
+        discoverer = claude_desktop.ClaudeDesktopDiscoverer(tmp_path)
         plugin = install_plugin(discoverer)
     else:
         discoverer = ClaudeCodeDiscoverer(tmp_path)
