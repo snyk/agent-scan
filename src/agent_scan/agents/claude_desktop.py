@@ -22,6 +22,9 @@ from agent_scan.well_known_clients import expand_path
 
 logger = logging.getLogger(__name__)
 
+# Allowlist, not passthrough: new or credential-bearing keys (e.g. headers) never leave the machine.
+_LOGGED_CONNECTOR_FIELDS = ("uuid", "name", "url", "tools", "instructions")
+
 
 class ClaudeDesktopDiscoverer(ClaudePluginDiscoverer):
     """Discover Desktop configuration, manifest-listed plugins and logged connectors."""
@@ -120,7 +123,8 @@ class ClaudeDesktopDiscoverer(ClaudePluginDiscoverer):
                             continue
                         server = RemoteServer(url=url, type="http")
                         redact.redact_server_config(server)
-                        by_uuid[uuid] = (rank, {**entry, "url": server.url})
+                        fields = {key: entry[key] for key in _LOGGED_CONNECTOR_FIELDS if key in entry}
+                        by_uuid[uuid] = (rank, {**fields, "url": server.url})
                 except (OSError, RuntimeError, ValueError):
                     continue
         return {org: [entry for _, entry in by_uuid.values()] for org, by_uuid in newest.items()}

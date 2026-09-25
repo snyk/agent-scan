@@ -60,20 +60,31 @@ def test_newest_session_wins_by_activity_then_creation_then_mtime(
     assert desktop.discover_logged_mcp_servers() == {"org": [connector(name="New")]}
 
 
-def test_url_query_is_redacted_and_entire_entry_is_preserved(desktop):
-    entry = connector(
+def test_url_query_is_redacted_and_only_allowlisted_fields_are_kept(desktop):
+    allowed = connector(
         url="https://example.com/mcp?token=secret&region=eu",
         tools=[{"name": "read", "description": "Read something", "inputSchema": {"type": "object"}}],
         instructions="Use this connector to read messages",
-        extra={"future": True},
     )
+    entry = {
+        **allowed,
+        "headers": {"Authorization": "Bearer secret"},
+        "oauth": {"access_token": "secret"},
+        "extra": {"future": True},
+    }
     path = write_session(desktop, [entry])
 
     result = desktop.discover_logged_mcp_servers()["org"][0]
 
     assert parse_qs(urlsplit(result["url"]).query) == {"token": ["**REDACTED**"], "region": ["**REDACTED**"]}
-    assert result == {**entry, "url": result["url"]}
+    assert result == {**allowed, "url": result["url"]}
     assert json.loads(path.read_text())["remoteMcpServersConfig"] == [entry]
+
+
+def test_absent_optional_fields_are_omitted(desktop):
+    write_session(desktop, [connector()])
+
+    assert desktop.discover_logged_mcp_servers()["org"][0].keys() == {"uuid", "name", "url"}
 
 
 @pytest.mark.parametrize(
