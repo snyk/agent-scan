@@ -18,6 +18,22 @@ BINARY_FILE_DESCRIPTION_PREFIX = "Binary file. Hash: "
 _MAX_SKILL_FILE_BYTES = 20 * 1024 * 1024
 _MAX_SKILL_WALK_DEPTH = 10
 
+_SKILL_LINK_CREDENTIAL_PATHS = {
+    "ssh-credentials": (".ssh",),
+    "cloud-credentials": (".aws", ".config/gcloud", ".azure", ".kube"),
+    "netrc-credentials": (".netrc", ".git-credentials", ".npmrc", ".pypirc"),
+}
+_SKILL_LINK_SYSTEM_PATHS = (
+    (
+        os.environ.get("SYSTEMROOT", os.environ.get("WINDIR", r"C:\Windows")),
+        os.environ.get("PROGRAMFILES", r"C:\Program Files"),
+        os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"),
+        os.environ.get("PROGRAMDATA", r"C:\ProgramData"),
+    )
+    if os.name == "nt"
+    else ("/etc", "/var", "/usr")
+)
+
 # Cap traversal depth when walking a commands dir, mirroring the value used by
 # the discoverer plugin/extension walks (``agents.base._MAX_PLUGIN_RGLOB_DEPTH``).
 # Kept as a separate constant here to avoid a circular import (agents.base
@@ -140,8 +156,36 @@ def _record_skill_file_error(relative_path: str, error: Exception, errors: list[
         errors.append(message)
 
 
-def _walk_skill_regular_files(skill_root: str, *, errors: list[str] | None = None) -> Iterator[tuple[str, str]]:
-    """Yield lexical relative paths and confined targets, reporting skips per entry."""
+def _skill_link_target_category(target_path: str) -> str:
+    """Classify a resolved target using metadata only; never return a local path."""
+    try:
+        os.stat(target_path)
+    except (FileNotFoundError, NotADirectoryError):
+        return "missing"
+    except OSError:
+        pass
+
+    home = os.path.expanduser("~")
+    for category, paths in _SKILL_LINK_CREDENTIAL_PATHS.items():
+        if any(is_path_within_boundary(target_path, os.path.join(home, path)) for path in paths):
+            return category
+    if is_path_within_boundary(target_path, home):
+        return "home"
+    if any(is_path_within_boundary(target_path, path) for path in _SKILL_LINK_SYSTEM_PATHS):
+        return "system"
+    return "other"
+
+
+def _outside_skill_link_placeholder(relative_path: str, target_path: str, errors: list[str] | None) -> SkillFile:
+    _record_skill_file_error(relative_path, SkillInspectionError("Path resolves outside the skill root"), errors)
+    return SkillFile(
+        path=relative_path,
+        content=f"[link outside skill folder: {_skill_link_target_category(target_path)}]",
+    )
+
+
+def _walk_skill_files(skill_root: str, *, errors: list[str] | None = None) -> Iterator[tuple[str, str] | SkillFile]:
+    """Yield confined targets or explicit link placeholders, reporting skips per entry."""
     skill_root = os.path.realpath(skill_root)
     root_stat = os.stat(skill_root)
     root_identity = (root_stat.st_dev, root_stat.st_ino)
@@ -151,7 +195,12 @@ def _walk_skill_regular_files(skill_root: str, *, errors: list[str] | None = Non
         directory, ancestor_identities, depth = pending.pop()
         try:
             if not is_path_within_boundary(directory, skill_root):
-                raise SkillInspectionError("Path resolves outside the skill root")
+                yield _outside_skill_link_placeholder(
+                    os.path.relpath(directory, skill_root).replace(os.path.sep, "/"),
+                    os.path.realpath(directory),
+                    errors,
+                )
+                continue
             with os.scandir(directory) as entries:
                 sorted_entries = sorted(entries, key=lambda entry: entry.name)
         except (OSError, ValueError, SkillInspectionError) as error:
@@ -164,7 +213,8 @@ def _walk_skill_regular_files(skill_root: str, *, errors: list[str] | None = Non
             try:
                 full_path = os.path.realpath(entry.path)
                 if not is_path_within_boundary(full_path, skill_root):
-                    raise SkillInspectionError("Path resolves outside the skill root")
+                    yield _outside_skill_link_placeholder(relative_path, full_path, errors)
+                    continue
                 target_stat = os.stat(full_path)
                 if stat.S_ISDIR(target_stat.st_mode):
                     identity = (target_stat.st_dev, target_stat.st_ino)
@@ -179,6 +229,8 @@ def _walk_skill_regular_files(skill_root: str, *, errors: list[str] | None = Non
                     raise SkillInspectionError("Skill file is not a regular file")
             except (OSError, ValueError, SkillInspectionError) as error:
                 _record_skill_file_error(relative_path, error, errors)
+                if isinstance(error, FileNotFoundError | NotADirectoryError) and entry.is_symlink():
+                    yield SkillFile(path=relative_path, content="[broken skill link: missing]")
 
         pending.extend(reversed(child_directories))
 
@@ -187,6 +239,7 @@ def collect_skill_files(skill_path: str, *, errors: list[str] | None = None) -> 
     """Collect skill files as redacted ``SkillFile`` records for inspection and analysis.
 
     Skipped entries are logged and appended to ``errors`` for inspection output.
+    Escaping and broken links also emit explicit synthetic markers, never target content.
     Traverses and reads confined files within a skill target without constructing
     intermediate MCP signature objects:
     - **Single-file command skills** (a flat ``*.md``): returns a single ``SkillFile``
@@ -225,11 +278,16 @@ def collect_skill_files(skill_path: str, *, errors: list[str] | None = None) -> 
 
     files: list[SkillFile] = []
     skill_root = os.path.realpath(expanded_path)
-    for relative_path, full_path in _walk_skill_regular_files(skill_root, errors=errors):
+    for entry in _walk_skill_files(skill_root, errors=errors):
+        if isinstance(entry, SkillFile):
+            files.append(entry)
+            continue
+        relative_path, full_path = entry
         extension = relative_path.rsplit(".", 1)[-1].lower()
         try:
             if not is_path_within_boundary(full_path, skill_root):
-                raise SkillInspectionError("Path resolves outside the skill root")
+                files.append(_outside_skill_link_placeholder(relative_path, os.path.realpath(full_path), errors))
+                continue
             files.append(
                 SkillFile(
                     path=relative_path,

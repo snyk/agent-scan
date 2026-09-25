@@ -41,7 +41,9 @@ TEST_CANDIDATE_CLIENT = CandidateClient(
 
 
 @pytest.mark.asyncio
-async def test_inspect_client_rejects_escaping_symlinked_skill_md(tmp_path):
+async def test_inspect_client_rejects_escaping_symlinked_skill_md(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     skill_dir = tmp_path / "skill"
     skill_dir.mkdir()
     outside_file = tmp_path / "outside.md"
@@ -59,7 +61,9 @@ async def test_inspect_client_rejects_escaping_symlinked_skill_md(tmp_path):
 
     assert len(result.skills) == 1
     assert result.skills[0].name == "skill"
-    assert result.skills[0].files == []
+    assert [(file.path, file.content) for file in result.skills[0].files] == [
+        ("SKILL.md", "[link outside skill folder: home]")
+    ]
     assert result.skills[0].error is not None
     assert result.skills[0].error.category == "skill_scan_error"
     assert "SKILL.md" in result.skills[0].error.message

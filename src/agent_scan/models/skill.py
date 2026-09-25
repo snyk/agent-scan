@@ -33,9 +33,12 @@ class SkillFrontmatter(BaseModel):
 
 
 class SkillFile(BaseModel):
-    """An individual file collected from a skill directory."""
+    """A collected file or explicit synthetic record for an uncollected skill link."""
 
     path: str = Field(
         description="Relative path of the file within the skill directory (e.g., 'SKILL.md', 'scripts/run.py')."
     )
-    content: str = Field(description="Redacted UTF-8 text or a synthetic binary hash marker.")
+    content: str = Field(
+        description="Redacted UTF-8 text, a synthetic binary hash marker, or an explicit link placeholder "
+        "containing only a coarse target category, never target content or its absolute path."
+    )

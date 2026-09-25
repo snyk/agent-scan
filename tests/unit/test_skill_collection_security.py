@@ -20,7 +20,9 @@ CANARY = "INTERNAL-CANARY-not-a-real-secret\n"
 
 
 @pytest.fixture
-def skill(tmp_path):
+def skill(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     root = tmp_path / "skills" / "demo-skill"
     (root / "data").mkdir(parents=True)
     (root / "SKILL.md").write_text(SKILL_CONTENT)
@@ -41,7 +43,10 @@ def test_escaping_file_symlink_is_reported_without_collecting_content(skill, tmp
 
     inspected = _inspect_skill(discovered)
 
-    assert [(file.path, file.content) for file in inspected.files] == [("SKILL.md", SKILL_CONTENT)]
+    assert [(file.path, file.content) for file in inspected.files] == [
+        ("SKILL.md", SKILL_CONTENT),
+        ("data/notes.md", "[link outside skill folder: home]"),
+    ]
     assert inspected.error is not None
     assert inspected.error.category == "skill_scan_error"
     assert "Skipped data/notes.md: Path resolves outside the skill root" in inspected.error.message
@@ -50,6 +55,9 @@ def test_escaping_file_symlink_is_reported_without_collecting_content(skill, tmp
     assert request.error is not None
     assert "data/notes.md" in request.error.message
     assert CANARY.strip() not in request.model_dump_json()
+    assert request.files == inspected.files
+    assert SkillRequest.model_validate_json(request.model_dump_json()).files == inspected.files
+    assert str(target) not in request.model_dump_json()
     print_inspected_path(InspectedPath(path=str(skill), skills=[inspected]))
     output = capsys.readouterr().out
     assert "data/notes.md" in output
@@ -66,7 +74,10 @@ def test_escaping_directory_symlink_is_not_traversed(skill, tmp_path, target_nam
 
     files = collect_skill_files(str(skill), errors=errors)
 
-    assert [file.path for file in files] == ["SKILL.md"]
+    assert [(file.path, file.content) for file in files] == [
+        ("SKILL.md", SKILL_CONTENT),
+        ("data/external", "[link outside skill folder: home]"),
+    ]
     assert errors == ["Skipped data/external: Path resolves outside the skill root"]
 
 
@@ -105,7 +116,10 @@ def test_broken_symlink_does_not_blank_skill(skill):
 
     inspected = _inspect_skill(DiscoveredSkill(name="demo", path=str(skill)))
 
-    assert [file.path for file in inspected.files] == ["SKILL.md"]
+    assert [(file.path, file.content) for file in inspected.files] == [
+        ("SKILL.md", SKILL_CONTENT),
+        ("data/broken.md", "[broken skill link: missing]"),
+    ]
     assert inspected.name == "demo-skill"
     assert inspected.error is not None
     assert "data/broken.md" in inspected.error.message
