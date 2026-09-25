@@ -1,27 +1,30 @@
-"""Claude Desktop's per-OS MCP config and locally installed macOS plugins.
+"""Claude Desktop's MCP config, local macOS plugins and logged connectors.
 
 Desktop plugins are listed in
 ``local-agent-mode-sessions/*/*/rpm/manifest.json`` beneath the Desktop base.
-Only listed plugin directories are scanned; session files and cowork caches are
-not read. The Windows plugin layout has not been verified, so plugin discovery
-is macOS-only. Cloud skills/connectors, extensions and MDM settings remain out
-of scope. Claude Code's separate configuration belongs to its own discoverer.
+Only listed plugin directories are scanned. Guard discovery also reads connector
+metadata from Claude Code and Cowork session files on macOS and Windows; the
+Windows session layout is assumed to match macOS and has not been verified.
+Plugin discovery is macOS-only. Cloud skills, extensions and MDM settings remain
+out of scope. Claude Code's separate configuration belongs to its own discoverer.
 """
 
 import logging
+import math
 import sys
 from pathlib import Path
 
+from agent_scan import redact
 from agent_scan.agents.base import McpConfigsResult, SkillsDirsResult, _canonicalize_keys, _escapes_plugin_root
 from agent_scan.agents.claude_plugins import ClaudePluginDiscoverer
-from agent_scan.models import CouldNotParseMCPConfig
+from agent_scan.models import CouldNotParseMCPConfig, RemoteServer
 from agent_scan.well_known_clients import expand_path
 
 logger = logging.getLogger(__name__)
 
 
 class ClaudeDesktopDiscoverer(ClaudePluginDiscoverer):
-    """Discover Desktop configuration and manifest-listed local plugins."""
+    """Discover Desktop configuration, manifest-listed plugins and logged connectors."""
 
     name = "claude desktop"
     _config_filename = "claude_desktop_config.json"
@@ -70,6 +73,57 @@ class ClaudeDesktopDiscoverer(ClaudePluginDiscoverer):
         result = self._discover_plugin_skills()
         result.update(self._discover_plugin_manifest_skills())
         return _canonicalize_keys(result)
+
+    def discover_logged_mcp_servers(self) -> dict[str, list[dict]]:
+        """Collect the newest connector metadata per org/UUID from Desktop sessions."""
+        install_dir = self._install_dir()
+        if install_dir is None:
+            return {}
+        newest: dict[str, dict[str, tuple[tuple[float, float, float], dict]]] = {}
+        for directory in ("claude-code-sessions", "local-agent-mode-sessions"):
+            try:
+                sessions = sorted(install_dir.glob(f"{directory}/*/*/local_*.json"))
+            except (OSError, RuntimeError, ValueError):
+                continue
+            for session in sessions:
+                try:
+                    relative = session.relative_to(install_dir)
+                    if any(
+                        (install_dir / Path(*relative.parts[:i])).is_symlink()
+                        for i in range(1, len(relative.parts) + 1)
+                    ):
+                        continue
+                    data = self._load_json_file(session, log_parse_errors=False)
+                    if not isinstance(data, dict):
+                        continue
+                    entries = data.get("remoteMcpServersConfig")
+                    if not isinstance(entries, list) or not entries:
+                        continue
+                    # Desktop rewrites old files too, so mtime is only a tie-breaker.
+                    timestamps = [data.get("lastActivityAt"), data.get("createdAt")]
+                    activity, created = (
+                        value
+                        if isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
+                        else 0
+                        for value in timestamps
+                    )
+                    rank = (activity, created, session.stat().st_mtime)
+                    org = relative.parts[2]
+                    for entry in entries:
+                        if not isinstance(entry, dict):
+                            continue
+                        uuid, url = entry.get("uuid"), entry.get("url")
+                        if not isinstance(uuid, str) or not isinstance(url, str):
+                            continue
+                        by_uuid = newest.setdefault(org, {})
+                        if uuid in by_uuid and by_uuid[uuid][0] >= rank:
+                            continue
+                        server = RemoteServer(url=url, type="http")
+                        redact.redact_server_config(server)
+                        by_uuid[uuid] = (rank, {**entry, "url": server.url})
+                except (OSError, RuntimeError, ValueError):
+                    continue
+        return {org: [entry for _, entry in by_uuid.values()] for org, by_uuid in newest.items()}
 
     def _plugin_base_dirs(self) -> list[Path]:
         if self._plugin_base_dirs_cache is not None:

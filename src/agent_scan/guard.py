@@ -31,6 +31,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 lacks stdlib TOML
         tomllib = None  # type: ignore[assignment]
 
 from agent_scan.agents import DiscoveryScope
+from agent_scan.agents.claude_desktop import ClaudeDesktopDiscoverer
 from agent_scan.hook_events import HOOK_CLIENTS, send_hook_event
 from agent_scan.pushkeys import (
     GuardEnabledAccessDeniedError,
@@ -40,7 +41,7 @@ from agent_scan.pushkeys import (
     revoke_push_key,
 )
 from agent_scan.redact import redact_push_keys, redact_push_keys_in_data
-from agent_scan.utils import toml_escape, toml_unescape
+from agent_scan.utils import get_readable_home_directories, toml_escape, toml_unescape
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable
@@ -1437,13 +1438,22 @@ def _send_servers_discovered_event(
     except Exception as e:
         rich.print(f"[yellow]Warning:[/yellow] Could not discover MCP servers: {e}")
         return False
-    duration_ms = round((time.monotonic() - started) * 1000)
-
     payload_dict: dict = {
         "hook_event_name": event_name,
         "servers": servers,
-        "discovery_duration_ms": duration_ms,
     }
+    if hook_client == "claude-code":
+        try:
+            logged_servers: dict[str, list[dict]] = {}
+            # Match InspectArgs.all_users=False in _discover_servers_payload.
+            for home_directory, _username in get_readable_home_directories(all_users=False):
+                for org, entries in ClaudeDesktopDiscoverer(home_directory).discover_logged_mcp_servers().items():
+                    logged_servers.setdefault(org, []).extend(entries)
+            if logged_servers:
+                payload_dict["claudeLoggedMcpServers"] = logged_servers
+        except Exception as e:
+            rich.print(f"[yellow]Warning:[/yellow] Could not discover Claude Desktop connectors: {e}")
+    payload_dict["discovery_duration_ms"] = round((time.monotonic() - started) * 1000)
     payload_dict[HOOK_CLIENTS[hook_client].session_field] = session_marker
     redact_push_keys_in_data(payload_dict)
     payload = json.dumps(payload_dict)

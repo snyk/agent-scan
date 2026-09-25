@@ -79,6 +79,17 @@ from agent_scan.models.errors import CouldNotParseMCPConfig, FileNotFoundConfig
 from agent_scan.pushkeys import GuardEnabledAccessDeniedError
 from agent_scan.version import version_info
 
+
+@pytest.fixture(autouse=True)
+def logged_connectors():
+    # Guard tests must not read the developer's Desktop session history.
+    with patch(
+        "agent_scan.agents.claude_desktop.ClaudeDesktopDiscoverer.discover_logged_mcp_servers",
+        return_value={},
+    ) as collector:
+        yield collector
+
+
 # ---------------------------------------------------------------------------
 # Helpers to build hook data
 # ---------------------------------------------------------------------------
@@ -5426,6 +5437,39 @@ def test_run_with_timeout_raises_when_worker_exceeds_deadline():
 
 
 class TestSendServersDiscoveredEvent:
+    @pytest.mark.parametrize("hook_client", ["claude-code", "cursor", "codex"])
+    def test_logged_connectors_are_only_sent_for_claude_code(self, hook_client, logged_connectors):
+        connectors = {"org": [{"uuid": "connector", "name": "Slack", "url": "https://example.com/mcp"}]}
+        logged_connectors.return_value = connectors
+
+        ok, captured = self._capture(hook_client=hook_client)
+
+        assert ok is True
+        if hook_client == "claude-code":
+            assert captured["payload"]["claudeLoggedMcpServers"] == connectors
+        else:
+            assert "claudeLoggedMcpServers" not in captured["payload"]
+            logged_connectors.assert_not_called()
+
+    def test_empty_logged_connectors_are_omitted(self):
+        ok, captured = self._capture()
+        assert ok is True
+        assert "claudeLoggedMcpServers" not in captured["payload"]
+
+    def test_collector_failure_still_sends_configured_servers(self, logged_connectors):
+        logged_connectors.side_effect = RuntimeError("Cannot collect connectors")
+        entries = [{"servers": [{"name": "configured"}]}]
+        ok, captured = self._capture(entries=entries)
+        assert ok is True
+        assert captured["payload"]["servers"] == entries
+        assert "claudeLoggedMcpServers" not in captured["payload"]
+
+    def test_push_keys_are_redacted_in_logged_connectors(self, logged_connectors):
+        logged_connectors.return_value = {"org": [{"instructions": "PUSH_KEY='12345678-1234-1234-1234-123456789abc'"}]}
+        ok, captured = self._capture()
+        assert ok is True
+        assert captured["payload"]["claudeLoggedMcpServers"]["org"][0]["instructions"] == "PUSH_KEY='**REDACTED**'"
+
     @staticmethod
     def _capture(hook_client="claude-code", entries=None, machine_id="machine-42"):
         captured = {}
@@ -5703,7 +5747,9 @@ class TestRunDiscover:
         values.update(overrides)
         return SimpleNamespace(**values)
 
-    def test_happy_path_sends_session_start_discovery_from_environment(self, tmp_path, monkeypatch):
+    def test_happy_path_sends_session_start_discovery_from_environment(self, tmp_path, monkeypatch, logged_connectors):
+        connectors = {"org": [{"uuid": "connector", "name": "Slack", "url": "https://example.com/mcp"}]}
+        logged_connectors.return_value = connectors
         config = tmp_path / "custom" / "settings.json"
         captured = {}
 
@@ -5735,6 +5781,7 @@ class TestRunDiscover:
             "hook_event_name": "sessionStartServerDiscovery",
             "servers": [],
             "session_id": "session-start-server-discovery",
+            "claudeLoggedMcpServers": connectors,
         }
         assert captured["url"] == "https://env-hooks.example"
         assert captured["client"] == "claude-code"
