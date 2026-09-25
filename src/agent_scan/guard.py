@@ -1314,6 +1314,16 @@ def _discover_servers_payload(
     return _servers_discovered_entries(clients_to_inspect)
 
 
+def _discover_logged_connectors() -> dict[str, list[dict]]:
+    """Collect Claude Desktop connectors into a fresh dict, safe to abandon on timeout."""
+    logged_servers: dict[str, list[dict]] = {}
+    # Match InspectArgs.all_users=False in _discover_servers_payload.
+    for home_directory, _username in get_readable_home_directories(all_users=False):
+        for org, entries in ClaudeDesktopDiscoverer(home_directory).discover_logged_mcp_servers().items():
+            logged_servers.setdefault(org, []).extend(entries)
+    return logged_servers
+
+
 def _invoke_hook_script(
     script_path: Path,
     hook_client: str,
@@ -1442,13 +1452,11 @@ def _send_servers_discovered_event(
         "hook_event_name": event_name,
         "servers": servers,
     }
-    if hook_client == "claude-code":
+    if hook_client == "claude-code" and discovery_scope in (DiscoveryScope.SERVERS, DiscoveryScope.ALL):
         try:
-            logged_servers: dict[str, list[dict]] = {}
-            # Match InspectArgs.all_users=False in _discover_servers_payload.
-            for home_directory, _username in get_readable_home_directories(all_users=False):
-                for org, entries in ClaudeDesktopDiscoverer(home_directory).discover_logged_mcp_servers().items():
-                    logged_servers.setdefault(org, []).extend(entries)
+            # Share the discovery deadline so a stalled Desktop directory cannot hang the hook.
+            remaining = _DISCOVERY_TIMEOUT_SECONDS - (time.monotonic() - started)
+            logged_servers = _run_with_timeout(_discover_logged_connectors, remaining)
             if logged_servers:
                 payload_dict["claudeLoggedMcpServers"] = logged_servers
         except Exception as e:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import os
 import re
@@ -21,6 +22,7 @@ import pytest
 
 import agent_scan.guard as guard_module
 import agent_scan.version as version_module
+from agent_scan.agents import DiscoveryScope
 from agent_scan.guard import (
     _PERMISSION_DENIED,
     ALL_CLIENTS,
@@ -5470,8 +5472,66 @@ class TestSendServersDiscoveredEvent:
         assert ok is True
         assert captured["payload"]["claudeLoggedMcpServers"]["org"][0]["instructions"] == "PUSH_KEY='**REDACTED**'"
 
+    @pytest.mark.parametrize("scope", list(DiscoveryScope))
+    def test_logged_connectors_respect_discovery_scope(self, scope, logged_connectors):
+        connectors = {"org": [{"uuid": "connector", "name": "Slack", "url": "https://example.com/mcp"}]}
+        logged_connectors.return_value = connectors
+
+        ok, captured = self._capture(discovery_scope=scope)
+
+        assert ok is True
+        if scope is DiscoveryScope.SKILLS:
+            assert "claudeLoggedMcpServers" not in captured["payload"]
+            logged_connectors.assert_not_called()
+        else:
+            assert captured["payload"]["claudeLoggedMcpServers"] == connectors
+
+    def test_connector_collection_timeout_still_sends_configured_servers(self, logged_connectors):
+        import time as test_time
+
+        stop = threading.Event()
+        logged_connectors.side_effect = lambda: stop.wait(5) or {}
+        entries = [{"servers": [{"name": "configured"}]}]
+
+        try:
+            with patch(f"{_G}._DISCOVERY_TIMEOUT_SECONDS", 0.05), patch(f"{_G}.rich") as rich_mock:
+                started = test_time.monotonic()
+                ok, captured = self._capture(entries=entries, patch_rich=False)
+                elapsed = test_time.monotonic() - started
+        finally:
+            stop.set()
+
+        assert ok is True
+        assert elapsed < 0.5
+        assert captured["payload"]["servers"] == entries
+        assert "claudeLoggedMcpServers" not in captured["payload"]
+        warnings = [call.args[0] for call in rich_mock.print.call_args_list]
+        assert any("Claude Desktop connectors" in w and "timed out" in w for w in warnings)
+
+    def test_connector_collection_uses_remaining_discovery_budget(self):
+        timeouts = []
+
+        def fake_run_with_timeout(func, timeout):
+            timeouts.append(timeout)
+            return func()
+
+        with (
+            patch(f"{_G}._run_with_timeout", side_effect=fake_run_with_timeout),
+            patch("time.monotonic", side_effect=[100.0, 110.0, 110.5]),
+        ):
+            ok, _captured = self._capture()
+
+        assert ok is True
+        assert timeouts == [pytest.approx(guard_module._DISCOVERY_TIMEOUT_SECONDS - 10.0)]
+
     @staticmethod
-    def _capture(hook_client="claude-code", entries=None, machine_id="machine-42"):
+    def _capture(
+        hook_client="claude-code",
+        entries=None,
+        machine_id="machine-42",
+        discovery_scope=DiscoveryScope.ALL,
+        patch_rich=True,
+    ):
         captured = {}
 
         def fake_send(url, client, push_key, payload, identifier, **kwargs):
@@ -5487,9 +5547,11 @@ class TestSendServersDiscoveredEvent:
         with (
             patch(f"{_G}._discover_servers_payload", return_value=[] if entries is None else entries),
             patch(f"{_G}.send_hook_event", side_effect=fake_send),
-            patch(f"{_G}.rich"),
+            patch(f"{_G}.rich") if patch_rich else contextlib.nullcontext(),
         ):
-            ok = guard_module._send_servers_discovered_event("pk-test", "https://api.snyk.io", hook_client, machine_id)
+            ok = guard_module._send_servers_discovered_event(
+                "pk-test", "https://api.snyk.io", hook_client, machine_id, discovery_scope=discovery_scope
+            )
         return ok, captured
 
     @pytest.mark.parametrize(
@@ -5555,7 +5617,7 @@ class TestSendServersDiscoveredEvent:
         with (
             patch(f"{_G}._discover_servers_payload", return_value=[]),
             patch(f"{_G}.send_hook_event", side_effect=fake_send),
-            patch("time.monotonic", side_effect=[100.0, 100.25]),
+            patch("time.monotonic", side_effect=[100.0, 100.1, 100.25]),
             patch(f"{_G}.rich"),
         ):
             ok = guard_module._send_servers_discovered_event(
