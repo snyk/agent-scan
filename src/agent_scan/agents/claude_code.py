@@ -341,6 +341,9 @@ class ClaudeCodeDiscoverer(ClaudePluginDiscoverer):
         self._plugin_base_dirs_cache = list(dict.fromkeys((*fixed, *extra, *external)))
         return self._plugin_base_dirs_cache
 
+    def _plugin_skill_roots(self) -> list[Path]:
+        return [*self._plugin_base_dirs(), *self._installed_plugin_dirs()]
+
     def _installed_plugin_dirs(self) -> list[Path]:
         """Read additive plugin roots from each target home's install registry.
 
@@ -481,6 +484,7 @@ class ClaudeCodeDiscoverer(ClaudePluginDiscoverer):
         try:
             return (
                 (root / ".mcp.json").is_file()
+                or (root / "SKILL.md").is_file()
                 or any((root / manifest_dir / "plugin.json").is_file() for manifest_dir in self._plugin_manifest_dirs)
                 or any((root / directory).is_dir() for directory in ("skills", "commands", "agents"))
             )
