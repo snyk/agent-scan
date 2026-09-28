@@ -1932,8 +1932,17 @@ class _CopiedScript(NamedTuple):
 _SECTION_BEGIN = b"# --- BEGIN install-time variables ---"
 _SECTION_END = b"# --- END install-time variables ---"
 
-_VARIABLE_VALUE_RE = re.compile(rb"\A[A-Za-z0-9][A-Za-z0-9._+-]{0,63}\Z")
-_HOOK_VALUE_RE = re.compile(rb"\A[^\x00-\x20\"'\\$`;&|<>()[\]{}]{1,2048}\Z")
+# Guards the __AGENT_SCAN_VERSION__ value, read from the installed distribution's
+# metadata. A strict allowlist, since a version is only ever alphanumerics plus the
+# separators PEP 440 permits.
+_VERSION_VALUE_RE = re.compile(rb"\A[A-Za-z0-9][A-Za-z0-9._+-]{0,63}\Z")
+
+# Guards the values install substitutes into the hook scripts (push key, remote URL,
+# machine ID). These come from outside this repo and land inside a double-quoted shell
+# literal, so this denies everything that could break out of or extend that literal:
+# whitespace and control characters, quotes, backslash, and the shell/PowerShell
+# metacharacters for expansion, command substitution, chaining, and redirection.
+_SHELL_SAFE_VALUE_RE = re.compile(rb"\A[^\x00-\x20\"'\\$`;&|<>()[\]{}]{1,2048}\Z")
 
 
 def _hook_script_variables(*, push_key: str = "", url: str = "", machine_id: str = "") -> dict[bytes, bytes]:
@@ -1953,16 +1962,14 @@ def _hook_script_variables(*, push_key: str = "", url: str = "", machine_id: str
 
     variables = {
         b"__AGENT_SCAN_VERSION__": version_info.encode(),
-        b"__AGENT_GUARD_PUSH_KEY__": (push_key or os.environ.get("PUSH_KEY") or "").encode(),
-        b"__AGENT_GUARD_REMOTE_HOOKS_BASE_URL__": (
-            url or os.environ.get("REMOTE_HOOKS_BASE_URL") or DEFAULT_REMOTE_URL
-        ).encode(),
-        b"__AGENT_GUARD_MACHINE_ID__": (machine_id or os.environ.get("MACHINE_ID") or "").encode(),
+        b"__AGENT_GUARD_PUSH_KEY__": push_key.encode(),
+        b"__AGENT_GUARD_REMOTE_HOOKS_BASE_URL__": (url or DEFAULT_REMOTE_URL).encode(),
+        b"__AGENT_GUARD_MACHINE_ID__": machine_id.encode(),
     }
     for placeholder, value in variables.items():
         if not value and placeholder in {b"__AGENT_GUARD_PUSH_KEY__", b"__AGENT_GUARD_MACHINE_ID__"}:
             continue
-        pattern = _VARIABLE_VALUE_RE if placeholder == b"__AGENT_SCAN_VERSION__" else _HOOK_VALUE_RE
+        pattern = _VERSION_VALUE_RE if placeholder == b"__AGENT_SCAN_VERSION__" else _SHELL_SAFE_VALUE_RE
         if not pattern.fullmatch(value):
             raise ValueError(f"Unusable install-time variable value for {placeholder!r}: {value!r}")
     return variables
