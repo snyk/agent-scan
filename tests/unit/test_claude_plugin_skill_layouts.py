@@ -76,6 +76,14 @@ def test_version_root_skill(tmp_path, base):
     assert [(entry.name, entry.path) for entry in found] == [("terrashark", str(root))]
 
 
+@pytest.mark.parametrize("base", ["cache", "repos", "synced"])
+def test_storage_container_is_not_a_skill(tmp_path, base):
+    container = skill(tmp_path / f".claude/plugins/{base}")
+    root = skill(container / "market/plugin/1.2.3")
+    found = entries(ClaudeCodeDiscoverer(tmp_path))
+    assert [(entry.name, entry.path) for entry in found] == [("plugin", str(root))]
+
+
 @pytest.mark.parametrize("location", ["in-place", ".claude/plugins/cache/custom"])
 def test_registry_root_skill(tmp_path, location):
     root = skill(tmp_path / location)

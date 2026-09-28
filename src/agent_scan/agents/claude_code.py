@@ -342,7 +342,7 @@ class ClaudeCodeDiscoverer(ClaudePluginDiscoverer):
         return self._plugin_base_dirs_cache
 
     def _plugin_skill_roots(self) -> list[Path]:
-        return [*self._plugin_base_dirs(), *self._installed_plugin_dirs()]
+        return self._installed_plugin_dirs()
 
     def _installed_plugin_dirs(self) -> list[Path]:
         """Read additive plugin roots from each target home's install registry.
