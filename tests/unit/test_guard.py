@@ -191,15 +191,16 @@ def _detect_test_client(client: str, path: Path) -> dict | None:
 class TestBundledHookScriptSyntax:
     """Parse the bundled hook scripts with their real interpreters.
 
-    These run on any platform where the interpreter exists, unlike the
-    Windows-gated PowerShell behaviour tests. A shell heredoc that expands
-    ``$PushKey``/``$env:`` while editing a ``.ps1`` silently strips those
-    tokens and produces a script that still looks plausible, so parse the
-    files rather than pattern-matching them.
+    The shell scripts are POSIX-only and skipped on Windows, matching the
+    other bash-invoking tests. A shell heredoc that expands ``$PushKey``/
+    ``$env:`` while editing a ``.ps1`` silently strips those tokens and
+    produces a script that still looks plausible, so parse the files rather
+    than pattern-matching them.
     """
 
     HOOKS = Path(guard_module.__file__).parent / "hooks"
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX hook scripts")
     @pytest.mark.parametrize("name", ["snyk-agent-guard.sh", "snyk-agent-guard-discover.sh"])
     def test_shell_hook_scripts_parse(self, name):
         script = self.HOOKS / name
