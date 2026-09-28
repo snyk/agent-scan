@@ -234,16 +234,16 @@ class TestIsAgentScanCommand:
             "powershell -File 'snyk-agent-guard.ps1' -Client claude-code -PushKey 'pk' -RemoteUrl 'url'"
         )
 
-    def test_no_match_snyk_agent_guard_without_push_key(self):
+    def test_matches_script_without_env_prefix(self):
         assert _is_agent_scan_command("bash /home/u/.claude/hooks/snyk-agent-guard.sh")
 
-    def test_no_match_push_key_without_snyk_agent_guard(self):
+    def test_no_match_env_prefix_with_unrelated_script(self):
         assert not _is_agent_scan_command("PUSH_KEY='pk' bash /some/other-tool.sh --client claude")
 
     def test_no_match_other_tool(self):
         assert not _is_agent_scan_command("some-other-tool hook --client claude")
 
-    def test_no_match_agentguard(self):
+    def test_no_match_agentguard_binary(self):
         assert not _is_agent_scan_command("PUSH_KEY='pk' /usr/local/bin/agentguard hook --client claude-code")
 
     def test_no_match_empty(self):
@@ -253,7 +253,7 @@ class TestIsAgentScanCommand:
         assert _is_agent_scan_command("'snyk-agent-guard.sh'")
 
     def test_no_match_similarly_named_user_script(self):
-        assert not _is_agent_scan_command("PUSH_KEY='pk' bash /home/u/my-snyk-agent-guard.sh --client claude-code")
+        assert not _is_agent_scan_command("bash /home/u/my-snyk-agent-guard.sh --client claude-code")
 
     def test_no_match_longer_name_sharing_prefix(self):
         assert not _is_agent_scan_command("bash /usr/local/bin/snyk-agent-guardian.sh")
