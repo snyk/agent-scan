@@ -1344,9 +1344,6 @@ def _invoke_hook_script(
     """
     import subprocess
 
-    if not machine_id.strip():
-        raise ValueError("machine ID is required")
-
     cmd, env = _render_argv(
         _HookInvocation(
             script_path=script_path,
