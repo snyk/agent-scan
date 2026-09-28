@@ -57,11 +57,7 @@ _T = TypeVar("_T")
 
 ALL_CLIENTS = ["claude", "cursor", "codex", "github-copilot"]
 DEFAULT_REMOTE_URL = "https://api.snyk.io"
-_DETECTION_RE = re.compile(
-    r"PUSH_KEY=.*snyk-agent-guard"
-    r"|snyk-agent-guard.*-PushKey\b",
-    re.DOTALL,
-)
+_DETECTION_RE = re.compile(r"""(?:^|[/\\'"\s])snyk-agent-guard(?:-discover)?\.(?:sh|ps1)(?:['"\s]|$)""")
 _PERMISSION_DENIED = "__permission_denied__"
 _STDIN_READ_TIMEOUT_SECONDS = 5.0
 _DISCOVERY_TIMEOUT_SECONDS = 60.0
@@ -596,29 +592,29 @@ def _install_hooks(
     discover_script_path = _discover_script_path(config_path)
     discover_script_existed = discover_script_path.exists()
 
-    main_script = _copy_hook_script(_forwarder_script_path(config_path))
-    discover_script = _copy_hook_script(discover_script_path) if install_discovery else None
+    main_script = _copy_hook_script(
+        _forwarder_script_path(config_path), push_key=push_key, url=url, machine_id=machine_id
+    )
+    discover_script = (
+        _copy_hook_script(discover_script_path, push_key=push_key, url=url, machine_id=machine_id)
+        if install_discovery
+        else None
+    )
 
     dest_path = main_script.path
     script_updated = main_script.updated or bool(discover_script and discover_script.updated)
     command = _build_hook_command(
-        push_key,
-        url,
         dest_path,
         hook_client,
         tenant_id=tenant_id,
-        machine_id=machine_id,
     )
     discover_command = None
     if install_discovery:
         assert agent_scan_command is not None
         discover_command = _build_discover_hook_command(
-            push_key,
-            url,
             discover_script_path,
             agent_scan_command=agent_scan_command,
             tenant_id=tenant_id,
-            machine_id=machine_id,
             hook_client=hook_client,
         )
     prepared_config, prepared_content, hooks_diff, preserved = _prepare_client_config(
@@ -1327,8 +1323,6 @@ def _discover_logged_connectors() -> dict[str, list[dict]]:
 def _invoke_hook_script(
     script_path: Path,
     hook_client: str,
-    push_key: str,
-    url: str,
     payload: str,
     *,
     machine_id: str,
@@ -1342,9 +1336,6 @@ def _invoke_hook_script(
         _HookInvocation(
             script_path=script_path,
             hook_client=hook_client,
-            push_key=push_key,
-            url=url,
-            machine_id=machine_id,
         )
     )
 
@@ -1412,8 +1403,6 @@ def _send_test_event(
     ok, detail = _invoke_hook_script(
         script_path,
         hook_client,
-        push_key,
-        url,
         payload,
         machine_id=machine_id,
     )
@@ -1620,6 +1609,10 @@ def _parse_command_info(cmd: str, events: list[str]) -> dict:
     url = _extract_env_from_cmd(cmd, "REMOTE_HOOKS_BASE_URL")
     push_key = _extract_env_from_cmd(cmd, "PUSH_KEY")
     tenant_id = _extract_env_from_cmd(cmd, "TENANT_ID")
+    script_path = _script_path_from_command(cmd)
+    embedded = _read_hook_script_variables(script_path) if script_path else {}
+    push_key = embedded.get("PUSH_KEY", push_key)
+    url = embedded.get("REMOTE_HOOKS_BASE_URL", url)
     host = urlparse(url).netloc if url else "unknown"
 
     return {
@@ -1630,6 +1623,37 @@ def _parse_command_info(cmd: str, events: list[str]) -> dict:
         "url": url or DEFAULT_REMOTE_URL,
         "events": events,
     }
+
+
+def _script_path_from_command(cmd: str) -> Path | None:
+    match = re.search(
+        r"(?:bash|powershell\s+-File)\s+['\"]([^'\"]*snyk-agent-guard(?:-discover)?\.(?:sh|ps1))['\"]", cmd
+    )
+    return Path(match.group(1)) if match else None
+
+
+def _read_hook_script_variables(path: Path) -> dict[str, str]:
+    try:
+        content = path.read_text()
+    except (OSError, UnicodeError):
+        return {}
+    begin = content.find(_SECTION_BEGIN.decode())
+    if begin < 0:
+        return {}
+    start = begin + len(_SECTION_BEGIN)
+    end = content.find(_SECTION_END.decode(), start)
+    if end < 0:
+        return {}
+    section = content[start:end]
+    result: dict[str, str] = {}
+    for name, variable in (
+        ("PUSH_KEY", "INSTALL_PUSH_KEY"),
+        ("REMOTE_HOOKS_BASE_URL", "INSTALL_REMOTE_HOOKS_BASE_URL"),
+    ):
+        match = re.search(rf"{variable}\s*=\s*['\"]([^'\"]*)['\"]", section)
+        if match and not match.group(1).startswith("__AGENT_GUARD_"):
+            result[name] = match.group(1)
+    return result
 
 
 _PS_PARAM_MAP = {
@@ -1750,9 +1774,6 @@ class _HookInvocation(NamedTuple):
 
     script_path: Path
     hook_client: str
-    push_key: str
-    url: str
-    machine_id: str = ""
     tenant_id: str = ""
     agent_scan_command: str = ""
     scope: str = ""
@@ -1760,14 +1781,9 @@ class _HookInvocation(NamedTuple):
 
 
 def _render_posix_command(invocation: _HookInvocation) -> str:
-    parts = [
-        f"PUSH_KEY={_shell_quote(invocation.push_key)}",
-        f"REMOTE_HOOKS_BASE_URL={_shell_quote(invocation.url)}",
-    ]
+    parts = []
     if invocation.tenant_id:
         parts.append(f"TENANT_ID={_shell_quote(invocation.tenant_id)}")
-    if invocation.machine_id:
-        parts.append(f"MACHINE_ID={_shell_quote(invocation.machine_id)}")
     if invocation.agent_scan_command:
         parts.append(f"AGENT_SCAN_COMMAND={_shell_quote(invocation.agent_scan_command)}")
     parts.append(f"bash {_shell_quote(invocation.script_path.as_posix())}")
@@ -1785,13 +1801,7 @@ def _render_powershell_command(invocation: _HookInvocation) -> str:
         _ps_quote(str(invocation.script_path)),
         "-Client",
         invocation.hook_client,
-        "-PushKey",
-        _ps_quote(invocation.push_key),
-        "-RemoteUrl",
-        _ps_quote(invocation.url),
     ]
-    if invocation.machine_id:
-        parts.extend(["-MachineId", _ps_quote(invocation.machine_id)])
     if invocation.agent_scan_command:
         parts.extend(["-AgentScanCommand", _ps_quote(invocation.agent_scan_command)])
     if invocation.scope:
@@ -1807,28 +1817,16 @@ def _render_argv(invocation: _HookInvocation) -> tuple[list[str], dict[str, str]
             str(invocation.script_path),
             "-Client",
             invocation.hook_client,
-            "-PushKey",
-            invocation.push_key,
-            "-RemoteUrl",
-            invocation.url,
         ]
-        if invocation.machine_id:
-            argv.extend(["-MachineId", invocation.machine_id])
         if invocation.agent_scan_command:
             argv.extend(["-AgentScanCommand", invocation.agent_scan_command])
         if invocation.scope:
             argv.extend(["-Scope", invocation.scope])
         return argv, None
 
-    env = {
-        **os.environ,
-        "PUSH_KEY": invocation.push_key,
-        "REMOTE_HOOKS_BASE_URL": invocation.url,
-    }
+    env = dict(os.environ)
     if invocation.tenant_id:
         env["TENANT_ID"] = invocation.tenant_id
-    if invocation.machine_id:
-        env["MACHINE_ID"] = invocation.machine_id
     if invocation.agent_scan_command:
         env["AGENT_SCAN_COMMAND"] = invocation.agent_scan_command
     argv = ["bash", str(invocation.script_path), "--client", invocation.hook_client]
@@ -1838,20 +1836,14 @@ def _render_argv(invocation: _HookInvocation) -> tuple[list[str], dict[str, str]
 
 
 def _build_hook_command(
-    push_key: str,
-    url: str,
     script_path: Path,
     hook_client: str,
     *,
     tenant_id: str = "",
-    machine_id: str = "",
 ) -> str:
     invocation = _HookInvocation(
         script_path=script_path,
         hook_client=hook_client,
-        push_key=push_key,
-        url=url,
-        machine_id=machine_id,
         tenant_id=tenant_id,
     )
     if IS_WINDOWS:
@@ -1877,21 +1869,15 @@ def _agent_scan_command() -> str | None:
 
 
 def _build_discover_hook_command(
-    push_key: str,
-    url: str,
     script_path: Path,
     hook_client: str,
     *,
     agent_scan_command: str,
     tenant_id: str = "",
-    machine_id: str = "",
 ) -> str:
     invocation = _HookInvocation(
         script_path=script_path,
         hook_client=hook_client,
-        push_key=push_key,
-        url=url,
-        machine_id=machine_id,
         agent_scan_command=agent_scan_command,
         scope="servers",
         quote_client=True,
@@ -1902,21 +1888,16 @@ def _build_discover_hook_command(
 
 
 def _build_hook_command_powershell(
-    push_key: str,
-    url: str,
     script_path: Path,
     hook_client: str,
     *,
     tenant_id: str = "",
-    machine_id: str = "",
 ) -> str:
     return _render_powershell_command(
         _HookInvocation(
             script_path=script_path,
             hook_client=hook_client,
-            push_key=push_key,
-            url=url,
-            machine_id=machine_id,
+            tenant_id=tenant_id,
         )
     )
 
@@ -1958,9 +1939,10 @@ _SECTION_BEGIN = b"# --- BEGIN install-time variables ---"
 _SECTION_END = b"# --- END install-time variables ---"
 
 _VARIABLE_VALUE_RE = re.compile(rb"\A[A-Za-z0-9][A-Za-z0-9._+-]{0,63}\Z")
+_HOOK_VALUE_RE = re.compile(rb"\A[^\x00-\x20\"'\\$`;&|<>()[\]{}]{1,2048}\Z")
 
 
-def _hook_script_variables() -> dict[bytes, bytes]:
+def _hook_script_variables(*, push_key: str = "", url: str = "", machine_id: str = "") -> dict[bytes, bytes]:
     """Values substituted into the hook scripts' install-time variables section.
 
     Keyed by the ``__PLACEHOLDER__`` the scripts declare between their
@@ -1975,14 +1957,26 @@ def _hook_script_variables() -> dict[bytes, bytes]:
     """
     from agent_scan.version import version_info
 
-    variables = {b"__AGENT_SCAN_VERSION__": version_info.encode()}
+    variables = {
+        b"__AGENT_SCAN_VERSION__": version_info.encode(),
+        b"__AGENT_GUARD_PUSH_KEY__": (push_key or os.environ.get("PUSH_KEY") or "").encode(),
+        b"__AGENT_GUARD_REMOTE_HOOKS_BASE_URL__": (
+            url or os.environ.get("REMOTE_HOOKS_BASE_URL") or DEFAULT_REMOTE_URL
+        ).encode(),
+        b"__AGENT_GUARD_MACHINE_ID__": (machine_id or os.environ.get("MACHINE_ID") or "").encode(),
+    }
     for placeholder, value in variables.items():
-        if not _VARIABLE_VALUE_RE.match(value):
+        if not value and placeholder in {b"__AGENT_GUARD_PUSH_KEY__", b"__AGENT_GUARD_MACHINE_ID__"}:
+            continue
+        pattern = _VARIABLE_VALUE_RE if placeholder == b"__AGENT_SCAN_VERSION__" else _HOOK_VALUE_RE
+        if not pattern.fullmatch(value):
             raise ValueError(f"Unusable install-time variable value for {placeholder!r}: {value!r}")
     return variables
 
 
-def _substitute_hook_script_variables(content: bytes) -> bytes:
+def _substitute_hook_script_variables(
+    content: bytes, *, push_key: str = "", url: str = "", machine_id: str = ""
+) -> bytes:
     """Fill in the install-time variables section of a bundled hook script.
 
     Only the section is rewritten. Both forwarders compare their variables against the
@@ -1994,7 +1988,7 @@ def _substitute_hook_script_variables(content: bytes) -> bytes:
     The values are checked by ``_hook_script_variables`` before they get here; the markers
     below are committed alongside the scripts that declare them, and tests pin their shape.
     """
-    variables = _hook_script_variables()
+    variables = _hook_script_variables(push_key=push_key, url=url, machine_id=machine_id)
 
     begin = content.find(_SECTION_BEGIN)
     if begin < 0:
@@ -2011,7 +2005,7 @@ def _substitute_hook_script_variables(content: bytes) -> bytes:
     return content[:start] + section + content[end:]
 
 
-def _copy_hook_script(dest: Path) -> _CopiedScript:
+def _copy_hook_script(dest: Path, *, push_key: str = "", url: str = "", machine_id: str = "") -> _CopiedScript:
     """Copy the bundled hook script named ``dest.name`` to *dest*.
 
     Handles both the forwarding hook and the session-start discovery trampoline;
@@ -2020,7 +2014,9 @@ def _copy_hook_script(dest: Path) -> _CopiedScript:
     dest.parent.mkdir(parents=True, exist_ok=True)
 
     source = importlib_resources.files("agent_scan.hooks").joinpath(dest.name)
-    new_content = _substitute_hook_script_variables(source.read_bytes())
+    new_content = _substitute_hook_script_variables(
+        source.read_bytes(), push_key=push_key, url=url, machine_id=machine_id
+    )
     new_checksum = hashlib.sha256(new_content).hexdigest()
 
     current_content = dest.read_bytes() if dest.exists() else None

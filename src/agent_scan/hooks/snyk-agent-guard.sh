@@ -18,6 +18,9 @@ set -euo pipefail
 # --- BEGIN install-time variables ---
 # Agent-scan CLI version (replaced at install time).
 AGENT_SCAN_VERSION="__AGENT_SCAN_VERSION__"
+INSTALL_PUSH_KEY="__AGENT_GUARD_PUSH_KEY__"
+INSTALL_REMOTE_HOOKS_BASE_URL="__AGENT_GUARD_REMOTE_HOOKS_BASE_URL__"
+INSTALL_MACHINE_ID="__AGENT_GUARD_MACHINE_ID__"
 # --- END install-time variables ---
 
 # Hook API version.
@@ -112,12 +115,17 @@ hook_main() {
   done
 
   [[ -n "$client" ]] || die "Missing required argument: --client <claude-code|cursor|codex|github-copilot>"
-  [[ -n "${REMOTE_HOOKS_BASE_URL:-}" ]] || die "REMOTE_HOOKS_BASE_URL environment variable is not set"
+  local remote_url="${REMOTE_HOOKS_BASE_URL:-$INSTALL_REMOTE_HOOKS_BASE_URL}"
+  [[ "$remote_url" != "__AGENT_GUARD_REMOTE_HOOKS_BASE_URL__" ]] || remote_url=""
+  [[ -n "$remote_url" ]] || die "REMOTE_HOOKS_BASE_URL environment variable is not set"
 
   local pushkey
-  pushkey="${PUSH_KEY:-${PUSHKEY:-}}"
+  pushkey="${PUSH_KEY:-${PUSHKEY:-$INSTALL_PUSH_KEY}}"
+  [[ "$pushkey" != "__AGENT_GUARD_PUSH_KEY__" ]] || pushkey=""
   [[ -n "$pushkey" ]] || die "PUSH_KEY environment variable is not set"
-  [[ -n "${MACHINE_ID:-}" ]] || die "MACHINE_ID environment variable is not set"
+  local machine_id="${MACHINE_ID:-$INSTALL_MACHINE_ID}"
+  [[ "$machine_id" != "__AGENT_GUARD_MACHINE_ID__" ]] || machine_id=""
+  [[ -n "$machine_id" ]] || die "MACHINE_ID environment variable is not set"
 
   local cli_version user_agent
   cli_version="$AGENT_SCAN_VERSION"
@@ -139,7 +147,7 @@ hook_main() {
     *) die "Unknown client: ${client}. Expected claude-code, cursor, codex, or github-copilot." ;;
   esac
 
-  local url="${REMOTE_HOOKS_BASE_URL}${endpoint}?version=${VERSION}"
+  local url="${remote_url}${endpoint}?version=${VERSION}"
 
   # Read payload from stdin
   local payload
@@ -161,7 +169,7 @@ hook_main() {
   x_user="$(printf '{%s:%s,%s:%s,%s:%s,%s:%s}' \
     "\"hostname\"" "$(json_quote "$hostname")" \
     "\"username\"" "$(json_quote "$username")" \
-    "\"identifier\"" "$(json_quote "$MACHINE_ID")" \
+    "\"identifier\"" "$(json_quote "$machine_id")" \
     "\"cli_version\"" "$(json_quote "$cli_version")")"
 
   # Execute request
