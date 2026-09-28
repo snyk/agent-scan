@@ -189,14 +189,7 @@ def _detect_test_client(client: str, path: Path) -> dict | None:
 
 
 class TestBundledHookScriptSyntax:
-    """Parse the bundled hook scripts with their real interpreters.
-
-    The shell scripts are POSIX-only and skipped on Windows, matching the
-    other bash-invoking tests. A shell heredoc that expands ``$PushKey``/
-    ``$env:`` while editing a ``.ps1`` silently strips those tokens and
-    produces a script that still looks plausible, so parse the files rather
-    than pattern-matching them.
-    """
+    """Parse the bundled hook scripts with their real interpreters"""
 
     HOOKS = Path(guard_module.__file__).parent / "hooks"
 
@@ -5332,7 +5325,7 @@ class TestDiscoverServersPayload:
 
 
 class TestInvokeHookScript:
-    def test_posix_invocation_sets_machine_id(self, monkeypatch):
+    def test_posix_invocation_leaves_machine_id_unset(self, monkeypatch):
         monkeypatch.delenv("MACHINE_ID", raising=False)
         completed = subprocess.CompletedProcess([], 0, stdout="ok", stderr="")
         with patch(f"{_G}.IS_WINDOWS", False), patch("subprocess.run", return_value=completed) as run:
@@ -5340,7 +5333,6 @@ class TestInvokeHookScript:
                 PurePosixPath("/hook.sh"),
                 "claude-code",
                 "{}",
-                machine_id="machine-42",
             )
 
         assert result == (True, "")
@@ -5348,7 +5340,7 @@ class TestInvokeHookScript:
         assert "MACHINE_ID" not in run.call_args.kwargs["env"]
         assert run.call_args.kwargs["input"] == "{}"
 
-    def test_posix_invocation_overwrites_ambient_machine_id(self, monkeypatch):
+    def test_posix_invocation_preserves_ambient_machine_id(self, monkeypatch):
         monkeypatch.setenv("MACHINE_ID", "ambient-machine")
         completed = subprocess.CompletedProcess([], 0, stdout="ok", stderr="")
         with patch(f"{_G}.IS_WINDOWS", False), patch("subprocess.run", return_value=completed) as run:
@@ -5356,7 +5348,6 @@ class TestInvokeHookScript:
                 PurePosixPath("/hook.sh"),
                 "cursor",
                 "{}",
-                machine_id="chosen-machine",
             )
 
         assert result == (True, "")
@@ -5364,7 +5355,13 @@ class TestInvokeHookScript:
 
     def test_empty_machine_id_is_rejected(self):
         with pytest.raises(ValueError, match="machine ID"):
-            guard_module._invoke_hook_script(Path("/hook.sh"), "cursor", "{}", machine_id="  ")
+            guard_module._send_test_event(
+                "pk",
+                "https://api.snyk.io",
+                "cursor",
+                Path("/hook.sh"),
+                machine_id="  ",
+            )
 
     def test_windows_invocation_machine_id_shape(self):
         completed = subprocess.CompletedProcess([], 0, stdout="ok", stderr="")
@@ -5373,7 +5370,6 @@ class TestInvokeHookScript:
                 Path("C:/hook.ps1"),
                 "codex",
                 "{}",
-                machine_id="machine-42",
             )
 
         assert result == (True, "")
@@ -5389,7 +5385,7 @@ class TestInvokeHookScript:
     def test_nonzero_exit_returns_stderr(self):
         completed = subprocess.CompletedProcess([], 7, stdout="", stderr="bad request\n")
         with patch(f"{_G}.IS_WINDOWS", False), patch("subprocess.run", return_value=completed):
-            result = guard_module._invoke_hook_script(Path("/hook.sh"), "cursor", "{}", machine_id="machine-42")
+            result = guard_module._invoke_hook_script(Path("/hook.sh"), "cursor", "{}")
         assert result == (False, "bad request")
 
 

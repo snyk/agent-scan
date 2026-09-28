@@ -1324,13 +1324,8 @@ def _invoke_hook_script(
     script_path: Path,
     hook_client: str,
     payload: str,
-    *,
-    machine_id: str,
 ) -> tuple[bool, str]:
     import subprocess
-
-    if not machine_id.strip():
-        raise ValueError("machine ID is required")
 
     cmd, env = _render_argv(
         _HookInvocation(
@@ -1404,7 +1399,6 @@ def _send_test_event(
         script_path,
         hook_client,
         payload,
-        machine_id=machine_id,
     )
     if ok:
         rich.print("[green]\u2713[/green]  Test event sent  [green]\u2192 OK[/green]")
