@@ -201,13 +201,24 @@ def collect_skill_files(skill_path: str) -> list[SkillFile]:
     return files
 
 
-def inspect_skills_dir(path: str, *, boundary: str | None = None) -> list[DiscoveredSkill]:
+def inspect_skills_dir(path: str, *, boundary: str | None = None, include_self: bool = False) -> list[DiscoveredSkill]:
     logger.info("Scanning skills dir: %s", path)
 
     expanded_path = os.path.expanduser(path)
     candidate_skills_dirs = os.listdir(expanded_path)
     resolved_boundary = Path(boundary).resolve() if boundary is not None else None
     skills: list[DiscoveredSkill] = []
+    if include_self:
+        candidate = Path(expanded_path)
+        skill_md = get_skill_md_path(expanded_path)
+        if skill_md is not None and (
+            resolved_boundary is None
+            or (
+                candidate.resolve().is_relative_to(resolved_boundary)
+                and (candidate / skill_md).resolve().is_relative_to(resolved_boundary)
+            )
+        ):
+            return [DiscoveredSkill(name=candidate.name, path=expanded_path)]
     for candidate_skill_dir in candidate_skills_dirs:
         candidate_skill_dir_full_path = os.path.join(expanded_path, candidate_skill_dir)
         if not os.path.isdir(candidate_skill_dir_full_path):

@@ -101,3 +101,5 @@
 - `0.6.5.2` Discover Claude Desktop plugins on macOS, including their skills and MCP servers, from the installed-plugin list.
 - `0.6.6` Include Claude Desktop cloud connectors (name, URL, tools, and instructions, with URL query values redacted) in Claude Code's Agent Guard install and session-start discovery events, so connectors that Claude Code only sees by connection UUID can be identified.
 - `0.6.7` Discover Claude Desktop on Linux (the official beta) from `~/.config/Claude`, including its MCP config and the skills and MCP servers of installed Desktop plugins.
+
+- Unreleased: Discover Claude plugin skills listed as individual directories and single-skill plugins with a root `SKILL.md`.

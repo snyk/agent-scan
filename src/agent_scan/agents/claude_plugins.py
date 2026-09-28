@@ -1,6 +1,7 @@
 """Shared Claude Code and Desktop plugin skills and MCP discovery."""
 
 import logging
+import re
 from abc import abstractmethod
 from functools import partial
 from pathlib import Path
@@ -77,6 +78,9 @@ class ClaudePluginDiscoverer(AgentDiscoverer, abstract=True):
     def _plugin_base_dirs(self) -> list[Path]:
         """Return this client's installed plugin roots."""
 
+    def _plugin_skill_roots(self) -> list[Path]:
+        return self._plugin_base_dirs()
+
     def _plugin_path_allowed(self, path: Path, root: Path) -> bool:
         if not self._confine_plugin_paths:
             return True
@@ -101,20 +105,51 @@ class ClaudePluginDiscoverer(AgentDiscoverer, abstract=True):
                     result[path.as_posix()] = parsed
         return result
 
-    def _scan_plugin_skills_dir(self, path: Path, root: Path) -> SkillsDirsResult:
+    def _scan_plugin_skills_dir(self, path: Path, root: Path, *, include_self: bool = False) -> SkillsDirsResult:
         if not self._plugin_path_allowed(path, root):
             return {}
-        inspect_fn = (
-            partial(inspect_skills_dir, boundary=str(root)) if self._confine_plugin_paths else inspect_skills_dir
+        inspect_fn = partial(
+            inspect_skills_dir,
+            boundary=str(root) if self._confine_plugin_paths else None,
+            include_self=include_self,
         )
         entries = self._scan_skills_dir(path, inspect_fn)
         return {path.as_posix(): entries} if entries is not None else {}
 
     def _discover_plugin_skills(self) -> SkillsDirsResult:
         result: SkillsDirsResult = {}
+        plugin_roots = {manifest.parent.parent for manifest, _ in self._plugin_manifests()}
+        plugin_roots.update(self._plugin_skill_roots())
         for base in self._plugin_base_dirs():
             for path in _walk_under_depth(base, "skills", _MAX_PLUGIN_RGLOB_DEPTH, want_file=False):
                 result.update(self._scan_plugin_skills_dir(path, base))
+            for marker in _walk_under_depth(base, "SKILL.md", _MAX_PLUGIN_RGLOB_DEPTH, want_file=True):
+                root = marker.parent
+                version_root = (
+                    len(root.relative_to(base).parts) == 3
+                    and base.name in ("cache", "repos", "synced")
+                    and re.fullmatch(r"v?\d+\.\d+\.\d+(?:[-+].*)?|[a-f0-9]{7,40}", root.name) is not None
+                )
+                if root not in plugin_roots and not version_root:
+                    continue
+                found = self._scan_plugin_skills_dir(root, base, include_self=True)
+                if version_root:
+                    for entries in found.values():
+                        if isinstance(entries, list):
+                            for entry in entries:
+                                entry.name = root.parent.name
+                result.update(found)
+        seen: set[Path] = set()
+        for key, entries in result.items():
+            if not isinstance(entries, list):
+                continue
+            unique = []
+            for entry in entries:
+                canonical = Path(entry.path).resolve()
+                if canonical not in seen:
+                    seen.add(canonical)
+                    unique.append(entry)
+            result[key] = unique
         return result
 
     def _plugin_manifests(self) -> list[tuple[Path, dict]]:
@@ -147,6 +182,12 @@ class ClaudePluginDiscoverer(AgentDiscoverer, abstract=True):
 
     def _discover_plugin_manifest_skills(self) -> SkillsDirsResult:
         result: SkillsDirsResult = {}
+        seen = {
+            Path(skill.path).resolve()
+            for entries in self._discover_plugin_skills().values()
+            if isinstance(entries, list)
+            for skill in entries
+        }
         for manifest, data in self._plugin_manifests():
             skills = data.get("skills")
             if not isinstance(skills, list):
@@ -155,5 +196,16 @@ class ClaudePluginDiscoverer(AgentDiscoverer, abstract=True):
             for rel in skills:
                 if not isinstance(rel, str) or not rel.strip() or _escapes_plugin_root(rel.strip()):
                     continue
-                result.update(self._scan_plugin_skills_dir(plugin_root / rel.strip(), plugin_root))
+                found = self._scan_plugin_skills_dir(plugin_root / rel.strip(), plugin_root, include_self=True)
+                for path, entries in found.items():
+                    if not isinstance(entries, list):
+                        continue
+                    unique = []
+                    for skill in entries:
+                        canonical = Path(skill.path).resolve()
+                        if canonical not in seen:
+                            seen.add(canonical)
+                            unique.append(skill)
+                    if unique:
+                        result[path] = unique
         return result
