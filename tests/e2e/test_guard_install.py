@@ -34,6 +34,15 @@ class _FakeHookServer(BaseHTTPRequestHandler):
         pass
 
 
+def _assert_config_free_of_install_values(config_file, url, machine_id=None):
+    """Install-time values belong in the installed hook scripts, never in the agent config file."""
+    config_text = config_file.read_text()
+    assert "test-pk-e2e" not in config_text, f"push key leaked into {config_file}"
+    assert url not in config_text, f"hooks base url leaked into {config_file}"
+    if machine_id is not None:
+        assert machine_id not in config_text, f"machine id leaked into {config_file}"
+
+
 @pytest.fixture()
 def fake_hook_server():
     server = HTTPServer(("127.0.0.1", 0), _FakeHookServer)
@@ -78,6 +87,7 @@ class TestGuardInstallE2E:
 
         # The config file should exist and contain valid JSON with hooks
         settings = json.loads(config_file.read_text())
+        _assert_config_free_of_install_values(config_file, fake_hook_server)
         assert "hooks" in settings
         # Should have entries for standard Claude hook events
         assert "PreToolUse" in settings["hooks"]
@@ -150,6 +160,7 @@ class TestGuardInstallE2E:
         assert result.returncode == 0, f"guard install failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
 
         data = json.loads(config_file.read_text())
+        _assert_config_free_of_install_values(config_file, fake_hook_server, "e2e-machine-id")
         assert "hooks" in data
         assert "preToolUse" in data["hooks"]
         assert "stop" in data["hooks"]
@@ -210,6 +221,7 @@ class TestGuardInstallE2E:
         assert result.returncode == 0, f"guard install failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
 
         data = json.loads(config_file.read_text())
+        _assert_config_free_of_install_values(config_file, fake_hook_server, "e2e-machine-id")
         assert "PreToolUse" in data["hooks"]
         assert "Stop" in data["hooks"]
         assert "SubagentStart" in data["hooks"]
