@@ -3496,6 +3496,24 @@ class TestHookScriptVariableSubstitution:
         assert "__AGENT_SCAN_" not in section
         assert "__AGENT_GUARD_" not in section
 
+    @pytest.mark.parametrize("name", _FORWARDER_SCRIPTS + _TRAMPOLINE_SCRIPTS)
+    def test_reinstall_rotates_the_embedded_push_key(self, tmp_path, name):
+        """Reinstalling over an existing script leaves no trace of the superseded key."""
+        dest = tmp_path / "hooks" / name
+        guard_module._copy_hook_script(dest, push_key="pk-old", url="https://api.snyk.io", machine_id="machine-old")
+        assert "pk-old" in dest.read_text()
+
+        guard_module._copy_hook_script(dest, push_key="pk-new", url="https://api.eu.snyk.io", machine_id="machine-new")
+
+        rendered = dest.read_text()
+        assert "pk-old" not in rendered
+        assert "machine-old" not in rendered
+        assert "https://api.snyk.io" not in rendered
+        section = _variables_section(rendered)
+        assert "pk-new" in section
+        assert "machine-new" in section
+        assert "https://api.eu.snyk.io" in section
+
 
 @pytest.mark.skipif(IS_WINDOWS, reason="bash script; skipped on Windows")
 class TestBashHookScript:
