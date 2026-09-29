@@ -3650,9 +3650,7 @@ class TestBashHookScript:
         decoded = base64.b64decode(req["body"].removeprefix("base64:"))
         assert json.loads(decoded) == json.loads(payload)
 
-    def test_install_test_event_uses_embedded_values_over_ambient_environment(
-        self, hook_server, tmp_path, monkeypatch
-    ):
+    def test_install_test_event_uses_embedded_values_over_ambient_environment(self, hook_server, tmp_path, monkeypatch):
         script = tmp_path / "snyk-agent-guard.sh"
         guard_module._copy_hook_script(
             script,
