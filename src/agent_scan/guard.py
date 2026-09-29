@@ -1928,9 +1928,7 @@ def _build_hook_command_powershell(
         _HookInvocation(
             script_path=script_path,
             hook_client=hook_client,
-            push_key=push_key,
-            url=url,
-            machine_id=machine_id,
+            tenant_id=tenant_id,
         )
     )
 
