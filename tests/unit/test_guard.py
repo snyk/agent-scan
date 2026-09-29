@@ -3528,7 +3528,7 @@ class TestHookScriptVariableSubstitution:
             dest, push_key="pk-1", url="https://api.snyk.io", machine_id="machine-1", tenant_id="tenant-1"
         )
 
-        info = guard_module._parse_command_info(command.format(path=dest), ["PreToolUse"])
+        info = guard_module._parse_command_info(command.format(path=dest), ["PreToolUse"], script_path=dest)
 
         assert info["tenant_id"] == "tenant-1"
         assert info["auth_value"] == "pk-1"
@@ -3552,25 +3552,31 @@ class TestHookScriptVariableSubstitution:
         assert info["tenant_id"] == "tenant-1"
 
     @pytest.mark.parametrize(
-        "name, render",
+        "is_windows, render",
         [
-            ("snyk-agent-guard.sh", guard_module._render_posix_command),
-            ("snyk-agent-guard.ps1", guard_module._render_powershell_command),
+            (False, guard_module._render_posix_command),
+            (True, guard_module._render_powershell_command),
         ],
     )
-    def test_a_quote_in_the_install_path_survives_the_command_round_trip(self, tmp_path, name, render):
-        """Both renderers escape a quote by emitting more quotes; parsing must undo that."""
-        dest = tmp_path / "O'Brien" / "hooks" / name
-        guard_module._copy_hook_script(
-            dest, push_key="pk-1", url="https://api.snyk.io", machine_id="machine-1", tenant_id="tenant-1"
-        )
-        command = render(
-            guard_module._HookInvocation(script_path=dest, hook_client="claude-code", tenant_id="tenant-1")
-        )
+    def test_detection_reads_script_from_config_path(self, tmp_path, is_windows, render):
+        config_path = tmp_path / "O'Brien" / "settings.json"
+        with patch(f"{_G}.IS_WINDOWS", is_windows):
+            script_path = guard_module._forwarder_script_path(config_path)
+            guard_module._copy_hook_script(
+                script_path,
+                push_key="pk-1",
+                url="https://api.snyk.io",
+                machine_id="machine-1",
+                tenant_id="tenant-1",
+            )
+            command = render(
+                guard_module._HookInvocation(script_path=script_path, hook_client="claude-code", tenant_id="tenant-1")
+            )
+            _setup_claude_hooks(command, config_path)
 
-        assert guard_module._script_path_from_command(command) == dest
+            info = guard_module._detect_claude_install(config_path)
 
-        info = guard_module._parse_command_info(command, ["PreToolUse"])
+        assert info is not None
         assert info["auth_value"] == "pk-1"
         assert info["url"] == "https://api.snyk.io"
         assert info["tenant_id"] == "tenant-1"
