@@ -1956,6 +1956,11 @@ _VERSION_VALUE_RE = re.compile(rb"\A[A-Za-z0-9][A-Za-z0-9._+-]{0,63}\Z")
 # metacharacters for expansion, command substitution, chaining, and redirection.
 _SHELL_SAFE_VALUE_RE = re.compile(rb"\A[^\x00-\x20\"'\\$`;&|<>()[\]{}]{1,2048}\Z")
 
+# The machine ID may be a user-supplied --machine-id / MACHINE_ID that the hook command
+# used to carry shell-quoted, so it also admits a plain space. That is inert inside the
+# double-quoted literal, and the scripts only ever use the value quoted.
+_MACHINE_ID_VALUE_RE = re.compile(rb"\A[^\x00-\x1f\"'\\$`;&|<>()[\]{}]{1,2048}\Z")
+
 
 def _hook_script_variables(
     *, push_key: str = "", url: str = "", machine_id: str = "", tenant_id: str = ""
@@ -1990,7 +1995,10 @@ def _hook_script_variables(
             b"__AGENT_GUARD_TENANT_ID__",
         }:
             continue
-        pattern = _VERSION_VALUE_RE if placeholder == b"__AGENT_SCAN_VERSION__" else _SHELL_SAFE_VALUE_RE
+        pattern = {
+            b"__AGENT_SCAN_VERSION__": _VERSION_VALUE_RE,
+            b"__AGENT_GUARD_MACHINE_ID__": _MACHINE_ID_VALUE_RE,
+        }.get(placeholder, _SHELL_SAFE_VALUE_RE)
         if not pattern.fullmatch(value):
             # The value may be a credential, so name only the placeholder.
             raise ValueError(f"Unusable install-time variable value for {placeholder.decode()}")

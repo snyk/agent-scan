@@ -3465,6 +3465,20 @@ class TestHookScriptVariableValues:
 
         assert not dest.exists()
 
+    def test_machine_id_may_contain_a_space(self):
+        variables = guard_module._hook_script_variables(machine_id="my box")
+        assert variables[b"__AGENT_GUARD_MACHINE_ID__"] == b"my box"
+
+    @pytest.mark.parametrize("value", ["my\tbox", "two\nlines", 'my"box', "$(id)", "`id`", "a;b", "back\\slash"])
+    def test_machine_id_still_rejects_what_would_break_the_literal(self, value):
+        with pytest.raises(ValueError, match="__AGENT_GUARD_MACHINE_ID__"):
+            guard_module._hook_script_variables(machine_id=value)
+
+    @pytest.mark.parametrize("field", ["push_key", "tenant_id"])
+    def test_space_is_still_rejected_in_other_values(self, field):
+        with pytest.raises(ValueError, match="install-time"):
+            guard_module._hook_script_variables(**{field: "has space"})
+
     def test_the_shipped_variables_are_the_cli_version(self):
         """The sentinel-driven tests prove the plumbing; this pins what actually ships."""
         variables = guard_module._hook_script_variables()
@@ -3835,6 +3849,23 @@ class TestBashHookScript:
         x_user = json.loads(_HookHandler.last_request["headers"]["X-User"])
         assert x_user["identifier"] == "machine-42"
 
+    def test_installed_machine_id_with_a_space_reaches_the_server(self, tmp_path, hook_server):
+        script = tmp_path / "snyk-agent-guard.sh"
+        guard_module._copy_hook_script(script, push_key="installed-key", url=hook_server, machine_id="my box")
+
+        result = subprocess.run(
+            ["bash", str(script), "--client", "claude-code"],
+            input='{"hook_event_name":"test","session_id":"s1"}',
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={"PATH": "/usr/bin:/bin:/usr/local/bin"},
+        )
+
+        assert result.returncode == 0, result.stderr
+        x_user = json.loads(_HookHandler.last_request["headers"]["X-User"])
+        assert x_user["identifier"] == "my box"
+
     def test_installed_script_reports_its_cli_version(self, monkeypatch, tmp_path, hook_server):
         script = tmp_path / "hooks" / "snyk-agent-guard.sh"
         # Installed values win over the environment, so the test server is baked in.
@@ -4154,6 +4185,22 @@ class TestPowerShellHookScript:
         assert result.returncode == 0, result.stderr
         x_user = json.loads(_HookHandler.last_request["headers"]["X-User"])
         assert x_user["identifier"] == "machine-42"
+
+    def test_installed_machine_id_with_a_space_reaches_the_server(self, tmp_path, hook_server):
+        script = tmp_path / "snyk-agent-guard.ps1"
+        guard_module._copy_hook_script(script, push_key="installed-key", url=hook_server, machine_id="my box")
+
+        result = subprocess.run(
+            [self._ps_cmd(), "-File", str(script), "-Client", "claude-code"],
+            input='{"hook_event_name":"test","session_id":"s1"}',
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+        assert result.returncode == 0, result.stderr
+        x_user = json.loads(_HookHandler.last_request["headers"]["X-User"])
+        assert x_user["identifier"] == "my box"
 
     def test_installed_script_reports_its_cli_version(self, monkeypatch, tmp_path, hook_server):
         script = tmp_path / "hooks" / "snyk-agent-guard.ps1"
