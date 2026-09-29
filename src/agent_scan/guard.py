@@ -1881,21 +1881,6 @@ def _build_discover_hook_command(
     return _render_posix_command(invocation)
 
 
-def _build_hook_command_powershell(
-    script_path: Path,
-    hook_client: str,
-    *,
-    tenant_id: str = "",
-) -> str:
-    return _render_powershell_command(
-        _HookInvocation(
-            script_path=script_path,
-            hook_client=hook_client,
-            tenant_id=tenant_id,
-        )
-    )
-
-
 def _shell_quote(s: str) -> str:
     return "'" + s.replace("'", "'\"'\"'") + "'"
 

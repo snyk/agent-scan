@@ -38,7 +38,6 @@ from agent_scan.guard import (
     CURSOR_HOOKS_PATH,
     CURSOR_MANAGED_HOOKS_PATH,
     _build_hook_command,
-    _build_hook_command_powershell,
     _compact_events,
     _compute_hooks_diff,
     _config_path,
@@ -181,6 +180,18 @@ def _detect_test_client(client: str, path: Path) -> dict | None:
         "github-copilot": _detect_copilot_install,
     }[client]
     return detect(path)
+
+
+def _powershell_hook_command(script_path: Path, hook_client: str) -> str:
+    """Render the PowerShell hook command regardless of the host platform.
+
+    _build_hook_command picks a renderer from IS_WINDOWS, so the PowerShell form
+    is unreachable on POSIX. This calls the renderer directly so the tests below
+    can assert on it anywhere.
+    """
+    return guard_module._render_powershell_command(
+        guard_module._HookInvocation(script_path=script_path, hook_client=hook_client)
+    )
 
 
 # ===================================================================
@@ -400,14 +411,14 @@ class TestBuildHookCommand:
         assert "TENANT_ID='tid'" in cmd
 
     def test_powershell_carries_no_credentials(self):
-        cmd = _build_hook_command_powershell(Path("C:/x/hook.ps1"), "codex")
+        cmd = _powershell_hook_command(Path("C:/x/hook.ps1"), "codex")
         assert "-MachineId" not in cmd
         assert "-PushKey" not in cmd
         assert "-RemoteUrl" not in cmd
 
     def test_powershell_escapes_single_quotes_in_all_literals(self):
         script_path = Path("C:/Users/O'Brien/hook.ps1")
-        cmd = _build_hook_command_powershell(script_path, "codex")
+        cmd = _powershell_hook_command(script_path, "codex")
 
         expected_path = str(script_path).replace("'", "''")
         assert f"-File '{expected_path}'" in cmd
@@ -4122,7 +4133,7 @@ class TestCursorStylePowerShellInvocation:
 
     def test_cursor_invokes_command_string(self, hook_server):
         script = _get_script_path("snyk-agent-guard.ps1")
-        command = _build_hook_command_powershell(
+        command = _powershell_hook_command(
             script,
             "claude-code",
         )
