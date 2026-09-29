@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import stat
 import sys
@@ -1620,11 +1621,37 @@ def _parse_command_info(cmd: str, events: list[str]) -> dict:
     }
 
 
+_SCRIPT_NAME_RE = re.compile(r"snyk-agent-guard(?:-discover)?\.(?:sh|ps1)\Z")
+_PS_FILE_ARG_RE = re.compile(r"-File\s+(?:'((?:[^']|'')*)'|\"([^\"]*)\"|(\S+))")
+
+
 def _script_path_from_command(cmd: str) -> Path | None:
-    match = re.search(
-        r"(?:bash|powershell\s+-File)\s+['\"]([^'\"]*snyk-agent-guard(?:-discover)?\.(?:sh|ps1))['\"]", cmd
-    )
-    return Path(match.group(1)) if match else None
+    """Recover the hook script path from a command rendered by ``_render_*_command``.
+
+    Both renderers escape an embedded quote by emitting *more* quote characters
+    (``'"'"'`` for POSIX, ``''`` for PowerShell), so the path has to be unquoted with
+    the matching grammar. Matching a quote-delimited run instead stops at the first
+    escaped quote, which loses paths such as ``/Users/O'Brien/hooks``.
+    """
+    for candidate in _script_path_candidates(cmd):
+        if _SCRIPT_NAME_RE.search(candidate):
+            return Path(candidate)
+    return None
+
+
+def _script_path_candidates(cmd: str) -> list[str]:
+    # PowerShell first: shlex would silently join its doubled-quote escape into a
+    # plausible-looking but wrong path (``O''Brien`` -> ``OBrien``).
+    match = _PS_FILE_ARG_RE.search(cmd)
+    if match:
+        quoted, double_quoted, bare = match.groups()
+        if quoted is not None:
+            return [quoted.replace("''", "'")]
+        return [double_quoted if double_quoted is not None else bare]
+    try:
+        return shlex.split(cmd)
+    except ValueError:
+        return []
 
 
 def _read_hook_script_variables(path: Path) -> dict[str, str]:
