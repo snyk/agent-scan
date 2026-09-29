@@ -1034,6 +1034,39 @@ class TestDiscoveryHookScriptFiles:
         assert script.current_checksum == hashlib.sha256(b"stale discovery script\n").hexdigest()
         assert script.new_checksum == hashlib.sha256(discover_script.read_bytes()).hexdigest()
 
+    def test_installed_values_win_over_ambient_environment(self, tmp_path):
+        script = tmp_path / "snyk-agent-guard-discover.sh"
+        guard_module._copy_hook_script(
+            script,
+            push_key="installed-key",
+            url="https://installed.example",
+            machine_id="installed-machine",
+        )
+        stub = tmp_path / "snyk-agent-scan"
+        marker = tmp_path / "env"
+        stub.write_text('#!/bin/sh\nprintf "%s|%s|%s" "$PUSH_KEY" "$REMOTE_HOOKS_BASE_URL" "$MACHINE_ID" > "$MARKER"\n')
+        stub.chmod(0o755)
+        env = {
+            **os.environ,
+            "AGENT_SCAN_COMMAND": str(stub),
+            "PUSH_KEY": "ambient-key",
+            "REMOTE_HOOKS_BASE_URL": "https://ambient.example",
+            "MACHINE_ID": "ambient-machine",
+            "MARKER": str(marker),
+        }
+
+        result = subprocess.run(
+            ["bash", str(script), "--client", "claude-code"],
+            input="{}",
+            text=True,
+            capture_output=True,
+            timeout=5,
+            env=env,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert marker.read_text() == "installed-key|https://installed.example|installed-machine"
+
     def test_stale_absolute_command_does_not_fall_back_to_path(self, tmp_path):
         script = Path(guard_module.__file__).parent / "hooks" / "snyk-agent-guard-discover.sh"
         bin_dir = tmp_path / "bin"
@@ -3294,7 +3327,7 @@ def _variables_section(text: str) -> str:
 _SENTINEL_VERSION = "9.9.9-test"
 
 
-def _copy_with_sentinel_version(monkeypatch, dest: Path) -> None:
+def _copy_with_sentinel_version(monkeypatch, dest: Path, url: str = "https://api.snyk.io") -> None:
     """Install *dest* carrying a version no fallback could have produced."""
     monkeypatch.setattr(
         guard_module,
@@ -3302,7 +3335,7 @@ def _copy_with_sentinel_version(monkeypatch, dest: Path) -> None:
         lambda **kwargs: {
             b"__AGENT_SCAN_VERSION__": _SENTINEL_VERSION.encode(),
             b"__AGENT_GUARD_PUSH_KEY__": b"test-push-key",
-            b"__AGENT_GUARD_REMOTE_HOOKS_BASE_URL__": b"https://api.snyk.io",
+            b"__AGENT_GUARD_REMOTE_HOOKS_BASE_URL__": url.encode(),
             b"__AGENT_GUARD_MACHINE_ID__": b"test-machine-id",
         },
     )
@@ -3617,6 +3650,35 @@ class TestBashHookScript:
         decoded = base64.b64decode(req["body"].removeprefix("base64:"))
         assert json.loads(decoded) == json.loads(payload)
 
+    def test_install_test_event_uses_embedded_values_over_ambient_environment(
+        self, hook_server, tmp_path, monkeypatch
+    ):
+        script = tmp_path / "snyk-agent-guard.sh"
+        guard_module._copy_hook_script(
+            script,
+            push_key="installed-key",
+            url=hook_server,
+            machine_id="installed-machine",
+            tenant_id="installed-tenant",
+        )
+        monkeypatch.setenv("PUSH_KEY", "ambient-key")
+        monkeypatch.setenv("PUSHKEY", "ambient-key-alias")
+        monkeypatch.setenv("REMOTE_HOOKS_BASE_URL", "https://ambient.example")
+        monkeypatch.setenv("MACHINE_ID", "ambient-machine")
+
+        ok, detail = guard_module._invoke_hook_script(
+            script,
+            "claude-code",
+            '{"hook_event_name":"hooksConfigured","session_id":"hooks-setup"}',
+        )
+
+        assert ok, detail
+        req = _HookHandler.last_request
+        assert req is not None
+        assert "/hidden/agent-monitor/hooks/claude-code" in req["path"]
+        assert req["headers"]["X-Client-Id"] == "installed-key"
+        assert json.loads(req["headers"]["X-User"])["identifier"] == "installed-machine"
+
     def test_posts_large_payload_without_exec_argument_limit(self, hook_server):
         script = _get_script_path("snyk-agent-guard.sh")
         payload = json.dumps(
@@ -3777,7 +3839,8 @@ class TestBashHookScript:
 
     def test_installed_script_reports_its_cli_version(self, monkeypatch, tmp_path, hook_server):
         script = tmp_path / "hooks" / "snyk-agent-guard.sh"
-        _copy_with_sentinel_version(monkeypatch, script)
+        # Installed values win over the environment, so the test server is baked in.
+        _copy_with_sentinel_version(monkeypatch, script, url=hook_server)
 
         result = subprocess.run(
             ["bash", str(script), "--client", "claude-code"],
@@ -5498,8 +5561,7 @@ class TestDiscoverServersPayload:
 
 
 class TestInvokeHookScript:
-    def test_posix_invocation_leaves_machine_id_unset(self, monkeypatch):
-        monkeypatch.delenv("MACHINE_ID", raising=False)
+    def test_posix_invocation_shape(self):
         completed = subprocess.CompletedProcess([], 0, stdout="ok", stderr="")
         with patch(f"{_G}.IS_WINDOWS", False), patch("subprocess.run", return_value=completed) as run:
             result = guard_module._invoke_hook_script(
@@ -5510,21 +5572,7 @@ class TestInvokeHookScript:
 
         assert result == (True, "")
         assert run.call_args.args[0] == ["bash", "/hook.sh", "--client", "claude-code"]
-        assert "MACHINE_ID" not in run.call_args.kwargs["env"]
         assert run.call_args.kwargs["input"] == "{}"
-
-    def test_posix_invocation_preserves_ambient_machine_id(self, monkeypatch):
-        monkeypatch.setenv("MACHINE_ID", "ambient-machine")
-        completed = subprocess.CompletedProcess([], 0, stdout="ok", stderr="")
-        with patch(f"{_G}.IS_WINDOWS", False), patch("subprocess.run", return_value=completed) as run:
-            result = guard_module._invoke_hook_script(
-                PurePosixPath("/hook.sh"),
-                "cursor",
-                "{}",
-            )
-
-        assert result == (True, "")
-        assert run.call_args.kwargs["env"]["MACHINE_ID"] == "ambient-machine"
 
     def test_empty_machine_id_is_rejected(self):
         with pytest.raises(ValueError, match="machine ID"):
@@ -5536,7 +5584,7 @@ class TestInvokeHookScript:
                 machine_id="  ",
             )
 
-    def test_windows_invocation_machine_id_shape(self):
+    def test_windows_invocation_shape(self):
         completed = subprocess.CompletedProcess([], 0, stdout="ok", stderr="")
         with patch(f"{_G}.IS_WINDOWS", True), patch("subprocess.run", return_value=completed) as run:
             result = guard_module._invoke_hook_script(

@@ -116,16 +116,18 @@ hook_main() {
   done
 
   [[ -n "$client" ]] || die "Missing required argument: --client <claude-code|cursor|codex|github-copilot>"
-  local remote_url="${REMOTE_HOOKS_BASE_URL:-$INSTALL_REMOTE_HOOKS_BASE_URL}"
-  [[ "$remote_url" != "__AGENT_GUARD_REMOTE_HOOKS_BASE_URL__" ]] || remote_url=""
+  # Installed values win over the environment, so a stale export cannot override a
+  # reinstall; the environment is only a fallback for a script never filled in.
+  local remote_url="$INSTALL_REMOTE_HOOKS_BASE_URL"
+  [[ "$remote_url" != "__AGENT_GUARD_REMOTE_HOOKS_BASE_URL__" ]] || remote_url="${REMOTE_HOOKS_BASE_URL:-}"
   [[ -n "$remote_url" ]] || die "REMOTE_HOOKS_BASE_URL environment variable is not set"
 
   local pushkey
-  pushkey="${PUSH_KEY:-${PUSHKEY:-$INSTALL_PUSH_KEY}}"
-  [[ "$pushkey" != "__AGENT_GUARD_PUSH_KEY__" ]] || pushkey=""
+  pushkey="$INSTALL_PUSH_KEY"
+  [[ "$pushkey" != "__AGENT_GUARD_PUSH_KEY__" ]] || pushkey="${PUSH_KEY:-${PUSHKEY:-}}"
   [[ -n "$pushkey" ]] || die "PUSH_KEY environment variable is not set"
-  local machine_id="${MACHINE_ID:-$INSTALL_MACHINE_ID}"
-  [[ "$machine_id" != "__AGENT_GUARD_MACHINE_ID__" ]] || machine_id=""
+  local machine_id="$INSTALL_MACHINE_ID"
+  [[ "$machine_id" != "__AGENT_GUARD_MACHINE_ID__" ]] || machine_id="${MACHINE_ID:-}"
   [[ -n "$machine_id" ]] || die "MACHINE_ID environment variable is not set"
 
   local cli_version user_agent

@@ -42,23 +42,22 @@ $VERSION = "2025-11-11"
 # Main
 # ---------------------------------------------------------------------------
 
-# Parameters take precedence over env vars.
-if (-not $PushKey) { $PushKey = if ($env:PUSH_KEY) { $env:PUSH_KEY } elseif ($env:PUSHKEY) { $env:PUSHKEY } else { $INSTALL_PUSH_KEY } }
-if ($PushKey -eq "__AGENT_GUARD_PUSH_KEY__") { $PushKey = $null }
+# Parameters take precedence over installed values, which take precedence over env vars,
+# so a stale env var cannot override a reinstall. Env vars are only a fallback for a
+# script never filled in.
+if (-not $PushKey) { $PushKey = if ($INSTALL_PUSH_KEY -ne "__AGENT_GUARD_PUSH_KEY__") { $INSTALL_PUSH_KEY } elseif ($env:PUSH_KEY) { $env:PUSH_KEY } else { $env:PUSHKEY } }
 if (-not $PushKey) {
     Write-Error "PUSH_KEY is required (pass -PushKey or set env var)"
     exit 1
 }
 
-if (-not $RemoteUrl) { $RemoteUrl = if ($env:REMOTE_HOOKS_BASE_URL) { $env:REMOTE_HOOKS_BASE_URL } else { $INSTALL_REMOTE_HOOKS_BASE_URL } }
-if ($RemoteUrl -eq "__AGENT_GUARD_REMOTE_HOOKS_BASE_URL__") { $RemoteUrl = $null }
+if (-not $RemoteUrl) { $RemoteUrl = if ($INSTALL_REMOTE_HOOKS_BASE_URL -ne "__AGENT_GUARD_REMOTE_HOOKS_BASE_URL__") { $INSTALL_REMOTE_HOOKS_BASE_URL } else { $env:REMOTE_HOOKS_BASE_URL } }
 if (-not $RemoteUrl) {
     Write-Error "REMOTE_HOOKS_BASE_URL is required (pass -RemoteUrl or set env var)"
     exit 1
 }
 
-if (-not $MachineId) { $MachineId = if ($env:MACHINE_ID) { $env:MACHINE_ID } else { $INSTALL_MACHINE_ID } }
-if ($MachineId -eq "__AGENT_GUARD_MACHINE_ID__") { $MachineId = $null }
+if (-not $MachineId) { $MachineId = if ($INSTALL_MACHINE_ID -ne "__AGENT_GUARD_MACHINE_ID__") { $INSTALL_MACHINE_ID } else { $env:MACHINE_ID } }
 if (-not $MachineId) {
     Write-Error "MACHINE_ID is required (pass -MachineId or set env var)"
     exit 1
