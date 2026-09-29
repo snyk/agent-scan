@@ -1949,8 +1949,9 @@ _SECTION_END = b"# --- END install-time variables ---"
 _VERSION_VALUE_RE = re.compile(rb"\A[A-Za-z0-9][A-Za-z0-9._+-]{0,63}\Z")
 
 # Guards the values install substitutes into the hook scripts (push key, remote URL,
-# machine ID). These come from outside this repo and land inside a double-quoted shell
-# literal, so this denies everything that could break out of or extend that literal:
+# machine ID, tenant ID). These come from outside this repo and land inside a
+# double-quoted shell literal, so this denies everything that could break out of or
+# extend that literal:
 # whitespace and control characters, quotes, backslash, and the shell/PowerShell
 # metacharacters for expansion, command substitution, chaining, and redirection.
 _SHELL_SAFE_VALUE_RE = re.compile(rb"\A[^\x00-\x20\"'\\$`;&|<>()[\]{}]{1,2048}\Z")
@@ -1963,8 +1964,10 @@ def _hook_script_variables(
 
     Keyed by the ``__PLACEHOLDER__`` the scripts declare between their
     ``--- BEGIN/END install-time variables ---`` markers. To add a variable, add it here
-    and to the section in both snyk-agent-guard.sh and snyk-agent-guard.ps1; the discovery
-    trampolines carry none, as the CLI they exec reports its own version.
+    and to the section in both snyk-agent-guard.sh and snyk-agent-guard.ps1, and in the
+    discovery trampolines if ``guard discover`` needs it. The trampolines carry only the
+    push key, remote URL and machine ID: the CLI they exec reports its own version, and
+    discovery does not need the tenant.
 
     Only the values are checked, because only they come from outside this repo: the
     version is read from the installed distribution's metadata, and lands inside a

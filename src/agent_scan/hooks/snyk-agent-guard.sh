@@ -16,7 +16,6 @@
 set -euo pipefail
 
 # --- BEGIN install-time variables ---
-# Agent-scan CLI version (replaced at install time).
 AGENT_SCAN_VERSION="__AGENT_SCAN_VERSION__"
 INSTALL_PUSH_KEY="__AGENT_GUARD_PUSH_KEY__"
 INSTALL_REMOTE_HOOKS_BASE_URL="__AGENT_GUARD_REMOTE_HOOKS_BASE_URL__"
