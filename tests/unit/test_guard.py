@@ -4969,11 +4969,12 @@ class TestInstallHooksOrchestration:
         ctx["revoke"].assert_not_called()
 
     def test_test_event_failure_cleans_new_script(self, ctx, tmp_path):
-        ctx["main_script"] = guard_module._CopiedScript(ctx["dest"], False, True, None, _NEW_CHECKSUM)
         ctx["test_event"].return_value = False
         with pytest.raises(SystemExit):
             self._call(tmp_path)
-        ctx["dest"].unlink.assert_called_once_with(missing_ok=True)
+        config = tmp_path / "config.json"
+        assert not guard_module._forwarder_script_path(config).exists()
+        assert not guard_module._discover_script_path(config).exists()
 
     def test_test_event_failure_cleans_new_discovery_script(self, ctx, tmp_path):
         discover_script_name = (
@@ -5018,17 +5019,89 @@ class TestInstallHooksOrchestration:
         assert discover_script.read_text() == "existing\n"
 
     def test_test_event_failure_keeps_existing_script(self, ctx, tmp_path):
-        ctx["main_script"] = guard_module._CopiedScript(
-            ctx["dest"],
-            True,
-            False,
-            _CURRENT_CHECKSUM,
-            _NEW_CHECKSUM,
-        )
+        config = tmp_path / "config.json"
+        config.write_text("{}")
+        main_script = guard_module._forwarder_script_path(config)
+        discover_script = guard_module._discover_script_path(config)
+        main_script.parent.mkdir(parents=True, exist_ok=True)
+        originals = {main_script: b"old forwarder credential", discover_script: b"old discovery credential"}
+        for path, content in originals.items():
+            path.write_bytes(content)
+            path.chmod(0o640)
+
+        def overwrite_script(path, **kwargs):
+            existed = path.exists()
+            path.write_bytes(b"new credential")
+            path.chmod(0o755)
+            return guard_module._CopiedScript(path, existed, True, _CURRENT_CHECKSUM, _NEW_CHECKSUM)
+
+        ctx["copy"].side_effect = overwrite_script
         ctx["test_event"].return_value = False
         with pytest.raises(SystemExit):
             self._call(tmp_path, minted=True, config_exists=True)
-        ctx["dest"].unlink.assert_not_called()
+
+        for path, content in originals.items():
+            assert path.read_bytes() == content
+            if not guard_module.IS_WINDOWS:
+                assert stat.S_IMODE(path.stat().st_mode) == 0o640
+
+    def test_test_event_failure_removes_new_scripts(self, ctx, tmp_path):
+        def create_script(path, **kwargs):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"new credential")
+            return guard_module._CopiedScript(path, False, True, None, _NEW_CHECKSUM)
+
+        ctx["copy"].side_effect = create_script
+        ctx["test_event"].return_value = False
+        with pytest.raises(SystemExit):
+            self._call(tmp_path, minted=True)
+
+        config = tmp_path / "config.json"
+        assert not guard_module._forwarder_script_path(config).exists()
+        assert not guard_module._discover_script_path(config).exists()
+
+    def test_config_write_failure_restores_scripts_config_and_backup(self, ctx, tmp_path):
+        config = tmp_path / "config.json"
+        config.write_text("{}")
+        config.chmod(0o640)
+        backup = config.with_name(f"{config.name}.backup")
+        backup.write_text("older backup")
+        backup.chmod(0o600)
+        main_script = guard_module._forwarder_script_path(config)
+        discover_script = guard_module._discover_script_path(config)
+        main_script.parent.mkdir(parents=True, exist_ok=True)
+        originals = {main_script: b"old forwarder credential", discover_script: b"old discovery credential"}
+        for path, content in originals.items():
+            path.write_bytes(content)
+            path.chmod(0o640)
+
+        def overwrite_script(path, **kwargs):
+            existed = path.exists()
+            path.write_bytes(b"new credential")
+            path.chmod(0o755)
+            return guard_module._CopiedScript(path, existed, True, _CURRENT_CHECKSUM, _NEW_CHECKSUM)
+
+        def partially_write_then_fail(prepared, path, preserved):
+            config_backup = path.with_name(f"{path.name}.backup")
+            config_backup.write_text("backup created by failed write")
+            path.write_text("partial config")
+            raise OSError("simulated config write failure")
+
+        ctx["copy"].side_effect = overwrite_script
+        ctx["write"].side_effect = partially_write_then_fail
+        with pytest.raises(OSError, match="simulated config write failure"):
+            self._call(tmp_path, config_exists=True)
+
+        assert config.read_text() == "{}"
+        if not guard_module.IS_WINDOWS:
+            assert stat.S_IMODE(config.stat().st_mode) == 0o640
+        assert backup.read_text() == "older backup"
+        if not guard_module.IS_WINDOWS:
+            assert stat.S_IMODE(backup.stat().st_mode) == 0o600
+        for path, content in originals.items():
+            assert path.read_bytes() == content
+            if not guard_module.IS_WINDOWS:
+                assert stat.S_IMODE(path.stat().st_mode) == 0o640
 
     def test_test_event_failure_does_not_write_config(self, ctx, tmp_path):
         ctx["test_event"].return_value = False

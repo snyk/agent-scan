@@ -590,69 +590,77 @@ def _install_hooks(
             "the session-start discovery hook will not be installed"
         )
     discover_script_path = _discover_script_path(config_path)
-    discover_script_existed = discover_script_path.exists()
-
-    main_script = _copy_hook_script(
-        _forwarder_script_path(config_path), push_key=push_key, url=url, machine_id=machine_id, tenant_id=tenant_id
+    script_snapshots = (
+        _snapshot_file(_forwarder_script_path(config_path)),
+        _snapshot_file(discover_script_path),
+        _snapshot_file(config_path),
+        _snapshot_file(config_path.with_name(f"{config_path.name}.backup")),
     )
-    discover_script = (
-        _copy_hook_script(discover_script_path, push_key=push_key, url=url, machine_id=machine_id)
-        if install_discovery
-        else None
-    )
-
-    dest_path = main_script.path
-    script_updated = main_script.updated or bool(discover_script and discover_script.updated)
-    command = _build_hook_command(
-        dest_path,
-        hook_client,
-        tenant_id=tenant_id,
-    )
-    discover_command = None
-    if install_discovery:
-        assert agent_scan_command is not None
-        discover_command = _build_discover_hook_command(
-            discover_script_path,
-            agent_scan_command=agent_scan_command,
-            tenant_id=tenant_id,
-            hook_client=hook_client,
+    try:
+        main_script = _copy_hook_script(
+            _forwarder_script_path(config_path), push_key=push_key, url=url, machine_id=machine_id, tenant_id=tenant_id
         )
-    prepared_config, prepared_content, hooks_diff, preserved = _prepare_client_config(
-        client,
-        command,
-        config_path,
-        discover_command=discover_command,
-    )
+        discover_script = (
+            _copy_hook_script(discover_script_path, push_key=push_key, url=url, machine_id=machine_id)
+            if install_discovery
+            else None
+        )
 
-    first_install = not main_script.existed
-    config_changed = bool(hooks_diff["added"] or hooks_diff["modified"] or hooks_diff["removed"])
+        dest_path = main_script.path
+        script_updated = main_script.updated or bool(discover_script and discover_script.updated)
+        command = _build_hook_command(
+            dest_path,
+            hook_client,
+            tenant_id=tenant_id,
+        )
+        discover_command = None
+        if install_discovery:
+            assert agent_scan_command is not None
+            discover_command = _build_discover_hook_command(
+                discover_script_path,
+                agent_scan_command=agent_scan_command,
+                tenant_id=tenant_id,
+                hook_client=hook_client,
+            )
+        prepared_config, prepared_content, hooks_diff, preserved = _prepare_client_config(
+            client,
+            command,
+            config_path,
+            discover_command=discover_command,
+        )
 
-    if not _send_test_event(
-        push_key,
-        url,
-        hook_client,
-        dest_path,
-        first_install=first_install,
-        config_changed=config_changed,
-        hooks_diff=hooks_diff,
-        push_key_changed=push_key_changed,
-        current_checksum=main_script.current_checksum,
-        new_checksum=main_script.new_checksum,
-        discover_current_checksum=discover_script.current_checksum if discover_script else None,
-        discover_new_checksum=discover_script.new_checksum if discover_script else None,
-        machine_id=machine_id,
-    ):
-        if not main_script.existed:
-            dest_path.unlink(missing_ok=True)
-        if not discover_script_existed:
-            discover_script_path.unlink(missing_ok=True)
-        rich.print("[bold red]Aborting install \u2014 test event failed.[/bold red]")
-        raise SystemExit(1)
+        first_install = not main_script.existed
+        config_changed = bool(hooks_diff["added"] or hooks_diff["modified"] or hooks_diff["removed"])
 
-    config_written = _write_client_config(client, config_path, prepared_config, prepared_content, preserved)
-    if not install_discovery and discover_script_path.exists():
-        discover_script_path.unlink()
-        rich.print(f"[green]✓[/green]  Removed stale hook script [dim]{discover_script_path}[/dim]")
+        if not _send_test_event(
+            push_key,
+            url,
+            hook_client,
+            dest_path,
+            first_install=first_install,
+            config_changed=config_changed,
+            hooks_diff=hooks_diff,
+            push_key_changed=push_key_changed,
+            current_checksum=main_script.current_checksum,
+            new_checksum=main_script.new_checksum,
+            discover_current_checksum=discover_script.current_checksum if discover_script else None,
+            discover_new_checksum=discover_script.new_checksum if discover_script else None,
+            machine_id=machine_id,
+        ):
+            rich.print("[bold red]Aborting install \u2014 test event failed.[/bold red]")
+            raise SystemExit(1)
+
+        config_written = _write_client_config(client, config_path, prepared_config, prepared_content, preserved)
+        if not install_discovery and discover_script_path.exists():
+            discover_script_path.unlink()
+            rich.print(f"[green]✓[/green]  Removed stale hook script [dim]{discover_script_path}[/dim]")
+    except BaseException:
+        for snapshot in reversed(script_snapshots):
+            try:
+                _restore_file(snapshot)
+            except OSError as rollback_error:
+                rich.print(f"[bold red]Rollback failed for {snapshot.path}:[/bold red] {rollback_error}")
+        raise
 
     if script_updated or config_written or minted:
         rich.print(f"[green]\u2713[/green]  {scope.title()} hooks installed for [bold]{label}[/bold]")
@@ -1905,6 +1913,30 @@ class _CopiedScript(NamedTuple):
     updated: bool
     current_checksum: str | None
     new_checksum: str
+
+
+class _FileSnapshot(NamedTuple):
+    path: Path
+    content: bytes | None
+    mode: int | None
+
+
+def _snapshot_file(path: Path) -> _FileSnapshot:
+    if not path.exists():
+        return _FileSnapshot(path, None, None)
+    return _FileSnapshot(path, path.read_bytes(), stat.S_IMODE(path.stat().st_mode))
+
+
+def _restore_file(snapshot: _FileSnapshot) -> None:
+    if snapshot.content is None:
+        if snapshot.path.exists():
+            snapshot.path.unlink()
+        return
+    if not snapshot.path.exists() or snapshot.path.read_bytes() != snapshot.content:
+        snapshot.path.parent.mkdir(parents=True, exist_ok=True)
+        snapshot.path.write_bytes(snapshot.content)
+    if snapshot.mode is not None and stat.S_IMODE(snapshot.path.stat().st_mode) != snapshot.mode:
+        snapshot.path.chmod(snapshot.mode)
 
 
 # The forwarder scripts fence the values install fills in with these markers
