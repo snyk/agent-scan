@@ -33,12 +33,11 @@ $INSTALL_REMOTE_HOOKS_BASE_URL = "__AGENT_GUARD_REMOTE_HOOKS_BASE_URL__"
 $INSTALL_MACHINE_ID = "__AGENT_GUARD_MACHINE_ID__"
 # --- END install-time variables ---
 
-$env:PUSH_KEY = if ($PushKey) { $PushKey } elseif ($env:PUSH_KEY) { $env:PUSH_KEY } else { $INSTALL_PUSH_KEY }
-if ($env:PUSH_KEY -eq "__AGENT_GUARD_PUSH_KEY__") { Remove-Item Env:PUSH_KEY -ErrorAction SilentlyContinue }
-$env:REMOTE_HOOKS_BASE_URL = if ($RemoteUrl) { $RemoteUrl } elseif ($env:REMOTE_HOOKS_BASE_URL) { $env:REMOTE_HOOKS_BASE_URL } else { $INSTALL_REMOTE_HOOKS_BASE_URL }
-if ($env:REMOTE_HOOKS_BASE_URL -eq "__AGENT_GUARD_REMOTE_HOOKS_BASE_URL__") { Remove-Item Env:REMOTE_HOOKS_BASE_URL -ErrorAction SilentlyContinue }
-if (-not $MachineId) { $MachineId = if ($env:MACHINE_ID) { $env:MACHINE_ID } else { $INSTALL_MACHINE_ID } }
-if ($MachineId -eq "__AGENT_GUARD_MACHINE_ID__") { $MachineId = $null }
+# Parameters take precedence over installed values, which take precedence over env vars;
+# env vars are only a fallback for a script never filled in.
+if ($PushKey) { $env:PUSH_KEY = $PushKey } elseif ($INSTALL_PUSH_KEY -ne "__AGENT_GUARD_PUSH_KEY__") { $env:PUSH_KEY = $INSTALL_PUSH_KEY }
+if ($RemoteUrl) { $env:REMOTE_HOOKS_BASE_URL = $RemoteUrl } elseif ($INSTALL_REMOTE_HOOKS_BASE_URL -ne "__AGENT_GUARD_REMOTE_HOOKS_BASE_URL__") { $env:REMOTE_HOOKS_BASE_URL = $INSTALL_REMOTE_HOOKS_BASE_URL }
+if (-not $MachineId) { $MachineId = if ($INSTALL_MACHINE_ID -ne "__AGENT_GUARD_MACHINE_ID__") { $INSTALL_MACHINE_ID } else { $env:MACHINE_ID } }
 if (-not $MachineId) { exit 0 }
 $env:MACHINE_ID = $MachineId
 
