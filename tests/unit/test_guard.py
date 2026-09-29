@@ -3514,6 +3514,43 @@ class TestHookScriptVariableSubstitution:
         assert "machine-new" in section
         assert "https://api.eu.snyk.io" in section
 
+    @pytest.mark.parametrize(
+        "name, command",
+        [
+            ("snyk-agent-guard.sh", "bash '{path}' --client claude-code"),
+            ("snyk-agent-guard.ps1", "powershell -File '{path}' -Client claude-code"),
+        ],
+    )
+    def test_uninstall_recovers_the_tenant_from_the_script(self, tmp_path, name, command):
+        """Revocation needs a tenant embedded in the script."""
+        dest = tmp_path / "hooks" / name
+        guard_module._copy_hook_script(
+            dest, push_key="pk-1", url="https://api.snyk.io", machine_id="machine-1", tenant_id="tenant-1"
+        )
+
+        info = guard_module._parse_command_info(command.format(path=dest), ["PreToolUse"])
+
+        assert info["tenant_id"] == "tenant-1"
+        assert info["auth_value"] == "pk-1"
+        assert info["url"] == "https://api.snyk.io"
+
+    def test_a_command_tenant_still_wins_for_a_script_predating_the_variable(self, tmp_path):
+        """Installs made before the tenant was embedded keep revoking off the command."""
+        dest = tmp_path / "hooks" / "snyk-agent-guard.sh"
+        dest.parent.mkdir(parents=True)
+        dest.write_text(
+            f"{_SECTION_BEGIN}"
+            'INSTALL_PUSH_KEY="pk-1"\n'
+            'INSTALL_REMOTE_HOOKS_BASE_URL="https://api.snyk.io"\n'
+            f"{_SECTION_END}"
+        )
+
+        info = guard_module._parse_command_info(
+            f"TENANT_ID='tenant-1' bash '{dest}' --client claude-code", ["PreToolUse"]
+        )
+
+        assert info["tenant_id"] == "tenant-1"
+
 
 @pytest.mark.skipif(IS_WINDOWS, reason="bash script; skipped on Windows")
 class TestBashHookScript:
@@ -4593,7 +4630,11 @@ class TestInstallHooksOrchestration:
         config = self._call(tmp_path, client="claude")
 
         ctx["copy"].assert_called_once_with(
-            guard_module._forwarder_script_path(config), push_key="pk-test", url="https://api.snyk.io", machine_id=""
+            guard_module._forwarder_script_path(config),
+            push_key="pk-test",
+            url="https://api.snyk.io",
+            machine_id="",
+            tenant_id="tid-1",
         )
         ctx["build_discover"].assert_not_called()
         assert ctx["prep_claude"].call_args.kwargs["discover_command"] is None

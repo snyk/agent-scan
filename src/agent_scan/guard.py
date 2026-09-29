@@ -593,7 +593,7 @@ def _install_hooks(
     discover_script_existed = discover_script_path.exists()
 
     main_script = _copy_hook_script(
-        _forwarder_script_path(config_path), push_key=push_key, url=url, machine_id=machine_id
+        _forwarder_script_path(config_path), push_key=push_key, url=url, machine_id=machine_id, tenant_id=tenant_id
     )
     discover_script = (
         _copy_hook_script(discover_script_path, push_key=push_key, url=url, machine_id=machine_id)
@@ -1607,6 +1607,7 @@ def _parse_command_info(cmd: str, events: list[str]) -> dict:
     embedded = _read_hook_script_variables(script_path) if script_path else {}
     push_key = embedded.get("PUSH_KEY", push_key)
     url = embedded.get("REMOTE_HOOKS_BASE_URL", url)
+    tenant_id = embedded.get("TENANT_ID", tenant_id)
     host = urlparse(url).netloc if url else "unknown"
 
     return {
@@ -1643,6 +1644,7 @@ def _read_hook_script_variables(path: Path) -> dict[str, str]:
     for name, variable in (
         ("PUSH_KEY", "INSTALL_PUSH_KEY"),
         ("REMOTE_HOOKS_BASE_URL", "INSTALL_REMOTE_HOOKS_BASE_URL"),
+        ("TENANT_ID", "INSTALL_TENANT_ID"),
     ):
         match = re.search(rf"{variable}\s*=\s*['\"]([^'\"]*)['\"]", section)
         if match and not match.group(1).startswith("__AGENT_GUARD_"):
@@ -1930,7 +1932,9 @@ _VERSION_VALUE_RE = re.compile(rb"\A[A-Za-z0-9][A-Za-z0-9._+-]{0,63}\Z")
 _SHELL_SAFE_VALUE_RE = re.compile(rb"\A[^\x00-\x20\"'\\$`;&|<>()[\]{}]{1,2048}\Z")
 
 
-def _hook_script_variables(*, push_key: str = "", url: str = "", machine_id: str = "") -> dict[bytes, bytes]:
+def _hook_script_variables(
+    *, push_key: str = "", url: str = "", machine_id: str = "", tenant_id: str = ""
+) -> dict[bytes, bytes]:
     """Values substituted into the hook scripts' install-time variables section.
 
     Keyed by the ``__PLACEHOLDER__`` the scripts declare between their
@@ -1950,9 +1954,14 @@ def _hook_script_variables(*, push_key: str = "", url: str = "", machine_id: str
         b"__AGENT_GUARD_PUSH_KEY__": push_key.encode(),
         b"__AGENT_GUARD_REMOTE_HOOKS_BASE_URL__": (url or DEFAULT_REMOTE_URL).encode(),
         b"__AGENT_GUARD_MACHINE_ID__": machine_id.encode(),
+        b"__AGENT_GUARD_TENANT_ID__": tenant_id.encode(),
     }
     for placeholder, value in variables.items():
-        if not value and placeholder in {b"__AGENT_GUARD_PUSH_KEY__", b"__AGENT_GUARD_MACHINE_ID__"}:
+        if not value and placeholder in {
+            b"__AGENT_GUARD_PUSH_KEY__",
+            b"__AGENT_GUARD_MACHINE_ID__",
+            b"__AGENT_GUARD_TENANT_ID__",
+        }:
             continue
         pattern = _VERSION_VALUE_RE if placeholder == b"__AGENT_SCAN_VERSION__" else _SHELL_SAFE_VALUE_RE
         if not pattern.fullmatch(value):
@@ -1961,7 +1970,7 @@ def _hook_script_variables(*, push_key: str = "", url: str = "", machine_id: str
 
 
 def _substitute_hook_script_variables(
-    content: bytes, *, push_key: str = "", url: str = "", machine_id: str = ""
+    content: bytes, *, push_key: str = "", url: str = "", machine_id: str = "", tenant_id: str = ""
 ) -> bytes:
     """Fill in the install-time variables section of a bundled hook script.
 
@@ -1974,7 +1983,7 @@ def _substitute_hook_script_variables(
     The values are checked by ``_hook_script_variables`` before they get here; the markers
     below are committed alongside the scripts that declare them, and tests pin their shape.
     """
-    variables = _hook_script_variables(push_key=push_key, url=url, machine_id=machine_id)
+    variables = _hook_script_variables(push_key=push_key, url=url, machine_id=machine_id, tenant_id=tenant_id)
 
     begin = content.find(_SECTION_BEGIN)
     if begin < 0:
@@ -1991,7 +2000,9 @@ def _substitute_hook_script_variables(
     return content[:start] + section + content[end:]
 
 
-def _copy_hook_script(dest: Path, *, push_key: str = "", url: str = "", machine_id: str = "") -> _CopiedScript:
+def _copy_hook_script(
+    dest: Path, *, push_key: str = "", url: str = "", machine_id: str = "", tenant_id: str = ""
+) -> _CopiedScript:
     """Copy the bundled hook script named ``dest.name`` to *dest*.
 
     Handles both the forwarding hook and the session-start discovery trampoline;
@@ -2001,7 +2012,7 @@ def _copy_hook_script(dest: Path, *, push_key: str = "", url: str = "", machine_
 
     source = importlib_resources.files("agent_scan.hooks").joinpath(dest.name)
     new_content = _substitute_hook_script_variables(
-        source.read_bytes(), push_key=push_key, url=url, machine_id=machine_id
+        source.read_bytes(), push_key=push_key, url=url, machine_id=machine_id, tenant_id=tenant_id
     )
     new_checksum = hashlib.sha256(new_content).hexdigest()
 
