@@ -1992,7 +1992,8 @@ def _hook_script_variables(
             continue
         pattern = _VERSION_VALUE_RE if placeholder == b"__AGENT_SCAN_VERSION__" else _SHELL_SAFE_VALUE_RE
         if not pattern.fullmatch(value):
-            raise ValueError(f"Unusable install-time variable value for {placeholder!r}: {value!r}")
+            # The value may be a credential, so name only the placeholder.
+            raise ValueError(f"Unusable install-time variable value for {placeholder.decode()}")
     return variables
 
 
