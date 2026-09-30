@@ -1,0 +1,4 @@
+{
+  "name": "Agent Scan",
+  "install": ".cursor/install.sh"
+}
