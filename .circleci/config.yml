@@ -95,6 +95,7 @@ jobs:
           mode: << parameters.mode >>
           open-source-additional-arguments: --exclude=mcp-builder,slack-gif-creator
           open-source-agentic-fix-enabled: true
+          open-source-agentic-fix-base-branch: main
           open-source-scan: medium
           iac-scan: disabled
       - notify_slack_on_failure
