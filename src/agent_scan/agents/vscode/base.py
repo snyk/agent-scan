@@ -28,6 +28,11 @@ from agent_scan.agents.base import (
     SkillsDirsResult,
     _walk_under_depth,
 )
+from agent_scan.agents.vscode.extension_mcp import (
+    extension_js_files,
+    provider_declarations,
+    servers_in_js_file,
+)
 from agent_scan.models import (
     ClaudeConfigFile,
     CouldNotParseMCPConfig,
@@ -309,6 +314,7 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         result.update(self._discover_workspace_mcp())
         result.update(self._discover_agent_config_mcp())
         result.update(self._discover_extension_mcp_servers())
+        result.update(self._discover_extension_provider_mcp_servers())
         result.update(self._discover_devcontainer_mcp())
         result.update(self._discover_code_workspace_mcp())
         return result
@@ -844,6 +850,60 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
             ("mcp.json",),
             lambda f: self._parse_mcp_file(f, formats=_VSCODE_FAMILY_FORMATS, skip_unrecognized=True),
         )
+
+    def _discover_extension_provider_mcp_servers(self) -> McpConfigsResult:
+        """Extract MCP servers each *installed* extension registers **in code**.
+
+        The sibling :meth:`_discover_extension_mcp_servers` only sees extensions
+        that ship an ``mcp.json``. An extension can instead call
+        ``vscode.lm.registerMcpServerDefinitionProvider`` and hand VS Code the
+        servers at activation — there is no config file at all, so the server is
+        invisible to a file walk while being just as live in the editor (Pylance
+        ships one this way).
+
+        The walk is gated on ``contributes.mcpServerDefinitionProviders`` in the
+        extension's ``package.json``: VS Code refuses to register a provider that
+        isn't declared there, so an extension without the key cannot have one, and
+        the expensive step — grepping multi-MiB minified bundles — is skipped for
+        all but the handful of extensions that do. Results are keyed by the JS
+        file holding the constructor call, the closest thing to a config path.
+
+        Extraction is best-effort and deliberately under-reports; see
+        ``extension_mcp`` for what is and isn't resolvable. A declared provider
+        whose definitions are all computed at runtime therefore contributes no
+        entry rather than a guessed one.
+        """
+        result: McpConfigsResult = {}
+        for extension_dir in self._extension_scan_roots():
+            manifest = self._load_json_file(extension_dir / "package.json", log_parse_errors=False)
+            if not isinstance(manifest, dict) or not provider_declarations(manifest):
+                continue
+            for js_file in extension_js_files(extension_dir, manifest):
+                raw = self._dedupe_server_names(servers_in_js_file(js_file))
+                if not raw:
+                    continue
+                parsed = self._validate_servers(raw, source=js_file.as_posix())
+                if parsed:
+                    result[js_file.as_posix()] = parsed
+        return result
+
+    @staticmethod
+    def _dedupe_server_names(entries: list[tuple[str, dict]]) -> dict[str, dict]:
+        """Collapse ``(name, config)`` pairs into a map, suffixing repeated names.
+
+        A bundle may construct several definitions sharing a label (or falling
+        back to the same command), and the server map is keyed by name — without
+        a suffix the later one would silently replace the earlier.
+        """
+        servers: dict[str, dict] = {}
+        for name, config in entries:
+            unique = name
+            suffix = 2
+            while unique in servers:
+                unique = f"{name}-{suffix}"
+                suffix += 1
+            servers[unique] = config
+        return servers
 
     def _discover_extension_skills(self) -> SkillsDirsResult:
         """Scan ``skills/`` subdirs under each *installed* extension (roots are
