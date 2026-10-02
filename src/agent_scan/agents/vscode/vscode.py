@@ -79,6 +79,11 @@ class VSCodeDiscoverer(VSCodeFamilyDiscoverer):
         ),
     }
     # VSCode/Copilot-specific features (not assumed for forks).
+    # VERIFIED: ``vscode.lm.registerMcpServerDefinitionProvider`` is implemented
+    # here (VS Code 1.101+), and Pylance's provider was confirmed live on disk —
+    # ``ms-python.vscode-pylance`` declares ``pylanceMcp`` and constructs an
+    # ``McpHttpServerDefinition`` in ``dist/extension.bundle.js``.
+    _extension_mcp_providers_enabled = True
     _settings_skill_locations_enabled = True
     _devcontainer_mcp_enabled = True
     _code_workspace_enabled = True
