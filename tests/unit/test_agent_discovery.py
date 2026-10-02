@@ -11513,3 +11513,66 @@ def test_vscode_extension_provider_mcp_dedupes_repeated_server_names(tmp_path):
     entries = mcp_configs[next(k for k in mcp_configs if "/pub.twin-1.0.0/" in k)]
     assert [name for name, _ in entries] == ["srv", "srv-2"]
     assert [server.args for _, server in entries] == [["a.js"], ["b.js"]]
+
+
+def test_vscode_extension_provider_mcp_is_opt_in_per_fork(tmp_path, monkeypatch):
+    """The provider scan is gated: a fork whose extension host doesn't implement
+    ``registerMcpServerDefinitionProvider`` must report nothing, even though the
+    extension on disk is byte-identical to the VS Code case."""
+    from agent_scan.agents import VSCodeDiscoverer
+
+    _install_extension(
+        tmp_path,
+        "pub.gated-1.0.0",
+        {
+            "main": "./dist/extension.bundle.js",
+            "contributes": {"mcpServerDefinitionProviders": [{"id": "p", "label": "l"}]},
+        },
+        'new v.McpStdioServerDefinition("srv","node");',
+    )
+    monkeypatch.setattr(VSCodeDiscoverer, "_extension_mcp_providers_enabled", False)
+
+    mcp_configs = VSCodeDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert not any(k.endswith(".js") for k in mcp_configs)
+
+
+def test_cursor_does_not_scan_extension_mcp_providers(tmp_path):
+    """Cursor stubs the API out despite tracking a recent VS Code, so an extension
+    declaring a provider is a false positive there. See the flag's rationale in
+    ``cursor.py``."""
+    from agent_scan.agents import CursorDiscoverer
+
+    exts = tmp_path / ".cursor" / "extensions"
+    ext_dir = exts / "pub.provider-1.0.0"
+    (ext_dir / "dist").mkdir(parents=True)
+    (ext_dir / "package.json").write_text(
+        json.dumps(
+            {
+                "main": "./dist/extension.bundle.js",
+                "contributes": {"mcpServerDefinitionProviders": [{"id": "p", "label": "l"}]},
+            }
+        )
+    )
+    (ext_dir / "dist" / "extension.bundle.js").write_text('new v.McpStdioServerDefinition("srv","node");')
+    (exts / "extensions.json").write_text(json.dumps([{"relativeLocation": "pub.provider-1.0.0"}]))
+
+    mcp_configs = CursorDiscoverer(tmp_path).discover_mcp_servers()
+
+    assert not any(k.endswith(".js") for k in mcp_configs)
+
+
+def test_only_vscode_opts_into_extension_mcp_providers():
+    """Drift guard: opting a fork in is a claim about that fork's extension host,
+    so it must be a deliberate edit with evidence, not an inherited default."""
+    from agent_scan.agents import (
+        AntigravityDiscoverer,
+        CursorDiscoverer,
+        KiroDiscoverer,
+        VSCodeDiscoverer,
+        WindsurfDiscoverer,
+    )
+
+    assert VSCodeDiscoverer._extension_mcp_providers_enabled is True
+    for fork in (CursorDiscoverer, WindsurfDiscoverer, KiroDiscoverer, AntigravityDiscoverer):
+        assert fork._extension_mcp_providers_enabled is False, fork.__name__

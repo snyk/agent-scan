@@ -281,6 +281,22 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
     _settings_skill_locations_enabled: bool = False  # honor chat.agentSkillsLocations
     _devcontainer_mcp_enabled: bool = False  # honor .devcontainer/devcontainer.json
     _code_workspace_enabled: bool = False  # honor .code-workspace settings block
+    # Honor ``contributes.mcpServerDefinitionProviders`` + the in-code server
+    # definitions it gates (see ``_discover_extension_provider_mcp_servers``).
+    #
+    # Off by default, and this one is NOT merely a cost switch. Forks install the
+    # same extension artifacts as VS Code, so the manifest key and the
+    # constructor call sit on disk identically whether or not the fork's
+    # extension host implements ``registerMcpServerDefinitionProvider``. A fork
+    # that doesn't implement it would have a *statically identical* extension
+    # reported as a live server that the editor never registers — a false
+    # positive, which the extraction is otherwise built to avoid. So each fork
+    # must be checked against its own extension host before opting in; being a
+    # recent VS Code fork is not sufficient evidence (see ``cursor.py``).
+    #
+    # Status: VS Code verified on (``vscode.py``); Cursor verified OFF
+    # (``cursor.py``); Windsurf/Kiro/Antigravity unverified and therefore off.
+    _extension_mcp_providers_enabled: bool = False
     # Path under $VSCODE_PORTABLE that holds the relocated userdata tree.
     _portable_env_var: str = ""
 
@@ -872,7 +888,14 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         ``extension_mcp`` for what is and isn't resolvable. A declared provider
         whose definitions are all computed at runtime therefore contributes no
         entry rather than a guessed one.
+
+        Gated on :attr:`_extension_mcp_providers_enabled`, which is off unless a
+        fork's extension host has been verified to implement the API — an
+        unimplemented one leaves the same bytes on disk while registering
+        nothing, so scanning it would manufacture false positives.
         """
+        if not self._extension_mcp_providers_enabled:
+            return {}
         result: McpConfigsResult = {}
         for extension_dir in self._extension_scan_roots():
             manifest = self._load_json_file(extension_dir / "package.json", log_parse_errors=False)
