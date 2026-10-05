@@ -51,6 +51,23 @@ class CursorDiscoverer(VSCodeFamilyDiscoverer):
         "~/.codex/skills",
     )
     _extension_paths = ("~/.cursor/extensions",)
+    # VERIFIED OFF — stated explicitly rather than inherited, because this is a
+    # confirmed negative, not an unchecked default. Cursor tracks a recent VS Code
+    # (3.22.12 reports ``vscodeVersion`` 1.128.0, well past the 1.101 that added
+    # the API) yet deliberately stubs the registration out in its extension host:
+    #
+    #   registerMcpServerDefinitionProvider: () => (
+    #     warn("registerMcpServerDefinitionProvider is not supported in Cursor"), noop
+    #   )
+    #
+    # (``Cursor.app/Contents/Resources/app/out/vs/workbench/api/node/
+    # extensionHostProcess.js``.) Extensions installed into Cursor carry the same
+    # ``contributes.mcpServerDefinitionProviders`` manifest key and the same
+    # constructor calls as in VS Code, so scanning them here would report servers
+    # Cursor never registers. Re-check before flipping: Cursor exposes its own
+    # ``registerMcpConfigurationProvider`` instead, which is a *separate*
+    # contribution point this scan does not cover.
+    _extension_mcp_providers_enabled = False
     # Built-in (bundled) extensions shipped inside the Cursor application.
     _builtin_extension_dir_templates: ClassVar[dict[str, tuple[str, ...]]] = {
         "darwin": (
