@@ -19,7 +19,7 @@ dependencies = [
     "aiohttp>=3.14.3",
     "rapidfuzz>=3.13.0",
     "truststore>=0.10.4",
-    "mcp[cli]==1.28.1",
+    "mcp[cli]==1.30.0",
     "regex>=2026.2.19",
     "detect-secrets>=1.5.0",
     # TOML decoder for the Codex discoverer on Python 3.10 (stdlib ``tomllib`` is
