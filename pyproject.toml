@@ -39,6 +39,7 @@ override-dependencies = [
     "pyjwt>=2.15.0",
     "anyio>=4.14.2",
     "urllib3>=2.8.0",
+    "multidict>=6.9.1",
 ]
 
 [project.scripts]
