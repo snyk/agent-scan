@@ -185,22 +185,24 @@ The four scopes:
 
 Legend: **✓** detected · **✗** the agent supports this but Agent Scan does not scan it yet · **N/A** the agent has no such component at this scope.
 
+Click an agent name for the exact paths behind each cell, or see the full [agent discovery reference](docs/agent-discovery.md).
+
 | Agent | System<br>skills | System<br>servers | User<br>skills | User<br>servers | Project / WS<br>skills | Project / WS<br>servers | Ext / plugin<br>skills | Ext / plugin<br>servers |
 | --- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
-| Windsurf | ✓ | N/A | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Cursor | N/A | N/A | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| VS Code | N/A | N/A | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| GitHub Copilot § | N/A | N/A | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Claude Desktop | N/A | N/A | ✗ | ✓ | N/A | N/A | ✓ | ✓ |
-| Claude Code | ✗ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Gemini CLI | N/A | ✗ | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ |
-| OpenClaw | N/A | N/A | ✓ | ✗ | ✓ † | N/A | ✗ | ✗ |
-| Amp | N/A | ✗ | ✓ | ✗ | ✗ ‡ | ✗ | ✗ | ✗ |
-| Kiro | N/A | N/A | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| OpenCode | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | N/A | N/A |
-| Antigravity | N/A | N/A | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Codex | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Amazon Q | N/A | N/A | N/A | ✓ | N/A | ✗ | N/A | N/A |
+| [Windsurf](docs/agent-discovery.md#windsurf) | ✓ | N/A | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| [Cursor](docs/agent-discovery.md#cursor) | N/A | N/A | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| [VS Code](docs/agent-discovery.md#vs-code) | N/A | N/A | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| [GitHub Copilot](docs/agent-discovery.md#github-copilot) § | N/A | N/A | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| [Claude Desktop](docs/agent-discovery.md#claude-desktop) | N/A | N/A | ✗ | ✓ | N/A | N/A | ✓ | ✓ |
+| [Claude Code](docs/agent-discovery.md#claude-code) | ✗ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| [Gemini CLI](docs/agent-discovery.md#gemini-cli) | N/A | ✗ | ✓ | ✓ | ✗ | ✗ | ✗ | ✗ |
+| [OpenClaw](docs/agent-discovery.md#openclaw) | N/A | N/A | ✓ | ✗ | ✓ † | N/A | ✗ | ✗ |
+| [Amp](docs/agent-discovery.md#amp) | N/A | ✗ | ✓ | ✗ | ✗ ‡ | ✗ | ✗ | ✗ |
+| [Kiro](docs/agent-discovery.md#kiro) | N/A | N/A | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| [OpenCode](docs/agent-discovery.md#opencode) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | N/A | N/A |
+| [Antigravity](docs/agent-discovery.md#antigravity) | N/A | N/A | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| [Codex](docs/agent-discovery.md#codex) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| [Amazon Q](docs/agent-discovery.md#amazon-q) | N/A | N/A | N/A | ✓ | N/A | ✗ | N/A | N/A |
 
 † OpenClaw has no opened-project enumeration: its project/workspace skills are found only at the fixed `~/.openclaw/workspace/skills`
 
@@ -419,6 +421,7 @@ If you want to include Agent Scan results in your own project or registry, pleas
 - [Documentation index](docs/README.md) — Versioned documentation for both CLI lines.
 - [CLI reference](docs/cli-reference.md) — v0.5.x and v0.6-and-later commands, flags, options, and environment variables.
 - [Scanning](docs/scanning.md) — v0.5.x and v0.6-and-later scanning behavior and examples.
+- [Agent discovery](docs/agent-discovery.md) — Every path Agent Scan reads, per agent.
 - [JSON output](docs/json-output.md) — The v0.5.x path-keyed output and the v0.6 response schema.
 - [Issue Codes](docs/issue-codes.md) — v0.5.x `E*` and `W*` security finding reference.
 - [Risk reference](docs/risks.md) — v0.6 security risk indicators, scores, and evidence fields.
