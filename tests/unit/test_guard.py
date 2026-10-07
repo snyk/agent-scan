@@ -16,7 +16,6 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
-from unittest.mock import call as mock_call
 
 import pytest
 
@@ -39,7 +38,6 @@ from agent_scan.guard import (
     CURSOR_HOOKS_PATH,
     CURSOR_MANAGED_HOOKS_PATH,
     _build_hook_command,
-    _build_hook_command_powershell,
     _compact_events,
     _compute_hooks_diff,
     _config_path,
@@ -184,9 +182,52 @@ def _detect_test_client(client: str, path: Path) -> dict | None:
     return detect(path)
 
 
+def _powershell_hook_command(script_path: Path, hook_client: str) -> str:
+    """Render the PowerShell hook command regardless of the host platform.
+
+    _build_hook_command picks a renderer from IS_WINDOWS, so the PowerShell form
+    is unreachable on POSIX. This calls the renderer directly so the tests below
+    can assert on it anywhere.
+    """
+    return guard_module._render_powershell_command(
+        guard_module._HookInvocation(script_path=script_path, hook_client=hook_client)
+    )
+
+
 # ===================================================================
 # Unit tests for pure helpers
 # ===================================================================
+
+
+class TestBundledHookScriptSyntax:
+    """Parse the bundled hook scripts with their real interpreters"""
+
+    HOOKS = Path(guard_module.__file__).parent / "hooks"
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX hook scripts")
+    @pytest.mark.parametrize("name", ["snyk-agent-guard.sh", "snyk-agent-guard-discover.sh"])
+    def test_shell_hook_scripts_parse(self, name):
+        script = self.HOOKS / name
+        result = subprocess.run(["bash", "-n", str(script)], capture_output=True, text=True)
+        assert result.returncode == 0, f"{name} failed to parse:\n{result.stderr}"
+
+    @pytest.mark.parametrize("name", ["snyk-agent-guard.ps1", "snyk-agent-guard-discover.ps1"])
+    def test_powershell_hook_scripts_parse(self, name):
+        shell = shutil.which("pwsh") or shutil.which("powershell")
+        if not shell:
+            pytest.skip("powershell not available")
+        script = self.HOOKS / name
+        probe = (
+            "$errors = $null; "
+            f"[void][System.Management.Automation.Language.Parser]::ParseFile('{script}', "
+            "[ref]$null, [ref]$errors); "
+            "if ($errors.Count -gt 0) { "
+            "$errors | ForEach-Object { "
+            "Write-Output ('line ' + $_.Extent.StartLineNumber + ': ' + $_.Message) }; "
+            "exit 1 } else { exit 0 }"
+        )
+        result = subprocess.run([shell, "-NoProfile", "-Command", probe], capture_output=True, text=True)
+        assert result.returncode == 0, f"{name} failed to parse:\n{result.stdout}"
 
 
 class TestIsAgentScanCommand:
@@ -204,20 +245,38 @@ class TestIsAgentScanCommand:
             "powershell -File 'snyk-agent-guard.ps1' -Client claude-code -PushKey 'pk' -RemoteUrl 'url'"
         )
 
-    def test_no_match_snyk_agent_guard_without_push_key(self):
-        assert not _is_agent_scan_command("bash /home/u/.claude/hooks/snyk-agent-guard.sh")
+    def test_matches_script_without_env_prefix(self):
+        assert _is_agent_scan_command("bash /home/u/.claude/hooks/snyk-agent-guard.sh")
 
-    def test_no_match_push_key_without_snyk_agent_guard(self):
+    def test_no_match_env_prefix_with_unrelated_script(self):
         assert not _is_agent_scan_command("PUSH_KEY='pk' bash /some/other-tool.sh --client claude")
 
     def test_no_match_other_tool(self):
         assert not _is_agent_scan_command("some-other-tool hook --client claude")
 
-    def test_no_match_agentguard(self):
+    def test_no_match_agentguard_binary(self):
         assert not _is_agent_scan_command("PUSH_KEY='pk' /usr/local/bin/agentguard hook --client claude-code")
 
     def test_no_match_empty(self):
         assert not _is_agent_scan_command("")
+
+    def test_matches_quoted_script_without_command_prefix(self):
+        assert _is_agent_scan_command("'snyk-agent-guard.sh'")
+
+    def test_no_match_similarly_named_user_script(self):
+        assert not _is_agent_scan_command("bash /home/u/my-snyk-agent-guard.sh --client claude-code")
+
+    def test_no_match_longer_name_sharing_prefix(self):
+        assert not _is_agent_scan_command("bash /usr/local/bin/snyk-agent-guardian.sh")
+
+    def test_no_match_hook_config_file(self):
+        assert not _is_agent_scan_command("cat /home/u/.copilot/hooks/snyk-agent-guard.json")
+
+    def test_no_match_backup_copy_of_script(self):
+        assert not _is_agent_scan_command("bash /home/u/.claude/hooks/snyk-agent-guard.sh.bak")
+
+    def test_no_match_script_name_inside_message(self):
+        assert not _is_agent_scan_command("echo 'installing snyk-agent-guard now'")
 
 
 class TestShellQuote:
@@ -285,27 +344,23 @@ class TestExtractEnvFromCmd:
         (
             "main",
             False,
-            "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' TENANT_ID='tenant' "
-            "MACHINE_ID='machine' bash '/x/snyk-agent-guard.sh' --client claude-code",
+            "TENANT_ID='tenant' bash '/x/snyk-agent-guard.sh' --client claude-code",
         ),
         (
             "main",
             True,
-            "powershell -File 'C:\\hooks\\snyk-agent-guard.ps1' -Client claude-code -PushKey 'pk' "
-            "-RemoteUrl 'https://api.snyk.io' -MachineId 'machine'",
+            "powershell -File 'C:\\hooks\\snyk-agent-guard.ps1' -Client claude-code",
         ),
         (
             "discover",
             False,
-            "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' MACHINE_ID='machine' "
             "AGENT_SCAN_COMMAND='/usr/local/bin/snyk-agent-scan' bash '/x/snyk-agent-guard-discover.sh' "
             "--client 'claude-code' --scope servers",
         ),
         (
             "discover",
             True,
-            "powershell -File 'C:\\hooks\\snyk-agent-guard-discover.ps1' -Client claude-code -PushKey 'pk' "
-            "-RemoteUrl 'https://api.snyk.io' -MachineId 'machine' "
+            "powershell -File 'C:\\hooks\\snyk-agent-guard-discover.ps1' -Client claude-code "
             "-AgentScanCommand 'C:\\Program Files\\Snyk\\snyk-agent-scan.exe' -Scope servers",
         ),
     ],
@@ -322,24 +377,18 @@ def test_build_hook_command_preserves_exact_output(variant, is_windows, expected
     with patch(f"{_G}.IS_WINDOWS", is_windows):
         if variant == "main":
             command = _build_hook_command(
-                "pk",
-                "https://api.snyk.io",
                 script_path,
                 "claude-code",
                 tenant_id="tenant",
-                machine_id="machine",
             )
         else:
             command = guard_module._build_discover_hook_command(
-                "pk",
-                "https://api.snyk.io",
                 script_path,
                 "claude-code",
                 agent_scan_command=(
                     r"C:\Program Files\Snyk\snyk-agent-scan.exe" if is_windows else "/usr/local/bin/snyk-agent-scan"
                 ),
                 tenant_id="tenant",
-                machine_id="machine",
             )
 
     assert command == expected
@@ -348,77 +397,51 @@ def test_build_hook_command_preserves_exact_output(variant, is_windows, expected
 class TestBuildHookCommand:
     @pytest.mark.skipif(sys.platform == "win32", reason="bash command format")
     def test_without_tenant_bash(self):
-        cmd = _build_hook_command("pk", "https://api.snyk.io", Path("/x/hook.sh"), "claude-code")
-        assert "PUSH_KEY='pk'" in cmd
-        assert "REMOTE_HOOKS_BASE_URL='https://api.snyk.io'" in cmd
+        cmd = _build_hook_command(Path("/x/hook.sh"), "claude-code")
+        assert "PUSH_KEY" not in cmd
+        assert "REMOTE_HOOKS_BASE_URL" not in cmd
+        assert "MACHINE_ID" not in cmd
         assert "TENANT_ID" not in cmd
         assert "bash '/x/hook.sh'" in cmd
         assert "--client claude-code" in cmd
 
     @pytest.mark.skipif(sys.platform == "win32", reason="bash command format")
     def test_with_tenant_bash(self):
-        cmd = _build_hook_command("pk", "https://api.snyk.io", Path("/x/hook.sh"), "cursor", tenant_id="tid")
+        cmd = _build_hook_command(Path("/x/hook.sh"), "cursor", tenant_id="tid")
         assert "TENANT_ID='tid'" in cmd
 
-    @pytest.mark.skipif(sys.platform == "win32", reason="bash command format")
-    def test_with_machine_id_bash(self):
-        cmd = _build_hook_command("pk", "https://api.snyk.io", Path("/x/hook.sh"), "cursor", machine_id="machine-42")
-        assert "MACHINE_ID='machine-42'" in cmd
-
-    @pytest.mark.skipif(sys.platform == "win32", reason="bash command format")
-    def test_without_machine_id_bash(self):
-        cmd = _build_hook_command("pk", "https://api.snyk.io", Path("/x/hook.sh"), "cursor")
-        assert "MACHINE_ID" not in cmd
-
-    def test_with_machine_id_powershell(self):
-        cmd = _build_hook_command_powershell(
-            "pk", "https://api.snyk.io", Path("C:/x/hook.ps1"), "codex", machine_id="machine-42"
-        )
-        assert "-MachineId 'machine-42'" in cmd
-
-    def test_without_machine_id_powershell(self):
-        cmd = _build_hook_command_powershell("pk", "https://api.snyk.io", Path("C:/x/hook.ps1"), "codex")
+    def test_powershell_carries_no_credentials(self):
+        cmd = _powershell_hook_command(Path("C:/x/hook.ps1"), "codex")
         assert "-MachineId" not in cmd
-
-    def test_machine_id_powershell_escapes_single_quotes(self):
-        cmd = _build_hook_command_powershell(
-            "pk", "https://api.snyk.io", Path("C:/x/hook.ps1"), "codex", machine_id="O'Brien-laptop"
-        )
-        assert "-MachineId 'O''Brien-laptop'" in cmd
+        assert "-PushKey" not in cmd
+        assert "-RemoteUrl" not in cmd
 
     def test_powershell_escapes_single_quotes_in_all_literals(self):
         script_path = Path("C:/Users/O'Brien/hook.ps1")
-        cmd = _build_hook_command_powershell(
-            "pk'quoted",
-            "https://example.com/O'Brien",
-            script_path,
-            "codex",
-        )
+        cmd = _powershell_hook_command(script_path, "codex")
 
         expected_path = str(script_path).replace("'", "''")
         assert f"-File '{expected_path}'" in cmd
-        assert "-PushKey 'pk''quoted'" in cmd
-        assert "-RemoteUrl 'https://example.com/O''Brien'" in cmd
+        assert "-PushKey" not in cmd
+        assert "-RemoteUrl" not in cmd
 
     @pytest.mark.skipif(sys.platform != "win32", reason="powershell command format")
     def test_without_tenant_powershell(self):
-        cmd = _build_hook_command("pk", "https://api.snyk.io", Path("/x/hook.ps1"), "claude-code")
-        assert "-PushKey 'pk'" in cmd
-        assert "-RemoteUrl 'https://api.snyk.io'" in cmd
+        cmd = _build_hook_command(Path("/x/hook.ps1"), "claude-code")
+        assert "-PushKey" not in cmd
+        assert "-RemoteUrl" not in cmd
         assert "powershell -File" in cmd
         assert "-Client claude-code" in cmd
 
     @pytest.mark.skipif(sys.platform != "win32", reason="powershell command format")
     def test_without_tenant_powershell_no_tenant_id(self):
-        cmd = _build_hook_command("pk", "https://api.snyk.io", Path("/x/hook.ps1"), "claude-code")
+        cmd = _build_hook_command(Path("/x/hook.ps1"), "claude-code")
         assert "TENANT_ID" not in cmd
 
     def test_roundtrip_extract(self):
-        cmd = _build_hook_command(
-            "my-key", "https://example.com", Path("/x/snyk-agent-guard.sh"), "claude-code", tenant_id="t-1"
-        )
-        assert _extract_env_from_cmd(cmd, "PUSH_KEY") == "my-key"
-        assert _extract_env_from_cmd(cmd, "REMOTE_HOOKS_BASE_URL") == "https://example.com"
+        cmd = _build_hook_command(Path("/x/snyk-agent-guard.sh"), "claude-code", tenant_id="t-1")
+        assert _extract_env_from_cmd(cmd, "PUSH_KEY") == ""
+        assert _extract_env_from_cmd(cmd, "REMOTE_HOOKS_BASE_URL") == ""
         # tenant_id is only in bash commands, not powershell
         if sys.platform != "win32":
             assert _extract_env_from_cmd(cmd, "TENANT_ID") == "t-1"
@@ -503,19 +526,16 @@ class TestBuildDiscoverHookCommand:
     def test_builds_quoted_environment_prefix_with_agent_scan_command(self, client):
         with patch(f"{_G}.IS_WINDOWS", False):
             command = guard_module._build_discover_hook_command(
-                "pk",
-                "https://api.snyk.io",
                 Path("/x/snyk-agent-guard-discover.sh"),
                 client,
                 agent_scan_command="/opt/Snyk's bin/snyk-agent-scan",
                 tenant_id="tenant",
-                machine_id="machine",
             )
 
-        assert "PUSH_KEY='pk'" in command
-        assert "REMOTE_HOOKS_BASE_URL='https://api.snyk.io'" in command
+        assert "PUSH_KEY" not in command
+        assert "REMOTE_HOOKS_BASE_URL" not in command
         assert "TENANT_ID=" not in command
-        assert "MACHINE_ID='machine'" in command
+        assert "MACHINE_ID" not in command
         assert "AGENT_SCAN_COMMAND='/opt/Snyk'\"'\"'s bin/snyk-agent-scan'" in command
         assert command.endswith(f"bash '/x/snyk-agent-guard-discover.sh' --client '{client}' --scope servers")
         assert _is_agent_scan_command(command)
@@ -524,26 +544,20 @@ class TestBuildDiscoverHookCommand:
     def test_builds_powershell_command_for_each_client(self, client):
         with patch(f"{_G}.IS_WINDOWS", True):
             command = guard_module._build_discover_hook_command(
-                "pk",
-                "https://api.snyk.io",
                 Path(r"C:\hooks\snyk-agent-guard-discover.ps1"),
                 client,
                 agent_scan_command=r"C:\Program Files\Snyk\snyk-agent-scan.exe",
                 tenant_id="ignored",
-                machine_id="machine's-id",
             )
 
         assert command == (
             rf"powershell -File 'C:\hooks\snyk-agent-guard-discover.ps1' -Client {client} "
-            "-PushKey 'pk' -RemoteUrl 'https://api.snyk.io' -MachineId 'machine''s-id' "
             r"-AgentScanCommand 'C:\Program Files\Snyk\snyk-agent-scan.exe' -Scope servers"
         )
 
     def test_powershell_escapes_single_quotes_in_paths(self):
         with patch(f"{_G}.IS_WINDOWS", True):
             command = guard_module._build_discover_hook_command(
-                "pk",
-                "https://api.snyk.io",
                 Path(r"C:\Users\O'Brien\discover.ps1"),
                 "claude-code",
                 agent_scan_command=r"C:\Users\O'Brien\snyk-agent-scan.exe",
@@ -563,8 +577,6 @@ class TestBuildDiscoverHookCommand:
         script = Path(r"C:\hooks\snyk-agent-guard-discover.ps1" if is_windows else "/hooks/discover.sh")
         with patch(f"{_G}.IS_WINDOWS", is_windows):
             command = guard_module._build_discover_hook_command(
-                "pk",
-                "https://api.snyk.io",
                 script,
                 "claude-code",
                 agent_scan_command="cd /repo; uv run -m src.agent_scan.cli",
@@ -579,9 +591,6 @@ class TestHookInvocationRenderers:
         invocation = guard_module._HookInvocation(
             script_path=script_path,
             hook_client="claude-code",
-            push_key="pk'raw",
-            url="https://example.test/hook's",
-            machine_id="machine'raw",
         )
 
         with patch.dict(os.environ, {"EXISTING": "value"}, clear=True), patch(f"{_G}.IS_WINDOWS", False):
@@ -589,20 +598,12 @@ class TestHookInvocationRenderers:
 
         # str(Path) follows the host flavour, so compare against it rather than a hardcoded separator
         assert argv == ["bash", str(script_path), "--client", "claude-code"]
-        assert env == {
-            "EXISTING": "value",
-            "PUSH_KEY": "pk'raw",
-            "REMOTE_HOOKS_BASE_URL": "https://example.test/hook's",
-            "MACHINE_ID": "machine'raw",
-        }
+        assert env == {"EXISTING": "value"}
 
     def test_render_argv_windows_returns_unquoted_argv_without_environment(self):
         invocation = guard_module._HookInvocation(
             script_path=Path(r"C:\hooks\snyk-agent-guard.ps1"),
             hook_client="codex",
-            push_key="pk'raw",
-            url="https://example.test/hook's",
-            machine_id="machine'raw",
         )
 
         with patch(f"{_G}.IS_WINDOWS", True):
@@ -614,12 +615,6 @@ class TestHookInvocationRenderers:
             str(Path(r"C:\hooks\snyk-agent-guard.ps1")),
             "-Client",
             "codex",
-            "-PushKey",
-            "pk'raw",
-            "-RemoteUrl",
-            "https://example.test/hook's",
-            "-MachineId",
-            "machine'raw",
         ]
         assert env is None
 
@@ -629,9 +624,6 @@ class TestHookInvocationRenderers:
         invocation = guard_module._HookInvocation(
             script_path=script_path,
             hook_client="cursor",
-            push_key="pk",
-            url="https://api.snyk.io",
-            machine_id="machine",
             tenant_id="tenant",
             agent_scan_command="/opt/Snyk's bin/snyk-agent-scan",
             scope="servers",
@@ -651,10 +643,7 @@ class TestHookInvocationRenderers:
         ]
         assert env == {
             "EXISTING": "value",
-            "PUSH_KEY": "pk",
-            "REMOTE_HOOKS_BASE_URL": "https://api.snyk.io",
             "TENANT_ID": "tenant",
-            "MACHINE_ID": "machine",
             "AGENT_SCAN_COMMAND": "/opt/Snyk's bin/snyk-agent-scan",
         }
 
@@ -662,9 +651,6 @@ class TestHookInvocationRenderers:
         invocation = guard_module._HookInvocation(
             script_path=Path(r"C:\hooks\snyk-agent-guard-discover.ps1"),
             hook_client="codex",
-            push_key="pk",
-            url="https://api.snyk.io",
-            machine_id="machine",
             tenant_id="tenant",
             agent_scan_command=r"C:\Program Files\Snyk\snyk-agent-scan.exe",
             scope="servers",
@@ -679,12 +665,6 @@ class TestHookInvocationRenderers:
             str(Path(r"C:\hooks\snyk-agent-guard-discover.ps1")),
             "-Client",
             "codex",
-            "-PushKey",
-            "pk",
-            "-RemoteUrl",
-            "https://api.snyk.io",
-            "-MachineId",
-            "machine",
             "-AgentScanCommand",
             r"C:\Program Files\Snyk\snyk-agent-scan.exe",
             "-Scope",
@@ -696,16 +676,11 @@ class TestHookInvocationRenderers:
         invocation = guard_module._HookInvocation(
             script_path=Path("/hooks/snyk-agent-guard.sh"),
             hook_client="claude-code",
-            push_key="pk",
-            url="https://api.snyk.io",
         )
 
         command = guard_module._render_posix_command(invocation)
 
-        assert command == (
-            "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' "
-            "bash '/hooks/snyk-agent-guard.sh' --client claude-code"
-        )
+        assert command == "bash '/hooks/snyk-agent-guard.sh' --client claude-code"
 
 
 class TestPrepareClaudeDiscoveryHook:
@@ -1034,17 +1009,13 @@ class TestDiscoveryHookScriptFiles:
         discover_script = guard_module._discover_script_path(config)
         guard_module._copy_hook_script(discover_script)
 
-        assert discover_script.read_text() == (
-            "#!/usr/bin/env bash\nset -euo pipefail\n"
-            '[[ -n "${MACHINE_ID:-}" ]] || exit 0\n'
-            '[[ -n "${AGENT_SCAN_COMMAND:-}" ]] || exit 0\n'
-            'if [[ -x "$AGENT_SCAN_COMMAND" ]]; then\n'
-            '  "$AGENT_SCAN_COMMAND" guard discover "$@" >/dev/null 2>&1 || true\n'
-            "else\n"
-            '  eval "$AGENT_SCAN_COMMAND guard discover \\"\\$@\\"" >/dev/null 2>&1 || true\n'
-            "fi\n"
-            "exit 0\n"
-        )
+        content = discover_script.read_text()
+        assert guard_module._SECTION_BEGIN.decode() in content
+        assert guard_module._SECTION_END.decode() in content
+        assert "INSTALL_PUSH_KEY" in content
+        assert "INSTALL_REMOTE_HOOKS_BASE_URL" in content
+        assert "INSTALL_MACHINE_ID" in content
+        assert '"$AGENT_SCAN_COMMAND" guard discover "$@"' in content
         assert os.access(discover_script, os.X_OK)
 
     def test_copy_reports_discovery_script_checksums(self, tmp_path):
@@ -1062,6 +1033,39 @@ class TestDiscoveryHookScriptFiles:
 
         assert script.current_checksum == hashlib.sha256(b"stale discovery script\n").hexdigest()
         assert script.new_checksum == hashlib.sha256(discover_script.read_bytes()).hexdigest()
+
+    def test_installed_values_win_over_ambient_environment(self, tmp_path):
+        script = tmp_path / "snyk-agent-guard-discover.sh"
+        guard_module._copy_hook_script(
+            script,
+            push_key="installed-key",
+            url="https://installed.example",
+            machine_id="installed-machine",
+        )
+        stub = tmp_path / "snyk-agent-scan"
+        marker = tmp_path / "env"
+        stub.write_text('#!/bin/sh\nprintf "%s|%s|%s" "$PUSH_KEY" "$REMOTE_HOOKS_BASE_URL" "$MACHINE_ID" > "$MARKER"\n')
+        stub.chmod(0o755)
+        env = {
+            **os.environ,
+            "AGENT_SCAN_COMMAND": str(stub),
+            "PUSH_KEY": "ambient-key",
+            "REMOTE_HOOKS_BASE_URL": "https://ambient.example",
+            "MACHINE_ID": "ambient-machine",
+            "MARKER": str(marker),
+        }
+
+        result = subprocess.run(
+            ["bash", str(script), "--client", "claude-code"],
+            input="{}",
+            text=True,
+            capture_output=True,
+            timeout=5,
+            env=env,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert marker.read_text() == "installed-key|https://installed.example|installed-machine"
 
     def test_stale_absolute_command_does_not_fall_back_to_path(self, tmp_path):
         script = Path(guard_module.__file__).parent / "hooks" / "snyk-agent-guard-discover.sh"
@@ -1309,10 +1313,12 @@ class TestWindowsDiscoveryHookScriptFiles:
             discover_script = guard_module._discover_script_path(config)
             guard_module._copy_hook_script(discover_script)
 
-        assert (
-            discover_script.read_bytes()
-            == (Path(guard_module.__file__).parent / "hooks" / "snyk-agent-guard-discover.ps1").read_bytes()
-        )
+        content = discover_script.read_text()
+        assert guard_module._SECTION_BEGIN.decode() in content
+        assert guard_module._SECTION_END.decode() in content
+        assert "INSTALL_PUSH_KEY" in content
+        assert "INSTALL_REMOTE_HOOKS_BASE_URL" in content
+        assert "INSTALL_MACHINE_ID" in content
 
     def test_copy_restores_missing_script_and_reports_update(self, tmp_path):
         config = tmp_path / "settings.json"
@@ -3321,12 +3327,17 @@ def _variables_section(text: str) -> str:
 _SENTINEL_VERSION = "9.9.9-test"
 
 
-def _copy_with_sentinel_version(monkeypatch, dest: Path) -> None:
+def _copy_with_sentinel_version(monkeypatch, dest: Path, url: str = "https://api.snyk.io") -> None:
     """Install *dest* carrying a version no fallback could have produced."""
     monkeypatch.setattr(
         guard_module,
         "_hook_script_variables",
-        lambda: {b"__AGENT_SCAN_VERSION__": _SENTINEL_VERSION.encode()},
+        lambda **kwargs: {
+            b"__AGENT_SCAN_VERSION__": _SENTINEL_VERSION.encode(),
+            b"__AGENT_GUARD_PUSH_KEY__": b"test-push-key",
+            b"__AGENT_GUARD_REMOTE_HOOKS_BASE_URL__": url.encode(),
+            b"__AGENT_GUARD_MACHINE_ID__": b"test-machine-id",
+        },
     )
     guard_module._copy_hook_script(dest)
 
@@ -3397,16 +3408,9 @@ class TestHookScriptInstallTimeVariables:
         assert declared == {key.decode() for key in guard_module._hook_script_variables()}
 
     @pytest.mark.parametrize("name", _FORWARDER_SCRIPTS)
-    def test_every_placeholder_has_a_fallback_outside_the_section(self, name):
-        """Each script scrubs a variable install never filled in.
-
-        The comparison is against the literal placeholder, so it has to sit outside the
-        section: substituting over it would rewrite the very literal it tests for.
-        """
+    def test_version_placeholder_has_a_fallback_outside_the_section(self, name):
         head, _, tail = _split_on_section(_get_script_path(name).read_text())
-
-        for placeholder in guard_module._hook_script_variables():
-            assert placeholder.decode() in head + tail
+        assert "__AGENT_SCAN_VERSION__" in head + tail
 
 
 class TestHookScriptVariableValues:
@@ -3435,7 +3439,8 @@ class TestHookScriptVariableValues:
     def test_accepts_a_release_shaped_value(self, monkeypatch, value):
         monkeypatch.setattr(version_module, "version_info", value)
 
-        assert guard_module._hook_script_variables() == {b"__AGENT_SCAN_VERSION__": value.encode()}
+        variables = guard_module._hook_script_variables()
+        assert variables[b"__AGENT_SCAN_VERSION__"] == value.encode()
         # Both consumers have to accept it: the shell that parses the script, and
         # agent-monitor, which degrades anything outside its shape to "unknown".
         assert _AGENT_MONITOR_CLI_VERSION_RE.fullmatch(value)
@@ -3460,9 +3465,27 @@ class TestHookScriptVariableValues:
 
         assert not dest.exists()
 
+    def test_machine_id_may_contain_a_space(self):
+        variables = guard_module._hook_script_variables(machine_id="my box")
+        assert variables[b"__AGENT_GUARD_MACHINE_ID__"] == b"my box"
+
+    @pytest.mark.parametrize("value", ["my\tbox", "two\nlines", 'my"box', "$(id)", "`id`", "a;b", "back\\slash"])
+    def test_machine_id_still_rejects_what_would_break_the_literal(self, value):
+        with pytest.raises(ValueError, match="__AGENT_GUARD_MACHINE_ID__"):
+            guard_module._hook_script_variables(machine_id=value)
+
+    @pytest.mark.parametrize("field", ["push_key", "tenant_id"])
+    def test_space_is_still_rejected_in_other_values(self, field):
+        with pytest.raises(ValueError, match="install-time"):
+            guard_module._hook_script_variables(**{field: "has space"})
+
     def test_the_shipped_variables_are_the_cli_version(self):
         """The sentinel-driven tests prove the plumbing; this pins what actually ships."""
-        assert guard_module._hook_script_variables() == {b"__AGENT_SCAN_VERSION__": version_info.encode()}
+        variables = guard_module._hook_script_variables()
+        assert variables[b"__AGENT_SCAN_VERSION__"] == version_info.encode()
+        assert variables[b"__AGENT_GUARD_PUSH_KEY__"] == b""
+        assert variables[b"__AGENT_GUARD_REMOTE_HOOKS_BASE_URL__"]
+        assert variables[b"__AGENT_GUARD_MACHINE_ID__"] == b""
 
 
 class TestHookScriptVariableSubstitution:
@@ -3479,7 +3502,7 @@ class TestHookScriptVariableSubstitution:
     )
 
     def test_substitutes_only_inside_the_section(self, monkeypatch):
-        monkeypatch.setattr(guard_module, "_hook_script_variables", lambda: {b"__X__": b"0.6.2"})
+        monkeypatch.setattr(guard_module, "_hook_script_variables", lambda **kwargs: {b"__X__": b"0.6.2"})
 
         rendered = guard_module._substitute_hook_script_variables(self._SCRIPT)
 
@@ -3506,21 +3529,104 @@ class TestHookScriptVariableSubstitution:
         assert guard_module._substitute_hook_script_variables(content) == content
 
     @pytest.mark.parametrize("name", _TRAMPOLINE_SCRIPTS)
-    def test_trampolines_carry_no_install_time_variables(self, tmp_path, name):
-        """The trampolines exec the CLI, which reports its own version directly.
-
-        They declare no section, so install has nothing to fill in and copies them
-        verbatim. A variable one of them ever needs has to be declared here first.
-        """
+    def test_trampolines_carry_install_time_variables(self, tmp_path, name):
         bundled = _get_script_path(name).read_bytes()
-        assert guard_module._SECTION_BEGIN not in bundled
-        assert guard_module._SECTION_END not in bundled
-        assert not _PLACEHOLDER_RE.search(bundled.decode())
+        assert guard_module._SECTION_BEGIN in bundled
+        assert guard_module._SECTION_END in bundled
 
         dest = tmp_path / "hooks" / name
-        guard_module._copy_hook_script(dest)
+        guard_module._copy_hook_script(
+            dest, push_key="test-push-key", url="https://api.snyk.io", machine_id="test-machine-id"
+        )
 
-        assert dest.read_bytes() == bundled
+        section = _variables_section(dest.read_text())
+        assert "__AGENT_SCAN_" not in section
+        assert "__AGENT_GUARD_" not in section
+
+    @pytest.mark.parametrize("name", _FORWARDER_SCRIPTS + _TRAMPOLINE_SCRIPTS)
+    def test_reinstall_rotates_the_embedded_push_key(self, tmp_path, name):
+        """Reinstalling over an existing script leaves no trace of the superseded key."""
+        dest = tmp_path / "hooks" / name
+        guard_module._copy_hook_script(dest, push_key="pk-old", url="https://api.snyk.io", machine_id="machine-old")
+        assert "pk-old" in dest.read_text()
+
+        guard_module._copy_hook_script(dest, push_key="pk-new", url="https://api.eu.snyk.io", machine_id="machine-new")
+
+        rendered = dest.read_text()
+        assert "pk-old" not in rendered
+        assert "machine-old" not in rendered
+        assert "https://api.snyk.io" not in rendered
+        section = _variables_section(rendered)
+        assert "pk-new" in section
+        assert "machine-new" in section
+        assert "https://api.eu.snyk.io" in section
+
+    @pytest.mark.parametrize(
+        "name, command",
+        [
+            ("snyk-agent-guard.sh", "bash '{path}' --client claude-code"),
+            ("snyk-agent-guard.ps1", "powershell -File '{path}' -Client claude-code"),
+        ],
+    )
+    def test_uninstall_recovers_the_tenant_from_the_script(self, tmp_path, name, command):
+        """Revocation needs a tenant embedded in the script."""
+        dest = tmp_path / "hooks" / name
+        guard_module._copy_hook_script(
+            dest, push_key="pk-1", url="https://api.snyk.io", machine_id="machine-1", tenant_id="tenant-1"
+        )
+
+        info = guard_module._parse_command_info(command.format(path=dest), ["PreToolUse"], script_path=dest)
+
+        assert info["tenant_id"] == "tenant-1"
+        assert info["auth_value"] == "pk-1"
+        assert info["url"] == "https://api.snyk.io"
+
+    def test_a_command_tenant_still_wins_for_a_script_predating_the_variable(self, tmp_path):
+        """Installs made before the tenant was embedded keep revoking off the command."""
+        dest = tmp_path / "hooks" / "snyk-agent-guard.sh"
+        dest.parent.mkdir(parents=True)
+        dest.write_text(
+            f"{_SECTION_BEGIN}"
+            'INSTALL_PUSH_KEY="pk-1"\n'
+            'INSTALL_REMOTE_HOOKS_BASE_URL="https://api.snyk.io"\n'
+            f"{_SECTION_END}"
+        )
+
+        info = guard_module._parse_command_info(
+            f"TENANT_ID='tenant-1' bash '{dest}' --client claude-code", ["PreToolUse"]
+        )
+
+        assert info["tenant_id"] == "tenant-1"
+
+    @pytest.mark.parametrize(
+        "is_windows, render",
+        [
+            (False, guard_module._render_posix_command),
+            (True, guard_module._render_powershell_command),
+        ],
+    )
+    def test_detection_reads_script_from_config_path(self, tmp_path, is_windows, render):
+        config_path = tmp_path / "O'Brien" / "settings.json"
+        with patch(f"{_G}.IS_WINDOWS", is_windows):
+            script_path = guard_module._forwarder_script_path(config_path)
+            guard_module._copy_hook_script(
+                script_path,
+                push_key="pk-1",
+                url="https://api.snyk.io",
+                machine_id="machine-1",
+                tenant_id="tenant-1",
+            )
+            command = render(
+                guard_module._HookInvocation(script_path=script_path, hook_client="claude-code", tenant_id="tenant-1")
+            )
+            _setup_claude_hooks(command, config_path)
+
+            info = guard_module._detect_claude_install(config_path)
+
+        assert info is not None
+        assert info["auth_value"] == "pk-1"
+        assert info["url"] == "https://api.snyk.io"
+        assert info["tenant_id"] == "tenant-1"
 
 
 @pytest.mark.skipif(IS_WINDOWS, reason="bash script; skipped on Windows")
@@ -3557,6 +3663,33 @@ class TestBashHookScript:
         assert req["body"].startswith("base64:")
         decoded = base64.b64decode(req["body"].removeprefix("base64:"))
         assert json.loads(decoded) == json.loads(payload)
+
+    def test_install_test_event_uses_embedded_values_over_ambient_environment(self, hook_server, tmp_path, monkeypatch):
+        script = tmp_path / "snyk-agent-guard.sh"
+        guard_module._copy_hook_script(
+            script,
+            push_key="installed-key",
+            url=hook_server,
+            machine_id="installed-machine",
+            tenant_id="installed-tenant",
+        )
+        monkeypatch.setenv("PUSH_KEY", "ambient-key")
+        monkeypatch.setenv("PUSHKEY", "ambient-key-alias")
+        monkeypatch.setenv("REMOTE_HOOKS_BASE_URL", "https://ambient.example")
+        monkeypatch.setenv("MACHINE_ID", "ambient-machine")
+
+        ok, detail = guard_module._invoke_hook_script(
+            script,
+            "claude-code",
+            '{"hook_event_name":"hooksConfigured","session_id":"hooks-setup"}',
+        )
+
+        assert ok, detail
+        req = _HookHandler.last_request
+        assert req is not None
+        assert "/hidden/agent-monitor/hooks/claude-code" in req["path"]
+        assert req["headers"]["X-Client-Id"] == "installed-key"
+        assert json.loads(req["headers"]["X-User"])["identifier"] == "installed-machine"
 
     def test_posts_large_payload_without_exec_argument_limit(self, hook_server):
         script = _get_script_path("snyk-agent-guard.sh")
@@ -3716,9 +3849,27 @@ class TestBashHookScript:
         x_user = json.loads(_HookHandler.last_request["headers"]["X-User"])
         assert x_user["identifier"] == "machine-42"
 
+    def test_installed_machine_id_with_a_space_reaches_the_server(self, tmp_path, hook_server):
+        script = tmp_path / "snyk-agent-guard.sh"
+        guard_module._copy_hook_script(script, push_key="installed-key", url=hook_server, machine_id="my box")
+
+        result = subprocess.run(
+            ["bash", str(script), "--client", "claude-code"],
+            input='{"hook_event_name":"test","session_id":"s1"}',
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={"PATH": "/usr/bin:/bin:/usr/local/bin"},
+        )
+
+        assert result.returncode == 0, result.stderr
+        x_user = json.loads(_HookHandler.last_request["headers"]["X-User"])
+        assert x_user["identifier"] == "my box"
+
     def test_installed_script_reports_its_cli_version(self, monkeypatch, tmp_path, hook_server):
         script = tmp_path / "hooks" / "snyk-agent-guard.sh"
-        _copy_with_sentinel_version(monkeypatch, script)
+        # Installed values win over the environment, so the test server is baked in.
+        _copy_with_sentinel_version(monkeypatch, script, url=hook_server)
 
         result = subprocess.run(
             ["bash", str(script), "--client", "claude-code"],
@@ -4035,6 +4186,22 @@ class TestPowerShellHookScript:
         x_user = json.loads(_HookHandler.last_request["headers"]["X-User"])
         assert x_user["identifier"] == "machine-42"
 
+    def test_installed_machine_id_with_a_space_reaches_the_server(self, tmp_path, hook_server):
+        script = tmp_path / "snyk-agent-guard.ps1"
+        guard_module._copy_hook_script(script, push_key="installed-key", url=hook_server, machine_id="my box")
+
+        result = subprocess.run(
+            [self._ps_cmd(), "-File", str(script), "-Client", "claude-code"],
+            input='{"hook_event_name":"test","session_id":"s1"}',
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+        assert result.returncode == 0, result.stderr
+        x_user = json.loads(_HookHandler.last_request["headers"]["X-User"])
+        assert x_user["identifier"] == "my box"
+
     def test_installed_script_reports_its_cli_version(self, monkeypatch, tmp_path, hook_server):
         script = tmp_path / "hooks" / "snyk-agent-guard.ps1"
         _copy_with_sentinel_version(monkeypatch, script)
@@ -4159,12 +4326,9 @@ class TestCursorStylePowerShellInvocation:
 
     def test_cursor_invokes_command_string(self, hook_server):
         script = _get_script_path("snyk-agent-guard.ps1")
-        command = _build_hook_command_powershell(
-            "test-pk-cursor",
-            hook_server,
+        command = _powershell_hook_command(
             script,
             "claude-code",
-            machine_id="machine-42",
         )
         payload = '{"hook_event_name":"test","session_id":"cursor-test"}'
         result = subprocess.run(
@@ -4173,6 +4337,12 @@ class TestCursorStylePowerShellInvocation:
             capture_output=True,
             text=True,
             timeout=15,
+            env={
+                **os.environ,
+                "PUSH_KEY": "test-pk-cursor",
+                "REMOTE_HOOKS_BASE_URL": hook_server,
+                "MACHINE_ID": "machine-42",
+            },
         )
         assert result.returncode == 0, f"Command failed:\n{command}\nstderr: {result.stderr}"
 
@@ -4196,11 +4366,8 @@ class TestCursorStyleBashInvocation:
     def test_cursor_invokes_command_string(self, hook_server):
         script = _get_script_path("snyk-agent-guard.sh")
         command = _build_hook_command(
-            "test-pk-cursor",
-            hook_server,
             script,
             "cursor",
-            machine_id="machine-42",
         )
         payload = '{"hook_event_name":"test","conversation_id":"cursor-test"}'
         result = subprocess.run(
@@ -4209,7 +4376,12 @@ class TestCursorStyleBashInvocation:
             capture_output=True,
             text=True,
             timeout=10,
-            env={"PATH": "/usr/bin:/bin:/usr/local/bin"},
+            env={
+                "PATH": "/usr/bin:/bin:/usr/local/bin",
+                "PUSH_KEY": "test-pk-cursor",
+                "REMOTE_HOOKS_BASE_URL": hook_server,
+                "MACHINE_ID": "machine-42",
+            },
         )
         assert result.returncode == 0, f"Command failed:\n{command}\nstderr: {result.stderr}"
 
@@ -4474,7 +4646,7 @@ class TestInstallHooksOrchestration:
             active[key] = p
             m[key] = p.start()
 
-        def copy_script(script_dest):
+        def copy_script(script_dest, **kwargs):
             return m["discover_script"] if "discover" in script_dest.name else m["main_script"]
 
         m["copy"].side_effect = copy_script
@@ -4518,14 +4690,18 @@ class TestInstallHooksOrchestration:
 
     def test_copy_hook_script_includes_discovery_for_regular_config(self, ctx, tmp_path):
         config = self._call(tmp_path, client="claude", config_exists=True)
-        assert ctx["copy"].call_args_list == [
-            mock_call(guard_module._forwarder_script_path(config)),
-            mock_call(guard_module._discover_script_path(config)),
+        assert [call.args[0] for call in ctx["copy"].call_args_list] == [
+            guard_module._forwarder_script_path(config),
+            guard_module._discover_script_path(config),
         ]
+        assert all(
+            "push_key" in call.kwargs and "url" in call.kwargs and "machine_id" in call.kwargs
+            for call in ctx["copy"].call_args_list
+        )
 
-    def test_machine_id_forwarded_to_command_and_test_event(self, ctx, tmp_path):
+    def test_machine_id_forwarded_to_script_and_test_event(self, ctx, tmp_path):
         self._call(tmp_path, machine_id="machine-42")
-        assert ctx["build"].call_args.kwargs["machine_id"] == "machine-42"
+        assert ctx["copy"].call_args.kwargs["machine_id"] == "machine-42"
         assert ctx["test_event"].call_args.kwargs["machine_id"] == "machine-42"
 
     def test_claude_builds_and_prepares_async_discovery_hook(self, ctx, tmp_path):
@@ -4536,7 +4712,6 @@ class TestInstallHooksOrchestration:
         assert ctx["build_discover"].call_args.kwargs == {
             "agent_scan_command": "/usr/local/bin/snyk-agent-scan",
             "tenant_id": "tid-1",
-            "machine_id": "machine-42",
             "hook_client": "claude-code",
         }
         assert ctx["prep_claude"].call_args.kwargs["discover_command"] == "discover-cmd"
@@ -4553,7 +4728,7 @@ class TestInstallHooksOrchestration:
             self._call(tmp_path, client="claude")
 
         ctx["build_discover"].assert_called_once()
-        assert ctx["build_discover"].call_args.args[2] == tmp_path / "hooks" / "snyk-agent-guard-discover.ps1"
+        assert ctx["build_discover"].call_args.args[0] == tmp_path / "hooks" / "snyk-agent-guard-discover.ps1"
         assert ctx["prep_claude"].call_args.kwargs["discover_command"] == "discover-cmd"
 
     def test_codex_json_builds_discovery_hook(self, ctx, tmp_path):
@@ -4569,10 +4744,14 @@ class TestInstallHooksOrchestration:
         config = self._call(tmp_path, client="codex", hook_client="codex")
 
         ctx["build_discover"].assert_called_once()
-        assert ctx["copy"].call_args_list == [
-            mock_call(guard_module._forwarder_script_path(config)),
-            mock_call(guard_module._discover_script_path(config)),
+        assert [call.args[0] for call in ctx["copy"].call_args_list] == [
+            guard_module._forwarder_script_path(config),
+            guard_module._discover_script_path(config),
         ]
+        assert all(
+            "push_key" in call.kwargs and "url" in call.kwargs and "machine_id" in call.kwargs
+            for call in ctx["copy"].call_args_list
+        )
         assert ctx["prep_codex_managed"].call_args.kwargs["discover_command"] == "discover-cmd"
 
     def test_inferred_agent_scan_command_warns_that_fallback_is_temporary(self, ctx, tmp_path):
@@ -4588,7 +4767,13 @@ class TestInstallHooksOrchestration:
 
         config = self._call(tmp_path, client="claude")
 
-        ctx["copy"].assert_called_once_with(guard_module._forwarder_script_path(config))
+        ctx["copy"].assert_called_once_with(
+            guard_module._forwarder_script_path(config),
+            push_key="pk-test",
+            url="https://api.snyk.io",
+            machine_id="",
+            tenant_id="tid-1",
+        )
         ctx["build_discover"].assert_not_called()
         assert ctx["prep_claude"].call_args.kwargs["discover_command"] is None
 
@@ -4892,11 +5077,12 @@ class TestInstallHooksOrchestration:
         ctx["revoke"].assert_not_called()
 
     def test_test_event_failure_cleans_new_script(self, ctx, tmp_path):
-        ctx["main_script"] = guard_module._CopiedScript(ctx["dest"], False, True, None, _NEW_CHECKSUM)
         ctx["test_event"].return_value = False
         with pytest.raises(SystemExit):
             self._call(tmp_path)
-        ctx["dest"].unlink.assert_called_once_with(missing_ok=True)
+        config = tmp_path / "config.json"
+        assert not guard_module._forwarder_script_path(config).exists()
+        assert not guard_module._discover_script_path(config).exists()
 
     def test_test_event_failure_cleans_new_discovery_script(self, ctx, tmp_path):
         discover_script_name = (
@@ -4904,7 +5090,7 @@ class TestInstallHooksOrchestration:
         )
         discover_script = tmp_path / "hooks" / discover_script_name
 
-        def copy_scripts(dest):
+        def copy_scripts(dest, **kwargs):
             if "discover" not in dest.name:
                 return ctx["main_script"]
             discover_script.parent.mkdir(parents=True)
@@ -4941,17 +5127,89 @@ class TestInstallHooksOrchestration:
         assert discover_script.read_text() == "existing\n"
 
     def test_test_event_failure_keeps_existing_script(self, ctx, tmp_path):
-        ctx["main_script"] = guard_module._CopiedScript(
-            ctx["dest"],
-            True,
-            False,
-            _CURRENT_CHECKSUM,
-            _NEW_CHECKSUM,
-        )
+        config = tmp_path / "config.json"
+        config.write_text("{}")
+        main_script = guard_module._forwarder_script_path(config)
+        discover_script = guard_module._discover_script_path(config)
+        main_script.parent.mkdir(parents=True, exist_ok=True)
+        originals = {main_script: b"old forwarder credential", discover_script: b"old discovery credential"}
+        for path, content in originals.items():
+            path.write_bytes(content)
+            path.chmod(0o640)
+
+        def overwrite_script(path, **kwargs):
+            existed = path.exists()
+            path.write_bytes(b"new credential")
+            path.chmod(0o755)
+            return guard_module._CopiedScript(path, existed, True, _CURRENT_CHECKSUM, _NEW_CHECKSUM)
+
+        ctx["copy"].side_effect = overwrite_script
         ctx["test_event"].return_value = False
         with pytest.raises(SystemExit):
             self._call(tmp_path, minted=True, config_exists=True)
-        ctx["dest"].unlink.assert_not_called()
+
+        for path, content in originals.items():
+            assert path.read_bytes() == content
+            if not guard_module.IS_WINDOWS:
+                assert stat.S_IMODE(path.stat().st_mode) == 0o640
+
+    def test_test_event_failure_removes_new_scripts(self, ctx, tmp_path):
+        def create_script(path, **kwargs):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"new credential")
+            return guard_module._CopiedScript(path, False, True, None, _NEW_CHECKSUM)
+
+        ctx["copy"].side_effect = create_script
+        ctx["test_event"].return_value = False
+        with pytest.raises(SystemExit):
+            self._call(tmp_path, minted=True)
+
+        config = tmp_path / "config.json"
+        assert not guard_module._forwarder_script_path(config).exists()
+        assert not guard_module._discover_script_path(config).exists()
+
+    def test_config_write_failure_restores_scripts_config_and_backup(self, ctx, tmp_path):
+        config = tmp_path / "config.json"
+        config.write_text("{}")
+        config.chmod(0o640)
+        backup = config.with_name(f"{config.name}.backup")
+        backup.write_text("older backup")
+        backup.chmod(0o600)
+        main_script = guard_module._forwarder_script_path(config)
+        discover_script = guard_module._discover_script_path(config)
+        main_script.parent.mkdir(parents=True, exist_ok=True)
+        originals = {main_script: b"old forwarder credential", discover_script: b"old discovery credential"}
+        for path, content in originals.items():
+            path.write_bytes(content)
+            path.chmod(0o640)
+
+        def overwrite_script(path, **kwargs):
+            existed = path.exists()
+            path.write_bytes(b"new credential")
+            path.chmod(0o755)
+            return guard_module._CopiedScript(path, existed, True, _CURRENT_CHECKSUM, _NEW_CHECKSUM)
+
+        def partially_write_then_fail(prepared, path, preserved):
+            config_backup = path.with_name(f"{path.name}.backup")
+            config_backup.write_text("backup created by failed write")
+            path.write_text("partial config")
+            raise OSError("simulated config write failure")
+
+        ctx["copy"].side_effect = overwrite_script
+        ctx["write"].side_effect = partially_write_then_fail
+        with pytest.raises(OSError, match="simulated config write failure"):
+            self._call(tmp_path, config_exists=True)
+
+        assert config.read_text() == "{}"
+        if not guard_module.IS_WINDOWS:
+            assert stat.S_IMODE(config.stat().st_mode) == 0o640
+        assert backup.read_text() == "older backup"
+        if not guard_module.IS_WINDOWS:
+            assert stat.S_IMODE(backup.stat().st_mode) == 0o600
+        for path, content in originals.items():
+            assert path.read_bytes() == content
+            if not guard_module.IS_WINDOWS:
+                assert stat.S_IMODE(path.stat().st_mode) == 0o640
 
     def test_test_event_failure_does_not_write_config(self, ctx, tmp_path):
         ctx["test_event"].return_value = False
@@ -5348,56 +5606,36 @@ class TestDiscoverServersPayload:
 
 
 class TestInvokeHookScript:
-    def test_posix_invocation_sets_machine_id(self, monkeypatch):
-        monkeypatch.delenv("MACHINE_ID", raising=False)
+    def test_posix_invocation_shape(self):
         completed = subprocess.CompletedProcess([], 0, stdout="ok", stderr="")
         with patch(f"{_G}.IS_WINDOWS", False), patch("subprocess.run", return_value=completed) as run:
             result = guard_module._invoke_hook_script(
                 PurePosixPath("/hook.sh"),
                 "claude-code",
-                "pk",
-                "https://api.snyk.io",
                 "{}",
-                machine_id="machine-42",
             )
 
         assert result == (True, "")
         assert run.call_args.args[0] == ["bash", "/hook.sh", "--client", "claude-code"]
-        assert run.call_args.kwargs["env"]["MACHINE_ID"] == "machine-42"
         assert run.call_args.kwargs["input"] == "{}"
-
-    def test_posix_invocation_overwrites_ambient_machine_id(self, monkeypatch):
-        monkeypatch.setenv("MACHINE_ID", "ambient-machine")
-        completed = subprocess.CompletedProcess([], 0, stdout="ok", stderr="")
-        with patch(f"{_G}.IS_WINDOWS", False), patch("subprocess.run", return_value=completed) as run:
-            result = guard_module._invoke_hook_script(
-                PurePosixPath("/hook.sh"),
-                "cursor",
-                "pk",
-                "https://api.snyk.io",
-                "{}",
-                machine_id="chosen-machine",
-            )
-
-        assert result == (True, "")
-        assert run.call_args.kwargs["env"]["MACHINE_ID"] == "chosen-machine"
 
     def test_empty_machine_id_is_rejected(self):
         with pytest.raises(ValueError, match="machine ID"):
-            guard_module._invoke_hook_script(
-                Path("/hook.sh"), "cursor", "pk", "https://api.snyk.io", "{}", machine_id="  "
+            guard_module._send_test_event(
+                "pk",
+                "https://api.snyk.io",
+                "cursor",
+                Path("/hook.sh"),
+                machine_id="  ",
             )
 
-    def test_windows_invocation_machine_id_shape(self):
+    def test_windows_invocation_shape(self):
         completed = subprocess.CompletedProcess([], 0, stdout="ok", stderr="")
         with patch(f"{_G}.IS_WINDOWS", True), patch("subprocess.run", return_value=completed) as run:
             result = guard_module._invoke_hook_script(
                 Path("C:/hook.ps1"),
                 "codex",
-                "pk",
-                "https://api.snyk.io",
                 "{}",
-                machine_id="machine-42",
             )
 
         assert result == (True, "")
@@ -5407,21 +5645,13 @@ class TestInvokeHookScript:
             str(Path("C:/hook.ps1")),
             "-Client",
             "codex",
-            "-PushKey",
-            "pk",
-            "-RemoteUrl",
-            "https://api.snyk.io",
-            "-MachineId",
-            "machine-42",
         ]
         assert run.call_args.kwargs["env"] is None
 
     def test_nonzero_exit_returns_stderr(self):
         completed = subprocess.CompletedProcess([], 7, stdout="", stderr="bad request\n")
         with patch(f"{_G}.IS_WINDOWS", False), patch("subprocess.run", return_value=completed):
-            result = guard_module._invoke_hook_script(
-                Path("/hook.sh"), "cursor", "pk", "url", "{}", machine_id="machine-42"
-            )
+            result = guard_module._invoke_hook_script(Path("/hook.sh"), "cursor", "{}")
         assert result == (False, "bad request")
 
 
