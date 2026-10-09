@@ -899,6 +899,36 @@ def main():
         metavar="CONFIG_FILE",
     )
 
+    # DISCOVER-REMOTE command (POC)
+    discover_remote_parser = subparsers.add_parser(
+        "discover-remote",
+        allow_abbrev=False,
+        help="[POC] Backend-driven discovery (Cursor only); prints every request and response",
+        description=(
+            "Proof of concept: the backend decides which files to read, step by step. "
+            "Skill files go to a mocked upload revision. Discovery only: no handshakes, no analysis."
+        ),
+    )
+    discover_remote_parser.add_argument(
+        "--backend-url",
+        type=str,
+        default="http://localhost:9099",
+        help="Scan backend base URL (default: http://localhost:9099)",
+        metavar="URL",
+    )
+    discover_remote_parser.add_argument(
+        "--full",
+        action="store_true",
+        default=False,
+        help="Print file bytes and ctx tokens in full instead of shortening them",
+    )
+    discover_remote_parser.add_argument(
+        "--show-ctx",
+        action="store_true",
+        default=False,
+        help="Also print the decoded body of each ctx token (signed, not encrypted)",
+    )
+
     # HELP command
     help_parser = subparsers.add_parser(  # noqa: F841
         "help",
@@ -1079,6 +1109,10 @@ def main():
         from agent_scan.guard import run_guard
 
         sys.exit(run_guard(args))
+    elif args.command == "discover-remote":
+        from agent_scan.remote_discovery.client import run_remote_discovery
+
+        sys.exit(asyncio.run(run_remote_discovery(args.backend_url, full=args.full, show_ctx=args.show_ctx)))
 
     else:
         # This shouldn't happen due to argparse's handling
