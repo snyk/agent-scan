@@ -17,6 +17,7 @@ This is the documentation for [Agent Scan](https://github.com/snyk/agent-scan). 
 
 - **[CLI flags and behavior](cli-reference.md#agent-scan-v06-and-later)** — Commands, flags, options, environment variables, and exit codes.
 - **[Scanning guide](scanning.md#agent-scan-v06-and-later)** — Risk-based scanning behavior and usage examples.
+- **[Agent discovery](agent-discovery.md)** — Every path Agent Scan reads to find MCP servers and skills, per agent.
 - **[JSON output](json-output.md#agent-scan-v06-and-later)** — The `2026-07-10` response schema and programmatic parsing.
 - **[Risk reference](risks.md)** — Security risk indicators, scores, and evidence fields for MCP servers and skills.
 - **[Failure codes](failure-codes.md)** — Operational discovery, inspection, and analysis failures.
