@@ -637,3 +637,28 @@ def test_set_token_url_return_value_distinguishes_accepted_from_refused(tmp_path
 
     assert accepted is True
     assert refused is False
+
+
+@pytest.mark.asyncio
+async def test_ensure_fresh_token_request_hooks_stop_the_refresh_before_it_is_sent(tmp_path, monkeypatch):
+    """The refresh POST carries the refresh token and client secret to a URL that came from server-controlled
+    discovery metadata. A destination guard passed as a request hook must stop it before anything is sent."""
+    from agent_scan.mcp_client import _guard_mcp_destination
+
+    sent: list[str] = []
+
+    async def transport_that_records(self, request):
+        sent.append(str(request.url))
+        raise AssertionError("the refresh request reached the network transport")
+
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", transport_that_records)
+    url = "https://mcp.linear.app/mcp"
+    store = OAuthTokenStore(path=tmp_path / "store.json")
+    store.put(
+        url, _entry(expires_at=time.time() - 10).model_copy(update={"token_url": "https://169.254.169.254/token"})
+    )
+
+    await ensure_fresh_token(store, url, request_hooks=[_guard_mcp_destination])
+
+    assert sent == []
+    assert store.get(url).token.access_token == "a1"  # still the stale token: the refresh never happened

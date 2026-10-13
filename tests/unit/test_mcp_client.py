@@ -1,5 +1,6 @@
 """Unit tests for the mcp_client module."""
 
+import logging
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -23,6 +24,8 @@ from agent_scan import oauth_store
 from agent_scan.mcp_client import (
     _check_server_pass,
     _create_mcp_http_client_without_redirects,
+    _guard_mcp_destination,
+    _resolve_scan_oauth_provider,
     check_server,
     get_client,
     scan_mcp_config_file,
@@ -239,6 +242,48 @@ async def test_get_client_expands_env_placeholders_for_remote_sse_server(mock_ss
     assert called_kwargs["headers"] == {"Authorization": "Bearer real-secret-value"}
     # The parsed model itself must be untouched -- still the literal placeholder.
     assert server.headers == {"Authorization": "Bearer ${LINEAR_API_TOKEN}"}
+
+
+@pytest.mark.asyncio
+async def test_resolve_scan_oauth_provider_guards_the_proactive_refresh():
+    """The proactive refresh runs before any guarded client exists, so it must be handed the destination guard."""
+    store = Mock()
+    store.get.return_value = Mock()  # an existing stored credential
+    with (
+        patch("agent_scan.mcp_client.OAuthTokenStore", return_value=store),
+        patch("agent_scan.mcp_client.PersistentTokenStorage"),
+        patch("agent_scan.mcp_client.ensure_fresh_token", new=AsyncMock()) as refresh,
+    ):
+        await _resolve_scan_oauth_provider("https://example.test/mcp", None)
+
+    assert _guard_mcp_destination in refresh.call_args.kwargs["request_hooks"]
+
+
+@pytest.mark.asyncio
+@patch("agent_scan.mcp_client.streamablehttp_client_without_session")
+async def test_get_client_logs_which_env_vars_a_remote_server_reads_without_values_or_url_secrets(
+    mock_streamable_client, monkeypatch, caplog
+):
+    """Unattended runs skip the consent prompt, so expansion leaves a names-only audit line."""
+    monkeypatch.setenv("LINEAR_API_TOKEN", "real-secret-value")
+    mock_client = AsyncMock()
+    mock_client.__aenter__.return_value = (AsyncMock(), AsyncMock())
+    mock_streamable_client.return_value = mock_client
+    server = RemoteServer(
+        url="https://example.com/mcp?api_key=URL-SECRET",
+        type="http",
+        headers={"Authorization": "Bearer ${LINEAR_API_TOKEN}"},
+    )
+
+    with caplog.at_level(logging.INFO, logger="agent_scan.utils"):
+        async with get_client(server, timeout=5, server_name="linear"):
+            pass
+
+    assert "linear" in caplog.text
+    assert "Authorization" in caplog.text
+    assert "LINEAR_API_TOKEN" in caplog.text
+    assert "real-secret-value" not in caplog.text
+    assert "URL-SECRET" not in caplog.text
 
 
 @pytest.mark.asyncio

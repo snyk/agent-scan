@@ -665,3 +665,30 @@ class TestExpandEnvVars:
         """A bare '$' or a name that doesn't look like ${IDENTIFIER} is not touched."""
         result = expand_env_vars({"PRICE": "$5.00 (${) not a var"})
         assert result == {"PRICE": "$5.00 (${) not a var"}
+
+    def test_expansion_is_logged_by_name_and_never_by_value(self, monkeypatch, caplog):
+        """The audit line names the key and variable so a run that skipped the consent prompt still leaves a record."""
+        monkeypatch.setenv("MY_SECRET", "super-secret-value")
+        with caplog.at_level(logging.INFO, logger="agent_scan.utils"):
+            result = expand_env_vars({"Authorization": "Bearer ${MY_SECRET}"}, context="headers of remote server 'x'")
+        assert result == {"Authorization": "Bearer super-secret-value"}
+        assert "headers of remote server 'x'" in caplog.text
+        assert "Authorization" in caplog.text
+        assert "MY_SECRET" in caplog.text
+        assert "super-secret-value" not in caplog.text
+
+    def test_each_expanded_variable_is_logged_once(self, monkeypatch, caplog):
+        monkeypatch.setenv("A_VAR", "value-a")
+        monkeypatch.setenv("B_VAR", "value-b")
+        with caplog.at_level(logging.INFO, logger="agent_scan.utils"):
+            expand_env_vars({"X": "${A_VAR}:${B_VAR}"}, context="env of stdio server 'y'")
+        messages = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO]
+        assert len(messages) == 2
+        assert any("A_VAR" in m for m in messages)
+        assert any("B_VAR" in m for m in messages)
+
+    def test_no_audit_line_when_nothing_was_expanded(self, monkeypatch, caplog):
+        monkeypatch.delenv("DOES_NOT_EXIST", raising=False)
+        with caplog.at_level(logging.INFO, logger="agent_scan.utils"):
+            expand_env_vars({"A": "plain", "B": "${DOES_NOT_EXIST}"}, context="env of stdio server 'y'")
+        assert [r for r in caplog.records if r.levelno == logging.INFO] == []

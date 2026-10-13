@@ -251,9 +251,9 @@ def resolve_command_and_args(server_config: StdioServer) -> tuple[str, list[str]
 _ENV_VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
-def expand_env_vars(env: dict[str, str] | None) -> dict[str, str] | None:
-    """Substitute ${NAME} references in stdio-server env values with the
-    scanning process's own environment variables.
+def expand_env_vars(env: dict[str, str] | None, *, context: str | None = None) -> dict[str, str] | None:
+    """Substitute ${NAME} references in stdio-server env values and remote-server
+    header values with the scanning process's own environment variables.
 
     Lets a config commit a placeholder like {"AUTH_HEADER": "${AUTH_HEADER}"}
     instead of a real secret: the real value is resolved only here, at spawn
@@ -265,22 +265,34 @@ def expand_env_vars(env: dict[str, str] | None) -> dict[str, str] | None:
     scanning process's environment is left unexpanded and logged as a
     warning (visible with --verbose), rather than silently connecting with
     a blank credential.
+
+    Every reference that *is* expanded is logged (also visible with --verbose)
+    by key and variable name -- never by value -- so a run that skipped the
+    consent prompt still leaves a record of which of the scanner's environment
+    variables a config made it read. ``context`` names the server in that line;
+    callers must not put anything secret in it (e.g. a URL with query values).
     """
     if env is None:
         return None
 
-    def _substitute(match: re.Match[str]) -> str:
-        name = match.group(1)
-        value = os.environ.get(name)
-        if not value:
-            logger.warning(
-                f"Env var '{name}' referenced in a server config's env block but not set (or empty) in "
-                f"the scanning environment; leaving '{match.group(0)}' unexpanded"
-            )
-            return match.group(0)
-        return value
+    where = context or "a server config"
+    expanded: dict[str, str] = {}
+    for key, raw_value in env.items():
 
-    return {key: _ENV_VAR_PATTERN.sub(_substitute, value) for key, value in env.items()}
+        def _substitute(match: re.Match[str], key: str = key) -> str:
+            name = match.group(1)
+            value = os.environ.get(name)
+            if not value:
+                logger.warning(
+                    f"Env var '{name}' referenced in a server config's env block but not set (or empty) in "
+                    f"the scanning environment; leaving '{match.group(0)}' unexpanded"
+                )
+                return match.group(0)
+            logger.info("%s: '%s' reads ${%s} from the scanning environment", where, key, name)
+            return value
+
+        expanded[key] = _ENV_VAR_PATTERN.sub(_substitute, raw_value)
+    return expanded
 
 
 @contextlib.contextmanager

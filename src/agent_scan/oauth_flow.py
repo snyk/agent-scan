@@ -21,6 +21,7 @@ needed. Pinned against ``mcp==1.27.0``.
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import threading
 import webbrowser
@@ -36,6 +37,7 @@ from mcp.client.sse import sse_client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.shared.auth import OAuthClientInformationFull, OAuthClientMetadata, OAuthToken
 
+from agent_scan.mcp_client import _find_unsafe_destination, _guard_mcp_destination
 from agent_scan.oauth_store import (
     OAuthTokenStore,
     StoredServerAuth,
@@ -239,10 +241,22 @@ def _transport_strategy(url: str) -> list[tuple[str, str]]:
 
 
 async def _connect_once(kind: str, attempt_url: str, provider: OAuthClientProvider, timeout: float) -> None:
-    """Open one MCP session through the auth provider, triggering the flow on 401."""
+    """Open one MCP session through the auth provider, triggering the flow on 401.
+
+    Both transports carry the destination guard the scan path uses, so ``mcp-auth`` refuses link-local
+    and cloud-metadata addresses too. It runs as a request hook, which httpx applies to every request
+    -- each redirect hop and the SDK's own discovery and token requests included -- so redirect handling
+    is unchanged: the streamable-HTTP client keeps ``follow_redirects=True``, and servers that
+    legitimately redirect keep working.
+    """
     if kind == "sse":
         async with sse_client(
-            url=attempt_url, auth=provider, timeout=timeout, httpx_client_factory=mcp_http_client_with_redirect_guard
+            url=attempt_url,
+            auth=provider,
+            timeout=timeout,
+            httpx_client_factory=functools.partial(
+                mcp_http_client_with_redirect_guard, request_hooks=[_guard_mcp_destination]
+            ),
         ) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
@@ -251,7 +265,7 @@ async def _connect_once(kind: str, attempt_url: str, provider: OAuthClientProvid
             auth=provider,
             follow_redirects=True,
             timeout=timeout,
-            event_hooks={"response": [_reject_redirected_token_exchange]},
+            event_hooks={"request": [_guard_mcp_destination], "response": [_reject_redirected_token_exchange]},
         ) as client:
             async with streamable_http_client(url=attempt_url, http_client=client) as (read, write, _):
                 async with ClientSession(read, write) as session:
@@ -295,7 +309,10 @@ async def authenticate_server(
             try:
                 await _connect_once(kind, attempt_url, provider, timeout)
             except Exception as e:
-                last_error = f"{type(e).__name__}: {e}"
+                # The transports run in anyio task groups, so a refused destination arrives wrapped
+                # in an ExceptionGroup; report the refusal itself, not "unhandled errors in a TaskGroup".
+                reported = _find_unsafe_destination(e) or e
+                last_error = f"{type(reported).__name__}: {reported}"
                 logger.debug("mcp-auth attempt failed (%s %s): %s", kind, attempt_url, last_error)
                 continue
             # Connected and initialized, but that alone doesn't mean OAuth
