@@ -11,6 +11,7 @@ import pytest
 from pytest_lazy_fixtures import lf
 
 from agent_scan.utils import TempFile
+from tests.server_utils import wait_for_port
 
 
 def posix(path: str) -> str:
@@ -283,9 +284,7 @@ class TestInspect:
             ],
         )
         try:
-            import time
-
-            time.sleep(1)
+            wait_for_port(int(port), process=process)
             result = subprocess.run(
                 [*agent_scan_cmd, "inspect", "--json", "--dangerously-run-mcp-servers", direct_scan_path],
                 capture_output=True,

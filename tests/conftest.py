@@ -2,12 +2,12 @@
 
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 import pytest
 
 from agent_scan.utils import TempFile, ensure_unicode_console
+from tests.server_utils import wait_for_port
 
 # Repository root (parent of tests/)
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -249,12 +249,14 @@ def sse_transport_config_file(sse_transport_config):
                 "8123",
             ],
         )
-        time.sleep(1)  # Wait for the server to start
-        temp_file.write(sse_transport_config)
-        temp_file.flush()
-        yield temp_file.name
-        process.terminate()
-        process.wait()
+        try:
+            wait_for_port(8123, process=process)
+            temp_file.write(sse_transport_config)
+            temp_file.flush()
+            yield temp_file.name
+        finally:
+            process.terminate()
+            process.wait()
 
 
 @pytest.fixture
@@ -289,12 +291,14 @@ def streamable_http_transport_config_file(streamable_http_transport_config):
                 "8124",
             ],
         )
-        time.sleep(1)  # Wait for the server to start
-        temp_file.write(streamable_http_transport_config)
-        temp_file.flush()
-        yield temp_file.name
-        process.terminate()
-        process.wait()
+        try:
+            wait_for_port(8124, process=process)
+            temp_file.write(streamable_http_transport_config)
+            temp_file.flush()
+            yield temp_file.name
+        finally:
+            process.terminate()
+            process.wait()
 
 
 @pytest.fixture
