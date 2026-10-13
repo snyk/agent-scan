@@ -99,8 +99,8 @@ class GitHubCopilotDiscoverer(AgentDiscoverer):
       honored additively.
 
     Recorded project roots come from ``permissions-config.json``'s ``locations`` map,
-    ``config.json``'s ``trusted_folders`` list, and ``session-state/*/workspace.yaml``'s
-    ``cwd`` / containing ``git_root``. Saved approvals are not consulted; every local,
+    ``config.json``'s ``trusted_folders`` / ``trustedFolders`` lists, and
+    ``session-state/*/workspace.yaml``'s ``cwd`` / containing ``git_root``. Saved approvals are not consulted; every local,
     existing project directory is scanned.
 
     Not covered: LSP servers (``lsp-config.json``) and custom agents (``agents/``),
@@ -347,8 +347,10 @@ class GitHubCopilotDiscoverer(AgentDiscoverer):
         if isinstance(permissions, dict) and isinstance(permissions.get("locations"), dict):
             roots.extend(permissions["locations"])
         config = self._load_json_file(home / "config.json", log_parse_errors=False)
-        if isinstance(config, dict) and isinstance(config.get("trusted_folders"), list):
-            roots.extend(config["trusted_folders"])
+        if isinstance(config, dict):
+            for trust_key in ("trusted_folders", "trustedFolders"):
+                if isinstance(config.get(trust_key), list):
+                    roots.extend(config[trust_key])
         roots.extend(self._session_project_roots(home))
 
         folders: list[Path] = []

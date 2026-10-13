@@ -55,7 +55,7 @@ def _assert_project(discoverer: GitHubCopilotDiscoverer, project: Path) -> None:
     assert [skill.name for skill in entries] == ["demo"]
 
 
-@pytest.mark.parametrize("source", ["session", "trusted_folders"])
+@pytest.mark.parametrize("source", ["session", "trusted_folders", "trustedFolders"])
 @pytest.mark.parametrize("override", [False, True])
 def test_project_discovered_from_one_source_only(tmp_path, monkeypatch, source, override):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
@@ -72,12 +72,12 @@ def test_project_discovered_from_one_source_only(tmp_path, monkeypatch, source, 
         _workspace(home, package, project)
     else:
         (home / "config.json").write_text(
-            '// Copilot CLI configuration\n{"trusted_folders": [' + json.dumps(str(project)) + ",],}\n"
+            f'// Copilot CLI configuration\n{{"{source}": [' + json.dumps(str(project)) + ",],}\n"
         )
 
     discoverer = GitHubCopilotDiscoverer(None)
 
-    assert discoverer.client_exists() == str(home)
+    assert discoverer.client_exists() == home.as_posix()
     _assert_project(discoverer, project)
 
 
@@ -135,7 +135,9 @@ def test_duplicate_roots_are_deduped_across_sources_and_targets(tmp_path):
     _workspace(home, project, project, "second")
     (home / "permissions-config.json").write_text(json.dumps({"locations": {str(project): {}}}))
     (home / "config.json").write_text(
-        json.dumps({"trusted_folders": [str(project), f"  {project}  ", str(project / ".")]})
+        json.dumps(
+            {"trusted_folders": [str(project), f"  {project}  ", str(project / ".")], "trustedFolders": [str(project)]}
+        )
     )
     discoverer = GitHubCopilotDiscoverer(tmp_path, target_folders=[project, project])
 
@@ -180,7 +182,7 @@ def test_git_root_bridges_symlinked_cwd(tmp_path):
     _assert_project(discoverer, project)
 
 
-@pytest.mark.parametrize("source", ["session", "trusted_folders", "permissions"])
+@pytest.mark.parametrize("source", ["session", "trusted_folders", "trustedFolders", "permissions"])
 def test_only_local_existing_directories_are_roots(tmp_path, source):
     home = tmp_path / ".copilot"
     home.mkdir()
@@ -204,8 +206,8 @@ def test_only_local_existing_directories_are_roots(tmp_path, source):
         for index, value in enumerate(invalid):
             path = _workspace(home, None, None, str(index))
             path.write_text(json.dumps({"cwd": value, "git_root": value}))
-    elif source == "trusted_folders":
-        (home / "config.json").write_text(json.dumps({"trusted_folders": invalid}))
+    elif source in {"trusted_folders", "trustedFolders"}:
+        (home / "config.json").write_text(json.dumps({source: invalid}))
     else:
         (home / "permissions-config.json").write_text(
             json.dumps({"locations": {v: {} for v in invalid if isinstance(v, str)}})
@@ -271,7 +273,7 @@ def test_session_scan_reads_only_small_direct_workspace_files(tmp_path, monkeypa
     _assert_project(GitHubCopilotDiscoverer(tmp_path), project)
 
 
-@pytest.mark.parametrize("source", ["session", "trusted_folders"])
+@pytest.mark.parametrize("source", ["session", "trusted_folders", "trustedFolders"])
 def test_copilot_home_override_does_not_affect_other_users(tmp_path, monkeypatch, source):
     home = tmp_path / "alice" / ".copilot"
     home.mkdir(parents=True)
@@ -281,7 +283,7 @@ def test_copilot_home_override_does_not_affect_other_users(tmp_path, monkeypatch
     if source == "session":
         _workspace(relocated, project, None)
     else:
-        (relocated / "config.json").write_text(json.dumps({"trusted_folders": [str(project)]}))
+        (relocated / "config.json").write_text(json.dumps({source: [str(project)]}))
     monkeypatch.setenv("COPILOT_HOME", str(relocated))
 
     discoverer = GitHubCopilotDiscoverer(home.parent)
