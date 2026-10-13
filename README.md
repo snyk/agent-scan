@@ -278,13 +278,14 @@ Agent Scan searches through your local agent's configuration files to find agent
 
 By default, Agent Scan prompts for user consent before contacting each discovered MCP server during interactive runs. This consent flow:
 
-- Shows the server name and its command or remote URL; environment variables and headers are redacted
+- Shows the server name and its command or remote URL; literal environment variable and header values are redacted, but `${NAME}` references in them are shown, because Agent Scan replaces each one with the value of that variable from your environment before connecting. Check which variables a server will read before approving
 - Allows you to approve or decline each server individually
 - Prevents potentially untrusted servers from being contacted without your explicit permission
 - Records declined servers with a `user_declined` error (they are never contacted)
 
 **Best Practices:**
 - Review commands, arguments, and remote URLs carefully before approving
+- Be suspicious of a `${NAME}` reference to a variable the server has no reason to need (for example a cloud credential in a header of an unfamiliar server). Unattended runs (`--dangerously-run-mcp-servers`, `--ci`, background remote inspection) have no prompt; with `--verbose` they log which variables were read, by name only, never by value
 - When scanning untrusted or third-party MCP configs, run Agent Scan inside a sandbox (Docker, VM, or disposable environment)
 - Decline any servers with unfamiliar or suspicious commands
 

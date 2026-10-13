@@ -127,7 +127,9 @@ async def _resolve_scan_oauth_provider(url: str, token: TokenAndClientInfo | Non
         store.put(url, entry)
     if entry is None:
         return None
-    await ensure_fresh_token(store, url)
+    # The proactive refresh POST runs before any guarded client exists and goes to a token
+    # endpoint taken from server-controlled discovery metadata, so give it the same destination guard.
+    await ensure_fresh_token(store, url, request_hooks=[_guard_mcp_destination])
     return OAuthClientProvider(
         server_url=url,
         client_metadata=OAuthClientMetadata(
@@ -140,6 +142,11 @@ async def _resolve_scan_oauth_provider(url: str, token: TokenAndClientInfo | Non
         redirect_handler=_handle_redirect_unsupported,
         callback_handler=_handle_callback_unsupported,
     )
+
+
+def _remote_server_label(server_config: RemoteServer, server_name: str | None) -> str:
+    """Name a remote server in logs: its config name, else just the host -- never the full URL, which can carry secrets."""
+    return server_name or urlparse(server_config.url).hostname or "<unknown>"
 
 
 @asynccontextmanager
@@ -184,7 +191,10 @@ async def get_client(
         sse_oauth_provider = await _resolve_scan_oauth_provider(server_config.url, token)
         client_cm = sse_client(
             url=server_config.url,
-            headers=expand_env_vars(server_config.headers),
+            headers=expand_env_vars(
+                server_config.headers,
+                context=f"headers of remote server '{_remote_server_label(server_config, server_name)}'",
+            ),
             # env=server_config.env, #Not supported by MCP yet, but present in vscode
             timeout=timeout,
             httpx_client_factory=_create_mcp_http_client_without_redirects,
@@ -196,7 +206,10 @@ async def get_client(
         )
         client_cm = streamablehttp_client_without_session(
             url=server_config.url,
-            headers=expand_env_vars(server_config.headers),
+            headers=expand_env_vars(
+                server_config.headers,
+                context=f"headers of remote server '{_remote_server_label(server_config, server_name)}'",
+            ),
             timeout=timeout or 60,
             token=token,
         )
@@ -210,7 +223,9 @@ async def get_client(
         server_params = StdioServerParameters(
             command=command,
             args=args,
-            env=expand_env_vars(server_config.env),
+            env=expand_env_vars(
+                server_config.env, context=f"env of stdio server '{server_name or server_config.command}'"
+            ),
             cwd=server_config.runtime_cwd,
         )
         # Create stderr capture with real pipe if traffic capture is enabled.

@@ -33,6 +33,7 @@ import json
 import logging
 import os
 import time
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse, urlsplit, urlunsplit
@@ -48,6 +49,10 @@ if TYPE_CHECKING:
     from agent_scan.models import TokenAndClientInfo
 
 logger = logging.getLogger(__name__)
+
+# An httpx request event hook. Callers inject the destination guard this way (see
+# ``mcp_client._guard_mcp_destination``) so this module never has to import it.
+RequestHook = Callable[[httpx.Request], Awaitable[None]]
 
 # Refresh this many seconds *before* the access token's nominal expiry, to
 # avoid using a token that expires mid-request.
@@ -133,6 +138,8 @@ def mcp_http_client_with_redirect_guard(
     headers: dict[str, str] | None = None,
     timeout: httpx.Timeout | None = None,
     auth: httpx.Auth | None = None,
+    *,
+    request_hooks: Sequence[RequestHook] = (),
 ) -> httpx.AsyncClient:
     """``McpHttpClientFactory``-shaped factory for ``sse_client``.
 
@@ -140,12 +147,21 @@ def mcp_http_client_with_redirect_guard(
     streamable-HTTP transport, which takes a pre-built one), so the redirect
     guard can't be added to that client the same way. This factory delegates
     to the SDK's own ``create_mcp_http_client`` for its usual defaults
-    (``follow_redirects=True``, standard timeouts), then attaches
-    ``_reject_redirected_token_exchange`` on top -- see its docstring for why.
+    (standard timeouts; redirect following is left at httpx's default, off,
+    and the SDK's transport follows same-origin redirects itself), then
+    attaches ``_reject_redirected_token_exchange`` on top -- see its
+    docstring for why.
+
+    ``request_hooks`` (bind them with ``functools.partial``) are added as
+    request event hooks. httpx runs those before *every* request, including
+    each redirect hop and the SDK's own discovery/token requests, so a
+    destination guard passed here covers redirects without having to turn
+    them off.
     """
     client = create_mcp_http_client(headers=headers, timeout=timeout, auth=auth)
     client.event_hooks = {
         **client.event_hooks,
+        "request": [*client.event_hooks.get("request", []), *request_hooks],
         "response": [*client.event_hooks.get("response", []), _reject_redirected_token_exchange],
     }
     return client
@@ -617,7 +633,13 @@ def _refresh_lock(server_url: str) -> asyncio.Lock:
     return lock
 
 
-async def ensure_fresh_token(store: OAuthTokenStore, server_url: str, *, timeout: float = 30.0) -> None:
+async def ensure_fresh_token(
+    store: OAuthTokenStore,
+    server_url: str,
+    *,
+    timeout: float = 30.0,
+    request_hooks: Sequence[RequestHook] = (),
+) -> None:
     """Refresh a stored access token before connecting, if it is expired.
 
     Best-effort and non-fatal: any failure (network, dead refresh token,
@@ -625,6 +647,12 @@ async def ensure_fresh_token(store: OAuthTokenStore, server_url: str, *, timeout
     stale token; if the server rejects it, the connection attempt fails and the
     scan reports a connection error for that server, and the user
     re-authenticates. Never raises.
+
+    ``request_hooks`` run before the refresh POST is sent. The scan passes its
+    destination guard here: the stored token endpoint came from server-controlled
+    discovery metadata, and this request carries the refresh token and client
+    secret, so a hook that raises stops it before anything leaves the machine
+    (the failure is then swallowed like any other refresh failure).
 
     This function guards only its own proactive refresh: ``follow_redirects``
     and ``is_secure_token_url`` below cover this module's HTTP POST to the
@@ -684,7 +712,9 @@ async def ensure_fresh_token(store: OAuthTokenStore, server_url: str, *, timeout
             # server picked. This protects only this proactive-refresh path, not
             # the MCP SDK's own refresh (see the docstring above); that path is
             # not covered here and is tracked as a follow-up.
-            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+            async with httpx.AsyncClient(
+                timeout=timeout, follow_redirects=False, event_hooks={"request": list(request_hooks)}
+            ) as client:
                 resp = await client.post(entry.token_url, data=data, headers=headers)
             if resp.status_code in (301, 302, 303, 307, 308):
                 logger.warning(
