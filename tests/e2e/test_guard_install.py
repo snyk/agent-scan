@@ -28,7 +28,7 @@ class _FakeHookServer(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
-        self.wfile.write(b'{"ok":true}')
+        self.wfile.write(b'{"success":true}')
 
     def log_message(self, format, *args):
         pass
