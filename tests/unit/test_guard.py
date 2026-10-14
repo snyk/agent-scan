@@ -5048,10 +5048,9 @@ class TestInstallHooksOrchestration:
             for call in ctx["copy"].call_args_list
         )
 
-    def test_machine_id_forwarded_to_script_and_test_event(self, ctx, tmp_path):
+    def test_machine_id_forwarded_to_script(self, ctx, tmp_path):
         self._call(tmp_path, machine_id="machine-42")
         assert ctx["copy"].call_args.kwargs["machine_id"] == "machine-42"
-        assert ctx["test_event"].call_args.kwargs["machine_id"] == "machine-42"
 
     def test_claude_builds_and_prepares_async_discovery_hook(self, ctx, tmp_path):
         with patch(f"{_G}.IS_WINDOWS", False):
@@ -5275,8 +5274,6 @@ class TestInstallHooksOrchestration:
         ctx["main_script"] = guard_module._CopiedScript(ctx["dest"], False, True, None, _NEW_CHECKSUM)
         self._call(tmp_path)
         ctx["test_event"].assert_called_once_with(
-            "pk-test",
-            "https://api.snyk.io",
             "claude-code",
             ctx["dest"],
             first_install=True,
@@ -5287,7 +5284,6 @@ class TestInstallHooksOrchestration:
             new_checksum=_NEW_CHECKSUM,
             discover_current_checksum=_DISCOVER_CURRENT_CHECKSUM,
             discover_new_checksum=_DISCOVER_NEW_CHECKSUM,
-            machine_id="",
         )
 
     def test_test_event_receives_empty_diff(self, ctx, tmp_path):
@@ -5295,8 +5291,6 @@ class TestInstallHooksOrchestration:
         ctx["main_script"] = guard_module._CopiedScript(ctx["dest"], False, True, None, _NEW_CHECKSUM)
         self._call(tmp_path)
         ctx["test_event"].assert_called_once_with(
-            "pk-test",
-            "https://api.snyk.io",
             "claude-code",
             ctx["dest"],
             first_install=True,
@@ -5307,15 +5301,12 @@ class TestInstallHooksOrchestration:
             new_checksum=_NEW_CHECKSUM,
             discover_current_checksum=_DISCOVER_CURRENT_CHECKSUM,
             discover_new_checksum=_DISCOVER_NEW_CHECKSUM,
-            machine_id="",
         )
 
     def test_test_event_not_first_install(self, ctx, tmp_path):
         ctx["prep_claude"].return_value = (_PREPARED, _DIFF_REMOVED, 0)
         self._call(tmp_path, minted=True, config_exists=True)
         ctx["test_event"].assert_called_once_with(
-            "pk-test",
-            "https://api.snyk.io",
             "claude-code",
             ctx["dest"],
             first_install=False,
@@ -5326,7 +5317,6 @@ class TestInstallHooksOrchestration:
             new_checksum=_NEW_CHECKSUM,
             discover_current_checksum=_DISCOVER_CURRENT_CHECKSUM,
             discover_new_checksum=_DISCOVER_NEW_CHECKSUM,
-            machine_id="",
         )
 
     def test_test_event_push_key_changed(self, ctx, tmp_path):
@@ -5334,8 +5324,6 @@ class TestInstallHooksOrchestration:
         ctx["main_script"] = guard_module._CopiedScript(ctx["dest"], False, True, None, _NEW_CHECKSUM)
         self._call(tmp_path)
         ctx["test_event"].assert_called_once_with(
-            "pk-test",
-            "https://api.snyk.io",
             "claude-code",
             ctx["dest"],
             first_install=True,
@@ -5346,7 +5334,6 @@ class TestInstallHooksOrchestration:
             new_checksum=_NEW_CHECKSUM,
             discover_current_checksum=_DISCOVER_CURRENT_CHECKSUM,
             discover_new_checksum=_DISCOVER_NEW_CHECKSUM,
-            machine_id="",
         )
 
     def test_test_event_push_key_unchanged(self, ctx, tmp_path):
@@ -5354,8 +5341,6 @@ class TestInstallHooksOrchestration:
         ctx["main_script"] = guard_module._CopiedScript(ctx["dest"], False, True, None, _NEW_CHECKSUM)
         self._call(tmp_path)
         ctx["test_event"].assert_called_once_with(
-            "pk-test",
-            "https://api.snyk.io",
             "claude-code",
             ctx["dest"],
             first_install=True,
@@ -5366,7 +5351,6 @@ class TestInstallHooksOrchestration:
             new_checksum=_NEW_CHECKSUM,
             discover_current_checksum=_DISCOVER_CURRENT_CHECKSUM,
             discover_new_checksum=_DISCOVER_NEW_CHECKSUM,
-            machine_id="",
         )
 
     # ---------------------------------------------------------------
@@ -5660,11 +5644,8 @@ class TestSendTestEventHooksScript:
 
         with patch("subprocess.run", side_effect=fake_run), patch(f"{_G}.rich"):
             _send_test_event(
-                "pk-test",
-                "https://api.snyk.io",
                 "claude-code",
                 Path("/fake/script.sh"),
-                machine_id="machine-42",
                 **kwargs,
             )
         return captured["payload"]
@@ -5968,15 +5949,6 @@ class TestInvokeHookScript:
         assert run.call_args.args[0] == ["bash", "/hook.sh", "--client", "claude-code"]
         assert run.call_args.kwargs["input"] == "{}"
 
-    def test_empty_machine_id_is_rejected(self):
-        with pytest.raises(ValueError, match="machine ID"):
-            guard_module._send_test_event(
-                "pk",
-                "https://api.snyk.io",
-                "cursor",
-                Path("/hook.sh"),
-                machine_id="  ",
-            )
 
     def test_windows_invocation_shape(self):
         completed = subprocess.CompletedProcess([], 0, stdout="ok", stderr="")
@@ -6011,10 +5983,7 @@ class TestInvokeHookScriptSuccessPayload:
             return guard_module._invoke_hook_script(
                 Path("/hook.sh"),
                 "cursor",
-                "pk",
-                "url",
                 "{}",
-                machine_id="machine-42",
                 require_success_payload=require,
             )
 
@@ -6067,11 +6036,8 @@ class TestSendTestEventSuccessPayload:
         completed = subprocess.CompletedProcess([], 0, stdout=stdout, stderr="")
         with patch("subprocess.run", return_value=completed), patch(f"{_G}.rich"):
             return _send_test_event(
-                "pk-test",
-                "https://api.snyk.io",
                 "claude-code",
                 Path("/fake/script.sh"),
-                machine_id="machine-42",
             )
 
     def test_http_200_with_empty_body_fails(self):

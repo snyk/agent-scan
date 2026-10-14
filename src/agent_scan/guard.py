@@ -633,8 +633,6 @@ def _install_hooks(
         config_changed = bool(hooks_diff["added"] or hooks_diff["modified"] or hooks_diff["removed"])
 
         if not _send_test_event(
-            push_key,
-            url,
             hook_client,
             dest_path,
             first_install=first_install,
@@ -645,7 +643,6 @@ def _install_hooks(
             new_checksum=main_script.new_checksum,
             discover_current_checksum=discover_script.current_checksum if discover_script else None,
             discover_new_checksum=discover_script.new_checksum if discover_script else None,
-            machine_id=machine_id,
         ):
             rich.print("[bold red]Aborting install \u2014 test event failed.[/bold red]")
             raise SystemExit(1)
@@ -1341,7 +1338,6 @@ def _invoke_hook_script(
     hook_client: str,
     payload: str,
     *,
-    machine_id: str,
     require_success_payload: bool = False,
 ) -> tuple[bool, str]:
     """Run the hook script with ``payload`` on stdin. Returns ``(ok, detail)``.
@@ -1385,8 +1381,6 @@ def _invoke_hook_script(
 
 
 def _send_test_event(
-    push_key: str,
-    url: str,
     hook_client: str,
     script_path: Path,
     *,
@@ -1398,11 +1392,8 @@ def _send_test_event(
     new_checksum: str | None = None,
     discover_current_checksum: str | None = None,
     discover_new_checksum: str | None = None,
-    machine_id: str,
 ) -> bool:
     """Send a test hooksConfigured event by invoking the hook script. Returns True on success."""
-    if not machine_id.strip():
-        raise ValueError("machine ID is required")
     payload_dict: dict = {"hook_event_name": "hooksConfigured"}
     payload_dict[HOOK_CLIENTS[hook_client].session_field] = "hooks-setup"
     payload_dict["first_install"] = first_install
@@ -1431,7 +1422,6 @@ def _send_test_event(
         script_path,
         hook_client,
         payload,
-        machine_id=machine_id,
         require_success_payload=True,
     )
     if ok:
