@@ -1324,6 +1324,14 @@ def _discover_logged_connectors() -> dict[str, list[dict]]:
     return logged_servers
 
 
+def _has_success_payload(stdout: str | None) -> bool:
+    try:
+        body = json.loads(stdout or "")
+    except ValueError:
+        return False
+    return isinstance(body, dict) and body.get("success") is True
+
+
 def _invoke_hook_script(
     script_path: Path,
     hook_client: str,
@@ -1332,7 +1340,14 @@ def _invoke_hook_script(
     payload: str,
     *,
     machine_id: str,
+    require_success_payload: bool = False,
 ) -> tuple[bool, str]:
+    """Run the hook script with ``payload`` on stdin. Returns ``(ok, detail)``.
+
+    By default a zero exit code is success. With ``require_success_payload`` the script's
+    stdout must additionally be a JSON object containing ``"success": true``, because the
+    server answers HTTP 200 even when it rejects the request (e.g. an invalid push key).
+    """
     import subprocess
 
     if not machine_id.strip():
@@ -1357,9 +1372,11 @@ def _invoke_hook_script(
             timeout=15,
             env=env,
         )
-        if result.returncode == 0:
-            return True, ""
-        return False, result.stderr.strip() or f"exit code {result.returncode}"
+        if result.returncode != 0:
+            return False, result.stderr.strip() or f"exit code {result.returncode}"
+        if require_success_payload and not _has_success_payload(result.stdout):
+            return False, "response did not confirm success (push key may be invalid)"
+        return True, ""
     except subprocess.TimeoutExpired:
         return False, "timeout"
     except Exception as e:
@@ -1416,6 +1433,7 @@ def _send_test_event(
         url,
         payload,
         machine_id=machine_id,
+        require_success_payload=True,
     )
     if ok:
         rich.print("[green]\u2713[/green]  Test event sent  [green]\u2192 OK[/green]")

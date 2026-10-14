@@ -5425,6 +5425,52 @@ class TestInvokeHookScript:
         assert result == (False, "bad request")
 
 
+class TestInvokeHookScriptSuccessPayload:
+    def _invoke(self, stdout, *, require=True):
+        completed = subprocess.CompletedProcess([], 0, stdout=stdout, stderr="")
+        with patch(f"{_G}.IS_WINDOWS", False), patch("subprocess.run", return_value=completed):
+            return guard_module._invoke_hook_script(
+                Path("/hook.sh"),
+                "cursor",
+                "pk",
+                "url",
+                "{}",
+                machine_id="machine-42",
+                require_success_payload=require,
+            )
+
+    def test_success_true_payload_is_ok(self):
+        assert self._invoke('{"success": true}') == (True, "")
+
+    @pytest.mark.parametrize("stdout", ["{}", '{"success": false}', '{"success": "true"}', "[]", "not json", "", None])
+    def test_missing_or_false_success_is_rejected(self, stdout):
+        ok, detail = self._invoke(stdout)
+        assert ok is False
+        assert "did not confirm success" in detail
+
+    def test_payload_not_required_by_default(self):
+        assert self._invoke("{}", require=False) == (True, "")
+
+
+class TestSendTestEventSuccessPayload:
+    def _send(self, stdout):
+        completed = subprocess.CompletedProcess([], 0, stdout=stdout, stderr="")
+        with patch("subprocess.run", return_value=completed), patch(f"{_G}.rich"):
+            return _send_test_event(
+                "pk-test",
+                "https://api.snyk.io",
+                "claude-code",
+                Path("/fake/script.sh"),
+                machine_id="machine-42",
+            )
+
+    def test_http_200_with_empty_body_fails(self):
+        assert self._send("{}") is False
+
+    def test_success_payload_passes(self):
+        assert self._send('{"success": true}') is True
+
+
 def test_run_with_timeout_raises_when_worker_exceeds_deadline():
     stop = threading.Event()
 
