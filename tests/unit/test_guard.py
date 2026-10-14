@@ -109,6 +109,19 @@ AGENTGUARD_CMD = (
 )
 
 
+# Every synchronous guard hook is written with this explicit timeout (seconds).
+HOOK_TIMEOUT = 30
+
+
+def _strip_timeouts(hooks: dict) -> None:
+    """Drop timeout keys in place, reproducing a config written before timeouts existed."""
+    for entries in hooks.values():
+        for item in entries:
+            for entry in item.get("hooks", [item]):
+                entry.pop("timeout", None)
+                entry.pop("timeoutSec", None)
+
+
 def _claude_group(command: str, matcher: str | None = None) -> dict:
     g: dict = {"hooks": [{"type": "command", "command": command}]}
     if matcher:
@@ -855,7 +868,11 @@ class TestPrepareGitHubCopilotDiscoveryHook:
             discover_command=self.discover_command,
         )
 
-        assert data["hooks"]["SessionStart"][1] == {"type": "command", COPILOT_SCRIPT_KEY: self.discover_command}
+        assert data["hooks"]["SessionStart"][1] == {
+            "type": "command",
+            COPILOT_SCRIPT_KEY: self.discover_command,
+            "timeoutSec": HOOK_TIMEOUT,
+        }
 
     def test_none_preserves_current_hook_shape(self, tmp_path):
         data, _, _ = _prepare_copilot_config(
@@ -866,7 +883,8 @@ class TestPrepareGitHubCopilotDiscoveryHook:
 
         assert all(len(data["hooks"][event]) == 1 for event in COPILOT_HOOK_EVENTS)
         assert all(
-            data["hooks"][event][0] == {"type": "command", COPILOT_SCRIPT_KEY: COPILOT_AGENT_SCAN_CMD}
+            data["hooks"][event][0]
+            == {"type": "command", COPILOT_SCRIPT_KEY: COPILOT_AGENT_SCAN_CMD, "timeoutSec": HOOK_TIMEOUT}
             for event in COPILOT_HOOK_EVENTS
         )
 
@@ -959,6 +977,122 @@ class TestPrepareCodexDiscoveryHook:
         _uninstall_test_client("codex", path)
 
         assert "hooks" not in json.loads(path.read_text())
+
+
+class TestSyncHookTimeout:
+    """Synchronous guard hooks carry an explicit timeout; fire-and-forget entries don't.
+
+    Without it Claude Code and Codex wait up to 600 s for a hung forwarder on every
+    event, which freezes the agent whenever the hook request hangs instead of failing.
+    """
+
+    discover_command = (
+        "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' bash '/x/snyk-agent-guard-discover.sh'"
+    )
+
+    def test_constant_is_thirty_seconds(self):
+        assert guard_module.HOOK_TIMEOUT_SECONDS == HOOK_TIMEOUT
+
+    def test_claude_guard_entries_carry_timeout_except_session_end(self, tmp_path):
+        with patch(f"{_G}.IS_WINDOWS", False):
+            settings, _, _ = _prepare_claude_config(
+                AGENT_SCAN_CMD,
+                tmp_path / "settings.json",
+                discover_command=self.discover_command,
+            )
+
+        for event in CLAUDE_HOOK_EVENTS:
+            entry = settings["hooks"][event][0]["hooks"][0]
+            if event == "SessionEnd":
+                # A per-hook timeout raises Claude Code's 1.5 s SessionEnd budget to match,
+                # which would delay every exit by the full timeout on a hung network.
+                assert entry == {"type": "command", "command": AGENT_SCAN_CMD}
+            else:
+                assert entry == {"type": "command", "command": AGENT_SCAN_CMD, "timeout": HOOK_TIMEOUT}
+        # Claude Code does not enforce ``timeout`` on an async hook, so none is written.
+        assert "timeout" not in settings["hooks"]["SessionStart"][1]["hooks"][0]
+
+    def test_claude_windows_entry_keeps_shell_alongside_timeout(self, tmp_path):
+        with patch(f"{_G}.IS_WINDOWS", True):
+            settings, _, _ = _prepare_claude_config(AGENT_SCAN_CMD, tmp_path / "settings.json")
+
+        assert settings["hooks"]["PreToolUse"][0]["hooks"][0] == {
+            "type": "command",
+            "command": AGENT_SCAN_CMD,
+            "shell": "powershell",
+            "timeout": HOOK_TIMEOUT,
+        }
+
+    def test_codex_guard_entries_carry_timeout_on_every_event(self, tmp_path):
+        data, _, _ = _prepare_codex_config(
+            AGENT_SCAN_CMD,
+            tmp_path / "hooks.json",
+            discover_command=self.discover_command,
+        )
+
+        for event in CODEX_HOOK_EVENTS:
+            assert data["hooks"][event][0]["hooks"][0] == {
+                "type": "command",
+                "command": AGENT_SCAN_CMD,
+                "timeout": HOOK_TIMEOUT,
+            }
+        # The async discovery hook is not synchronous; it keeps its own internal caps.
+        assert "timeout" not in data["hooks"]["SessionStart"][1]["hooks"][0]
+
+    def test_cursor_guard_entries_carry_timeout_except_fire_and_forget_events(self, tmp_path):
+        data, _, _ = _prepare_cursor_config(
+            AGENT_SCAN_CMD,
+            tmp_path / "hooks.json",
+            discover_command=self.discover_command,
+        )
+
+        for event in CURSOR_HOOK_EVENTS:
+            entry = data["hooks"][event][0]
+            if event in ("sessionStart", "sessionEnd"):
+                # Cursor documents these two as fire-and-forget: the agent loop never waits.
+                assert entry == {"command": AGENT_SCAN_CMD}
+            else:
+                assert entry == {"command": AGENT_SCAN_CMD, "timeout": HOOK_TIMEOUT}
+        assert data["hooks"]["sessionStart"][1] == {"command": self.discover_command}
+
+    def test_copilot_entries_carry_timeout_sec_including_discovery(self, tmp_path):
+        data, _, _ = _prepare_copilot_config(
+            COPILOT_AGENT_SCAN_CMD,
+            tmp_path / "snyk-agent-guard.json",
+            discover_command=self.discover_command,
+        )
+
+        # Copilot has no async mode, so its discovery entry is synchronous too. 30 s is
+        # already Copilot's default; writing it keeps the bound explicit if that changes.
+        for event in COPILOT_HOOK_EVENTS:
+            assert data["hooks"][event][0]["timeoutSec"] == HOOK_TIMEOUT
+        assert data["hooks"]["SessionStart"][1]["timeoutSec"] == HOOK_TIMEOUT
+
+    @pytest.mark.parametrize("client", ["claude", "cursor", "codex", "github-copilot"])
+    def test_install_written_without_timeout_is_reported_modified(self, tmp_path, client):
+        """A pre-timeout install must show as modified on reinstall, not as up to date."""
+        path = tmp_path / "cfg.json"
+        prepare = {
+            "claude": lambda p: _prepare_claude_config(AGENT_SCAN_CMD, p),
+            "cursor": lambda p: _prepare_cursor_config(AGENT_SCAN_CMD, p),
+            "codex": lambda p: _prepare_codex_config(AGENT_SCAN_CMD, p),
+            "github-copilot": lambda p: _prepare_copilot_config(COPILOT_AGENT_SCAN_CMD, p),
+        }[client]
+        expected_events = {
+            "claude": set(CLAUDE_HOOK_EVENTS) - {"SessionEnd"},
+            "cursor": set(CURSOR_HOOK_EVENTS) - {"sessionStart", "sessionEnd"},
+            "codex": set(CODEX_HOOK_EVENTS),
+            "github-copilot": set(COPILOT_HOOK_EVENTS),
+        }[client]
+        data, _, preserved = prepare(path)
+        _strip_timeouts(data["hooks"])
+        _write_config(data, path, preserved)
+
+        _, diff, _ = prepare(path)
+
+        assert set(diff["modified"]) == expected_events
+        assert diff["added"] == {}
+        assert diff["removed"] == {}
 
 
 class TestWriteConfig:
@@ -1825,7 +1959,7 @@ class TestGitHubCopilotCommandSerialization:
         _setup_copilot_hooks(COPILOT_AGENT_SCAN_CMD, path)
 
         entry = json.loads(path.read_text())["hooks"]["Stop"][0]
-        assert entry == {"type": "command", "bash": COPILOT_AGENT_SCAN_CMD}
+        assert entry == {"type": "command", "bash": COPILOT_AGENT_SCAN_CMD, "timeoutSec": HOOK_TIMEOUT}
 
     def test_writes_powershell_key_on_windows(self, tmp_path, monkeypatch):
         monkeypatch.setattr(guard_module, "IS_WINDOWS", True)
@@ -1833,7 +1967,7 @@ class TestGitHubCopilotCommandSerialization:
         _setup_copilot_hooks(COPILOT_AGENT_SCAN_CMD, path)
 
         entry = json.loads(path.read_text())["hooks"]["Stop"][0]
-        assert entry == {"type": "command", "powershell": COPILOT_AGENT_SCAN_CMD}
+        assert entry == {"type": "command", "powershell": COPILOT_AGENT_SCAN_CMD, "timeoutSec": HOOK_TIMEOUT}
 
     @pytest.mark.parametrize("key", ["bash", "powershell", "command"])
     def test_reinstall_replaces_an_existing_hook_under_any_script_key(self, tmp_path, key):
@@ -2009,7 +2143,8 @@ class TestConfigPath:
         assert data["version"] == 1
         assert set(data["hooks"]) == set(COPILOT_HOOK_EVENTS)
         assert all(
-            data["hooks"][event] == [{"type": "command", COPILOT_SCRIPT_KEY: COPILOT_AGENT_SCAN_CMD}]
+            data["hooks"][event]
+            == [{"type": "command", COPILOT_SCRIPT_KEY: COPILOT_AGENT_SCAN_CMD, "timeoutSec": HOOK_TIMEOUT}]
             for event in COPILOT_HOOK_EVENTS
         )
 
@@ -2951,6 +3086,7 @@ class TestCodexManagedRequirementsToml:
                     f"[[hooks.{event}.hooks]]",
                     'type = "command"',
                     f'command = "{CODEX_AGENT_SCAN_CMD}"',
+                    f"timeout = {HOOK_TIMEOUT}",
                     "",
                 ]
             )
@@ -3023,11 +3159,12 @@ class TestCodexManagedRequirementsToml:
             discover_command=CODEX_DISCOVER_CMD,
         )
 
-        events, guard_command, discover_command = _parse_codex_requirements_toml(content)
+        events, guard_command, discover_command, guard_timeout = _parse_codex_requirements_toml(content)
 
         assert events == CODEX_HOOK_EVENTS
         assert guard_command == CODEX_AGENT_SCAN_CMD
         assert discover_command == CODEX_DISCOVER_CMD
+        assert guard_timeout == HOOK_TIMEOUT
 
     def test_render_parse_round_trip_preserves_control_characters(self, tmp_path):
         _, _, _, render = self._import_managed_helpers()
@@ -3046,7 +3183,7 @@ class TestCodexManagedRequirementsToml:
             discover_command=discover_command,
         )
 
-        events, parsed_guard, parsed_discover = _parse_codex_requirements_toml(content)
+        events, parsed_guard, parsed_discover, _ = _parse_codex_requirements_toml(content)
         assert events == CODEX_HOOK_EVENTS
         assert parsed_guard == guard_command
         assert parsed_discover == discover_command
@@ -3075,6 +3212,67 @@ class TestCodexManagedRequirementsToml:
         )
 
         assert diff == {"added": {}, "modified": {}, "removed": {}}
+
+    def test_render_puts_timeout_in_guard_tables_only(self, tmp_path):
+        _, _, _, render = self._import_managed_helpers()
+
+        content = render(
+            CODEX_AGENT_SCAN_CMD,
+            tmp_path / "requirements.toml",
+            discover_command=CODEX_DISCOVER_CMD,
+        )
+
+        assert content.count(f"timeout = {HOOK_TIMEOUT}") == len(CODEX_HOOK_EVENTS)
+        assert f'command = "{CODEX_AGENT_SCAN_CMD}"\ntimeout = {HOOK_TIMEOUT}\n' in content
+        assert f'command = "{CODEX_DISCOVER_CMD}"\nasync = true\n' in content
+
+    def test_rendered_timeout_parses_as_an_integer(self, tmp_path):
+        tomllib = pytest.importorskip("tomllib")
+        _, _, _, render = self._import_managed_helpers()
+
+        parsed = tomllib.loads(
+            render(
+                CODEX_AGENT_SCAN_CMD,
+                tmp_path / "requirements.toml",
+                discover_command=CODEX_DISCOVER_CMD,
+            )
+        )
+
+        for event in CODEX_HOOK_EVENTS:
+            assert parsed["hooks"][event][0]["hooks"][0]["timeout"] == HOOK_TIMEOUT
+        assert "timeout" not in parsed["hooks"]["SessionStart"][1]["hooks"][0]
+
+    def test_parse_reads_guard_timeout_back(self, tmp_path):
+        _, _, _, render = self._import_managed_helpers()
+        content = render(
+            CODEX_AGENT_SCAN_CMD,
+            tmp_path / "requirements.toml",
+            discover_command=CODEX_DISCOVER_CMD,
+        )
+
+        _, _, _, guard_timeout = _parse_codex_requirements_toml(content)
+
+        assert guard_timeout == HOOK_TIMEOUT
+
+    def test_prepare_marks_pre_timeout_install_as_modified(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        content, _ = _prepare_codex_managed_config(
+            CODEX_AGENT_SCAN_CMD,
+            path,
+            discover_command=CODEX_DISCOVER_CMD,
+        )
+        path.write_text(content.replace(f"timeout = {HOOK_TIMEOUT}\n", ""))
+
+        _, diff = _prepare_codex_managed_config(
+            CODEX_AGENT_SCAN_CMD,
+            path,
+            discover_command=CODEX_DISCOVER_CMD,
+        )
+
+        assert set(diff["modified"]) == set(CODEX_HOOK_EVENTS)
+        for event in CODEX_HOOK_EVENTS:
+            assert diff["modified"][event]["expected_value"][0]["timeout"] == HOOK_TIMEOUT
+            assert "timeout" not in diff["modified"][event]["actual_value"][0]
 
     def test_install_writes_toml(self, tmp_path):
         install, _, _, _ = self._import_managed_helpers()
@@ -3252,10 +3450,11 @@ class TestCodexManagedRequirementsToml:
             'type = "command"\n'
             "command = \"PUSH_KEY='pk' bash 'C:\\\\Users\\\\me\\\\hooks\\\\snyk-agent-guard.sh' --client codex\"\n"
         )
-        events, cmd, discover_cmd = _parse_codex_requirements_toml(toml)
+        events, cmd, discover_cmd, guard_timeout = _parse_codex_requirements_toml(toml)
         assert "PreToolUse" in events
         assert "C:\\Users\\me\\hooks\\snyk-agent-guard.sh" in cmd
         assert discover_cmd is None
+        assert guard_timeout is None
 
     def test_discovery_backslash_path_round_trips(self, tmp_path):
         _, _, _, render = self._import_managed_helpers()
@@ -3269,7 +3468,7 @@ class TestCodexManagedRequirementsToml:
             tmp_path / "requirements.toml",
             discover_command=discover_command,
         )
-        _, _, parsed_discover = _parse_codex_requirements_toml(content)
+        _, _, parsed_discover, _ = _parse_codex_requirements_toml(content)
 
         assert parsed_discover == discover_command
 
