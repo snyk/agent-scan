@@ -14,6 +14,8 @@ import logging
 import os
 from pathlib import Path
 
+import yaml
+
 from agent_scan.agents.base import (
     _MAX_PLUGIN_RGLOB_DEPTH,
     AgentDiscoverer,
@@ -34,6 +36,8 @@ from agent_scan.skill_client import inspect_skills_dir
 from agent_scan.well_known_clients import GITHUB_COPILOT_NAME, expand_path
 
 logger = logging.getLogger(__name__)
+
+_MAX_WORKSPACE_FILE_BYTES = 64 * 1024
 
 # ``{"mcpServers": {...}}`` is the shape Copilot documents for every one of its MCP
 # files. ``servers`` (VS Code's spelling) and the wrapper-less flat map are accepted too
@@ -94,15 +98,14 @@ class GitHubCopilotDiscoverer(AgentDiscoverer):
       ``skills`` inside the plugin, or define its MCP servers inline; both forms are
       honored additively.
 
-    Recorded project roots come from the ``locations`` map in
-    ``<copilot_home>/permissions-config.json``, which Copilot keys by absolute project
-    path. As with Codex's ``[projects]`` table, the saved approvals themselves are never
-    read — every listed location is scanned.
+    Recorded project roots come from ``permissions-config.json``'s ``locations`` map,
+    ``config.json``'s ``trusted_folders`` / ``trustedFolders`` lists, and
+    ``session-state/*/workspace.yaml``'s ``cwd`` / containing ``git_root``. Saved approvals are not consulted; every local,
+    existing project directory is scanned.
 
-    Not covered: ``<copilot_home>/session-state/<id>/workspace.yaml``, whose ``cwd``
-    records one more project root per session (YAML, one file per session); LSP servers
-    (``lsp-config.json``) and custom agents (``agents/``), neither of which declares MCP
-    servers; and ``COPILOT_HOME`` for other users' homes, which this process cannot know.
+    Not covered: LSP servers (``lsp-config.json``) and custom agents (``agents/``),
+    neither of which declares MCP servers; and ``COPILOT_HOME`` for other users' homes,
+    which this process cannot know.
     """
 
     # MUST match the GitHub Copilot entry in ``well_known_clients.py`` so the Phase-A /
@@ -337,20 +340,79 @@ class GitHubCopilotDiscoverer(AgentDiscoverer):
     # --- project enumeration ---
 
     def _discover_project_folders(self) -> list[Path]:
-        """Project roots from the ``locations`` map in ``permissions-config.json``,
-        which Copilot keys by absolute project path. The saved approvals under each key
-        are intentionally not read — every listed location is scanned."""
-        data = self._load_json_file(self._copilot_home() / self._permissions_filename)
-        if not isinstance(data, dict):
-            return []
-        locations = data.get("locations")
-        if not isinstance(locations, dict):
-            return []
+        """Union local project history and trust records, retaining literal ancestors."""
+        home = self._copilot_home()
+        roots: list[object] = []
+        permissions = self._load_json_file(home / self._permissions_filename, log_parse_errors=False)
+        if isinstance(permissions, dict) and isinstance(permissions.get("locations"), dict):
+            roots.extend(permissions["locations"])
+        config = self._load_json_file(home / "config.json", log_parse_errors=False)
+        if isinstance(config, dict):
+            for trust_key in ("trusted_folders", "trustedFolders"):
+                if isinstance(config.get(trust_key), list):
+                    roots.extend(config[trust_key])
+        roots.extend(self._session_project_roots(home))
+
         folders: list[Path] = []
-        for location in locations:
-            if not isinstance(location, str) or not location.strip():
+        seen: set[Path] = set()
+        for root in roots:
+            candidate = self._absolute_project_path(root)
+            if candidate is None:
                 continue
-            candidate = Path(location.strip())
-            if candidate.is_absolute():
+            try:
+                if not candidate.is_dir():
+                    continue
+                key = candidate.resolve()
+            except (OSError, RuntimeError, ValueError):
+                continue
+            if key not in seen:
+                seen.add(key)
                 folders.append(candidate)
         return folders
+
+    @staticmethod
+    def _absolute_project_path(value: object) -> Path | None:
+        if not isinstance(value, str) or not value.strip():
+            return None
+        candidate = Path(value.strip())
+        return candidate if candidate.is_absolute() else None
+
+    def _session_project_roots(self, home: Path) -> list[str]:
+        """Read only bounded workspace metadata, never session events or subtrees."""
+        roots: list[str] = []
+        try:
+            for session in (home / "session-state").iterdir():
+                data = self._load_session_workspace(session / "workspace.yaml")
+                if data is None:
+                    continue
+                cwd = self._absolute_project_path(data.get("cwd"))
+                git_root = self._absolute_project_path(data.get("git_root"))
+                if cwd is not None:
+                    roots.append(str(cwd))
+                if git_root is not None:
+                    try:
+                        # Ancestors are already walked, but git_root survives a deleted cwd
+                        # and can bridge a symlinked cwd. Unrelated roots are not projects.
+                        if cwd is None or cwd.resolve().is_relative_to(git_root.resolve()):
+                            roots.append(str(git_root))
+                    except (OSError, RuntimeError, ValueError):
+                        continue
+        except OSError:
+            logger.debug("Cannot enumerate Copilot sessions in %s", home)
+        return roots
+
+    @staticmethod
+    def _load_session_workspace(path: Path) -> dict | None:
+        try:
+            if not path.is_file():
+                return None
+            with path.open("rb") as workspace:
+                content = workspace.read(_MAX_WORKSPACE_FILE_BYTES + 1)
+            if len(content) > _MAX_WORKSPACE_FILE_BYTES:
+                logger.warning("Skipping oversized Copilot workspace %s", path)
+                return None
+            data = yaml.safe_load(content)
+            return data if isinstance(data, dict) else None
+        except (OSError, ValueError, yaml.YAMLError, RecursionError):
+            logger.warning("Skipping unreadable or malformed Copilot workspace %s", path)
+            return None
