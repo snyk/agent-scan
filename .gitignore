@@ -49,7 +49,10 @@ src/agent_scan/todo.md
 
 *.env
 npm/package.json
-.cursor/
+.cursor/*
+!.cursor/
+!.cursor/install.sh
+!.cursor/environment.json
 
 # Snyk Security Extension - AI Rules (auto-generated)
 .cursor/rules/snyk_rules.mdc
