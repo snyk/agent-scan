@@ -3404,9 +3404,26 @@ def _copy_with_sentinel_version(monkeypatch, dest: Path) -> None:
     guard_module._copy_hook_script(dest)
 
 
-_SH_BUDGET_RE = re.compile(r"^DEFAULT_TIMEOUT_SECONDS=(\d+)$", re.MULTILINE)
-_PS_BUDGET_RE = re.compile(r"^\$DEFAULT_TIMEOUT_SECONDS = (\d+)$", re.MULTILINE)
-# A timeout flag followed directly by a number would bypass the one resolved value.
+_SH_BUDGET_RE = re.compile(rb"^TIMEOUT_SECONDS=(\d+)$", re.MULTILINE)
+_PS_BUDGET_RE = re.compile(rb"^\$TIMEOUT_SECONDS = (\d+)$", re.MULTILINE)
+
+
+def _forwarder_with_budget(tmp_path: Path, name: str, seconds: int) -> Path:
+    """A copy of forwarder *name* whose timeout constant is *seconds*.
+
+    The shipped scripts take no override, so this is how a test watches a timeout fire
+    without waiting the real budget. Bytes in and out keep the line endings as shipped.
+    """
+    regex = _PS_BUDGET_RE if name.endswith(".ps1") else _SH_BUDGET_RE
+    shipped = _get_script_path(name).read_bytes()
+    patched, count = regex.subn(lambda m: m.group(0)[: m.start(1) - m.start(0)] + str(seconds).encode(), shipped)
+    assert count == 1, f"{name}: expected exactly one TIMEOUT_SECONDS to rewrite"
+    dest = tmp_path / name
+    dest.write_bytes(patched)
+    return dest
+
+
+# A timeout flag followed directly by a number would bypass the one constant.
 _TIMEOUT_LITERAL_RE = re.compile(r"(?:(?:-t|--connect-timeout|--max-time|-TimeoutSec)\s+\d|\.Wait\(\s*\d)")
 # The agent-side per-hook cap `guard install` writes (PR #511). The literal stands in for the
 # constant until that change is on main.
@@ -3416,19 +3433,19 @@ _SERVER_BUDGET_SECONDS = 25
 
 
 class TestHookScriptRequestBudget:
-    """Both forwarders bound stdin and the request with one value, between the server budget
-    and the agent's per-hook cap."""
+    """Both forwarders bound stdin and the request with one constant, between the server
+    budget and the agent's per-hook cap."""
 
     @staticmethod
     def _budget(name: str) -> int:
-        text = _get_script_path(name).read_text()
+        text = _get_script_path(name).read_bytes()
         regex = _PS_BUDGET_RE if name.endswith(".ps1") else _SH_BUDGET_RE
         matches = regex.findall(text)
-        assert len(matches) == 1, f"{name}: expected exactly one DEFAULT_TIMEOUT_SECONDS, found {matches}"
+        assert len(matches) == 1, f"{name}: expected exactly one TIMEOUT_SECONDS, found {matches}"
         return int(matches[0])
 
     @pytest.mark.parametrize("name", _FORWARDER_SCRIPTS)
-    def test_default_budget_fits_between_server_budget_and_agent_cap(self, name):
+    def test_budget_fits_between_server_budget_and_agent_cap(self, name):
         assert _SERVER_BUDGET_SECONDS < self._budget(name) < _AGENT_HOOK_TIMEOUT_SECONDS
 
     def test_both_forwarders_share_one_budget(self):
@@ -3438,12 +3455,12 @@ class TestHookScriptRequestBudget:
     def test_budget_sits_outside_the_install_time_section(self, name):
         head, section, tail = _split_on_section(_get_script_path(name).read_text())
 
-        assert "DEFAULT_TIMEOUT_SECONDS" not in section
-        assert "DEFAULT_TIMEOUT_SECONDS" in head + tail
+        assert "TIMEOUT_SECONDS" not in section
+        assert "TIMEOUT_SECONDS" in head + tail
 
     @pytest.mark.parametrize("name", _FORWARDER_SCRIPTS)
-    def test_override_variable_is_read(self, name):
-        assert "SNYK_AGENT_GUARD_TIMEOUT_SECONDS" in _get_script_path(name).read_text()
+    def test_timeout_is_not_read_from_the_environment(self, name):
+        assert "SNYK_AGENT_GUARD_TIMEOUT_SECONDS" not in _get_script_path(name).read_text()
 
     @pytest.mark.parametrize("name", _FORWARDER_SCRIPTS)
     def test_no_timeout_literal_bypasses_the_resolved_value(self, name):
@@ -3940,12 +3957,12 @@ class TestBashHookScript:
             "PUSH_KEY": "test-pk-fail",
             "REMOTE_HOOKS_BASE_URL": url,
             "MACHINE_ID": "machine-42",
-            # Every timeout in the script reads this one value; 1 s keeps the tests fast.
-            "SNYK_AGENT_GUARD_TIMEOUT_SECONDS": "1",
         }
 
-    def test_hanging_server_fails_open_within_the_request_budget(self, hanging_hook_server):
-        script = _get_script_path("snyk-agent-guard.sh")
+    def test_hanging_server_fails_open_within_the_request_budget(self, hanging_hook_server, tmp_path):
+        # 2 s, not 1: bash's deadline counts whole seconds, so a 1 s budget could expire
+        # during the stdin read before the request is ever sent.
+        script = _forwarder_with_budget(tmp_path, "snyk-agent-guard.sh", 2)
         result = subprocess.run(
             ["bash", str(script), "--client", "claude-code"],
             input='{"hook_event_name":"PreToolUse","session_id":"s1"}',
@@ -3993,8 +4010,8 @@ class TestBashHookScript:
         assert "curl exit 7" in result.stderr
         assert "timed out" not in result.stderr
 
-    def test_stdin_held_open_without_data_fails_open(self, hook_server):
-        script = _get_script_path("snyk-agent-guard.sh")
+    def test_stdin_held_open_without_data_fails_open(self, hook_server, tmp_path):
+        script = _forwarder_with_budget(tmp_path, "snyk-agent-guard.sh", 1)
         with _open_stdin_pipe() as stdin_fd:
             result = subprocess.run(
                 ["bash", str(script), "--client", "claude-code"],
@@ -4011,19 +4028,30 @@ class TestBashHookScript:
         assert "failing open" in result.stderr
         assert _HookHandler.last_request is None
 
+    def test_environment_cannot_shorten_the_timeout(self, hook_server):
+        script = _get_script_path("snyk-agent-guard.sh")
+        env = {**self._failure_env(hook_server), "SNYK_AGENT_GUARD_TIMEOUT_SECONDS": "1"}
+        with _open_stdin_pipe() as stdin_fd, pytest.raises(subprocess.TimeoutExpired):
+            subprocess.run(
+                ["bash", str(script), "--client", "claude-code"],
+                stdin=stdin_fd,
+                capture_output=True,
+                text=True,
+                timeout=3,
+                env=env,
+            )
+
+        assert _HookHandler.last_request is None
+
     def test_empty_payload_is_still_a_usage_error(self, hook_server):
         script = _get_script_path("snyk-agent-guard.sh")
-        # Default budget on purpose: bash 3.2 cannot tell a read timeout from EOF by status,
-        # so the script decides by deadline, and with a 1 s override an EOF that straddles a
-        # second boundary could pass for a timeout. At 27 s an immediate EOF never can.
-        env = {k: v for k, v in self._failure_env(hook_server).items() if k != "SNYK_AGENT_GUARD_TIMEOUT_SECONDS"}
         result = subprocess.run(
             ["bash", str(script), "--client", "claude-code"],
             input="",
             capture_output=True,
             text=True,
             timeout=10,
-            env=env,
+            env=self._failure_env(hook_server),
         )
 
         assert result.returncode != 0
@@ -4356,11 +4384,11 @@ class TestPowerShellHookScript:
 
     # --- failure handling: transport, HTTP and stdin failures fail open ----------------
 
-    def _failure_argv(self, url: str) -> list[str]:
+    def _failure_argv(self, url: str, script: Path | None = None) -> list[str]:
         return [
             self._ps_cmd(),
             "-File",
-            str(_get_script_path("snyk-agent-guard.ps1")),
+            str(script or _get_script_path("snyk-agent-guard.ps1")),
             "-Client",
             "claude-code",
             "-PushKey",
@@ -4371,19 +4399,14 @@ class TestPowerShellHookScript:
             "machine-42",
         ]
 
-    @staticmethod
-    def _failure_env(seconds: str = "2") -> dict:
-        # Every timeout in the script reads this one value; 2 s leaves room for a cold start.
-        return {**os.environ, "SNYK_AGENT_GUARD_TIMEOUT_SECONDS": seconds}
-
-    def test_hanging_server_fails_open_within_the_request_budget(self, hanging_hook_server):
+    def test_hanging_server_fails_open_within_the_request_budget(self, hanging_hook_server, tmp_path):
+        script = _forwarder_with_budget(tmp_path, "snyk-agent-guard.ps1", 2)
         result = subprocess.run(
-            self._failure_argv(hanging_hook_server),
+            self._failure_argv(hanging_hook_server, script),
             input='{"hook_event_name":"PreToolUse","session_id":"s1"}',
             capture_output=True,
             text=True,
             timeout=30,
-            env=self._failure_env(),
         )
 
         assert _HangingHookHandler.received.is_set(), "server never saw the request: not a hang"
@@ -4399,7 +4422,6 @@ class TestPowerShellHookScript:
             capture_output=True,
             text=True,
             timeout=30,
-            env=self._failure_env(),
         )
 
         assert result.returncode == 0, result.stderr
@@ -4408,39 +4430,51 @@ class TestPowerShellHookScript:
         assert "failing open" in result.stderr
 
     def test_connection_refused_fails_open(self):
-        # Windows retries the SYN on a refused loopback connect for about two seconds, so a
-        # short budget can expire first and the script then reports a timeout rather than a
-        # refused connection. Both are the fail-open path; the budget is widened so the
-        # refusal usually wins, and either reason is accepted.
+        # Windows retries the SYN on a refused loopback connect for about two seconds, well
+        # inside the shipped budget, so the refusal is what the script reports.
         result = subprocess.run(
             self._failure_argv(_closed_port_url()),
             input='{"hook_event_name":"PreToolUse","session_id":"s1"}',
             capture_output=True,
             text=True,
             timeout=30,
-            env=self._failure_env(seconds="5"),
         )
 
         assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == ""
-        assert "request failed" in result.stderr or "timed out" in result.stderr
+        assert "request failed" in result.stderr
         assert "failing open" in result.stderr
 
-    def test_stdin_held_open_without_data_fails_open(self, hook_server):
+    def test_stdin_held_open_without_data_fails_open(self, hook_server, tmp_path):
+        script = _forwarder_with_budget(tmp_path, "snyk-agent-guard.ps1", 2)
         with _open_stdin_pipe() as stdin_fd:
             result = subprocess.run(
-                self._failure_argv(hook_server),
+                self._failure_argv(hook_server, script),
                 stdin=stdin_fd,
                 capture_output=True,
                 text=True,
                 timeout=30,
-                env=self._failure_env(),
             )
 
         assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == ""
         assert "reading hook payload" in result.stderr
         assert "failing open" in result.stderr
+        assert _HookHandler.last_request is None
+
+    def test_environment_cannot_shorten_the_timeout(self, hook_server):
+        # 8 s leaves room for a cold start, so an honored 2 s override would return first.
+        env = {**os.environ, "SNYK_AGENT_GUARD_TIMEOUT_SECONDS": "2"}
+        with _open_stdin_pipe() as stdin_fd, pytest.raises(subprocess.TimeoutExpired):
+            subprocess.run(
+                self._failure_argv(hook_server),
+                stdin=stdin_fd,
+                capture_output=True,
+                text=True,
+                timeout=8,
+                env=env,
+            )
+
         assert _HookHandler.last_request is None
 
     def test_empty_payload_is_still_a_usage_error(self, hook_server):
@@ -4450,7 +4484,6 @@ class TestPowerShellHookScript:
             capture_output=True,
             text=True,
             timeout=30,
-            env=self._failure_env(),
         )
 
         assert result.returncode != 0

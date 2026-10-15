@@ -7,10 +7,9 @@
 #
 # Reads a JSON payload from stdin and POSTs it (base64-encoded) to the Agent Guard endpoint.
 #
-# Every wait is bounded by one value, $DEFAULT_TIMEOUT_SECONDS below, which the environment
-# variable SNYK_AGENT_GUARD_TIMEOUT_SECONDS (a positive integer) overrides: the stdin read
-# and the whole request. Transport and HTTP failures, and a stdin read that times out, fail
-# open: nothing on stdout, one line on stderr, exit 0. Usage errors exit 1.
+# Every wait is bounded by one constant, $TIMEOUT_SECONDS below: the stdin read and the
+# whole request. Transport and HTTP failures, and a stdin read that times out, fail open:
+# nothing on stdout, one line on stderr, exit 0. Usage errors exit 1.
 #
 # Requirements: PowerShell 5.1+ (built-in on Windows 10+)
 #
@@ -41,10 +40,9 @@ $VERSION = "2025-11-11"
 
 # Timeout, in seconds, for each wait in this script: the stdin read and the whole request
 # (same reasoning as snyk-agent-guard.sh: the agent caps the hook at 30 s and agent-monitor
-# may legitimately take ~24 s to answer). SNYK_AGENT_GUARD_TIMEOUT_SECONDS overrides it when
-# it is a positive integer; anything else, including 0 (which Invoke-WebRequest treats as
-# indefinite), falls back to the default.
-$DEFAULT_TIMEOUT_SECONDS = 27
+# may legitimately take ~24 s to answer). Deliberately not read from the environment (see
+# snyk-agent-guard.sh), so changing it means changing this script.
+$TIMEOUT_SECONDS = 27
 
 # Transport and HTTP failures must not block the agent (see snyk-agent-guard.sh): one line on
 # stderr, nothing on stdout, exit 0. [Console]::Error is used instead of Write-Error, which
@@ -53,11 +51,6 @@ $DEFAULT_TIMEOUT_SECONDS = 27
 function FailOpen([string]$reason) {
     [Console]::Error.WriteLine("snyk-agent-guard: $reason; failing open")
     exit 0
-}
-
-$timeoutSeconds = $DEFAULT_TIMEOUT_SECONDS
-if ($env:SNYK_AGENT_GUARD_TIMEOUT_SECONDS -match '^[1-9][0-9]{0,3}$') {
-    $timeoutSeconds = [int]$env:SNYK_AGENT_GUARD_TIMEOUT_SECONDS
 }
 
 # ---------------------------------------------------------------------------
@@ -112,8 +105,8 @@ $url = "${RemoteUrl}${endpoint}?version=$VERSION"
 # writes, or never closes the pipe, would otherwise hold the hook forever.
 $reader = New-Object System.IO.StreamReader([Console]::OpenStandardInput(), [System.Text.Encoding]::UTF8, $true)
 $readTask = $reader.ReadToEndAsync()
-if (-not $readTask.Wait($timeoutSeconds * 1000)) {
-    FailOpen "timed out reading hook payload from stdin after ${timeoutSeconds}s"
+if (-not $readTask.Wait($TIMEOUT_SECONDS * 1000)) {
+    FailOpen "timed out reading hook payload from stdin after ${TIMEOUT_SECONDS}s"
 }
 $payload = $readTask.Result.Trim()
 if (-not $payload) {
@@ -175,7 +168,7 @@ try {
     }
     $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($body)
     $response = Invoke-WebRequest -Uri $url -Method POST -Body $bodyBytes -Headers $headers `
-        -UseBasicParsing -TimeoutSec $timeoutSeconds
+        -UseBasicParsing -TimeoutSec $TIMEOUT_SECONDS
 } catch {
     $ex = $_.Exception
     $statusCode = 0
@@ -194,7 +187,7 @@ try {
         ($ex -is [System.OperationCanceledException])
     )
     if ($timedOut) {
-        FailOpen "request timed out after ${timeoutSeconds}s"
+        FailOpen "request timed out after ${TIMEOUT_SECONDS}s"
     }
     FailOpen "request failed: $($ex.Message)"
 }
