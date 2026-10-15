@@ -40,8 +40,7 @@ $VERSION = "2025-11-11"
 
 # Timeout, in seconds, for each wait in this script: the stdin read and the whole request
 # (same reasoning as snyk-agent-guard.sh: the agent caps the hook at 30 s and agent-monitor
-# may legitimately take ~24 s to answer). Deliberately not read from the environment (see
-# snyk-agent-guard.sh), so changing it means changing this script.
+# may legitimately take ~24 s to answer).
 $TIMEOUT_SECONDS = 27
 
 # Transport and HTTP failures must not block the agent (see snyk-agent-guard.sh): one line on

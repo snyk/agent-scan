@@ -31,9 +31,7 @@ VERSION="2025-11-11"
 # whole request. Every synchronous hook the CLI installs is capped by the agent at 30 s, and
 # agent-monitor may legitimately take ~24 s to answer (its 25 s policy budget minus
 # headroom), so 27 s is late enough for a slow verdict and early enough that the agent sees
-# a clean fail-open exit instead of killing the hook. Deliberately not read from the
-# environment: whatever can set the agent's environment could otherwise shorten it until
-# every verdict fails open, so changing it means changing this script.
+# a clean fail-open exit instead of killing the hook.
 TIMEOUT_SECONDS=27
 
 # ---------------------------------------------------------------------------

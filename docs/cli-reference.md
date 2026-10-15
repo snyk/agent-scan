@@ -364,7 +364,6 @@ fire-and-forget session-start hook that reports discovered MCP servers with a `s
 
 The installed hook scripts wait at most 27 seconds each for the agent's payload on stdin and for the Agent Guard
 response. On a timeout, and on any transport or HTTP failure, they fail open: no output, one line on stderr, exit 0.
-The limit is fixed in the scripts and not configurable.
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
