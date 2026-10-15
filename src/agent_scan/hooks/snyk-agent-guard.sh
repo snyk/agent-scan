@@ -11,9 +11,9 @@
 #
 # Reads a JSON payload from stdin and POSTs it (base64-encoded) to the Agent Guard endpoint.
 #
-# Every wait is bounded by one constant, TIMEOUT_SECONDS below: the stdin read, the
-# connection and the whole request. Transport and HTTP failures, and a stdin read that times
-# out, fail open: nothing on stdout, one line on stderr, exit 0. Usage errors exit 1.
+# Every wait is bounded by one constant, TIMEOUT_SECONDS below: the stdin read and the whole
+# request. Transport and HTTP failures, and a stdin read that times out, fail open: nothing
+# on stdout, one line on stderr, exit 0. Usage errors exit 1.
 #
 # Requirements: bash, curl, base64, tr
 #
@@ -27,11 +27,11 @@ AGENT_SCAN_VERSION="__AGENT_SCAN_VERSION__"
 # Hook API version.
 VERSION="2025-11-11"
 
-# Timeout, in seconds, for each wait in this script: the stdin read, the connection and the
-# whole request. Every synchronous hook the CLI installs is capped by the agent at 30 s, and
-# agent-monitor may legitimately take ~24 s to answer (its 25 s policy budget minus
-# headroom), so 27 s is late enough for a slow verdict and early enough that the agent sees
-# a clean fail-open exit instead of killing the hook.
+# Timeout, in seconds, for each wait in this script: the stdin read and the whole request.
+# Every synchronous hook the CLI installs is capped by the agent at 30 s, and agent-monitor
+# may legitimately take ~24 s to answer (its 25 s policy budget minus headroom), so 27 s is
+# late enough for a slow verdict and early enough that the agent sees a clean fail-open exit
+# instead of killing the hook.
 TIMEOUT_SECONDS=27
 
 # ---------------------------------------------------------------------------
@@ -230,7 +230,6 @@ hook_main() {
     -sS
     -X POST
     "$url"
-    --connect-timeout "$TIMEOUT_SECONDS"
     --max-time "$TIMEOUT_SECONDS"
     -H "User-Agent: ${user_agent}"
     -H "X-User: ${x_user}"

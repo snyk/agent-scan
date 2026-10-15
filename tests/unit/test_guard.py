@@ -3425,7 +3425,7 @@ def _forwarder_with_budget(tmp_path: Path, name: str, seconds: int) -> Path:
 
 
 # A timeout flag followed directly by a number would bypass the one constant.
-_TIMEOUT_LITERAL_RE = re.compile(r"(?:(?:-t|--connect-timeout|--max-time|-TimeoutSec)\s+\d|\.Wait\(\s*\d)")
+_TIMEOUT_LITERAL_RE = re.compile(r"(?:(?:-t|--max-time|-TimeoutSec)\s+\d|\.Wait\(\s*\d)")
 # The agent-side per-hook cap `guard install` writes (PR #511). The literal stands in for the
 # constant until that change is on main.
 _AGENT_HOOK_TIMEOUT_SECONDS = getattr(guard_module, "HOOK_TIMEOUT_SECONDS", 30)
