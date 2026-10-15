@@ -4372,9 +4372,9 @@ class TestPowerShellHookScript:
         ]
 
     @staticmethod
-    def _failure_env() -> dict:
+    def _failure_env(seconds: str = "2") -> dict:
         # Every timeout in the script reads this one value; 2 s leaves room for a cold start.
-        return {**os.environ, "SNYK_AGENT_GUARD_TIMEOUT_SECONDS": "2"}
+        return {**os.environ, "SNYK_AGENT_GUARD_TIMEOUT_SECONDS": seconds}
 
     def test_hanging_server_fails_open_within_the_request_budget(self, hanging_hook_server):
         result = subprocess.run(
@@ -4408,18 +4408,22 @@ class TestPowerShellHookScript:
         assert "failing open" in result.stderr
 
     def test_connection_refused_fails_open(self):
+        # Windows retries the SYN on a refused loopback connect for about two seconds, so a
+        # short budget can expire first and the script then reports a timeout rather than a
+        # refused connection. Both are the fail-open path; the budget is widened so the
+        # refusal usually wins, and either reason is accepted.
         result = subprocess.run(
             self._failure_argv(_closed_port_url()),
             input='{"hook_event_name":"PreToolUse","session_id":"s1"}',
             capture_output=True,
             text=True,
             timeout=30,
-            env=self._failure_env(),
+            env=self._failure_env(seconds="5"),
         )
 
         assert result.returncode == 0, result.stderr
         assert result.stdout.strip() == ""
-        assert "request failed" in result.stderr
+        assert "request failed" in result.stderr or "timed out" in result.stderr
         assert "failing open" in result.stderr
 
     def test_stdin_held_open_without_data_fails_open(self, hook_server):
