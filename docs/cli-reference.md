@@ -362,6 +362,12 @@ snyk-agent-scan guard install {claude,cursor,codex,github-copilot,all} [OPTIONS]
 After configuring the hooks, installation sends a `hooksConfiguredServerDiscovery` event. It also configures a
 fire-and-forget session-start hook that reports discovered MCP servers with a `sessionStartServerDiscovery` event.
 
+The installed hook scripts wait at most 60 seconds for the Agent Guard response. On a timeout, and on any transport
+or HTTP failure, they fail open: exit 0 with one line on stderr. On Claude Code and Codex they also return a
+`systemMessage` that the agent shows as a warning ("Unable to reach Snyk Evo to validate agent behavior. Please check
+your network and configuration and try again."); Cursor and GitHub Copilot, whose hook output has no such field,
+receive nothing on stdout.
+
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
 | `--url URL` | string | `https://api.snyk.io` | Remote hook base URL for the Snyk API environment. |

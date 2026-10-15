@@ -8,11 +8,12 @@ import json
 import os
 import re
 import shutil
+import socket
 import stat
 import subprocess
 import sys
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -2585,6 +2586,67 @@ def hook_server():
     server.shutdown()
 
 
+class _HangingHookHandler(BaseHTTPRequestHandler):
+    """Reads the request and never answers: a proxy that completes the handshake, then stalls."""
+
+    release = threading.Event()
+    received = threading.Event()
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        _HangingHookHandler.received.set()
+        _HangingHookHandler.release.wait(60)  # teardown releases; the cap bounds a leak
+
+    def log_message(self, format, *args):
+        pass
+
+
+class _ErrorHookHandler(BaseHTTPRequestHandler):
+    """Answers every POST with HTTP 500 and a body the forwarder must not pass on."""
+
+    def do_POST(self):
+        self.rfile.read(int(self.headers.get("Content-Length", 0)))
+        self.send_response(500)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(b'{"error":"boom"}')
+
+    def log_message(self, format, *args):
+        pass
+
+
+@pytest.fixture()
+def hanging_hook_server():
+    """A server that accepts the hook request and never responds."""
+    _HangingHookHandler.release = threading.Event()
+    _HangingHookHandler.received = threading.Event()
+    # Threaded: the handler blocks, so a single-threaded server could not even shut down.
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _HangingHookHandler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{server.server_address[1]}"
+    _HangingHookHandler.release.set()
+    server.shutdown()
+    server.server_close()
+
+
+@pytest.fixture()
+def error_hook_server():
+    """A server that answers every hook request with HTTP 500."""
+    server = HTTPServer(("127.0.0.1", 0), _ErrorHookHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{server.server_address[1]}"
+    server.shutdown()
+    server.server_close()
+
+
+def _closed_port_url() -> str:
+    """A loopback URL nothing listens on."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return f"http://127.0.0.1:{sock.getsockname()[1]}"
+
+
 def _get_script_path(name: str) -> Path:
     from importlib import resources as importlib_resources
 
@@ -3541,6 +3603,103 @@ def _copy_with_sentinel_version(monkeypatch, dest: Path) -> None:
     guard_module._copy_hook_script(dest)
 
 
+# Matched on bytes, and Windows checks the scripts out with CRLF, so the line end may carry \r.
+_SH_BUDGET_RE = re.compile(rb"^TIMEOUT_SECONDS=(\d+)(?=\r?$)", re.MULTILINE)
+_PS_BUDGET_RE = re.compile(rb"^\$TIMEOUT_SECONDS = (\d+)(?=\r?$)", re.MULTILINE)
+
+
+def _forwarder_with_budget(tmp_path: Path, name: str, seconds: int) -> Path:
+    """A copy of forwarder *name* whose timeout constant is *seconds*.
+
+    Lets a test watch a timeout fire without waiting the shipped budget. Bytes in and out
+    keep the line endings as shipped.
+    """
+    regex = _PS_BUDGET_RE if name.endswith(".ps1") else _SH_BUDGET_RE
+    shipped = _get_script_path(name).read_bytes()
+    patched, count = regex.subn(lambda m: m.group(0)[: m.start(1) - m.start(0)] + str(seconds).encode(), shipped)
+    assert count == 1, f"{name}: expected exactly one TIMEOUT_SECONDS to rewrite"
+    dest = tmp_path / name
+    dest.write_bytes(patched)
+    return dest
+
+
+# A timeout flag followed directly by a number would bypass the one constant.
+_TIMEOUT_LITERAL_RE = re.compile(r"(?:--max-time|-TimeoutSec)\s+\d")
+# How long agent-monitor may legitimately take to answer: it holds a PreToolUse for up to
+# 25 s until the session's discovery arrives, then evaluates within its 25 s session
+# autorelease budget.
+_SERVER_BUDGET_SECONDS = 50
+
+# The sentence both forwarders show the user when they fail open. Claude Code and Codex
+# render it from a `systemMessage` JSON field on stdout; every client gets it on stderr.
+FAIL_OPEN_MESSAGE = (
+    "Unable to reach Snyk Evo to validate agent behavior. Please check your network and configuration and try again."
+)
+# Clients whose hook output schema defines `systemMessage` (Claude Code and Codex docs);
+# Cursor's permission hooks block on stdout that does not match their schema and Copilot
+# documents no such field, so those two must see nothing on stdout.
+SYSTEM_MESSAGE_CLIENTS = ("claude-code", "codex")
+NO_STDOUT_CLIENTS = ("cursor", "github-copilot")
+_SH_MESSAGE_RE = re.compile(rb'^FAIL_OPEN_MESSAGE="(.*)"(?=\r?$)', re.MULTILINE)
+_PS_MESSAGE_RE = re.compile(rb'^\$FAIL_OPEN_MESSAGE = "(.*)"(?=\r?$)', re.MULTILINE)
+
+
+def _fail_open_message(name: str) -> str:
+    """The fail-open sentence as shipped in forwarder *name*."""
+    regex = _PS_MESSAGE_RE if name.endswith(".ps1") else _SH_MESSAGE_RE
+    matches = regex.findall(_get_script_path(name).read_bytes())
+    assert len(matches) == 1, f"{name}: expected exactly one FAIL_OPEN_MESSAGE, found {matches}"
+    return matches[0].decode()
+
+
+class TestHookScriptFailOpenMessage:
+    """The sentence is embedded in JSON verbatim, so it has to be identical in both scripts
+    and free of anything that would need escaping."""
+
+    @pytest.mark.parametrize("name", _FORWARDER_SCRIPTS)
+    def test_shipped_sentence_matches_the_pinned_one(self, name):
+        assert _fail_open_message(name) == FAIL_OPEN_MESSAGE
+
+    def test_sentence_needs_no_json_escaping(self):
+        assert not re.search(r'["\\\x00-\x1f\x7f]', FAIL_OPEN_MESSAGE)
+        assert json.loads('{"systemMessage":"' + FAIL_OPEN_MESSAGE + '"}') == {"systemMessage": FAIL_OPEN_MESSAGE}
+
+    def test_sentence_is_well_under_claude_codes_cap(self):
+        # Claude Code caps systemMessage at 10,000 characters and drops longer values.
+        assert len(FAIL_OPEN_MESSAGE) < 1000
+
+
+class TestHookScriptRequestBudget:
+    """Both forwarders bound the request with one constant that outlasts the server's
+    budget."""
+
+    @staticmethod
+    def _budget(name: str) -> int:
+        text = _get_script_path(name).read_bytes()
+        regex = _PS_BUDGET_RE if name.endswith(".ps1") else _SH_BUDGET_RE
+        matches = regex.findall(text)
+        assert len(matches) == 1, f"{name}: expected exactly one TIMEOUT_SECONDS, found {matches}"
+        return int(matches[0])
+
+    @pytest.mark.parametrize("name", _FORWARDER_SCRIPTS)
+    def test_budget_outlasts_the_server_budget(self, name):
+        assert self._budget(name) > _SERVER_BUDGET_SECONDS
+
+    def test_both_forwarders_share_one_budget(self):
+        assert self._budget("snyk-agent-guard.sh") == self._budget("snyk-agent-guard.ps1")
+
+    @pytest.mark.parametrize("name", _FORWARDER_SCRIPTS)
+    def test_budget_sits_outside_the_install_time_section(self, name):
+        head, section, tail = _split_on_section(_get_script_path(name).read_text())
+
+        assert "TIMEOUT_SECONDS" not in section
+        assert "TIMEOUT_SECONDS" in head + tail
+
+    @pytest.mark.parametrize("name", _FORWARDER_SCRIPTS)
+    def test_no_timeout_literal_bypasses_the_resolved_value(self, name):
+        assert _TIMEOUT_LITERAL_RE.search(_get_script_path(name).read_text()) is None
+
+
 class TestHookScriptInstallTimeVariables:
     """Both forwarder scripts carry a variables section that install fills in."""
 
@@ -4022,6 +4181,102 @@ class TestBashHookScript:
         assert result.returncode != 0
         assert "REMOTE_HOOKS_BASE_URL" in result.stderr
 
+    # --- failure handling: transport and HTTP failures fail open -----------------------
+
+    @staticmethod
+    def _failure_env(url: str) -> dict:
+        return {
+            "PATH": "/usr/bin:/bin:/usr/local/bin",
+            "PUSH_KEY": "test-pk-fail",
+            "REMOTE_HOOKS_BASE_URL": url,
+            "MACHINE_ID": "machine-42",
+        }
+
+    def test_hanging_server_fails_open_within_the_request_budget(self, hanging_hook_server, tmp_path):
+        script = _forwarder_with_budget(tmp_path, "snyk-agent-guard.sh", 2)
+        result = subprocess.run(
+            ["bash", str(script), "--client", "claude-code"],
+            input='{"hook_event_name":"PreToolUse","session_id":"s1"}',
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=self._failure_env(hanging_hook_server),
+        )
+
+        assert _HangingHookHandler.received.is_set(), "server never saw the request: not a hang"
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == {"systemMessage": FAIL_OPEN_MESSAGE}
+        assert FAIL_OPEN_MESSAGE in result.stderr
+        assert "timed out" in result.stderr
+        assert "failing open" in result.stderr
+
+    def test_http_error_fails_open_without_forwarding_the_body(self, error_hook_server):
+        script = _get_script_path("snyk-agent-guard.sh")
+        result = subprocess.run(
+            ["bash", str(script), "--client", "claude-code"],
+            input='{"hook_event_name":"PreToolUse","session_id":"s1"}',
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=self._failure_env(error_hook_server),
+        )
+
+        assert result.returncode == 0, result.stderr
+        # The server's error body never reaches the agent; the user sees the fixed sentence.
+        assert json.loads(result.stdout) == {"systemMessage": FAIL_OPEN_MESSAGE}
+        assert "boom" not in result.stdout
+        assert "HTTP 500" in result.stderr
+        assert "failing open" in result.stderr
+
+    def test_connection_refused_fails_open(self):
+        script = _get_script_path("snyk-agent-guard.sh")
+        result = subprocess.run(
+            ["bash", str(script), "--client", "claude-code"],
+            input='{"hook_event_name":"PreToolUse","session_id":"s1"}',
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=self._failure_env(_closed_port_url()),
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == {"systemMessage": FAIL_OPEN_MESSAGE}
+        assert "curl exit 7" in result.stderr
+        assert "timed out" not in result.stderr
+
+    @pytest.mark.parametrize("client", SYSTEM_MESSAGE_CLIENTS + NO_STDOUT_CLIENTS)
+    def test_system_message_only_for_clients_whose_schema_defines_it(self, error_hook_server, client):
+        script = _get_script_path("snyk-agent-guard.sh")
+        result = subprocess.run(
+            ["bash", str(script), "--client", client],
+            input='{"hook_event_name":"PreToolUse","session_id":"s1"}',
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=self._failure_env(error_hook_server),
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert FAIL_OPEN_MESSAGE in result.stderr
+        if client in SYSTEM_MESSAGE_CLIENTS:
+            assert json.loads(result.stdout) == {"systemMessage": FAIL_OPEN_MESSAGE}
+        else:
+            assert result.stdout == ""
+
+    def test_empty_payload_is_still_a_usage_error(self, hook_server):
+        script = _get_script_path("snyk-agent-guard.sh")
+        result = subprocess.run(
+            ["bash", str(script), "--client", "claude-code"],
+            input="",
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=self._failure_env(hook_server),
+        )
+
+        assert result.returncode != 0
+        assert "payload" in result.stderr
+
 
 @pytest.mark.skipif(not IS_WINDOWS, reason="PowerShell script; Windows only")
 class TestPowerShellDiscoveryHookScript:
@@ -4342,6 +4597,100 @@ class TestPowerShellHookScript:
             env=env,
         )
         assert result.returncode != 0
+
+    # --- failure handling: transport and HTTP failures fail open -----------------------
+
+    def _failure_argv(self, url: str, script: Path | None = None, client: str = "claude-code") -> list[str]:
+        return [
+            self._ps_cmd(),
+            "-File",
+            str(script or _get_script_path("snyk-agent-guard.ps1")),
+            "-Client",
+            client,
+            "-PushKey",
+            "test-pk-fail",
+            "-RemoteUrl",
+            url,
+            "-MachineId",
+            "machine-42",
+        ]
+
+    def test_hanging_server_fails_open_within_the_request_budget(self, hanging_hook_server, tmp_path):
+        script = _forwarder_with_budget(tmp_path, "snyk-agent-guard.ps1", 2)
+        result = subprocess.run(
+            self._failure_argv(hanging_hook_server, script),
+            input='{"hook_event_name":"PreToolUse","session_id":"s1"}',
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        assert _HangingHookHandler.received.is_set(), "server never saw the request: not a hang"
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == {"systemMessage": FAIL_OPEN_MESSAGE}
+        assert FAIL_OPEN_MESSAGE in result.stderr
+        assert "timed out" in result.stderr
+        assert "failing open" in result.stderr
+
+    def test_http_error_fails_open_without_forwarding_the_body(self, error_hook_server):
+        result = subprocess.run(
+            self._failure_argv(error_hook_server),
+            input='{"hook_event_name":"PreToolUse","session_id":"s1"}',
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == {"systemMessage": FAIL_OPEN_MESSAGE}
+        assert "boom" not in result.stdout
+        assert "HTTP 500" in result.stderr
+        assert "failing open" in result.stderr
+
+    def test_connection_refused_fails_open(self):
+        # Windows retries the SYN on a refused loopback connect for about two seconds, well
+        # inside the shipped budget, so the refusal is what the script reports.
+        result = subprocess.run(
+            self._failure_argv(_closed_port_url()),
+            input='{"hook_event_name":"PreToolUse","session_id":"s1"}',
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == {"systemMessage": FAIL_OPEN_MESSAGE}
+        assert "request failed" in result.stderr
+        assert "failing open" in result.stderr
+
+    @pytest.mark.parametrize("client", SYSTEM_MESSAGE_CLIENTS + NO_STDOUT_CLIENTS)
+    def test_system_message_only_for_clients_whose_schema_defines_it(self, error_hook_server, client):
+        result = subprocess.run(
+            self._failure_argv(error_hook_server, client=client),
+            input='{"hook_event_name":"PreToolUse","session_id":"s1"}',
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert FAIL_OPEN_MESSAGE in result.stderr
+        if client in SYSTEM_MESSAGE_CLIENTS:
+            assert json.loads(result.stdout) == {"systemMessage": FAIL_OPEN_MESSAGE}
+        else:
+            assert result.stdout.strip() == ""
+
+    def test_empty_payload_is_still_a_usage_error(self, hook_server):
+        result = subprocess.run(
+            self._failure_argv(hook_server),
+            input="",
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        assert result.returncode != 0
+        assert "payload" in result.stderr
 
 
 # ===================================================================
@@ -5636,8 +5985,8 @@ class TestInvokeHookScript:
 
 
 class TestInvokeHookScriptSuccessPayload:
-    def _invoke(self, stdout, *, require=True):
-        completed = subprocess.CompletedProcess([], 0, stdout=stdout, stderr="")
+    def _invoke(self, stdout, *, require=True, stderr=""):
+        completed = subprocess.CompletedProcess([], 0, stdout=stdout, stderr=stderr)
         with patch(f"{_G}.IS_WINDOWS", False), patch("subprocess.run", return_value=completed):
             return guard_module._invoke_hook_script(
                 Path("/hook.sh"),
@@ -5652,7 +6001,19 @@ class TestInvokeHookScriptSuccessPayload:
     def test_success_true_payload_is_ok(self):
         assert self._invoke('{"success": true}') == (True, "")
 
-    @pytest.mark.parametrize("stdout", ["{}", '{"success": false}', '{"success": "true"}', "[]", "not json", "", None])
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            "{}",
+            '{"success": false}',
+            '{"success": "true"}',
+            '{"systemMessage": "failing open"}',  # what a forwarder prints when it fails open
+            "[]",
+            "not json",
+            "",
+            None,
+        ],
+    )
     def test_missing_or_false_success_is_rejected(self, stdout):
         ok, detail = self._invoke(stdout)
         assert ok is False
@@ -5660,6 +6021,25 @@ class TestInvokeHookScriptSuccessPayload:
 
     def test_payload_not_required_by_default(self):
         assert self._invoke("{}", require=False) == (True, "")
+
+    def test_missing_success_payload_reports_the_scripts_stderr(self):
+        """The forwarders fail open (exit 0, empty stdout) on transport errors, so the reason
+        for a failed install test event now lives on stderr and must reach the operator."""
+        ok, detail = self._invoke("", stderr="snyk-agent-guard: request timed out after 60s; failing open\n")
+
+        assert ok is False
+        assert "did not confirm success" in detail
+        assert "request timed out after 60s" in detail
+        assert "push key may be invalid" not in detail
+
+    def test_multiline_stderr_is_collapsed_into_one_detail_line(self):
+        stderr = "curl: (28) Operation timed out\nsnyk-agent-guard: request timed out after 60s; failing open\n"
+
+        _, detail = self._invoke("", stderr=stderr)
+
+        assert "\n" not in detail
+        assert "curl: (28)" in detail
+        assert "failing open" in detail
 
 
 class TestSendTestEventSuccessPayload:

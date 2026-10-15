@@ -1432,6 +1432,11 @@ def _invoke_hook_script(
         if result.returncode != 0:
             return False, result.stderr.strip() or f"exit code {result.returncode}"
         if require_success_payload and not _has_success_payload(result.stdout):
+            # The forwarders fail open on transport and HTTP errors (exit 0, empty stdout, a
+            # diagnostic on stderr), so when there is a reason it lives on stderr.
+            diagnostic = "; ".join(line.strip() for line in (result.stderr or "").splitlines() if line.strip())
+            if diagnostic:
+                return False, f"response did not confirm success: {diagnostic}"
             return False, "response did not confirm success (push key may be invalid)"
         return True, ""
     except subprocess.TimeoutExpired:
