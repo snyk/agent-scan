@@ -68,8 +68,10 @@ _DISCOVERY_TIMEOUT_SECONDS = 60.0
 # Per-hook timeout written on every synchronous guard hook. Claude Code and Codex
 # default to 600 s, Cursor to an undocumented platform default; a forwarder request
 # that hangs rather than fails would otherwise stall the agent for that long on every
-# event. Each agent treats a timed-out hook as fail-open.
-HOOK_TIMEOUT_SECONDS = 30
+# event. Each agent treats a timed-out hook as fail-open. The value sits above the
+# forwarder scripts' 60 s request budget, so a hung request fails open inside the
+# script, with its diagnostic, before the agent kills the hook.
+HOOK_TIMEOUT_SECONDS = 65
 
 CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 CURSOR_HOOKS_PATH = Path.home() / ".cursor" / "hooks.json"
@@ -1659,8 +1661,8 @@ def _copilot_command_entry(command: str) -> dict:
     """Build a Copilot command-hook entry for this platform.
 
     Copilot has no async hooks, so every entry (discovery included) is synchronous and
-    carries the timeout. 30 s is also Copilot's documented default; writing it keeps the
-    bound explicit should that default move.
+    carries the timeout. Copilot's documented default is 30 s, below the forwarder's
+    request budget, so the value must be written for the script to fail open on its own.
     """
     return {
         "type": "command",

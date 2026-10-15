@@ -110,7 +110,9 @@ AGENTGUARD_CMD = (
 
 
 # Every synchronous guard hook is written with this explicit timeout (seconds).
-HOOK_TIMEOUT = 30
+HOOK_TIMEOUT = 65
+# The forwarder scripts' own request budget, which the agent-side cap must outlast.
+_FORWARDER_BUDGET_RE = re.compile(rb"^\$?TIMEOUT_SECONDS\s*=\s*(\d+)(?=\r?$)", re.MULTILINE)
 
 
 def _strip_timeouts(hooks: dict) -> None:
@@ -990,8 +992,17 @@ class TestSyncHookTimeout:
         "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' bash '/x/snyk-agent-guard-discover.sh'"
     )
 
-    def test_constant_is_thirty_seconds(self):
+    def test_constant_is_sixty_five_seconds(self):
         assert guard_module.HOOK_TIMEOUT_SECONDS == HOOK_TIMEOUT
+
+    @pytest.mark.parametrize("name", ["snyk-agent-guard.sh", "snyk-agent-guard.ps1"])
+    def test_cap_outlasts_the_forwarder_request_budget(self, name):
+        """The forwarder fails open inside its own request budget, with a diagnostic. The
+        agent's cap must not fire first, or the user never sees it."""
+        match = _FORWARDER_BUDGET_RE.search(_get_script_path(name).read_bytes())
+        if match is None:
+            pytest.skip(f"{name} has no TIMEOUT_SECONDS on this branch")
+        assert int(match.group(1)) < guard_module.HOOK_TIMEOUT_SECONDS
 
     def test_claude_guard_entries_carry_timeout_except_session_end(self, tmp_path):
         with patch(f"{_G}.IS_WINDOWS", False):
@@ -1062,8 +1073,8 @@ class TestSyncHookTimeout:
             discover_command=self.discover_command,
         )
 
-        # Copilot has no async mode, so its discovery entry is synchronous too. 30 s is
-        # already Copilot's default; writing it keeps the bound explicit if that changes.
+        # Copilot has no async mode, so its discovery entry is synchronous too, and its 30 s
+        # default would kill the forwarder before the script's own request budget fires.
         for event in COPILOT_HOOK_EVENTS:
             assert data["hooks"][event][0]["timeoutSec"] == HOOK_TIMEOUT
         assert data["hooks"]["SessionStart"][1]["timeoutSec"] == HOOK_TIMEOUT
@@ -6696,7 +6707,7 @@ class TestComputeHooksDiff:
 
     def test_nested_value_difference_is_modified(self):
         old_val = [{"hooks": [{"type": "command", "command": "PUSH_KEY='x' bash snyk-agent-guard.sh", "timeout": 10}]}]
-        new_val = [{"hooks": [{"type": "command", "command": "PUSH_KEY='x' bash snyk-agent-guard.sh", "timeout": 30}]}]
+        new_val = [{"hooks": [{"type": "command", "command": "PUSH_KEY='x' bash snyk-agent-guard.sh", "timeout": 65}]}]
         result = _compute_hooks_diff({"PreToolUse": old_val}, {"PreToolUse": new_val})
         assert "PreToolUse" in result["modified"]
         assert result["modified"]["PreToolUse"]["expected_value"] == new_val
