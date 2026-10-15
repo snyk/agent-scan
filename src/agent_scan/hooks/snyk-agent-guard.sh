@@ -11,9 +11,8 @@
 #
 # Reads a JSON payload from stdin and POSTs it (base64-encoded) to the Agent Guard endpoint.
 #
-# Every wait is bounded by one constant, TIMEOUT_SECONDS below: the stdin read and the whole
-# request. Transport and HTTP failures, and a stdin read that times out, fail open: nothing
-# on stdout, one line on stderr, exit 0. Usage errors exit 1.
+# The request is bounded by TIMEOUT_SECONDS below. Transport and HTTP failures, that timeout
+# included, fail open: nothing on stdout, one line on stderr, exit 0. Usage errors exit 1.
 #
 # Requirements: bash, curl, base64, tr
 #
@@ -27,11 +26,10 @@ AGENT_SCAN_VERSION="__AGENT_SCAN_VERSION__"
 # Hook API version.
 VERSION="2025-11-11"
 
-# Timeout, in seconds, for each wait in this script: the stdin read and the whole request.
-# Every synchronous hook the CLI installs is capped by the agent at 30 s, and agent-monitor
-# may legitimately take ~24 s to answer (its 25 s policy budget minus headroom), so 27 s is
-# late enough for a slow verdict and early enough that the agent sees a clean fail-open exit
-# instead of killing the hook.
+# Timeout, in seconds, for the whole request. Every synchronous hook the CLI installs is
+# capped by the agent at 30 s, and agent-monitor may legitimately take ~24 s to answer (its
+# 25 s policy budget minus headroom), so 27 s is late enough for a slow verdict and early
+# enough that the agent sees a clean fail-open exit instead of killing the hook.
 TIMEOUT_SECONDS=27
 
 # ---------------------------------------------------------------------------
@@ -50,40 +48,6 @@ die() {
 fail_open() {
   echo "snyk-agent-guard: $*; failing open" 1>&2
   exit 0
-}
-
-# Read all of stdin into the caller's ``payload`` within TIMEOUT_SECONDS. bash's read is
-# the only builtin with a deadline: an agent that never writes, or never closes the pipe,
-# would otherwise hold the hook forever (cat has no timeout and macOS ships no timeout(1)).
-# The NUL delimiter keeps newlines; chunking keeps a large payload reasonable; the deadline
-# covers the whole read, not each chunk. bash 3.2 compatible: -N does not exist there.
-read_payload() {
-  local deadline=$(( SECONDS + TIMEOUT_SECONDS )) remaining chunk status
-  payload=""
-  while :; do
-    remaining=$(( deadline - SECONDS ))
-    if (( remaining <= 0 )); then
-      fail_open "timed out reading hook payload from stdin after ${TIMEOUT_SECONDS}s"
-    fi
-    chunk=""
-    status=0
-    IFS= read -r -d '' -n 65536 -t "$remaining" chunk || status=$?
-    payload+="$chunk"
-    if (( status == 0 )); then
-      continue
-    fi
-    # bash 4+ reports a timeout as a status above 128. bash 3.2 (macOS) reports 1, the
-    # same as EOF, so there the deadline decides: a read that returns once SECONDS has
-    # reached it waited the full remaining time.
-    if (( status > 128 )) || { (( BASH_VERSINFO[0] < 4 )) && (( SECONDS >= deadline )); }; then
-      fail_open "timed out reading hook payload from stdin after ${TIMEOUT_SECONDS}s"
-    fi
-    break
-  done
-  # The command substitution this replaces stripped trailing newlines; keep that shape.
-  while [[ "$payload" == *$'\n' ]]; do
-    payload="${payload%$'\n'}"
-  done
 }
 
 json_escape() {
@@ -195,9 +159,9 @@ hook_main() {
 
   local url="${REMOTE_HOOKS_BASE_URL}${endpoint}?version=${VERSION}"
 
-  # Read payload from stdin, bounded by the timeout.
+  # Read payload from stdin
   local payload
-  read_payload
+  payload="$(cat)"
   [[ -n "$payload" ]] || die "Expected JSON payload on stdin"
 
   command -v base64 >/dev/null 2>&1 || die "Missing required dependency: base64"

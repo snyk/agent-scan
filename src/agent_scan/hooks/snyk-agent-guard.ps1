@@ -7,9 +7,8 @@
 #
 # Reads a JSON payload from stdin and POSTs it (base64-encoded) to the Agent Guard endpoint.
 #
-# Every wait is bounded by one constant, $TIMEOUT_SECONDS below: the stdin read and the
-# whole request. Transport and HTTP failures, and a stdin read that times out, fail open:
-# nothing on stdout, one line on stderr, exit 0. Usage errors exit 1.
+# The request is bounded by $TIMEOUT_SECONDS below. Transport and HTTP failures, that timeout
+# included, fail open: nothing on stdout, one line on stderr, exit 0. Usage errors exit 1.
 #
 # Requirements: PowerShell 5.1+ (built-in on Windows 10+)
 #
@@ -38,9 +37,8 @@ $AGENT_SCAN_VERSION = "__AGENT_SCAN_VERSION__"
 # Hook API version.
 $VERSION = "2025-11-11"
 
-# Timeout, in seconds, for each wait in this script: the stdin read and the whole request
-# (same reasoning as snyk-agent-guard.sh: the agent caps the hook at 30 s and agent-monitor
-# may legitimately take ~24 s to answer).
+# Timeout, in seconds, for the whole request (same reasoning as snyk-agent-guard.sh: the
+# agent caps the hook at 30 s and agent-monitor may legitimately take ~24 s to answer).
 $TIMEOUT_SECONDS = 27
 
 # Transport and HTTP failures must not block the agent (see snyk-agent-guard.sh): one line on
@@ -100,14 +98,9 @@ if ($cliVersion -eq '__AGENT_SCAN_VERSION__') {
 $userAgent = "snyk/snyk-agent-guard.ps1 Agent Scan v$cliVersion"
 $url = "${RemoteUrl}${endpoint}?version=$VERSION"
 
-# Read payload from stdin as UTF-8 (strips BOM automatically), bounded: an agent that never
-# writes, or never closes the pipe, would otherwise hold the hook forever.
+# Read payload from stdin as UTF-8 (strips BOM automatically)
 $reader = New-Object System.IO.StreamReader([Console]::OpenStandardInput(), [System.Text.Encoding]::UTF8, $true)
-$readTask = $reader.ReadToEndAsync()
-if (-not $readTask.Wait($TIMEOUT_SECONDS * 1000)) {
-    FailOpen "timed out reading hook payload from stdin after ${TIMEOUT_SECONDS}s"
-}
-$payload = $readTask.Result.Trim()
+$payload = $reader.ReadToEnd().Trim()
 if (-not $payload) {
     Write-Error "Expected JSON payload on stdin"
     exit 1

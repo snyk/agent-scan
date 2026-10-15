@@ -2501,17 +2501,6 @@ def _closed_port_url() -> str:
         return f"http://127.0.0.1:{sock.getsockname()[1]}"
 
 
-@contextlib.contextmanager
-def _open_stdin_pipe():
-    """A stdin whose writer never closes: an agent that keeps the hook's pipe open."""
-    read_fd, write_fd = os.pipe()
-    try:
-        yield read_fd
-    finally:
-        os.close(write_fd)
-        os.close(read_fd)
-
-
 def _get_script_path(name: str) -> Path:
     from importlib import resources as importlib_resources
 
@@ -3425,7 +3414,7 @@ def _forwarder_with_budget(tmp_path: Path, name: str, seconds: int) -> Path:
 
 
 # A timeout flag followed directly by a number would bypass the one constant.
-_TIMEOUT_LITERAL_RE = re.compile(r"(?:(?:-t|--max-time|-TimeoutSec)\s+\d|\.Wait\(\s*\d)")
+_TIMEOUT_LITERAL_RE = re.compile(r"(?:--max-time|-TimeoutSec)\s+\d")
 # The agent-side per-hook cap `guard install` writes (PR #511). The literal stands in for the
 # constant until that change is on main.
 _AGENT_HOOK_TIMEOUT_SECONDS = getattr(guard_module, "HOOK_TIMEOUT_SECONDS", 30)
@@ -3434,8 +3423,8 @@ _SERVER_BUDGET_SECONDS = 25
 
 
 class TestHookScriptRequestBudget:
-    """Both forwarders bound stdin and the request with one constant, between the server
-    budget and the agent's per-hook cap."""
+    """Both forwarders bound the request with one constant, between the server budget and
+    the agent's per-hook cap."""
 
     @staticmethod
     def _budget(name: str) -> int:
@@ -3945,7 +3934,7 @@ class TestBashHookScript:
         assert result.returncode != 0
         assert "REMOTE_HOOKS_BASE_URL" in result.stderr
 
-    # --- failure handling: transport, HTTP and stdin failures fail open ----------------
+    # --- failure handling: transport and HTTP failures fail open -----------------------
 
     @staticmethod
     def _failure_env(url: str) -> dict:
@@ -3957,8 +3946,6 @@ class TestBashHookScript:
         }
 
     def test_hanging_server_fails_open_within_the_request_budget(self, hanging_hook_server, tmp_path):
-        # 2 s, not 1: bash's deadline counts whole seconds, so a 1 s budget could expire
-        # during the stdin read before the request is ever sent.
         script = _forwarder_with_budget(tmp_path, "snyk-agent-guard.sh", 2)
         result = subprocess.run(
             ["bash", str(script), "--client", "claude-code"],
@@ -4006,24 +3993,6 @@ class TestBashHookScript:
         assert result.stdout == ""
         assert "curl exit 7" in result.stderr
         assert "timed out" not in result.stderr
-
-    def test_stdin_held_open_without_data_fails_open(self, hook_server, tmp_path):
-        script = _forwarder_with_budget(tmp_path, "snyk-agent-guard.sh", 1)
-        with _open_stdin_pipe() as stdin_fd:
-            result = subprocess.run(
-                ["bash", str(script), "--client", "claude-code"],
-                stdin=stdin_fd,
-                capture_output=True,
-                text=True,
-                timeout=10,
-                env=self._failure_env(hook_server),
-            )
-
-        assert result.returncode == 0, result.stderr
-        assert result.stdout == ""
-        assert "reading hook payload" in result.stderr
-        assert "failing open" in result.stderr
-        assert _HookHandler.last_request is None
 
     def test_empty_payload_is_still_a_usage_error(self, hook_server):
         script = _get_script_path("snyk-agent-guard.sh")
@@ -4360,11 +4329,7 @@ class TestPowerShellHookScript:
         )
         assert result.returncode != 0
 
-    # ===================================================================
-    # End-to-end: command string invoked the way the client shell does it
-    # ===================================================================
-
-    # --- failure handling: transport, HTTP and stdin failures fail open ----------------
+    # --- failure handling: transport and HTTP failures fail open -----------------------
 
     def _failure_argv(self, url: str, script: Path | None = None) -> list[str]:
         return [
@@ -4427,23 +4392,6 @@ class TestPowerShellHookScript:
         assert "request failed" in result.stderr
         assert "failing open" in result.stderr
 
-    def test_stdin_held_open_without_data_fails_open(self, hook_server, tmp_path):
-        script = _forwarder_with_budget(tmp_path, "snyk-agent-guard.ps1", 2)
-        with _open_stdin_pipe() as stdin_fd:
-            result = subprocess.run(
-                self._failure_argv(hook_server, script),
-                stdin=stdin_fd,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-
-        assert result.returncode == 0, result.stderr
-        assert result.stdout.strip() == ""
-        assert "reading hook payload" in result.stderr
-        assert "failing open" in result.stderr
-        assert _HookHandler.last_request is None
-
     def test_empty_payload_is_still_a_usage_error(self, hook_server):
         result = subprocess.run(
             self._failure_argv(hook_server),
@@ -4455,6 +4403,11 @@ class TestPowerShellHookScript:
 
         assert result.returncode != 0
         assert "payload" in result.stderr
+
+
+# ===================================================================
+# End-to-end: command string invoked the way the client shell does it
+# ===================================================================
 
 
 @pytest.mark.skipif(not IS_WINDOWS, reason="PowerShell Cursor invocation; Windows only")
