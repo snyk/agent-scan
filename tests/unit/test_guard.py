@@ -3421,6 +3421,44 @@ _AGENT_HOOK_TIMEOUT_SECONDS = getattr(guard_module, "HOOK_TIMEOUT_SECONDS", 30)
 # agent-monitor's session autorelease budget: a legitimate verdict can take this long.
 _SERVER_BUDGET_SECONDS = 25
 
+# The sentence both forwarders show the user when they fail open. Claude Code and Codex
+# render it from a `systemMessage` JSON field on stdout; every client gets it on stderr.
+FAIL_OPEN_MESSAGE = (
+    "Unable to reach Snyk Evo to validate agent behavior. Please check your network and configuration and try again."
+)
+# Clients whose hook output schema defines `systemMessage` (Claude Code and Codex docs);
+# Cursor's permission hooks block on stdout that does not match their schema and Copilot
+# documents no such field, so those two must see nothing on stdout.
+SYSTEM_MESSAGE_CLIENTS = ("claude-code", "codex")
+NO_STDOUT_CLIENTS = ("cursor", "github-copilot")
+_SH_MESSAGE_RE = re.compile(rb'^FAIL_OPEN_MESSAGE="(.*)"(?=\r?$)', re.MULTILINE)
+_PS_MESSAGE_RE = re.compile(rb'^\$FAIL_OPEN_MESSAGE = "(.*)"(?=\r?$)', re.MULTILINE)
+
+
+def _fail_open_message(name: str) -> str:
+    """The fail-open sentence as shipped in forwarder *name*."""
+    regex = _PS_MESSAGE_RE if name.endswith(".ps1") else _SH_MESSAGE_RE
+    matches = regex.findall(_get_script_path(name).read_bytes())
+    assert len(matches) == 1, f"{name}: expected exactly one FAIL_OPEN_MESSAGE, found {matches}"
+    return matches[0].decode()
+
+
+class TestHookScriptFailOpenMessage:
+    """The sentence is embedded in JSON verbatim, so it has to be identical in both scripts
+    and free of anything that would need escaping."""
+
+    @pytest.mark.parametrize("name", _FORWARDER_SCRIPTS)
+    def test_shipped_sentence_matches_the_pinned_one(self, name):
+        assert _fail_open_message(name) == FAIL_OPEN_MESSAGE
+
+    def test_sentence_needs_no_json_escaping(self):
+        assert not re.search(r'["\\\x00-\x1f\x7f]', FAIL_OPEN_MESSAGE)
+        assert json.loads('{"systemMessage":"' + FAIL_OPEN_MESSAGE + '"}') == {"systemMessage": FAIL_OPEN_MESSAGE}
+
+    def test_sentence_is_well_under_claude_codes_cap(self):
+        # Claude Code caps systemMessage at 10,000 characters and drops longer values.
+        assert len(FAIL_OPEN_MESSAGE) < 1000
+
 
 class TestHookScriptRequestBudget:
     """Both forwarders bound the request with one constant, between the server budget and
@@ -3958,7 +3996,8 @@ class TestBashHookScript:
 
         assert _HangingHookHandler.received.is_set(), "server never saw the request: not a hang"
         assert result.returncode == 0, result.stderr
-        assert result.stdout == ""
+        assert json.loads(result.stdout) == {"systemMessage": FAIL_OPEN_MESSAGE}
+        assert FAIL_OPEN_MESSAGE in result.stderr
         assert "timed out" in result.stderr
         assert "failing open" in result.stderr
 
@@ -3974,7 +4013,9 @@ class TestBashHookScript:
         )
 
         assert result.returncode == 0, result.stderr
-        assert result.stdout == ""
+        # The server's error body never reaches the agent; the user sees the fixed sentence.
+        assert json.loads(result.stdout) == {"systemMessage": FAIL_OPEN_MESSAGE}
+        assert "boom" not in result.stdout
         assert "HTTP 500" in result.stderr
         assert "failing open" in result.stderr
 
@@ -3990,9 +4031,28 @@ class TestBashHookScript:
         )
 
         assert result.returncode == 0, result.stderr
-        assert result.stdout == ""
+        assert json.loads(result.stdout) == {"systemMessage": FAIL_OPEN_MESSAGE}
         assert "curl exit 7" in result.stderr
         assert "timed out" not in result.stderr
+
+    @pytest.mark.parametrize("client", SYSTEM_MESSAGE_CLIENTS + NO_STDOUT_CLIENTS)
+    def test_system_message_only_for_clients_whose_schema_defines_it(self, error_hook_server, client):
+        script = _get_script_path("snyk-agent-guard.sh")
+        result = subprocess.run(
+            ["bash", str(script), "--client", client],
+            input='{"hook_event_name":"PreToolUse","session_id":"s1"}',
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env=self._failure_env(error_hook_server),
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert FAIL_OPEN_MESSAGE in result.stderr
+        if client in SYSTEM_MESSAGE_CLIENTS:
+            assert json.loads(result.stdout) == {"systemMessage": FAIL_OPEN_MESSAGE}
+        else:
+            assert result.stdout == ""
 
     def test_empty_payload_is_still_a_usage_error(self, hook_server):
         script = _get_script_path("snyk-agent-guard.sh")
@@ -4331,13 +4391,13 @@ class TestPowerShellHookScript:
 
     # --- failure handling: transport and HTTP failures fail open -----------------------
 
-    def _failure_argv(self, url: str, script: Path | None = None) -> list[str]:
+    def _failure_argv(self, url: str, script: Path | None = None, client: str = "claude-code") -> list[str]:
         return [
             self._ps_cmd(),
             "-File",
             str(script or _get_script_path("snyk-agent-guard.ps1")),
             "-Client",
-            "claude-code",
+            client,
             "-PushKey",
             "test-pk-fail",
             "-RemoteUrl",
@@ -4358,7 +4418,8 @@ class TestPowerShellHookScript:
 
         assert _HangingHookHandler.received.is_set(), "server never saw the request: not a hang"
         assert result.returncode == 0, result.stderr
-        assert result.stdout.strip() == ""
+        assert json.loads(result.stdout) == {"systemMessage": FAIL_OPEN_MESSAGE}
+        assert FAIL_OPEN_MESSAGE in result.stderr
         assert "timed out" in result.stderr
         assert "failing open" in result.stderr
 
@@ -4372,7 +4433,8 @@ class TestPowerShellHookScript:
         )
 
         assert result.returncode == 0, result.stderr
-        assert result.stdout.strip() == ""
+        assert json.loads(result.stdout) == {"systemMessage": FAIL_OPEN_MESSAGE}
+        assert "boom" not in result.stdout
         assert "HTTP 500" in result.stderr
         assert "failing open" in result.stderr
 
@@ -4388,9 +4450,26 @@ class TestPowerShellHookScript:
         )
 
         assert result.returncode == 0, result.stderr
-        assert result.stdout.strip() == ""
+        assert json.loads(result.stdout) == {"systemMessage": FAIL_OPEN_MESSAGE}
         assert "request failed" in result.stderr
         assert "failing open" in result.stderr
+
+    @pytest.mark.parametrize("client", SYSTEM_MESSAGE_CLIENTS + NO_STDOUT_CLIENTS)
+    def test_system_message_only_for_clients_whose_schema_defines_it(self, error_hook_server, client):
+        result = subprocess.run(
+            self._failure_argv(error_hook_server, client=client),
+            input='{"hook_event_name":"PreToolUse","session_id":"s1"}',
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert FAIL_OPEN_MESSAGE in result.stderr
+        if client in SYSTEM_MESSAGE_CLIENTS:
+            assert json.loads(result.stdout) == {"systemMessage": FAIL_OPEN_MESSAGE}
+        else:
+            assert result.stdout.strip() == ""
 
     def test_empty_payload_is_still_a_usage_error(self, hook_server):
         result = subprocess.run(
@@ -5713,7 +5792,19 @@ class TestInvokeHookScriptSuccessPayload:
     def test_success_true_payload_is_ok(self):
         assert self._invoke('{"success": true}') == (True, "")
 
-    @pytest.mark.parametrize("stdout", ["{}", '{"success": false}', '{"success": "true"}', "[]", "not json", "", None])
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            "{}",
+            '{"success": false}',
+            '{"success": "true"}',
+            '{"systemMessage": "failing open"}',  # what a forwarder prints when it fails open
+            "[]",
+            "not json",
+            "",
+            None,
+        ],
+    )
     def test_missing_or_false_success_is_rejected(self, stdout):
         ok, detail = self._invoke(stdout)
         assert ok is False

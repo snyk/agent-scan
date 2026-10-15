@@ -8,7 +8,10 @@
 # Reads a JSON payload from stdin and POSTs it (base64-encoded) to the Agent Guard endpoint.
 #
 # The request is bounded by $TIMEOUT_SECONDS below. Transport and HTTP failures, that timeout
-# included, fail open: nothing on stdout, one line on stderr, exit 0. Usage errors exit 1.
+# included, fail open: exit 0, one line on stderr, and on stdout a systemMessage JSON object
+# for the clients whose hook output defines one (Claude Code, Codex) so the user is told
+# that Agent Guard did not validate the action; nothing on stdout for the others. Usage
+# errors exit 1.
 #
 # Requirements: PowerShell 5.1+ (built-in on Windows 10+)
 #
@@ -41,12 +44,26 @@ $VERSION = "2025-11-11"
 # agent caps the hook at 30 s and agent-monitor may legitimately take ~24 s to answer).
 $TIMEOUT_SECONDS = 27
 
-# Transport and HTTP failures must not block the agent (see snyk-agent-guard.sh): one line on
-# stderr, nothing on stdout, exit 0. [Console]::Error is used instead of Write-Error, which
-# $ErrorActionPreference = "Stop" would turn into a terminating error, a multi-line
-# ErrorRecord and exit code 1. Usage errors below keep Write-Error and exit 1.
+# What the user is told when the hook fails open. Embedded in JSON verbatim, so it must stay
+# free of double quotes, backslashes and control characters (pinned by a test).
+$FAIL_OPEN_MESSAGE = "Unable to reach Snyk Evo to validate agent behavior. Please check your network and configuration and try again."
+
+# Clients whose hook output schema defines systemMessage, a warning the agent shows the
+# user (see supports_system_message in snyk-agent-guard.sh for why Cursor and Copilot must
+# get nothing on stdout).
+$SYSTEM_MESSAGE_CLIENTS = @("claude-code", "codex")
+
+# Transport and HTTP failures must not block the agent (see snyk-agent-guard.sh): exit 0,
+# the user-facing sentence plus the technical reason on stderr, and the sentence as a
+# systemMessage on stdout only where the client renders it. [Console]::Error is used
+# instead of Write-Error, which $ErrorActionPreference = "Stop" would turn into a
+# terminating error, a multi-line ErrorRecord and exit code 1. Usage errors below keep
+# Write-Error and exit 1.
 function FailOpen([string]$reason) {
-    [Console]::Error.WriteLine("snyk-agent-guard: $reason; failing open")
+    [Console]::Error.WriteLine("snyk-agent-guard: $FAIL_OPEN_MESSAGE ($reason; failing open)")
+    if ($SYSTEM_MESSAGE_CLIENTS -contains $Client) {
+        [Console]::Out.WriteLine('{"systemMessage":"' + $FAIL_OPEN_MESSAGE + '"}')
+    }
     exit 0
 }
 

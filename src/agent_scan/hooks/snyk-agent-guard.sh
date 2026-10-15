@@ -12,7 +12,10 @@
 # Reads a JSON payload from stdin and POSTs it (base64-encoded) to the Agent Guard endpoint.
 #
 # The request is bounded by TIMEOUT_SECONDS below. Transport and HTTP failures, that timeout
-# included, fail open: nothing on stdout, one line on stderr, exit 0. Usage errors exit 1.
+# included, fail open: exit 0, one line on stderr, and on stdout a systemMessage JSON object
+# for the clients whose hook output defines one (Claude Code, Codex) so the user is told
+# that Agent Guard did not validate the action; nothing on stdout for the others. Usage
+# errors exit 1.
 #
 # Requirements: bash, curl, base64, tr
 #
@@ -32,6 +35,10 @@ VERSION="2025-11-11"
 # enough that the agent sees a clean fail-open exit instead of killing the hook.
 TIMEOUT_SECONDS=27
 
+# What the user is told when the hook fails open. Embedded in JSON verbatim, so it must stay
+# free of double quotes, backslashes and control characters (pinned by a test).
+FAIL_OPEN_MESSAGE="Unable to reach Snyk Evo to validate agent behavior. Please check your network and configuration and try again."
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -41,12 +48,30 @@ die() {
   exit 1
 }
 
+# Clients whose hook output schema defines systemMessage, a warning the agent shows the
+# user. Cursor has no such field and its permission hooks block on stdout that does not
+# match their schema; Copilot documents no such field and its preToolUse fails closed on
+# hook errors. Both therefore get nothing on stdout.
+supports_system_message() {
+  case "${1:-}" in
+    claude-code|codex) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Usage: fail_open <client> <reason>
+#
 # Transport and HTTP failures must not block the agent: Copilot denies the tool call on any
 # non-zero exit, Cursor blocks on non-JSON stdout but allows on no output, and Claude Code
-# and Codex ignore exit 0 with empty stdout. So: one diagnostic line on stderr, nothing on
-# stdout, exit 0. Usage errors still go through die().
+# and Codex ignore exit 0 with empty stdout. So: exit 0, the user-facing sentence plus the
+# technical reason on stderr, and the sentence as a systemMessage on stdout only where the
+# client renders it. Usage errors still go through die().
 fail_open() {
-  echo "snyk-agent-guard: $*; failing open" 1>&2
+  local client=$1 reason=$2
+  echo "snyk-agent-guard: ${FAIL_OPEN_MESSAGE} (${reason}; failing open)" 1>&2
+  if supports_system_message "$client"; then
+    printf '{"systemMessage":"%s"}\n' "$FAIL_OPEN_MESSAGE"
+  fi
   exit 0
 }
 
@@ -210,15 +235,15 @@ hook_main() {
   # curl writes the -w marker even for a failed transfer (http code 000) and may have
   # streamed part of a body before the timeout fired, so resp is only read on success.
   if (( curl_status == 28 )); then
-    fail_open "request timed out after ${TIMEOUT_SECONDS}s"
+    fail_open "$client" "request timed out after ${TIMEOUT_SECONDS}s"
   elif (( curl_status != 0 )); then
-    fail_open "request failed (curl exit ${curl_status})"
+    fail_open "$client" "request failed (curl exit ${curl_status})"
   fi
   http_code="${resp##*$'\n'"${marker}"}"
   body="${resp%$'\n'"${marker}"*}"
 
   if [[ "$http_code" =~ ^[0-9]{3}$ ]] && (( http_code >= 400 )); then
-    fail_open "HTTP ${http_code}"
+    fail_open "$client" "HTTP ${http_code}"
   fi
 
   printf '%s' "$body"
