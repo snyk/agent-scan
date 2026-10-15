@@ -29,11 +29,12 @@ AGENT_SCAN_VERSION="__AGENT_SCAN_VERSION__"
 # Hook API version.
 VERSION="2025-11-11"
 
-# Timeout, in seconds, for the whole request. Every synchronous hook the CLI installs is
-# capped by the agent at 30 s, and agent-monitor may legitimately take ~24 s to answer (its
-# 25 s policy budget minus headroom), so 27 s is late enough for a slow verdict and early
-# enough that the agent sees a clean fail-open exit instead of killing the hook.
-TIMEOUT_SECONDS=27
+# Timeout, in seconds, for the whole request. agent-monitor may legitimately take ~50 s to
+# answer: it holds a PreToolUse for up to 25 s until the session's discovery arrives, then
+# evaluates within its 25 s policy budget. Every synchronous hook the CLI installs is capped
+# by the agent at 65 s, so 60 s is late enough for a slow verdict and early enough that the
+# agent sees a clean fail-open exit instead of killing the hook.
+TIMEOUT_SECONDS=60
 
 # What the user is told when the hook fails open. Embedded in JSON verbatim, so it must stay
 # free of double quotes, backslashes and control characters (pinned by a test).

@@ -3415,11 +3415,10 @@ def _forwarder_with_budget(tmp_path: Path, name: str, seconds: int) -> Path:
 
 # A timeout flag followed directly by a number would bypass the one constant.
 _TIMEOUT_LITERAL_RE = re.compile(r"(?:--max-time|-TimeoutSec)\s+\d")
-# The agent-side per-hook cap `guard install` writes (PR #511). The literal stands in for the
-# constant until that change is on main.
-_AGENT_HOOK_TIMEOUT_SECONDS = getattr(guard_module, "HOOK_TIMEOUT_SECONDS", 30)
-# agent-monitor's session autorelease budget: a legitimate verdict can take this long.
-_SERVER_BUDGET_SECONDS = 25
+# How long agent-monitor may legitimately take to answer: it holds a PreToolUse for up to
+# 25 s until the session's discovery arrives, then evaluates within its 25 s session
+# autorelease budget.
+_SERVER_BUDGET_SECONDS = 50
 
 # The sentence both forwarders show the user when they fail open. Claude Code and Codex
 # render it from a `systemMessage` JSON field on stdout; every client gets it on stderr.
@@ -3461,8 +3460,8 @@ class TestHookScriptFailOpenMessage:
 
 
 class TestHookScriptRequestBudget:
-    """Both forwarders bound the request with one constant, between the server budget and
-    the agent's per-hook cap."""
+    """Both forwarders bound the request with one constant that outlasts the server's
+    budget."""
 
     @staticmethod
     def _budget(name: str) -> int:
@@ -3473,8 +3472,8 @@ class TestHookScriptRequestBudget:
         return int(matches[0])
 
     @pytest.mark.parametrize("name", _FORWARDER_SCRIPTS)
-    def test_budget_fits_between_server_budget_and_agent_cap(self, name):
-        assert _SERVER_BUDGET_SECONDS < self._budget(name) < _AGENT_HOOK_TIMEOUT_SECONDS
+    def test_budget_outlasts_the_server_budget(self, name):
+        assert self._budget(name) > _SERVER_BUDGET_SECONDS
 
     def test_both_forwarders_share_one_budget(self):
         assert self._budget("snyk-agent-guard.sh") == self._budget("snyk-agent-guard.ps1")
@@ -5816,15 +5815,15 @@ class TestInvokeHookScriptSuccessPayload:
     def test_missing_success_payload_reports_the_scripts_stderr(self):
         """The forwarders fail open (exit 0, empty stdout) on transport errors, so the reason
         for a failed install test event now lives on stderr and must reach the operator."""
-        ok, detail = self._invoke("", stderr="snyk-agent-guard: request timed out after 27s; failing open\n")
+        ok, detail = self._invoke("", stderr="snyk-agent-guard: request timed out after 60s; failing open\n")
 
         assert ok is False
         assert "did not confirm success" in detail
-        assert "request timed out after 27s" in detail
+        assert "request timed out after 60s" in detail
         assert "push key may be invalid" not in detail
 
     def test_multiline_stderr_is_collapsed_into_one_detail_line(self):
-        stderr = "curl: (28) Operation timed out\nsnyk-agent-guard: request timed out after 27s; failing open\n"
+        stderr = "curl: (28) Operation timed out\nsnyk-agent-guard: request timed out after 60s; failing open\n"
 
         _, detail = self._invoke("", stderr=stderr)
 

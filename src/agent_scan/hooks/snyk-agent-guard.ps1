@@ -41,8 +41,8 @@ $AGENT_SCAN_VERSION = "__AGENT_SCAN_VERSION__"
 $VERSION = "2025-11-11"
 
 # Timeout, in seconds, for the whole request (same reasoning as snyk-agent-guard.sh: the
-# agent caps the hook at 30 s and agent-monitor may legitimately take ~24 s to answer).
-$TIMEOUT_SECONDS = 27
+# agent caps the hook at 65 s and agent-monitor may legitimately take ~50 s to answer).
+$TIMEOUT_SECONDS = 60
 
 # What the user is told when the hook fails open. Embedded in JSON verbatim, so it must stay
 # free of double quotes, backslashes and control characters (pinned by a test).
