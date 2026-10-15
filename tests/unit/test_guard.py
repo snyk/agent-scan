@@ -3404,8 +3404,9 @@ def _copy_with_sentinel_version(monkeypatch, dest: Path) -> None:
     guard_module._copy_hook_script(dest)
 
 
-_SH_BUDGET_RE = re.compile(rb"^TIMEOUT_SECONDS=(\d+)$", re.MULTILINE)
-_PS_BUDGET_RE = re.compile(rb"^\$TIMEOUT_SECONDS = (\d+)$", re.MULTILINE)
+# Matched on bytes, and Windows checks the scripts out with CRLF, so the line end may carry \r.
+_SH_BUDGET_RE = re.compile(rb"^TIMEOUT_SECONDS=(\d+)(?=\r?$)", re.MULTILINE)
+_PS_BUDGET_RE = re.compile(rb"^\$TIMEOUT_SECONDS = (\d+)(?=\r?$)", re.MULTILINE)
 
 
 def _forwarder_with_budget(tmp_path: Path, name: str, seconds: int) -> Path:
