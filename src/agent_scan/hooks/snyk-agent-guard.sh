@@ -11,6 +11,11 @@
 #
 # Reads a JSON payload from stdin and POSTs it (base64-encoded) to the Agent Guard endpoint.
 #
+# Every wait is bounded by one value, DEFAULT_TIMEOUT_SECONDS below, which the environment
+# variable SNYK_AGENT_GUARD_TIMEOUT_SECONDS (a positive integer) overrides: the stdin read,
+# the connection and the whole request. Transport and HTTP failures, and a stdin read that
+# times out, fail open: nothing on stdout, one line on stderr, exit 0. Usage errors exit 1.
+#
 # Requirements: bash, curl, base64, tr
 #
 set -euo pipefail
@@ -23,6 +28,15 @@ AGENT_SCAN_VERSION="__AGENT_SCAN_VERSION__"
 # Hook API version.
 VERSION="2025-11-11"
 
+# Timeout, in seconds, for each wait in this script: the stdin read, the connection and the
+# whole request. Every synchronous hook the CLI installs is capped by the agent at 30 s, and
+# agent-monitor may legitimately take ~24 s to answer (its 25 s policy budget minus
+# headroom), so 27 s is late enough for a slow verdict and early enough that the agent sees
+# a clean fail-open exit instead of killing the hook. SNYK_AGENT_GUARD_TIMEOUT_SECONDS
+# overrides it when it is a positive integer; anything else, including 0 (which curl reads
+# as "no limit"), falls back to the default.
+DEFAULT_TIMEOUT_SECONDS=27
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -30,6 +44,58 @@ VERSION="2025-11-11"
 die() {
   echo "Error: $*" 1>&2
   exit 1
+}
+
+# Transport and HTTP failures must not block the agent: Copilot denies the tool call on any
+# non-zero exit, Cursor blocks on non-JSON stdout but allows on no output, and Claude Code
+# and Codex ignore exit 0 with empty stdout. So: one diagnostic line on stderr, nothing on
+# stdout, exit 0. Usage errors still go through die().
+fail_open() {
+  echo "snyk-agent-guard: $*; failing open" 1>&2
+  exit 0
+}
+
+# The override when it is a positive integer, else the default.
+resolve_timeout_seconds() {
+  if [[ "${SNYK_AGENT_GUARD_TIMEOUT_SECONDS:-}" =~ ^[1-9][0-9]{0,3}$ ]]; then
+    printf '%s' "$SNYK_AGENT_GUARD_TIMEOUT_SECONDS"
+  else
+    printf '%s' "$DEFAULT_TIMEOUT_SECONDS"
+  fi
+}
+
+# Read all of stdin into the caller's ``payload`` within ``timeout_seconds``. bash's read is
+# the only builtin with a deadline: an agent that never writes, or never closes the pipe,
+# would otherwise hold the hook forever (cat has no timeout and macOS ships no timeout(1)).
+# The NUL delimiter keeps newlines; chunking keeps a large payload reasonable; the deadline
+# covers the whole read, not each chunk. bash 3.2 compatible: -N does not exist there.
+read_payload() {
+  local deadline=$(( SECONDS + timeout_seconds )) remaining chunk status
+  payload=""
+  while :; do
+    remaining=$(( deadline - SECONDS ))
+    if (( remaining <= 0 )); then
+      fail_open "timed out reading hook payload from stdin after ${timeout_seconds}s"
+    fi
+    chunk=""
+    status=0
+    IFS= read -r -d '' -n 65536 -t "$remaining" chunk || status=$?
+    payload+="$chunk"
+    if (( status == 0 )); then
+      continue
+    fi
+    # bash 4+ reports a timeout as a status above 128. bash 3.2 (macOS) reports 1, the
+    # same as EOF, so there the deadline decides: a read that returns once SECONDS has
+    # reached it waited the full remaining time.
+    if (( status > 128 )) || { (( BASH_VERSINFO[0] < 4 )) && (( SECONDS >= deadline )); }; then
+      fail_open "timed out reading hook payload from stdin after ${timeout_seconds}s"
+    fi
+    break
+  done
+  # The command substitution this replaces stripped trailing newlines; keep that shape.
+  while [[ "$payload" == *$'\n' ]]; do
+    payload="${payload%$'\n'}"
+  done
 }
 
 json_escape() {
@@ -119,6 +185,9 @@ hook_main() {
   [[ -n "$pushkey" ]] || die "PUSH_KEY environment variable is not set"
   [[ -n "${MACHINE_ID:-}" ]] || die "MACHINE_ID environment variable is not set"
 
+  local timeout_seconds
+  timeout_seconds="$(resolve_timeout_seconds)"
+
   local cli_version user_agent
   cli_version="$AGENT_SCAN_VERSION"
   # Only a copy install never filled in still holds the placeholder, and the literal must
@@ -141,9 +210,9 @@ hook_main() {
 
   local url="${REMOTE_HOOKS_BASE_URL}${endpoint}?version=${VERSION}"
 
-  # Read payload from stdin
+  # Read payload from stdin, bounded by the timeout.
   local payload
-  payload="$(cat)"
+  read_payload
   [[ -n "$payload" ]] || die "Expected JSON payload on stdin"
 
   command -v base64 >/dev/null 2>&1 || die "Missing required dependency: base64"
@@ -176,6 +245,8 @@ hook_main() {
     -sS
     -X POST
     "$url"
+    --connect-timeout "$timeout_seconds"
+    --max-time "$timeout_seconds"
     -H "User-Agent: ${user_agent}"
     -H "X-User: ${x_user}"
     -H "Content-Type: text/plain"
@@ -186,13 +257,20 @@ hook_main() {
     curl_args+=(-H "X-Agent-Surface: ${agent_surface}")
   fi
 
-  resp="$(printf '%s' "$encoded_body" | curl "${curl_args[@]}" -w $'\n'"${marker}%{http_code}")" || die "Request failed"
+  local curl_status=0
+  resp="$(printf '%s' "$encoded_body" | curl "${curl_args[@]}" -w $'\n'"${marker}%{http_code}")" || curl_status=$?
+  # curl writes the -w marker even for a failed transfer (http code 000) and may have
+  # streamed part of a body before the timeout fired, so resp is only read on success.
+  if (( curl_status == 28 )); then
+    fail_open "request timed out after ${timeout_seconds}s"
+  elif (( curl_status != 0 )); then
+    fail_open "request failed (curl exit ${curl_status})"
+  fi
   http_code="${resp##*$'\n'"${marker}"}"
   body="${resp%$'\n'"${marker}"*}"
 
   if [[ "$http_code" =~ ^[0-9]{3}$ ]] && (( http_code >= 400 )); then
-    echo "Error: ${http_code}" 1>&2
-    exit 1
+    fail_open "HTTP ${http_code}"
   fi
 
   printf '%s' "$body"

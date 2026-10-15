@@ -7,6 +7,11 @@
 #
 # Reads a JSON payload from stdin and POSTs it (base64-encoded) to the Agent Guard endpoint.
 #
+# Every wait is bounded by one value, $DEFAULT_TIMEOUT_SECONDS below, which the environment
+# variable SNYK_AGENT_GUARD_TIMEOUT_SECONDS (a positive integer) overrides: the stdin read
+# and the whole request. Transport and HTTP failures, and a stdin read that times out, fail
+# open: nothing on stdout, one line on stderr, exit 0. Usage errors exit 1.
+#
 # Requirements: PowerShell 5.1+ (built-in on Windows 10+)
 #
 param(
@@ -33,6 +38,27 @@ $AGENT_SCAN_VERSION = "__AGENT_SCAN_VERSION__"
 
 # Hook API version.
 $VERSION = "2025-11-11"
+
+# Timeout, in seconds, for each wait in this script: the stdin read and the whole request
+# (same reasoning as snyk-agent-guard.sh: the agent caps the hook at 30 s and agent-monitor
+# may legitimately take ~24 s to answer). SNYK_AGENT_GUARD_TIMEOUT_SECONDS overrides it when
+# it is a positive integer; anything else, including 0 (which Invoke-WebRequest treats as
+# indefinite), falls back to the default.
+$DEFAULT_TIMEOUT_SECONDS = 27
+
+# Transport and HTTP failures must not block the agent (see snyk-agent-guard.sh): one line on
+# stderr, nothing on stdout, exit 0. [Console]::Error is used instead of Write-Error, which
+# $ErrorActionPreference = "Stop" would turn into a terminating error, a multi-line
+# ErrorRecord and exit code 1. Usage errors below keep Write-Error and exit 1.
+function FailOpen([string]$reason) {
+    [Console]::Error.WriteLine("snyk-agent-guard: $reason; failing open")
+    exit 0
+}
+
+$timeoutSeconds = $DEFAULT_TIMEOUT_SECONDS
+if ($env:SNYK_AGENT_GUARD_TIMEOUT_SECONDS -match '^[1-9][0-9]{0,3}$') {
+    $timeoutSeconds = [int]$env:SNYK_AGENT_GUARD_TIMEOUT_SECONDS
+}
 
 # ---------------------------------------------------------------------------
 # Main
@@ -82,9 +108,14 @@ if ($cliVersion -eq '__AGENT_SCAN_VERSION__') {
 $userAgent = "snyk/snyk-agent-guard.ps1 Agent Scan v$cliVersion"
 $url = "${RemoteUrl}${endpoint}?version=$VERSION"
 
-# Read payload from stdin as UTF-8 (strips BOM automatically)
+# Read payload from stdin as UTF-8 (strips BOM automatically), bounded: an agent that never
+# writes, or never closes the pipe, would otherwise hold the hook forever.
 $reader = New-Object System.IO.StreamReader([Console]::OpenStandardInput(), [System.Text.Encoding]::UTF8, $true)
-$payload = $reader.ReadToEnd().Trim()
+$readTask = $reader.ReadToEndAsync()
+if (-not $readTask.Wait($timeoutSeconds * 1000)) {
+    FailOpen "timed out reading hook payload from stdin after ${timeoutSeconds}s"
+}
+$payload = $readTask.Result.Trim()
 if (-not $payload) {
     Write-Error "Expected JSON payload on stdin"
     exit 1
@@ -131,7 +162,7 @@ $agentSurface = if ($Client -ne "github-copilot") {
     ""
 }
 
-# Execute request
+# Execute request. Any failure past this point fails open; see FailOpen.
 try {
     $headers = @{
         "User-Agent"   = $userAgent
@@ -143,17 +174,28 @@ try {
         $headers["X-Agent-Surface"] = $agentSurface
     }
     $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($body)
-    $response = Invoke-WebRequest -Uri $url -Method POST -Body $bodyBytes -Headers $headers -UseBasicParsing
-    Write-Output $response.Content
+    $response = Invoke-WebRequest -Uri $url -Method POST -Body $bodyBytes -Headers $headers `
+        -UseBasicParsing -TimeoutSec $timeoutSeconds
 } catch {
-    $statusCode = $null
-    if ($_.Exception.Response) {
-        $statusCode = [int]$_.Exception.Response.StatusCode
+    $ex = $_.Exception
+    $statusCode = 0
+    if ($ex.Response) {
+        try { $statusCode = [int]$ex.Response.StatusCode } catch { $statusCode = 0 }
     }
-    if ($statusCode) {
-        Write-Error "Error: $statusCode"
-    } else {
-        Write-Error "Request failed: $_"
+    if ($statusCode -ge 400) {
+        FailOpen "HTTP $statusCode"
     }
-    exit 1
+    # Windows PowerShell 5.1 surfaces -TimeoutSec as a WebException with Status Timeout;
+    # PowerShell 7 raises an OperationCanceledException instead. -TimeoutSec bounds the
+    # connection and the wait for response headers; a body that stalls afterwards is left
+    # to the agent's own hook timeout.
+    $timedOut = (
+        ($ex -is [System.Net.WebException] -and $ex.Status -eq [System.Net.WebExceptionStatus]::Timeout) -or
+        ($ex -is [System.OperationCanceledException])
+    )
+    if ($timedOut) {
+        FailOpen "request timed out after ${timeoutSeconds}s"
+    }
+    FailOpen "request failed: $($ex.Message)"
 }
+Write-Output $response.Content

@@ -407,6 +407,7 @@ snyk-agent-scan guard uninstall {claude,cursor,codex,github-copilot,all} [OPTION
 | `SNYK_TOKEN` | Required to mint/revoke push keys and verify that Guard is enabled for the tenant |
 | `MACHINE_ID` | Required non-anonymous machine identifier sent with hook events; alternative to `guard install --machine-id` |
 | `AGENT_SCAN_COMMAND` | Optional Agent Scan command invoked by the session-start discovery hook, with the hook arguments appended. The hook is installed only when this is set. A value that is not an existing executable file is run as a shell command. |
+| `SNYK_AGENT_GUARD_TIMEOUT_SECONDS` | Timeout, in seconds, for every wait in the installed hook scripts: the stdin read, the connection, and the whole request (default `27`; positive integers only). On expiry, and on any transport or HTTP failure, the scripts fail open: no output, one line on stderr, exit 0. Read by the scripts at run time, not by `guard install`. |
 
 ## Environment variables
 
