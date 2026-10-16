@@ -481,7 +481,12 @@ See the [risk reference](risks.md) for every supported MCP and skill risk name.
           "args": ["-y", "@modelcontextprotocol/server-github"],
           "type": "stdio",
           "env": null,
-          "binary_identifier": null
+          "binary_identifier": null,
+          "binary_check": {
+            "result": "code_launcher",
+            "resolved_command": "npx",
+            "resolved_path": "/usr/local/bin/npx"
+          }
         },
         "signature": null,
         "error": null
@@ -504,6 +509,14 @@ See the [risk reference](risks.md) for every supported MCP and skill risk name.
   }
 }
 ```
+
+For stdio servers, `binary_identifier` contains the verified macOS signing identifier, or `null`. `binary_check` reports why a server did or did not get an identifier and is also included in the backend request alongside `binary_identifier`. It is `null` if the check never ran and never affects server launch or identity.
+
+| `binary_check` field | Description |
+| --- | --- |
+| `result` | `signed` (verified Apple-root signature with identifier), `not_macos` (unsupported platform), `not_found` (command resolution failed), `code_launcher` (known interpreter/package runner), `unsigned` (signature verification or details command failed), `not_apple_root` (Apple Root CA absent), `no_identifier` (identifier absent), or `error` (unexpected failure; no exception text). |
+| `resolved_command` | Command returned by resolution or supplied by the discoverer; `null` if resolution did not complete. |
+| `resolved_path` | Real path checked; `null` if path resolution did not complete. |
 
 The example uses `signature: null` for brevity. After a successful MCP handshake, `signature` contains server metadata plus the full tool, prompt, resource, and resource-template descriptions.
 
