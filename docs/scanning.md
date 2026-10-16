@@ -65,6 +65,57 @@ Agent applications, skills, tool names, and descriptions are shared with Snyk. R
 
 Discovered client information, MCP server configurations and signatures, and skill files are shared with Snyk. Secrets in configuration values and text are redacted before transmission. Results use scored risk indicators; see the [risk reference](risks.md). Operational errors remain separate in the [failure code reference](failure-codes.md).
 
+## Env var placeholders in stdio server configs
+
+A stdio MCP server's `env` block in a client config (`.claude.json`, `.mcp.json`,
+etc.) can reference `${NAME}` to pull a value from whichever environment is
+running the scan, instead of hardcoding a secret in the config file:
+
+```json
+{
+  "mcpServers": {
+    "my-server": {
+      "command": "npx",
+      "args": ["-y", "mcp-remote@0.3.0", "https://example.com/mcp", "--header", "Authorization:${AUTH_HEADER}"],
+      "env": { "AUTH_HEADER": "${AUTH_HEADER}" }
+    }
+  }
+}
+```
+
+`${AUTH_HEADER}` in the `env` value is substituted from the scanning
+process's own environment variable of the same name at the moment the
+server is spawned. Note the child process's env-var *key* (the left side,
+`"AUTH_HEADER"` here) doesn't have to match the placeholder name on the
+right — `"env": {"FOO_TOKEN": "${MY_SECRET}"}` is equally valid. If the
+referenced variable isn't set when the scan runs, the placeholder is left
+unexpanded and a warning is logged (visible with `--verbose`) rather than
+silently connecting with a blank credential. There is no escape syntax for
+a literal `${NAME}` today: if an `env` value happens to legitimately
+contain well-formed `${NAME}` text that isn't meant as a placeholder, it
+will still be substituted whenever `NAME` happens to be set in the
+scanning environment.
+
+This only applies to `env` values. A value inside `args` (as in the
+`mcp-remote` example above) is *not* expanded by Agent Scan itself --
+`mcp-remote` and similar wrapper commands already resolve `${VAR}`
+references in their own arguments from their own process environment, so
+once the variable is present in the spawned process's environment (via the
+`env` block), that resolution happens downstream, in the wrapper.
+
+Because a config's `env` block can reference `${NAME}` for any variable
+name, a discovered (and possibly untrusted or tampered) config can use
+this feature to pull *any* variable out of the scanning user's shell --
+for example `"env": {"X": "${SNYK_TOKEN}"}`, or a reference to
+`AWS_SECRET_ACCESS_KEY`, `GITHUB_TOKEN`, or similar. This is a natural
+consequence of the feature rather than itself a bug: starting a stdio MCP
+server already requires explicit consent (or `--dangerously-run-mcp-servers`),
+and spawning a server is arbitrary code execution regardless of whether its
+`env` block references any placeholders. To make this visible, the
+interactive consent prompt (shown unless `--dangerously-run-mcp-servers` is
+passed) displays which environment variable names a server's `env` block
+will pull from your shell, so you can review them before the server starts.
+
 ## CLI Usage
 
 The command structure and most options are shared by both versions:

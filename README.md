@@ -125,6 +125,17 @@ v0.6 and later use the risk-based output and the `2026-07-10` analysis API.
 
 Both versions scan MCP servers, tools, prompts, resources, and skills, and automatically discover supported agent configurations such as Claude Code/Desktop, Cursor, Gemini CLI, and Windsurf.
 
+Or scan exactly one MCP server, skipping every other server and all skills:
+
+```bash
+# one configured server, by name
+uvx snyk-agent-scan@latest scan --server MY_SERVER
+# a remote server by URL, with the transport pinned so nothing is probed
+uvx snyk-agent-scan@latest scan --url https://example.com/mcp --server-type http
+```
+
+See the [CLI reference](docs/cli-reference.md#targeting-a-single-mcp-server-scan-inspect) for the full set of targeting options, including the `npm:` / `pypi:` / `oci:` prefixes for scanning a server straight from a package.
+
 ### Run with a standalone binary
 
 Download the binary for your operating system and architecture from the [latest GitHub Release](https://github.com/snyk/agent-scan/releases/latest). The release page also provides an SBOM (`sbom-<version>.json`), checksum files, and GitHub-generated source code archives. See [Verifying Standalone Binaries](#verifying-standalone-binaries) to verify your download.
@@ -267,13 +278,14 @@ Agent Scan searches through your local agent's configuration files to find agent
 
 By default, Agent Scan prompts for user consent before contacting each discovered MCP server during interactive runs. This consent flow:
 
-- Shows the server name and its command or remote URL; environment variables and headers are redacted
+- Shows the server name and its command or remote URL; literal environment variable and header values are redacted, but `${NAME}` references in them are shown, because Agent Scan replaces each one with the value of that variable from your environment before connecting. Check which variables a server will read before approving
 - Allows you to approve or decline each server individually
 - Prevents potentially untrusted servers from being contacted without your explicit permission
 - Records declined servers with a `user_declined` error (they are never contacted)
 
 **Best Practices:**
 - Review commands, arguments, and remote URLs carefully before approving
+- Be suspicious of a `${NAME}` reference to a variable the server has no reason to need (for example a cloud credential in a header of an unfamiliar server). Unattended runs (`--dangerously-run-mcp-servers`, `--ci`, background remote inspection) have no prompt; with `--verbose` they log which variables were read, by name only, never by value
 - When scanning untrusted or third-party MCP configs, run Agent Scan inside a sandbox (Docker, VM, or disposable environment)
 - Decline any servers with unfamiliar or suspicious commands
 
