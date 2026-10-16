@@ -5627,6 +5627,7 @@ class TestServersDiscoveredPayload:
             "type": "stdio",
             "env": None,
             "binary_identifier": "binary-id",
+            "binary_check": None,
         }
 
     def test_redacts_stdio_env_without_mutating_discovery_result(self):
