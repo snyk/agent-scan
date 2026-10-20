@@ -16,7 +16,7 @@ dependencies = [
     "lark>=1.1.9",
     "psutil>=5.9.0",
     "pyyaml>=6.0.2",
-    "aiohttp>=3.14.3",
+    "aiohttp>=3.14.4",
     "rapidfuzz>=3.13.0",
     "truststore>=0.10.4",
     "mcp[cli]==1.30.0",

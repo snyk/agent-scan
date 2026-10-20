@@ -911,11 +911,13 @@ def _make_get_session_seq(get_cms):
     return mock_session
 
 
-def _make_post_session(*, status=202, post_exc=None):
+def _make_post_session(*, status=202, post_exc=None, json_data=None, reason="Reason"):
     """A mock ClientSession whose ``.post(...)`` yields a response with the given status."""
     mock_session = MagicMock()
     mock_response = AsyncMock()
     mock_response.status = status
+    mock_response.reason = reason
+    mock_response.json = AsyncMock(return_value=json_data)
 
     mock_post = MagicMock()
     if post_exc is not None:
@@ -938,6 +940,8 @@ def _post_cm(*, status=None, exc=None):
     else:
         response = AsyncMock()
         response.status = status
+        response.reason = "Reason"
+        response.json = AsyncMock(return_value=None)
         cm.__aenter__ = AsyncMock(return_value=response)
     cm.__aexit__ = AsyncMock(return_value=None)
     return cm
@@ -1115,7 +1119,7 @@ class TestSubmitAsyncAnalysis:
         with patch("agent_scan.verify_api.aiohttp.ClientSession") as mock_cls:
             session = _make_post_session(status=202)
             mock_cls.return_value = session
-            await _submit_async_analysis(
+            success, error_text, exc = await _submit_async_analysis(
                 self._ASYNC_URL,
                 payload,
                 {"X-Push-Key": "pk", "X-Environment": "test"},
@@ -1124,6 +1128,9 @@ class TestSubmitAsyncAnalysis:
                 False,
             )
 
+        assert success is True
+        assert error_text is None
+        assert exc is None
         session.post.assert_called_once()
         call = session.post.call_args
         assert call[0][0] == self._ASYNC_URL
@@ -1141,12 +1148,15 @@ class TestSubmitAsyncAnalysis:
         with patch("agent_scan.verify_api.aiohttp.ClientSession") as mock_cls:
             session = _make_post_session(status=202)
             mock_cls.return_value = session
-            await _submit_async_analysis(self._ASYNC_URL, payload, {"X-Push-Key": "pk"}, None, None, False)
+            success, _, _ = await _submit_async_analysis(
+                self._ASYNC_URL, payload, {"X-Push-Key": "pk"}, None, None, False
+            )
 
+        assert success is True
         assert "X-Scan-User-Id" not in session.post.call_args[1]["headers"]
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("status", [400, 401, 403, 413])
+    @pytest.mark.parametrize("status", [400, 401, 403, 413, 429])
     async def test_4xx_does_not_retry(self, status):
         """4xx is deterministic: return after a single attempt without retrying."""
         payload = MagicMock()
@@ -1158,10 +1168,89 @@ class TestSubmitAsyncAnalysis:
         ):
             session = _make_post_session(status=status)
             mock_cls.return_value = session
-            assert await _submit_async_analysis(self._ASYNC_URL, payload, {}, None, None, False) is None
+            success, error_text, _ = await _submit_async_analysis(self._ASYNC_URL, payload, {}, "m", None, False)
 
+        assert success is False
+        assert error_text is not None
+        assert "Tried calling verification api" not in error_text
         session.post.assert_called_once()
         mock_sleep.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_401_mentions_push_key_only(self):
+        payload = MagicMock()
+        payload.model_dump_json.return_value = "{}"
+
+        with patch("agent_scan.verify_api.aiohttp.ClientSession") as mock_cls:
+            mock_cls.return_value = _make_post_session(status=401)
+            _, error_text, _ = await _submit_async_analysis(self._ASYNC_URL, payload, {}, "m", None, False)
+
+        assert error_text == "Unauthorized. Please check your push key."
+
+    @pytest.mark.asyncio
+    async def test_4xx_uses_backend_detail(self):
+        payload = MagicMock()
+        payload.model_dump_json.return_value = "{}"
+
+        with patch("agent_scan.verify_api.aiohttp.ClientSession") as mock_cls:
+            mock_cls.return_value = _make_post_session(
+                status=403, json_data={"detail": "Tenant is not entitled"}, reason="Forbidden"
+            )
+            _, error_text, _ = await _submit_async_analysis(self._ASYNC_URL, payload, {}, "m", None, False)
+
+        assert error_text == "The analysis server returned an error for your request: 403 - Tenant is not entitled"
+
+    @pytest.mark.asyncio
+    async def test_4xx_falls_back_to_reason_without_detail(self):
+        payload = MagicMock()
+        payload.model_dump_json.return_value = "{}"
+
+        with patch("agent_scan.verify_api.aiohttp.ClientSession") as mock_cls:
+            session = _make_post_session(status=400, reason="Bad Request")
+            session.post.return_value.__aenter__.return_value.json = AsyncMock(side_effect=ValueError("not json"))
+            mock_cls.return_value = session
+            _, error_text, _ = await _submit_async_analysis(self._ASYNC_URL, payload, {}, "m", None, False)
+
+        assert error_text == "The analysis server returned an error for your request: 400 - Bad Request"
+
+    @pytest.mark.asyncio
+    async def test_4xx_body_read_timeout_does_not_retry(self):
+        payload = MagicMock()
+        payload.model_dump_json.return_value = "{}"
+
+        with (
+            patch("agent_scan.verify_api.aiohttp.ClientSession") as mock_cls,
+            patch("agent_scan.verify_api.asyncio.sleep", new_callable=AsyncMock) as mock_sleep,
+        ):
+            session = _make_post_session(status=400, reason="Bad Request")
+            session.post.return_value.__aenter__.return_value.json = AsyncMock(side_effect=TimeoutError("slow"))
+            mock_cls.return_value = session
+            success, error_text, _ = await _submit_async_analysis(self._ASYNC_URL, payload, {}, "m", None, False)
+
+        assert success is False
+        assert error_text == "The analysis server returned an error for your request: 400 - Bad Request"
+        session.post.assert_called_once()
+        mock_sleep.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_5xx_exhausted_reports_retry_count_and_last_error(self):
+        payload = MagicMock()
+        payload.model_dump_json.return_value = "{}"
+
+        with (
+            patch("agent_scan.verify_api.aiohttp.ClientSession") as mock_cls,
+            patch("agent_scan.verify_api.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            mock_cls.return_value = _make_post_session(
+                status=503, json_data={"detail": "Failed to enqueue scan; retry later"}, reason="Service Unavailable"
+            )
+            success, error_text, _ = await _submit_async_analysis(self._ASYNC_URL, payload, {}, "m", None, False, 3)
+
+        assert success is False
+        assert error_text == (
+            "Tried calling verification api 3 times. Could not reach analysis server. "
+            "Last error: Could not reach analysis server: 503 - Failed to enqueue scan; retry later"
+        )
 
     @pytest.mark.asyncio
     async def test_202_first_try_does_not_retry(self):
@@ -1174,8 +1263,11 @@ class TestSubmitAsyncAnalysis:
         ):
             session = _make_post_session(status=202)
             mock_cls.return_value = session
-            assert await _submit_async_analysis(self._ASYNC_URL, payload, {}, None, None, False) is None
+            success, error_text, exc = await _submit_async_analysis(self._ASYNC_URL, payload, {}, "m", None, False)
 
+        assert success is True
+        assert error_text is None
+        assert exc is None
         session.post.assert_called_once()
         mock_sleep.assert_not_awaited()
 
@@ -1192,8 +1284,11 @@ class TestSubmitAsyncAnalysis:
         ):
             session = _make_post_session_seq([_post_cm(status=status), _post_cm(status=202)])
             mock_cls.return_value = session
-            assert await _submit_async_analysis(self._ASYNC_URL, payload, {}, None, None, False, 3) is None
+            success, error_text, exc = await _submit_async_analysis(self._ASYNC_URL, payload, {}, "m", None, False, 3)
 
+        assert success is True
+        assert error_text is None
+        assert exc is None
         assert session.post.call_count == 2
         mock_sleep.assert_awaited_once()
 
@@ -1219,14 +1314,17 @@ class TestSubmitAsyncAnalysis:
         ):
             session = _make_post_session_seq([_post_cm(exc=exc), _post_cm(status=202)])
             mock_cls.return_value = session
-            assert await _submit_async_analysis(self._ASYNC_URL, payload, {}, None, None, False, 3) is None
+            success, error_text, err = await _submit_async_analysis(self._ASYNC_URL, payload, {}, "m", None, False, 3)
 
+        assert success is True
+        assert error_text is None
+        assert err is None
         assert session.post.call_count == 2
         mock_sleep.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_transient_exception_gives_up_after_max_retries(self):
-        """Exhausting retries returns None (fire-and-forget) after max_retries attempts."""
+        """Exhausting retries returns failure after max_retries attempts."""
         payload = MagicMock()
         payload.model_dump_json.return_value = "{}"
 
@@ -1236,14 +1334,17 @@ class TestSubmitAsyncAnalysis:
         ):
             session = _make_post_session(post_exc=TimeoutError("slow"))
             mock_cls.return_value = session
-            assert await _submit_async_analysis(self._ASYNC_URL, payload, {}, None, None, False, 3) is None
+            success, error_text, exc = await _submit_async_analysis(self._ASYNC_URL, payload, {}, "m", None, False, 3)
 
+        assert success is False
+        assert "API timeout while scanning discovered servers" in error_text
+        assert isinstance(exc, TimeoutError)
         assert session.post.call_count == 3
         assert mock_sleep.await_count == 2  # backoff between the 3 attempts
 
     @pytest.mark.asyncio
     async def test_non_transient_client_error_does_not_retry(self):
-        """A bare aiohttp.ClientError outside the transient set is swallowed, not retried."""
+        """A bare aiohttp.ClientError outside the transient set fails immediately without retry."""
         payload = MagicMock()
         payload.model_dump_json.return_value = "{}"
 
@@ -1253,8 +1354,11 @@ class TestSubmitAsyncAnalysis:
         ):
             session = _make_post_session(post_exc=aiohttp.ClientError("boom"))
             mock_cls.return_value = session
-            assert await _submit_async_analysis(self._ASYNC_URL, payload, {}, None, None, False, 3) is None
+            success, error_text, exc = await _submit_async_analysis(self._ASYNC_URL, payload, {}, "m", None, False, 3)
 
+        assert success is False
+        assert "Could not reach analysis server: boom" in error_text
+        assert isinstance(exc, aiohttp.ClientError)
         session.post.assert_called_once()
         mock_sleep.assert_not_awaited()
 
@@ -1265,7 +1369,7 @@ class TestAnalyzeMachineAsyncRouting:
     _ANALYSIS_URL = "https://api.snyk.io/hidden/mcp-scan/analysis-machine?version=2026-07-10"
 
     @pytest.mark.asyncio
-    async def test_async_enabled_submits_async_and_skips_sync(self):
+    async def test_async_enabled_submits_async_and_skips_sync(self, capsys):
         inspected_paths = [
             InspectedPath(
                 client="cursor",
@@ -1298,8 +1402,14 @@ class TestAnalyzeMachineAsyncRouting:
             patch(
                 "agent_scan.verify_api._async_analysis_enabled", new_callable=AsyncMock, return_value=True
             ) as mock_enabled,
-            patch("agent_scan.verify_api._submit_async_analysis", new_callable=AsyncMock) as mock_submit,
+            patch(
+                "agent_scan.verify_api._submit_async_analysis",
+                new_callable=AsyncMock,
+                return_value=(True, None, None),
+            ) as mock_submit,
             patch("agent_scan.verify_api.aiohttp.ClientSession") as mock_session_class,
+            patch("agent_scan.verify_api.get_hostname", return_value="my-host"),
+            patch("agent_scan.verify_api.get_username", return_value="alice"),
         ):
             result = await analyze_machine(
                 inspected_paths=inspected_paths,
@@ -1307,6 +1417,10 @@ class TestAnalyzeMachineAsyncRouting:
                 identifier="id-1",
                 push_key="push-abc",
             )
+
+        captured = capsys.readouterr()
+        assert "Scan sent successfully (machine id: id-1, hostname: my-host, user: alice)" in captured.out
+        assert "Warning: This scan was submitted for asynchronous analysis" in captured.err
 
         mock_enabled.assert_awaited_once()
         mock_submit.assert_awaited_once()
@@ -1327,6 +1441,49 @@ class TestAnalyzeMachineAsyncRouting:
         assert (
             mock_submit.call_args.args[0] == "https://api.snyk.io/hidden/agent-scan/async/analysis?version=2026-07-10"
         )
+
+    @pytest.mark.asyncio
+    async def test_async_submit_failure_returns_error_and_does_not_print_success(self, capsys):
+        """When async submission fails, return error response and do not report scan sent successfully."""
+        inspected_paths = [InspectedPath(client="cursor", path="/test/path")]
+
+        with (
+            patch(
+                "agent_scan.verify_api._async_analysis_enabled", new_callable=AsyncMock, return_value=True
+            ) as mock_enabled,
+            patch(
+                "agent_scan.verify_api._submit_async_analysis",
+                new_callable=AsyncMock,
+                return_value=(
+                    False,
+                    "Unauthorized. Please check your push key.",
+                    None,
+                ),
+            ) as mock_submit,
+            patch("agent_scan.verify_api.aiohttp.ClientSession") as mock_session_class,
+            patch("agent_scan.verify_api.get_hostname", return_value="my-host"),
+            patch("agent_scan.verify_api.get_username", return_value="alice"),
+        ):
+            result = await analyze_machine(
+                inspected_paths=inspected_paths,
+                analysis_url=self._ANALYSIS_URL,
+                identifier="id-1",
+                push_key="push-abc",
+            )
+
+        captured = capsys.readouterr()
+        assert "Scan sent successfully" not in captured.out
+        assert "Warning: This scan was submitted for asynchronous analysis" not in captured.err
+        assert "Scan failed: Unauthorized. Please check your push key." in captured.err
+
+        mock_enabled.assert_awaited_once()
+        mock_submit.assert_awaited_once()
+        mock_session_class.assert_not_called()
+        assert len(result.scan_path_responses) == 1
+        error = result.scan_path_responses[0].error
+        assert error is not None
+        assert error.is_failure is True
+        assert "Unauthorized" in error.message
 
     @pytest.mark.asyncio
     async def test_async_disabled_falls_through_to_sync(self):
