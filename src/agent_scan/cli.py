@@ -975,6 +975,15 @@ def main():
         default=False,
         help="Install hooks to the managed (admin/MDM) config path instead of the user-level path",
     )
+    guard_install_parser.add_argument(
+        "--check-installed",
+        action="store_true",
+        default=False,
+        help=(
+            "With --managed, skip agents that are not installed for any user on this machine "
+            "(default: install hooks without checking). Non-managed installs always check."
+        ),
+    )
 
     guard_discover_parser = guard_subparsers.add_parser(
         "discover",

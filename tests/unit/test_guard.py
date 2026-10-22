@@ -25,6 +25,7 @@ import agent_scan.guard as guard_module
 import agent_scan.version as version_module
 from agent_scan.agents import DiscoveryScope
 from agent_scan.guard import (
+    _CLIENT_INSTALL_DIRS,
     _PERMISSION_DENIED,
     ALL_CLIENTS,
     CLAUDE_HOOK_EVENTS,
@@ -6563,6 +6564,21 @@ class TestRunDiscover:
         assert send.call_args.args[4] == "env-machine"
 
 
+def _fake_homes(tmp_path, installed_clients, *, users=("tester",)):
+    """Patch get_readable_home_directories to one home per user under tmp_path.
+
+    *installed_clients* get their config dir created in the first user's home.
+    """
+    homes = []
+    for user in users:
+        home = tmp_path / "homes" / user
+        home.mkdir(parents=True, exist_ok=True)
+        homes.append((home, user))
+    for client in installed_clients:
+        (homes[0][0] / _CLIENT_INSTALL_DIRS[client]).mkdir(exist_ok=True)
+    return patch(f"{_G}.get_readable_home_directories", return_value=homes)
+
+
 class TestRunInstallSendsServersDiscovered:
     @staticmethod
     def _args(tmp_path, *, client="claude", file_override=True, managed=False, machine_id="machine-42"):
@@ -6574,16 +6590,6 @@ class TestRunInstallSendsServersDiscovered:
             managed=managed,
             machine_id=machine_id,
         )
-
-    @staticmethod
-    def _fake_paths(tmp_path, installed):
-        paths = {}
-        for client in ALL_CLIENTS:
-            path = tmp_path / client
-            if client in installed:
-                path.mkdir(exist_ok=True)
-            paths[client] = path
-        return paths
 
     def test_single_client_sends_once_directly(self, tmp_path, monkeypatch):
         from agent_scan.agents import DiscoveryScope
@@ -6655,7 +6661,7 @@ class TestRunInstallSendsServersDiscovered:
             return True
 
         with (
-            patch(f"{_G}._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, ALL_CLIENTS)),
+            _fake_homes(tmp_path, ALL_CLIENTS),
             patch(f"{_G}._install_hooks", side_effect=install) as install_mock,
             patch(f"{_G}._send_servers_discovered_event", side_effect=send) as send_mock,
         ):
@@ -6669,12 +6675,26 @@ class TestRunInstallSendsServersDiscovered:
     def test_nothing_installed_does_not_send(self, tmp_path, monkeypatch):
         monkeypatch.setenv("PUSH_KEY", "headless-pk")
         with (
-            patch(f"{_G}._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, [])),
+            _fake_homes(tmp_path, []),
             patch(f"{_G}._install_hooks") as install,
             patch(f"{_G}._send_servers_discovered_event") as send,
         ):
             _run_install(self._args(tmp_path, file_override=False))
 
+        install.assert_not_called()
+        send.assert_not_called()
+
+    def test_no_readable_home_directories_exits_with_error(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("PUSH_KEY", "headless-pk")
+        with (
+            patch(f"{_G}.get_readable_home_directories", return_value=[]),
+            patch(f"{_G}._install_hooks") as install,
+            patch(f"{_G}._send_servers_discovered_event") as send,
+        ):
+            with pytest.raises(SystemExit) as exc_info:
+                _run_install(self._args(tmp_path, file_override=False))
+
+        assert exc_info.value.code == 1
         install.assert_not_called()
         send.assert_not_called()
 
@@ -6757,7 +6777,7 @@ class TestRunInstallSendsServersDiscovered:
     def test_managed_install_sends(self, tmp_path, monkeypatch):
         monkeypatch.setenv("PUSH_KEY", "headless-pk")
         with (
-            patch(f"{_G}._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, ["claude"])),
+            _fake_homes(tmp_path, ["claude"]),
             patch(f"{_G}._install_hooks", return_value=Path("/managed/hook.sh")),
             patch(f"{_G}._send_servers_discovered_event", return_value=True) as send,
         ):
@@ -7282,12 +7302,7 @@ class TestRunInstallAll:
 
     @pytest.fixture(autouse=True)
     def _all_clients_installed(self, tmp_path):
-        fake_paths = {}
-        for client in ALL_CLIENTS:
-            d = tmp_path / f".{client}"
-            d.mkdir()
-            fake_paths[client] = d
-        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", fake_paths):
+        with _fake_homes(tmp_path, ALL_CLIENTS):
             yield
 
     @pytest.fixture(autouse=True)
@@ -7454,27 +7469,34 @@ class TestRunUninstallAll:
 
 class TestIsClientInstalled:
     def test_installed_when_config_dir_exists(self, tmp_path):
-        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", {"claude": tmp_path / ".claude"}):
-            (tmp_path / ".claude").mkdir()
-            assert _is_client_installed("claude") is True
+        (tmp_path / ".claude").mkdir()
+        assert _is_client_installed("claude", [tmp_path]) is True
 
     def test_not_installed_when_config_dir_missing(self, tmp_path):
-        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", {"claude": tmp_path / ".claude"}):
-            assert _is_client_installed("claude") is False
+        assert _is_client_installed("claude", [tmp_path]) is False
 
     def test_not_installed_when_path_is_file_not_dir(self, tmp_path):
-        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", {"claude": tmp_path / ".claude"}):
-            (tmp_path / ".claude").write_text("")
-            assert _is_client_installed("claude") is False
+        (tmp_path / ".claude").write_text("")
+        assert _is_client_installed("claude", [tmp_path]) is False
+
+    def test_not_installed_without_home_dirs(self):
+        assert _is_client_installed("claude", []) is False
+
+    def test_installed_when_present_in_any_home(self, tmp_path):
+        empty, other = tmp_path / "a", tmp_path / "b"
+        empty.mkdir()
+        (other / ".cursor").mkdir(parents=True)
+        assert _is_client_installed("cursor", [empty, other]) is True
 
     def test_unknown_client_returns_true(self):
-        assert _is_client_installed("unknown-client") is True
+        assert _is_client_installed("unknown-client", []) is True
 
-    def test_permission_error_returns_false(self, tmp_path):
-        path = MagicMock()
-        path.is_dir.side_effect = PermissionError("denied")
-        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", {"claude": path}):
-            assert _is_client_installed("claude") is False
+    def test_permission_error_in_one_home_does_not_hide_another(self, tmp_path):
+        denied = MagicMock()
+        denied.__truediv__.return_value.is_dir.side_effect = PermissionError("denied")
+        (tmp_path / ".claude").mkdir()
+        assert _is_client_installed("claude", [denied]) is False
+        assert _is_client_installed("claude", [denied, tmp_path]) is True
 
 
 # ===================================================================
@@ -7495,17 +7517,6 @@ class TestRunInstallSkipsUninstalledClients:
         ):
             yield
 
-    @staticmethod
-    def _fake_paths(tmp_path, installed_clients):
-        """Build a _CLIENT_INSTALL_PATHS dict where only *installed_clients* have real dirs."""
-        paths = {}
-        for client in ALL_CLIENTS:
-            d = tmp_path / f".{client}"
-            if client in installed_clients:
-                d.mkdir(exist_ok=True)
-            paths[client] = d
-        return paths
-
     @patch("agent_scan.guard._install_hooks")
     @patch("agent_scan.guard.mint_push_key", return_value="minted-pk")
     @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
@@ -7514,7 +7525,7 @@ class TestRunInstallSkipsUninstalledClients:
     ):
         monkeypatch.delenv("PUSH_KEY", raising=False)
         monkeypatch.setenv("SNYK_TOKEN", "tok")
-        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, [])):
+        with _fake_homes(tmp_path, []):
             _run_install(
                 SimpleNamespace(
                     client="claude",
@@ -7529,30 +7540,85 @@ class TestRunInstallSkipsUninstalledClients:
         out = capsys.readouterr().out
         assert "not installed" in out.lower()
 
+    @staticmethod
+    def _managed_args(client, check_installed=True):
+        return SimpleNamespace(
+            client=client,
+            url="https://api.snyk.io",
+            tenant_id="tid-1",
+            file=None,
+            managed=True,
+            check_installed=check_installed,
+        )
+
+    @patch("agent_scan.guard._install_hooks")
+    @patch("agent_scan.guard.mint_push_key", return_value="minted-pk")
+    @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
+    def test_managed_install_proceeds_when_installed_for_any_user(
+        self, mock_fetch, mock_mint, mock_install, tmp_path, monkeypatch, capsys
+    ):
+        """Managed installs check every user's home; one user having the agent is enough."""
+        monkeypatch.delenv("PUSH_KEY", raising=False)
+        monkeypatch.setenv("SNYK_TOKEN", "tok")
+        homes = []
+        for user in ("alice", "bob"):
+            home = tmp_path / user
+            home.mkdir()
+            homes.append((home, user))
+        (homes[1][0] / ".claude").mkdir()
+        with (
+            patch("agent_scan.guard.get_readable_home_directories", return_value=homes) as get_homes,
+            patch("agent_scan.guard._preflight_writable"),
+        ):
+            _run_install(self._managed_args("all"))
+        get_homes.assert_called_once_with(all_users=True)
+        assert [c.args[0] for c in mock_install.call_args_list] == ["claude"]
+        assert "not installed" in capsys.readouterr().out.lower()
+
     @pytest.mark.parametrize("client", ["claude", "codex", "all"])
     @patch("agent_scan.guard._install_hooks")
     @patch("agent_scan.guard.mint_push_key", return_value="minted-pk")
     @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
-    def test_managed_install_ignores_the_invoking_users_home(
+    def test_managed_install_skipped_when_installed_for_no_user(
         self, mock_fetch, mock_mint, mock_install, tmp_path, monkeypatch, capsys, client
     ):
-        """A managed destination is system-wide, so the invoking account's home is irrelevant."""
         monkeypatch.delenv("PUSH_KEY", raising=False)
         monkeypatch.setenv("SNYK_TOKEN", "tok")
-        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, [])):
-            _run_install(
-                SimpleNamespace(
-                    client=client,
-                    url="https://api.snyk.io",
-                    tenant_id="tid-1",
-                    file=None,
-                    managed=True,
-                )
-            )
+        with _fake_homes(tmp_path, [], users=("alice", "bob")):
+            _run_install(self._managed_args(client))
+        mock_mint.assert_not_called()
+        mock_install.assert_not_called()
+        assert "not installed" in capsys.readouterr().out.lower()
+
+    @pytest.mark.parametrize("client", ["claude", "codex", "all"])
+    @patch("agent_scan.guard._install_hooks")
+    @patch("agent_scan.guard.mint_push_key", return_value="minted-pk")
+    @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
+    def test_managed_install_does_not_check_installed_by_default(
+        self, mock_fetch, mock_mint, mock_install, tmp_path, monkeypatch, capsys, client
+    ):
+        monkeypatch.delenv("PUSH_KEY", raising=False)
+        monkeypatch.setenv("SNYK_TOKEN", "tok")
+        with _fake_homes(tmp_path, []) as get_homes, patch("agent_scan.guard._preflight_writable"):
+            _run_install(self._managed_args(client, check_installed=False))
+        get_homes.assert_not_called()
         assert mock_install.called, "managed install was skipped"
-        out = capsys.readouterr().out
-        assert "not installed" not in out.lower()
-        assert "nothing to install" not in out.lower()
+        assert "not installed" not in capsys.readouterr().out.lower()
+
+    @patch("agent_scan.guard._install_hooks")
+    @patch("agent_scan.guard.mint_push_key", return_value="minted-pk")
+    @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
+    def test_non_managed_install_checks_only_the_invoking_user(
+        self, mock_fetch, mock_mint, mock_install, tmp_path, monkeypatch
+    ):
+        monkeypatch.delenv("PUSH_KEY", raising=False)
+        monkeypatch.setenv("SNYK_TOKEN", "tok")
+        with _fake_homes(tmp_path, ["claude"]) as get_homes:
+            _run_install(
+                SimpleNamespace(client="claude", url="https://api.snyk.io", tenant_id="tid-1", file=None, managed=False)
+            )
+        get_homes.assert_called_once_with(all_users=False)
+        mock_install.assert_called_once()
 
     @patch("agent_scan.guard._install_hooks")
     @patch("agent_scan.guard.mint_push_key", return_value="minted-pk")
@@ -7562,7 +7628,7 @@ class TestRunInstallSkipsUninstalledClients:
     ):
         monkeypatch.delenv("PUSH_KEY", raising=False)
         monkeypatch.setenv("SNYK_TOKEN", "tok")
-        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, [])):
+        with _fake_homes(tmp_path, []):
             _run_install(
                 SimpleNamespace(
                     client="all",
@@ -7585,7 +7651,7 @@ class TestRunInstallSkipsUninstalledClients:
     ):
         monkeypatch.delenv("PUSH_KEY", raising=False)
         monkeypatch.setenv("SNYK_TOKEN", "tok")
-        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, ["claude"])):
+        with _fake_homes(tmp_path, ["claude"]):
             _run_install(
                 SimpleNamespace(
                     client="all",
@@ -7606,7 +7672,7 @@ class TestRunInstallSkipsUninstalledClients:
     def test_headless_skips_uninstalled_client(self, mock_install, tmp_path, monkeypatch, capsys):
         monkeypatch.setenv("PUSH_KEY", "headless-pk")
         monkeypatch.setenv("TENANT_ID", "tid-hl")
-        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, [])):
+        with _fake_homes(tmp_path, []):
             _run_install(
                 SimpleNamespace(
                     client="cursor",
@@ -7626,7 +7692,7 @@ class TestRunInstallSkipsUninstalledClients:
     def test_all_clients_all_installed_installs_all(self, mock_fetch, mock_mint, mock_install, tmp_path, monkeypatch):
         monkeypatch.delenv("PUSH_KEY", raising=False)
         monkeypatch.setenv("SNYK_TOKEN", "tok")
-        with patch("agent_scan.guard._CLIENT_INSTALL_PATHS", self._fake_paths(tmp_path, ALL_CLIENTS)):
+        with _fake_homes(tmp_path, ALL_CLIENTS):
             _run_install(
                 SimpleNamespace(
                     client="all",
