@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import contextlib
 import copy
 import hashlib
@@ -601,27 +602,23 @@ def _install_hooks(
             _forwarder_script_path(config_path), push_key=push_key, url=url, machine_id=machine_id, tenant_id=tenant_id
         )
         discover_script = (
-            _copy_hook_script(discover_script_path, push_key=push_key, url=url, machine_id=machine_id)
+            _copy_hook_script(
+                discover_script_path,
+                push_key=push_key,
+                url=url,
+                machine_id=machine_id,
+                agent_scan_command=agent_scan_command or "",
+            )
             if install_discovery
             else None
         )
 
         dest_path = main_script.path
         script_updated = main_script.updated or bool(discover_script and discover_script.updated)
-        command = _build_hook_command(
-            dest_path,
-            hook_client,
-            tenant_id=tenant_id,
+        command = _build_hook_command(dest_path, hook_client)
+        discover_command = (
+            _build_discover_hook_command(discover_script_path, hook_client=hook_client) if install_discovery else None
         )
-        discover_command = None
-        if install_discovery:
-            assert agent_scan_command is not None
-            discover_command = _build_discover_hook_command(
-                discover_script_path,
-                agent_scan_command=agent_scan_command,
-                tenant_id=tenant_id,
-                hook_client=hook_client,
-            )
         prepared_config, prepared_content, hooks_diff, preserved = _prepare_client_config(
             client,
             command,
@@ -1651,7 +1648,8 @@ def _parse_command_info(cmd: str, events: list[str], *, script_path: Path | None
 
 def _read_hook_script_variables(path: Path) -> dict[str, str]:
     try:
-        content = path.read_text()
+        # utf-8-sig: a PowerShell script holding a non-ASCII value is written with a BOM.
+        content = path.read_text(encoding="utf-8-sig")
     except (OSError, UnicodeError):
         return {}
     begin = content.find(_SECTION_BEGIN.decode())
@@ -1793,19 +1791,12 @@ class _HookInvocation(NamedTuple):
 
     script_path: Path
     hook_client: str
-    tenant_id: str = ""
-    agent_scan_command: str = ""
     scope: str = ""
     quote_client: bool = False
 
 
 def _render_posix_command(invocation: _HookInvocation) -> str:
-    parts = []
-    if invocation.tenant_id:
-        parts.append(f"TENANT_ID={_shell_quote(invocation.tenant_id)}")
-    if invocation.agent_scan_command:
-        parts.append(f"AGENT_SCAN_COMMAND={_shell_quote(invocation.agent_scan_command)}")
-    parts.append(f"bash {_shell_quote(invocation.script_path.as_posix())}")
+    parts = [f"bash {_shell_quote(invocation.script_path.as_posix())}"]
     client = _shell_quote(invocation.hook_client) if invocation.quote_client else invocation.hook_client
     parts.append(f"--client {client}")
     if invocation.scope:
@@ -1821,12 +1812,6 @@ def _render_powershell_command(invocation: _HookInvocation) -> str:
         "-Client",
         invocation.hook_client,
     ]
-    if invocation.tenant_id:
-        parts.extend(["-TenantId", _ps_quote(invocation.tenant_id)])
-    if invocation.machine_id:
-        parts.extend(["-MachineId", _ps_quote(invocation.machine_id)])
-    if invocation.agent_scan_command:
-        parts.extend(["-AgentScanCommand", _ps_quote(invocation.agent_scan_command)])
     if invocation.scope:
         parts.extend(["-Scope", invocation.scope])
     return " ".join(parts)
@@ -1841,34 +1826,19 @@ def _render_argv(invocation: _HookInvocation) -> tuple[list[str], dict[str, str]
             "-Client",
             invocation.hook_client,
         ]
-        if invocation.agent_scan_command:
-            argv.extend(["-AgentScanCommand", invocation.agent_scan_command])
         if invocation.scope:
             argv.extend(["-Scope", invocation.scope])
         return argv, None
 
     env = dict(os.environ)
-    if invocation.tenant_id:
-        env["TENANT_ID"] = invocation.tenant_id
-    if invocation.agent_scan_command:
-        env["AGENT_SCAN_COMMAND"] = invocation.agent_scan_command
     argv = ["bash", str(invocation.script_path), "--client", invocation.hook_client]
     if invocation.scope:
         argv.extend(["--scope", invocation.scope])
     return argv, env
 
 
-def _build_hook_command(
-    script_path: Path,
-    hook_client: str,
-    *,
-    tenant_id: str = "",
-) -> str:
-    invocation = _HookInvocation(
-        script_path=script_path,
-        hook_client=hook_client,
-        tenant_id=tenant_id,
-    )
+def _build_hook_command(script_path: Path, hook_client: str) -> str:
+    invocation = _HookInvocation(script_path=script_path, hook_client=hook_client)
     if IS_WINDOWS:
         return _render_powershell_command(invocation)
     return _render_posix_command(invocation)
@@ -1891,38 +1861,16 @@ def _agent_scan_command() -> str | None:
     return None
 
 
-def _build_discover_hook_command(
-    script_path: Path,
-    hook_client: str,
-    *,
-    agent_scan_command: str,
-    tenant_id: str = "",
-) -> str:
+def _build_discover_hook_command(script_path: Path, hook_client: str) -> str:
     invocation = _HookInvocation(
         script_path=script_path,
         hook_client=hook_client,
-        agent_scan_command=agent_scan_command,
         scope="servers",
         quote_client=True,
     )
     if IS_WINDOWS:
         return _render_powershell_command(invocation)
     return _render_posix_command(invocation)
-
-
-def _build_hook_command_powershell(
-    script_path: Path,
-    hook_client: str,
-    *,
-    tenant_id: str = "",
-) -> str:
-    return _render_powershell_command(
-        _HookInvocation(
-            script_path=script_path,
-            hook_client=hook_client,
-            tenant_id=tenant_id,
-        )
-    )
 
 
 def _shell_quote(s: str) -> str:
@@ -2003,18 +1951,48 @@ _SHELL_SAFE_VALUE_RE = re.compile(rb"\A[^\x00-\x20\"'\\$`;&|<>()[\]{}]{1,2048}\Z
 # double-quoted literal, and the scripts only ever use the value quoted.
 _MACHINE_ID_VALUE_RE = re.compile(rb"\A[^\x00-\x1f\"'\\$`;&|<>()[\]{}]{1,2048}\Z")
 
+# Guards the AGENT_SCAN_COMMAND value. It is a path that may hold spaces, backslashes and
+# quotes (C:\Program Files\..., /opt/Snyk's bin/...) or a multi-word shell command, so
+# unlike the values above it lands in a single-quoted literal and is escaped for it by
+# _quote_single_quoted_value rather than restricted. That leaves only control characters
+# to deny: a newline would end the assignment line.
+_COMMAND_VALUE_RE = re.compile(rb"\A[^\x00-\x1f\x7f]{1,4096}\Z")
+
+# The placeholders the scripts declare inside a single-quoted literal.
+_SINGLE_QUOTED_PLACEHOLDERS = frozenset({b"__AGENT_GUARD_AGENT_SCAN_COMMAND__"})
+
+# Every character PowerShell accepts as a single quote: ASCII ' and the typographic
+# U+2018-U+201B. Any of them closes a single-quoted literal, and a doubled one stands
+# for itself.
+_PS_SINGLE_QUOTES = ("'", "\u2018", "\u2019", "\u201a", "\u201b")
+
+
+def _quote_single_quoted_value(value: bytes, *, powershell: bool) -> bytes:
+    """Escape *value* for the single-quoted literal of a sh or PowerShell script."""
+    if not powershell:
+        return value.replace(b"'", b"'\\''")
+    for quote in _PS_SINGLE_QUOTES:
+        encoded = quote.encode()
+        value = value.replace(encoded, encoded * 2)
+    return value
+
 
 def _hook_script_variables(
-    *, push_key: str = "", url: str = "", machine_id: str = "", tenant_id: str = ""
+    *,
+    push_key: str = "",
+    url: str = "",
+    machine_id: str = "",
+    tenant_id: str = "",
+    agent_scan_command: str = "",
 ) -> dict[bytes, bytes]:
     """Values substituted into the hook scripts' install-time variables section.
 
     Keyed by the ``__PLACEHOLDER__`` the scripts declare between their
     ``--- BEGIN/END install-time variables ---`` markers. To add a variable, add it here
-    and to the section in both snyk-agent-guard.sh and snyk-agent-guard.ps1, and in the
-    discovery trampolines if ``guard discover`` needs it. The trampolines carry only the
-    push key, remote URL and machine ID: the CLI they exec reports its own version, and
-    discovery does not need the tenant.
+    and to the section of each script that needs it. The forwarders carry the version,
+    push key, remote URL, machine ID and tenant; the discovery trampolines carry the push
+    key, remote URL, machine ID and the Agent Scan command they exec, since that CLI
+    reports its own version and discovery does not need the tenant.
 
     Only the values are checked, because only they come from outside this repo: the
     version is read from the installed distribution's metadata, and lands inside a
@@ -2029,17 +2007,20 @@ def _hook_script_variables(
         b"__AGENT_GUARD_REMOTE_HOOKS_BASE_URL__": (url or DEFAULT_REMOTE_URL).encode(),
         b"__AGENT_GUARD_MACHINE_ID__": machine_id.encode(),
         b"__AGENT_GUARD_TENANT_ID__": tenant_id.encode(),
+        b"__AGENT_GUARD_AGENT_SCAN_COMMAND__": agent_scan_command.encode(),
     }
     for placeholder, value in variables.items():
         if not value and placeholder in {
             b"__AGENT_GUARD_PUSH_KEY__",
             b"__AGENT_GUARD_MACHINE_ID__",
             b"__AGENT_GUARD_TENANT_ID__",
+            b"__AGENT_GUARD_AGENT_SCAN_COMMAND__",
         }:
             continue
         pattern = {
             b"__AGENT_SCAN_VERSION__": _VERSION_VALUE_RE,
             b"__AGENT_GUARD_MACHINE_ID__": _MACHINE_ID_VALUE_RE,
+            b"__AGENT_GUARD_AGENT_SCAN_COMMAND__": _COMMAND_VALUE_RE,
         }.get(placeholder, _SHELL_SAFE_VALUE_RE)
         if not pattern.fullmatch(value):
             # The value may be a credential, so name only the placeholder.
@@ -2048,7 +2029,14 @@ def _hook_script_variables(
 
 
 def _substitute_hook_script_variables(
-    content: bytes, *, push_key: str = "", url: str = "", machine_id: str = "", tenant_id: str = ""
+    content: bytes,
+    *,
+    powershell: bool = False,
+    push_key: str = "",
+    url: str = "",
+    machine_id: str = "",
+    tenant_id: str = "",
+    agent_scan_command: str = "",
 ) -> bytes:
     """Fill in the install-time variables section of a bundled hook script.
 
@@ -2058,10 +2046,18 @@ def _substitute_hook_script_variables(
     file would rewrite those. A script carrying no complete section -- the trampolines --
     is returned unchanged.
 
-    The values are checked by ``_hook_script_variables`` before they get here; the markers
-    below are committed alongside the scripts that declare them, and tests pin their shape.
+    The values are checked by ``_hook_script_variables`` before they get here; those the
+    scripts declare single-quoted are escaped for the literal of the script's language
+    (*powershell* or sh). The markers below are committed alongside the scripts that
+    declare them, and tests pin their shape.
     """
-    variables = _hook_script_variables(push_key=push_key, url=url, machine_id=machine_id, tenant_id=tenant_id)
+    variables = _hook_script_variables(
+        push_key=push_key,
+        url=url,
+        machine_id=machine_id,
+        tenant_id=tenant_id,
+        agent_scan_command=agent_scan_command,
+    )
 
     begin = content.find(_SECTION_BEGIN)
     if begin < 0:
@@ -2074,12 +2070,20 @@ def _substitute_hook_script_variables(
 
     section = content[start:end]
     for placeholder, value in variables.items():
+        if placeholder in _SINGLE_QUOTED_PLACEHOLDERS:
+            value = _quote_single_quoted_value(value, powershell=powershell)
         section = section.replace(placeholder, value)
     return content[:start] + section + content[end:]
 
 
 def _copy_hook_script(
-    dest: Path, *, push_key: str = "", url: str = "", machine_id: str = "", tenant_id: str = ""
+    dest: Path,
+    *,
+    push_key: str = "",
+    url: str = "",
+    machine_id: str = "",
+    tenant_id: str = "",
+    agent_scan_command: str = "",
 ) -> _CopiedScript:
     """Copy the bundled hook script named ``dest.name`` to *dest*.
 
@@ -2089,9 +2093,21 @@ def _copy_hook_script(
     dest.parent.mkdir(parents=True, exist_ok=True)
 
     source = importlib_resources.files("agent_scan.hooks").joinpath(dest.name)
+    powershell = dest.suffix == ".ps1"
     new_content = _substitute_hook_script_variables(
-        source.read_bytes(), push_key=push_key, url=url, machine_id=machine_id, tenant_id=tenant_id
+        source.read_bytes(),
+        powershell=powershell,
+        push_key=push_key,
+        url=url,
+        machine_id=machine_id,
+        tenant_id=tenant_id,
+        agent_scan_command=agent_scan_command,
     )
+    if powershell and not new_content.isascii() and not new_content.startswith(codecs.BOM_UTF8):
+        # Windows PowerShell reads a script without a BOM in the ANSI code page, which would
+        # mangle a non-ASCII value (an Agent Scan path under C:\Users\Zoë, say) that the
+        # hook command used to pass intact.
+        new_content = codecs.BOM_UTF8 + new_content
     new_checksum = hashlib.sha256(new_content).hexdigest()
 
     current_content = dest.read_bytes() if dest.exists() else None

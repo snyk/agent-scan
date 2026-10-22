@@ -34,13 +34,19 @@ class _FakeHookServer(BaseHTTPRequestHandler):
         pass
 
 
-def _assert_config_free_of_install_values(config_file, url, machine_id=None):
+def _assert_config_free_of_install_values(config_file, url, machine_id=None, agent_scan_command=None):
     """Install-time values belong in the installed hook scripts, never in the agent config file."""
     config_text = config_file.read_text()
     assert "test-pk-e2e" not in config_text, f"push key leaked into {config_file}"
     assert url not in config_text, f"hooks base url leaked into {config_file}"
+    assert "e2e-tenant-id" not in config_text, f"tenant id leaked into {config_file}"
     if machine_id is not None:
         assert machine_id not in config_text, f"machine id leaked into {config_file}"
+    if agent_scan_command is not None:
+        # json.dumps: the config escapes the backslashes of a Windows path.
+        assert json.dumps(str(agent_scan_command))[1:-1] not in config_text, (
+            f"agent scan command leaked into {config_file}"
+        )
 
 
 @pytest.fixture()
@@ -155,12 +161,17 @@ class TestGuardInstallE2E:
             capture_output=True,
             text=True,
             timeout=60,
-            env={**os.environ, "PUSH_KEY": "test-pk-e2e", "AGENT_SCAN_COMMAND": str(agent_scan_command)},
+            env={
+                **os.environ,
+                "PUSH_KEY": "test-pk-e2e",
+                "TENANT_ID": "e2e-tenant-id",
+                "AGENT_SCAN_COMMAND": str(agent_scan_command),
+            },
         )
         assert result.returncode == 0, f"guard install failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
 
         data = json.loads(config_file.read_text())
-        _assert_config_free_of_install_values(config_file, fake_hook_server, "e2e-machine-id")
+        _assert_config_free_of_install_values(config_file, fake_hook_server, "e2e-machine-id", agent_scan_command)
         assert "hooks" in data
         assert "preToolUse" in data["hooks"]
         assert "stop" in data["hooks"]
@@ -216,12 +227,17 @@ class TestGuardInstallE2E:
             capture_output=True,
             text=True,
             timeout=60,
-            env={**os.environ, "PUSH_KEY": "test-pk-e2e", "AGENT_SCAN_COMMAND": str(agent_scan_command)},
+            env={
+                **os.environ,
+                "PUSH_KEY": "test-pk-e2e",
+                "TENANT_ID": "e2e-tenant-id",
+                "AGENT_SCAN_COMMAND": str(agent_scan_command),
+            },
         )
         assert result.returncode == 0, f"guard install failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
 
         data = json.loads(config_file.read_text())
-        _assert_config_free_of_install_values(config_file, fake_hook_server, "e2e-machine-id")
+        _assert_config_free_of_install_values(config_file, fake_hook_server, "e2e-machine-id", agent_scan_command)
         assert "PreToolUse" in data["hooks"]
         assert "Stop" in data["hooks"]
         assert "SubagentStart" in data["hooks"]
