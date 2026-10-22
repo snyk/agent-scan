@@ -129,6 +129,9 @@ Both versions scan MCP servers, tools, prompts, resources, and skills, and autom
 
 Download the binary for your operating system and architecture from the [latest GitHub Release](https://github.com/snyk/agent-scan/releases/latest). The release page also provides an SBOM (`sbom-<version>.json`), checksum files, and GitHub-generated source code archives. See [Verifying Standalone Binaries](#verifying-standalone-binaries) to verify your download.
 
+Linux binaries (x86_64 and arm64) require glibc 2.35 or newer (Ubuntu 22.04 or newer).
+Older distributions such as Ubuntu 20.04 fail with a `GLIBC_2.35` not found error; use `uvx snyk-agent-scan@latest` instead.
+
 ## Highlights
 
 - Auto-discover MCP configurations, agent tools, skills
