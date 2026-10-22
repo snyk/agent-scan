@@ -133,6 +133,16 @@ def _coerce_none_to_empty_list(v: Any) -> Any:
     return [] if v is None else v
 
 
+class BinaryCheck(BaseModel):
+    """Diagnostic signature-check metadata; never used to launch or identify a server."""
+
+    result: Literal[
+        "signed", "not_macos", "not_found", "code_launcher", "unsigned", "not_apple_root", "no_identifier", "error"
+    ]
+    resolved_command: str | None = None
+    resolved_path: str | None = None
+
+
 class StdioServer(BaseModel):
     model_config = ConfigDict()
     command: str
@@ -140,6 +150,8 @@ class StdioServer(BaseModel):
     type: Literal["stdio"] | None = "stdio"
     env: dict[str, str] | None = None
     binary_identifier: str | None = None
+    # Reporting only: launch resolution must not consult these diagnostics.
+    binary_check: BinaryCheck | None = None
     # Discoverer-resolved launch context. Private so that config input can never
     # set it: the launched executable must be the one whose signature was checked
     # and whose command the user saw.
