@@ -27,13 +27,22 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-if ($PushKey)   { $env:PUSH_KEY = $PushKey }
-if ($RemoteUrl) { $env:REMOTE_HOOKS_BASE_URL = $RemoteUrl }
-if (-not $MachineId) { $MachineId = $env:MACHINE_ID }
+# --- BEGIN install-time variables ---
+$INSTALL_PUSH_KEY = "__AGENT_GUARD_PUSH_KEY__"
+$INSTALL_REMOTE_HOOKS_BASE_URL = "__AGENT_GUARD_REMOTE_HOOKS_BASE_URL__"
+$INSTALL_MACHINE_ID = "__AGENT_GUARD_MACHINE_ID__"
+$INSTALL_AGENT_SCAN_COMMAND = '__AGENT_GUARD_AGENT_SCAN_COMMAND__'
+# --- END install-time variables ---
+
+# Parameters take precedence over installed values, which take precedence over env vars;
+# env vars are only a fallback for a script never filled in.
+if ($PushKey) { $env:PUSH_KEY = $PushKey } elseif ($INSTALL_PUSH_KEY -ne "__AGENT_GUARD_PUSH_KEY__") { $env:PUSH_KEY = $INSTALL_PUSH_KEY }
+if ($RemoteUrl) { $env:REMOTE_HOOKS_BASE_URL = $RemoteUrl } elseif ($INSTALL_REMOTE_HOOKS_BASE_URL -ne "__AGENT_GUARD_REMOTE_HOOKS_BASE_URL__") { $env:REMOTE_HOOKS_BASE_URL = $INSTALL_REMOTE_HOOKS_BASE_URL }
+if (-not $MachineId) { $MachineId = if ($INSTALL_MACHINE_ID -ne "__AGENT_GUARD_MACHINE_ID__") { $INSTALL_MACHINE_ID } else { $env:MACHINE_ID } }
 if (-not $MachineId) { exit 0 }
 $env:MACHINE_ID = $MachineId
 
-$cmd = if ($AgentScanCommand) { $AgentScanCommand } elseif ($env:AGENT_SCAN_COMMAND) { $env:AGENT_SCAN_COMMAND } else { $null }
+$cmd = if ($AgentScanCommand) { $AgentScanCommand } elseif ($INSTALL_AGENT_SCAN_COMMAND -ne "__AGENT_GUARD_AGENT_SCAN_COMMAND__") { $INSTALL_AGENT_SCAN_COMMAND } elseif ($env:AGENT_SCAN_COMMAND) { $env:AGENT_SCAN_COMMAND } else { $null }
 if (-not $cmd) { exit 0 }
 
 $arguments = @("guard", "discover", "--client", $Client, "--scope", $Scope)
