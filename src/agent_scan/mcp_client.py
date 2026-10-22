@@ -22,7 +22,6 @@ from agent_scan.models import (
     ClaudeCodeConfigFile,
     ClaudeConfigFile,
     ConfigWithoutMCP,
-    FileTokenStorage,
     MCPConfig,
     OpenCodeConfigFile,
     PluginMCPConfigFile,
@@ -34,8 +33,15 @@ from agent_scan.models import (
     VSCodeConfigFile,
     VSCodeMCPConfig,
 )
+from agent_scan.oauth_store import (
+    OAuthTokenStore,
+    PersistentTokenStorage,
+    StoredServerAuth,
+    _reject_redirected_token_exchange,
+    ensure_fresh_token,
+)
 from agent_scan.traffic_capture import PipeStderrCapture, TrafficCapture, capturing_client
-from agent_scan.utils import resolve_command_and_args
+from agent_scan.utils import expand_env_vars, resolve_command_and_args
 
 # Set up logger for this module
 logger = logging.getLogger(__name__)
@@ -82,44 +88,75 @@ def _create_mcp_http_client_without_redirects(
     timeout: httpx.Timeout | float | None = None,
     auth: httpx.Auth | None = None,
 ) -> httpx.AsyncClient:
-    """Create a remote MCP client that never forwards requests across redirects."""
+    """Create a remote MCP client that never forwards requests across redirects.
+
+    The response hook additionally turns a redirected OAuth token exchange (which the MCP SDK issues
+    internally through this client on a 401) into an explicit error instead of a bare 3xx.
+    """
     return httpx.AsyncClient(
         auth=auth,
         follow_redirects=False,
-        event_hooks={"request": [_guard_mcp_destination]},
+        event_hooks={"request": [_guard_mcp_destination], "response": [_reject_redirected_token_exchange]},
         headers=headers,
         timeout=timeout,
     )
 
 
+async def _handle_redirect_unsupported(auth_url: str) -> None:
+    raise NotImplementedError(f"Interactive OAuth is not supported on the scan path: {auth_url}")
+
+
+async def _handle_callback_unsupported(auth_code: str, state: str | None) -> tuple[str, str | None]:
+    raise NotImplementedError("Interactive OAuth callback is not supported on the scan path")
+
+
+async def _resolve_scan_oauth_provider(url: str, token: TokenAndClientInfo | None) -> OAuthClientProvider | None:
+    """Build a store-backed, non-interactive OAuth provider for the scan path.
+
+    Looks up (or seeds) the persistent store by normalized URL, proactively
+    refreshes an expired token, and returns a provider whose interactive
+    handlers deliberately raise — so a server that would still need browser auth
+    fails cleanly to ``auth_failed`` rather than blocking the unattended scan.
+    Returns ``None`` when there is no credential for this server (unauthenticated
+    connect, exactly as before). Used by both the HTTP and SSE transports.
+    """
+    store = OAuthTokenStore()
+    entry = store.get(url)
+    if entry is None and token is not None:
+        entry = StoredServerAuth.from_token_and_client_info(token)
+        store.put(url, entry)
+    if entry is None:
+        return None
+    # The proactive refresh POST runs before any guarded client exists and goes to a token
+    # endpoint taken from server-controlled discovery metadata, so give it the same destination guard.
+    await ensure_fresh_token(store, url, request_hooks=[_guard_mcp_destination])
+    return OAuthClientProvider(
+        server_url=url,
+        client_metadata=OAuthClientMetadata(
+            client_name="mcp-scan",
+            grant_types=["authorization_code", "refresh_token"],
+            response_types=["code"],
+            redirect_uris=["http://127.0.0.1:33418/callback"],
+        ),
+        storage=PersistentTokenStorage(store, url),
+        redirect_handler=_handle_redirect_unsupported,
+        callback_handler=_handle_callback_unsupported,
+    )
+
+
+def _remote_server_label(server_config: RemoteServer, server_name: str | None) -> str:
+    """Name a remote server in logs: its config name, else just the host -- never the full URL, which can carry secrets."""
+    return server_name or urlparse(server_config.url).hostname or "<unknown>"
+
+
 @asynccontextmanager
 async def streamablehttp_client_without_session(
     url: str,
-    headers: dict[str, str],
+    headers: dict[str, str] | None,
     timeout: int,
     token: TokenAndClientInfo | None = None,
 ):
-    async def handle_redirect(auth_url: str) -> None:
-        raise NotImplementedError(f"handle_redirect is not implemented {auth_url}")
-
-    async def handle_callback(auth_code: str, state: str | None) -> tuple[str, str | None]:
-        raise NotImplementedError(f"handle_callback is not implemented {auth_code} {state}")
-
-    if token:
-        oauth_client_provider = OAuthClientProvider(
-            server_url=token.mcp_server_url,
-            client_metadata=OAuthClientMetadata(
-                client_name="mcp-scan",
-                grant_types=["authorization_code", "refresh_token"],
-                response_types=["code"],
-                redirect_uris=["http://localhost:3030/callback"],
-            ),
-            storage=FileTokenStorage(data=token),
-            redirect_handler=handle_redirect,
-            callback_handler=handle_callback,
-        )
-    else:
-        oauth_client_provider = None
+    oauth_client_provider = await _resolve_scan_oauth_provider(url, token)
     async with _create_mcp_http_client_without_redirects(
         auth=oauth_client_provider, headers=headers, timeout=timeout
     ) as custom_client:
@@ -149,12 +186,19 @@ async def get_client(
     """
     if isinstance(server_config, RemoteServer) and server_config.type == "sse":
         logger.debug("Creating SSE client with URL: %s", server_config.url)
+        # Attach the same store-backed OAuth provider the HTTP path uses, so an
+        # authenticated SSE server (e.g. Atlassian) presents its stored token.
+        sse_oauth_provider = await _resolve_scan_oauth_provider(server_config.url, token)
         client_cm = sse_client(
             url=server_config.url,
-            headers=server_config.headers,
+            headers=expand_env_vars(
+                server_config.headers,
+                context=f"headers of remote server '{_remote_server_label(server_config, server_name)}'",
+            ),
             # env=server_config.env, #Not supported by MCP yet, but present in vscode
             timeout=timeout,
             httpx_client_factory=_create_mcp_http_client_without_redirects,
+            auth=sse_oauth_provider,
         )
     elif isinstance(server_config, RemoteServer) and server_config.type == "http":
         logger.debug(
@@ -162,7 +206,10 @@ async def get_client(
         )
         client_cm = streamablehttp_client_without_session(
             url=server_config.url,
-            headers=server_config.headers,
+            headers=expand_env_vars(
+                server_config.headers,
+                context=f"headers of remote server '{_remote_server_label(server_config, server_name)}'",
+            ),
             timeout=timeout or 60,
             token=token,
         )
@@ -176,7 +223,9 @@ async def get_client(
         server_params = StdioServerParameters(
             command=command,
             args=args,
-            env=server_config.env,
+            env=expand_env_vars(
+                server_config.env, context=f"env of stdio server '{server_name or server_config.command}'"
+            ),
             cwd=server_config.runtime_cwd,
         )
         # Create stderr capture with real pipe if traffic capture is enabled.
@@ -296,6 +345,7 @@ async def check_server(
     server_name: str | None = None,
     config_path: str | None = None,
     stream_stderr: bool = False,
+    probe_transports: bool = True,
 ) -> tuple[ServerSignature, StdioServer | RemoteServer]:
     logger.debug("Checking server with timeout: %s seconds", timeout)
 
@@ -329,20 +379,28 @@ async def check_server(
         url_with_mcp = base_url + "/mcp"
         url_with_sse = base_url + "/sse"
 
-        if server_config.type == "http" or server_config.type is None:
-            strategy.append(("http", url_with_mcp))
-            strategy.append(("http", url_without_end))
-            strategy.append(("sse", url_with_mcp))
-            strategy.append(("sse", url_without_end))
-            strategy.append(("http", url_with_sse))
-            strategy.append(("sse", url_with_sse))
+        # Strict mode: contact exactly the configured transport and URL, once.
+        # No /mcp or /sse rewriting -- the caller told us what this server is.
+        if not probe_transports and original_type is not None:
+            strategy.append((original_type, original_url))
         else:
-            strategy.append(("sse", url_with_mcp))
-            strategy.append(("sse", url_without_end))
-            strategy.append(("http", url_with_mcp))
-            strategy.append(("http", url_without_end))
-            strategy.append(("sse", url_with_sse))
-            strategy.append(("http", url_with_sse))
+            if not probe_transports:
+                logger.warning("probe_transports=False but no transport type set; falling back to probing")
+
+            if server_config.type == "http" or server_config.type is None:
+                strategy.append(("http", url_with_mcp))
+                strategy.append(("http", url_without_end))
+                strategy.append(("sse", url_with_mcp))
+                strategy.append(("sse", url_without_end))
+                strategy.append(("http", url_with_sse))
+                strategy.append(("sse", url_with_sse))
+            else:
+                strategy.append(("sse", url_with_mcp))
+                strategy.append(("sse", url_without_end))
+                strategy.append(("http", url_with_mcp))
+                strategy.append(("http", url_without_end))
+                strategy.append(("sse", url_with_sse))
+                strategy.append(("http", url_with_sse))
 
         exceptions: list[Exception] = []
         for protocol, url in strategy:
@@ -382,6 +440,13 @@ async def check_server(
         # callers don't see it stuck on the last-tried mutated URL.
         server_config.url = original_url
         server_config.type = original_type
+
+        # A single failed attempt -- which only happens when probing is disabled
+        # and the strategy holds one entry -- needs no grouping. Raise the real
+        # error so callers see the actual cause rather than the opaque
+        # "unhandled errors in a TaskGroup (1 sub-exception)".
+        if len(exceptions) == 1:
+            raise exceptions[0]
 
         # if python 3.11 or higher, use ExceptionGroup
         if sys.version_info >= (3, 11):

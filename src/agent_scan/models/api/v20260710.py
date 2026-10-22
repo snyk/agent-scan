@@ -23,12 +23,12 @@ def _error_for_request(error: ScanError | None) -> ScanError | None:
 
     # Import lazily because importing ``agent_scan.redact`` initializes the
     # ``agent_scan.models`` package, whose public facade imports this module.
-    from agent_scan.redact import redact_absolute_paths, redact_text
+    from agent_scan.redact import redact_absolute_paths, redact_bearer_tokens, redact_text
 
     def sanitize(value: Exception | str | None) -> str | None:
         if value is None:
             return None
-        return redact_absolute_paths(redact_text(str(value)))
+        return redact_bearer_tokens(redact_absolute_paths(redact_text(str(value))))
 
     sanitized = error.clone()
     sanitized.message = sanitize(sanitized.message)
