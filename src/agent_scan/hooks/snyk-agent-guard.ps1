@@ -27,6 +27,9 @@ param(
     [string]$RemoteUrl,
 
     [Parameter(Mandatory=$false)]
+    [string]$TenantId,
+
+    [Parameter(Mandatory=$false)]
     [string]$MachineId
 )
 
