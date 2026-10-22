@@ -375,6 +375,7 @@ receive nothing on stdout.
 | `--machine-id ID` | string | — | Required non-anonymous machine identifier sent in the `X-User` header's `identifier` field. May instead be set with `MACHINE_ID`. |
 | `--file PATH` | string | — | Override the client configuration path. |
 | `--managed` | boolean | `false` | Install in the admin/MDM-managed configuration rather than the user configuration. |
+| `--check-installed` | boolean | `false` | With `--managed`, skip agents that are not installed for any user on the machine. Without it, managed installs do not check. Non-managed installs always check. |
 | `--test` | boolean | `false` | **Deprecated/no-op.** |
 
 ### `guard discover`

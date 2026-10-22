@@ -251,12 +251,20 @@ def _run_install(args) -> None:
         sys.exit(1)
 
     # Filter out clients whose agent is not installed on this machine.
-    # Skipped when --file is explicitly provided (the caller knows where to write), and
-    # when --managed is requested: a managed install writes to a system-wide path that
-    # does not depend on the invoking account's home directory.
-    if not getattr(args, "file", None) and not managed:
-        skipped = [c for c in clients if not _is_client_installed(c)]
-        clients = [c for c in clients if _is_client_installed(c)]
+    # Skipped when --file is explicitly provided (the caller knows where to write).
+    # A managed install writes to a system-wide path, so it is only checked when
+    # --check-installed is set; the agent then counts as installed when any user's home
+    # has it. Non-managed installs always check the invoking user's home.
+    if not getattr(args, "file", None) and (not managed or getattr(args, "check_installed", False)):
+        home_dirs = [home for home, _username in get_readable_home_directories(all_users=managed)]
+        if not home_dirs:
+            # get_readable_home_directories swallows enumeration errors and returns [],
+            # which would otherwise skip every client and silently install nothing.
+            rich.print("[bold red]Error:[/bold red] Could not find any readable user home directory.")
+            sys.exit(1)
+        installed_by_client = {c: _is_client_installed(c, home_dirs) for c in clients}
+        skipped = [c for c in clients if not installed_by_client[c]]
+        clients = [c for c in clients if installed_by_client[c]]
         for c in skipped:
             rich.print(
                 f"[yellow]Warning:[/yellow] {_client_label(c)} is not installed on this machine. "
@@ -1705,23 +1713,26 @@ _HOOK_CLIENT_NAMES = {
 }
 
 
-_CLIENT_INSTALL_PATHS = {
-    "claude": Path.home() / ".claude",
-    "cursor": Path.home() / ".cursor",
-    "codex": Path.home() / ".codex",
-    "github-copilot": Path.home() / ".copilot",
+_CLIENT_INSTALL_DIRS = {
+    "claude": ".claude",
+    "cursor": ".cursor",
+    "codex": ".codex",
+    "github-copilot": ".copilot",
 }
 
 
-def _is_client_installed(client: str) -> bool:
-    """Check whether the agent is installed on this machine by looking for its config directory."""
-    path = _CLIENT_INSTALL_PATHS.get(client)
-    if path is None:
+def _is_client_installed(client: str, home_dirs: Iterable[Path]) -> bool:
+    """Check whether the agent is installed under at least one of *home_dirs* by looking for its config directory."""
+    rel_dir = _CLIENT_INSTALL_DIRS.get(client)
+    if rel_dir is None:
         return True
-    try:
-        return path.is_dir()
-    except PermissionError:
-        return False
+    for home in home_dirs:
+        try:
+            if (home / rel_dir).is_dir():
+                return True
+        except PermissionError:
+            continue
+    return False
 
 
 def _client_label(client: str) -> str:
