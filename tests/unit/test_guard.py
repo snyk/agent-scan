@@ -293,7 +293,7 @@ class TestExtractEnvFromCmd:
             "main",
             True,
             "powershell -File 'C:\\hooks\\snyk-agent-guard.ps1' -Client claude-code -PushKey 'pk' "
-            "-RemoteUrl 'https://api.snyk.io' -MachineId 'machine'",
+            "-RemoteUrl 'https://api.snyk.io' -TenantId 'tenant' -MachineId 'machine'",
         ),
         (
             "discover",
@@ -420,9 +420,21 @@ class TestBuildHookCommand:
         )
         assert _extract_env_from_cmd(cmd, "PUSH_KEY") == "my-key"
         assert _extract_env_from_cmd(cmd, "REMOTE_HOOKS_BASE_URL") == "https://example.com"
-        # tenant_id is only in bash commands, not powershell
-        if sys.platform != "win32":
-            assert _extract_env_from_cmd(cmd, "TENANT_ID") == "t-1"
+        assert _extract_env_from_cmd(cmd, "TENANT_ID") == "t-1"
+
+    def test_roundtrip_extract_powershell(self):
+        cmd = _build_hook_command_powershell(
+            "my-key", "https://example.com", Path("C:/x/hook.ps1"), "claude-code", tenant_id="t-1"
+        )
+        assert "-TenantId 't-1'" in cmd
+        info = _parse_command_info(cmd, ["Stop"])
+        assert info["auth_value"] == "my-key"
+        assert info["url"] == "https://example.com"
+        assert info["tenant_id"] == "t-1"
+
+    def test_without_tenant_powershell_omits_param(self):
+        cmd = _build_hook_command_powershell("pk", "https://api.snyk.io", Path("C:/x/hook.ps1"), "codex")
+        assert "-TenantId" not in cmd
 
 
 class TestAgentScanCommand:
