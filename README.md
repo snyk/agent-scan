@@ -129,11 +129,11 @@ Both versions scan MCP servers, tools, prompts, resources, and skills, and autom
 
 Download the binary for your operating system and architecture from the [latest GitHub Release](https://github.com/snyk/agent-scan/releases/latest). The release page also provides an SBOM (`sbom-<version>.json`), checksum files, and GitHub-generated source code archives. See [Verifying Standalone Binaries](#verifying-standalone-binaries) to verify your download.
 
-**Supported platforms** (release v0.6.9):
+**Supported platforms:** standalone binaries are tested on the following versions, which are the minimum supported:
 
-- **Linux (x86_64 and arm64):** requires glibc 2.35 or newer. Verified on x86_64: Ubuntu 22.04/24.04, Debian 12, Fedora 40, Amazon Linux 2023; arm64: Ubuntu 22.04 only. Ubuntu 20.04, Debian 11, RHEL/Rocky/Alma 8 and 9, Amazon Linux 2, and SLES 15 (openSUSE Leap 15.5 tested) fail with `GLIBC_2.35 not found`; Alpine (musl) also does not run it. For unsupported distributions, use `uvx snyk-agent-scan@latest`.
-- **Windows (x86_64):** the bundled Python 3.13 requires Windows 10 or newer.
-- **macOS (arm64 and x86_64):** verified on recent macOS; the bundled Python targets macOS 15, older versions are not verified.
+- **Linux (x86_64, arm64):** Ubuntu 22.04, Debian 12, Amazon Linux 2023, Fedora 40
+- **Windows (x86_64):** Windows 10
+- **macOS (arm64, x86_64):** macOS 15
 
 ## Highlights
 
