@@ -129,6 +129,12 @@ Both versions scan MCP servers, tools, prompts, resources, and skills, and autom
 
 Download the binary for your operating system and architecture from the [latest GitHub Release](https://github.com/snyk/agent-scan/releases/latest). The release page also provides an SBOM (`sbom-<version>.json`), checksum files, and GitHub-generated source code archives. See [Verifying Standalone Binaries](#verifying-standalone-binaries) to verify your download.
 
+**Supported platforms:** standalone binaries are tested on the following versions, which are the minimum supported:
+
+- **Linux (x86_64, arm64):** Ubuntu 22.04, Debian 12, Amazon Linux 2023, Fedora 40
+- **Windows (x86_64):** Windows 10
+- **macOS (arm64, x86_64):** macOS 15
+
 ## Highlights
 
 - Auto-discover MCP configurations, agent tools, skills
