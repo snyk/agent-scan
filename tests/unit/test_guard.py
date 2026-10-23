@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import fnmatch
 import json
 import os
 import re
@@ -3635,6 +3636,198 @@ class TestHookScriptVariableValues:
     def test_the_shipped_variables_are_the_cli_version(self):
         """The sentinel-driven tests prove the plumbing; this pins what actually ships."""
         assert guard_module._hook_script_variables() == {b"__AGENT_SCAN_VERSION__": version_info.encode()}
+
+
+# Windows' MoveFileEx, behind os.replace, cannot replace a file that any process holds
+# open, so a reader holding the old file across the write only exists on POSIX. There the
+# write falls back to in place (covered with a patched os.replace below).
+_POSIX_RENAME_OVER_OPEN_FILE = pytest.mark.skipif(
+    sys.platform == "win32", reason="Windows cannot rename over a file that is held open"
+)
+
+
+class TestAtomicWrite:
+    """Configs and hook scripts are replaced by a rename, never rewritten in place."""
+
+    @staticmethod
+    def _leftovers(directory: Path) -> list[str]:
+        return sorted(p.name for p in directory.iterdir() if p.name.endswith(".tmp"))
+
+    @_POSIX_RENAME_OVER_OPEN_FILE
+    def test_a_reader_holding_the_old_file_keeps_its_complete_content(self, tmp_path):
+        """What an agent reading the config, or bash running a hook script, has open."""
+        path = tmp_path / "settings.json"
+        path.write_text('{"old": true}\n')
+
+        with open(path) as reader:
+            guard_module._atomic_write(path, '{"new": true}\n')
+            assert reader.read() == '{"old": true}\n'
+
+        assert path.read_text() == '{"new": true}\n'
+        assert self._leftovers(tmp_path) == []
+
+    def test_windows_retries_a_rename_blocked_for_a_moment(self, tmp_path):
+        path = tmp_path / "settings.json"
+        path.write_text("original\n")
+        real_replace = os.replace
+        calls = []
+
+        def blocked_once(src, dst):
+            calls.append(src)
+            if len(calls) == 1:
+                raise PermissionError(13, "Access is denied")
+            real_replace(src, dst)
+
+        with (
+            patch(f"{_G}.IS_WINDOWS", True),
+            patch(f"{_G}.os.replace", side_effect=blocked_once),
+            patch(f"{_G}.time.sleep") as sleep,
+        ):
+            guard_module._atomic_write(path, "replacement\n")
+
+        assert len(calls) == 2
+        sleep.assert_called_once()
+        assert path.read_text() == "replacement\n"
+        assert self._leftovers(tmp_path) == []
+
+    def test_windows_falls_back_to_writing_in_place_while_the_rename_stays_blocked(self, tmp_path):
+        """A reader without FILE_SHARE_DELETE must not fail the install outright."""
+        path = tmp_path / "settings.json"
+        path.write_text("original\n")
+
+        with (
+            patch(f"{_G}.IS_WINDOWS", True),
+            patch(f"{_G}.os.replace", side_effect=PermissionError(13, "Access is denied")) as replace,
+            patch(f"{_G}.time.sleep"),
+        ):
+            guard_module._atomic_write(path, "replacement\n")
+
+        assert replace.call_count == 5
+        assert path.read_text() == "replacement\n"
+        assert self._leftovers(tmp_path) == []
+
+    def test_posix_does_not_mask_a_refused_rename(self, tmp_path):
+        path = tmp_path / "settings.json"
+        path.write_text("original\n")
+
+        with (
+            patch(f"{_G}.IS_WINDOWS", False),
+            patch(f"{_G}.os.replace", side_effect=PermissionError(13, "Permission denied")),
+            pytest.raises(PermissionError),
+        ):
+            guard_module._atomic_write(path, "replacement\n")
+
+        assert path.read_text() == "original\n"
+        assert self._leftovers(tmp_path) == []
+
+    def test_a_failed_write_leaves_the_original_and_no_temp_file(self, tmp_path):
+        path = tmp_path / "settings.json"
+        path.write_text("original\n")
+
+        with patch(f"{_G}.os.replace", side_effect=OSError("disk full")), pytest.raises(OSError, match="disk full"):
+            guard_module._atomic_write(path, "replacement\n")
+
+        assert path.read_text() == "original\n"
+        assert self._leftovers(tmp_path) == []
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+    def test_keeps_the_mode_of_the_file_it_replaces(self, tmp_path):
+        path = tmp_path / "hooks.json"
+        path.write_text("{}\n")
+        path.chmod(0o640)
+
+        guard_module._atomic_write(path, '{"hooks": {}}\n')
+
+        assert stat.S_IMODE(path.stat().st_mode) == 0o640
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+    def test_explicit_mode_wins(self, tmp_path):
+        path = tmp_path / "snyk-agent-guard.sh"
+        path.write_bytes(b"old")
+        path.chmod(0o644)
+
+        guard_module._atomic_write(path, b"new", mode=0o755)
+
+        assert stat.S_IMODE(path.stat().st_mode) == 0o755
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+    def test_a_new_file_gets_the_umask_default(self, tmp_path):
+        """mkstemp would create 0600, leaving a managed config unreadable to other users."""
+        reference = tmp_path / "reference"
+        reference.write_text("x")
+        path = tmp_path / "new.json"
+
+        guard_module._atomic_write(path, "{}\n")
+
+        assert stat.S_IMODE(path.stat().st_mode) == stat.S_IMODE(reference.stat().st_mode)
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+    def test_writes_through_a_symlinked_config(self, tmp_path):
+        """A config kept in a dotfiles repo stays a link to it."""
+        target = tmp_path / "dotfiles" / "settings.json"
+        target.parent.mkdir()
+        target.write_text("{}\n")
+        link = tmp_path / ".claude" / "settings.json"
+        link.parent.mkdir()
+        link.symlink_to(target)
+
+        guard_module._atomic_write(link, '{"hooks": {}}\n')
+
+        assert link.is_symlink()
+        assert target.read_text() == '{"hooks": {}}\n'
+        assert self._leftovers(target.parent) == []
+
+    def test_temp_file_matches_neither_policy_nor_script_globs(self, tmp_path):
+        """Copilot loads policy.d/*.json; _write_client_config hardens snyk-agent-guard*."""
+        names = []
+        real_replace = os.replace
+
+        def spy(src, dst):
+            names.append(Path(src).name)
+            real_replace(src, dst)
+
+        with patch(f"{_G}.os.replace", side_effect=spy):
+            guard_module._atomic_write(tmp_path / "snyk-agent-guard.json", "{}\n")
+
+        assert len(names) == 1
+        assert not fnmatch.fnmatch(names[0], "*.json")
+        assert not fnmatch.fnmatch(names[0], "snyk-agent-guard*")
+
+    @staticmethod
+    def _stale_install(tmp_path):
+        config = tmp_path / "settings.json"
+        config.write_text("{}\n")
+        script = guard_module._forwarder_script_path(config)
+        script.parent.mkdir(parents=True)
+        stale_script = b"#!/usr/bin/env bash\n# hook script installed by an earlier release\n"
+        script.write_bytes(stale_script)
+        return config, script, stale_script
+
+    def test_install_replaces_rather_than_rewrites_config_and_scripts(self, tmp_path):
+        """End to end through the writers install uses: every changed file is a new inode
+        (on Windows, a new file index)."""
+        config, script, stale_script = self._stale_install(tmp_path)
+        old_inodes = {config: config.stat().st_ino, script: script.stat().st_ino}
+
+        assert guard_module._copy_hook_script(script).updated
+        assert guard_module._write_json_if_changed(config, {"hooks": {}})
+
+        for path, inode in old_inodes.items():
+            assert path.stat().st_ino != inode, f"{path.name} was rewritten in place"
+        assert script.read_bytes() != stale_script
+        assert self._leftovers(config.parent) == []
+        assert self._leftovers(script.parent) == []
+
+    @_POSIX_RENAME_OVER_OPEN_FILE
+    def test_install_leaves_readers_of_the_old_config_and_script_intact(self, tmp_path):
+        config, script, stale_script = self._stale_install(tmp_path)
+
+        with open(config) as config_reader, open(script, "rb") as script_reader:
+            guard_module._copy_hook_script(script)
+            guard_module._write_json_if_changed(config, {"hooks": {}})
+
+            assert config_reader.read() == "{}\n"
+            assert script_reader.read() == stale_script
 
 
 class TestHookScriptVariableSubstitution:

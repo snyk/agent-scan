@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import stat
 import sys
@@ -974,8 +975,7 @@ def _write_codex_managed_config(content: str, path: Path) -> bool:
         return False
     if path.exists():
         _backup_file(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content)
+    _atomic_write(path, content)
     rich.print(f"[green]✓[/green]  Written [dim]{path}[/dim]")
     return True
 
@@ -2072,7 +2072,7 @@ def _copy_hook_script(dest: Path) -> _CopiedScript:
 
     updated = current_content != new_content
     if updated:
-        dest.write_bytes(new_content)
+        _atomic_write(dest, new_content)
         rich.print(f"[green]\u2713[/green]  Copied hook script to [dim]{dest}[/dim]")
     if not IS_WINDOWS:
         dest.chmod(dest.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
@@ -2085,6 +2085,77 @@ def _remove_hook_script(client: str, config_path: Path) -> None:
         if dest.exists():
             dest.unlink()
             rich.print(f"[green]\u2713[/green]  Removed hook script [dim]{dest}[/dim]")
+
+
+def _atomic_write(path: Path, data: str | bytes, *, mode: int | None = None) -> None:
+    """Replace *path* with *data* in a single rename.
+
+    Agents read their hook config while guard rewrites it, and bash reads a hook script
+    as it runs it, so writing in place could hand either one a partly written file.
+    Writing a sibling temp file and renaming it over *path* means a reader sees the old
+    file or the new one, and a hook already running keeps reading the file it opened.
+    Windows cannot rename over a file that is open, so there the rename is retried briefly
+    and, while the file stays open, the write falls back to in place.
+
+    A symlinked *path* (a config kept in a dotfiles repo, say) is written through to its
+    target so the link survives. The replacement keeps the existing file's permission bits
+    unless *mode* is given and, where the platform allows, its owner, which a write in
+    place never changed; a new file gets the umask default, as ``open()`` would give it.
+    Text is written in text mode, so newlines and encoding match ``Path.write_text``.
+    """
+    target = path.resolve() if path.is_symlink() else path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        existing = target.stat()
+    except FileNotFoundError:
+        existing = None
+
+    # Dot-prefixed so the Copilot policy.d/*.json glob and the snyk-agent-guard* hardening
+    # glob in _write_client_config never pick up an in-flight temp file.
+    tmp = target.with_name(f".{target.name}.{secrets.token_hex(8)}.tmp")
+    # O_BINARY: Python does any newline translation itself; a CRT text-mode fd on Windows
+    # would translate a second time.
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o666)
+    try:
+        with os.fdopen(fd, "w" if isinstance(data, str) else "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        if mode is None and existing is not None:
+            mode = stat.S_IMODE(existing.st_mode)
+        if mode is not None:
+            os.chmod(tmp, mode)
+        if existing is not None and hasattr(os, "chown"):
+            with contextlib.suppress(OSError):
+                tmp_stat = os.stat(tmp)
+                if (tmp_stat.st_uid, tmp_stat.st_gid) != (existing.st_uid, existing.st_gid):
+                    os.chown(tmp, existing.st_uid, existing.st_gid)
+        for attempt in range(5):
+            try:
+                os.replace(tmp, target)
+                break
+            except PermissionError:
+                # Windows refuses the rename while any process holds the target open:
+                # MoveFileEx, which os.replace uses, cannot replace a file with open
+                # handles, even ones that share delete access. Agents read their config
+                # and close it again, so a short retry covers them.
+                if not IS_WINDOWS:
+                    raise
+                if attempt < 4:
+                    time.sleep(0.05 * (attempt + 1))
+                    continue
+                # Still held: write in place, as guard did before, rather than fail the
+                # install. That needs the holder to share write access, as readers
+                # opened by Node, Rust or Python do.
+                with open(target, "w" if isinstance(data, str) else "wb") as f:
+                    f.write(data)
+                if mode is not None:
+                    os.chmod(target, mode)
+                tmp.unlink()
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
 
 
 def _backup_file(path: Path) -> None:
@@ -2109,16 +2180,12 @@ def _write_json_if_changed(path: Path, data: dict) -> bool:
         if old_content == new_content:
             return False
         _backup_file(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(new_content)
+    _atomic_write(path, new_content)
     return True
 
 
 def _write_json(path: Path, data: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
-        f.write("\n")
+    _atomic_write(path, json.dumps(data, indent=2) + "\n")
 
 
 def _preserved_note(count: int) -> str:
