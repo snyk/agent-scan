@@ -35,6 +35,9 @@ from agent_scan.models import (
     ClaudeConfigFile,
     CouldNotParseMCPConfig,
     PluginMCPConfigFile,
+    RemoteServer,
+    ServerReference,
+    StdioServer,
 )
 from agent_scan.skill_client import inspect_skills_dir
 from agent_scan.well_known_clients import expand_path
@@ -113,6 +116,7 @@ class CodexDiscoverer(AgentDiscoverer):
         result.update(self._discover_plugin_mcp_servers())
         result.update(self._discover_plugin_manifest_mcp_servers())
         result.update(self._discover_project_mcp_servers())
+        result.update(self._discover_server_references())
         return result
 
     def discover_skills(self) -> SkillsDirsResult:
@@ -124,6 +128,52 @@ class CodexDiscoverer(AgentDiscoverer):
         result.update(self._discover_plugin_manifest_skills())
         result.update(self._discover_project_skills())
         return result
+
+    def _discover_server_references(self) -> McpConfigsResult:
+        """Collect provider-scoped references alongside executable MCP configs.
+
+        Namespace and URL resolution belong to the receiving backend. This
+        inventory reads neither credentials nor account-specific tool caches.
+        """
+
+        def _parse_server_references(path: Path) -> McpScanResult:
+            """Parse a Codex app declaration into provider-scoped server references."""
+            data = self._load_json_file(path)
+            if not isinstance(data, dict) or not isinstance(data.get("apps"), dict):
+                return None
+            references: list[tuple[str, StdioServer | RemoteServer | ServerReference]] = []
+            seen: set[str] = set()
+            for app in data["apps"].values():
+                app_id = app.get("id") if isinstance(app, dict) else None
+                if not isinstance(app_id, str) or not app_id or app_id in seen:
+                    continue
+                seen.add(app_id)
+                # The ID is a local registration label, not a tool namespace.
+                references.append((app_id, ServerReference(provider="codex_apps", id=app_id)))
+            return references
+
+        def _discover_manifest_server_references() -> McpConfigsResult:
+            """Include app files declared by plugin manifests, skipping known paths.
+
+            Codex supports an ``apps`` path such as ``./config/custom.app.json``
+            instead of the default ``.app.json``. Its loader and tests explicitly
+            support this override (``plugin_app_config_paths`` in core-plugins).
+            Discovery inventories these files in addition to default files.
+            """
+            result = {}
+            for root, manifest in self._plugin_manifests():
+                path = self._resolve_manifest_relative_path(root, manifest.get("apps"))
+                if path is None or path.as_posix() in result:
+                    continue
+                parsed = _parse_server_references(path)
+                if parsed:
+                    result[path.as_posix()] = parsed
+            return result
+
+        return (
+            self._discover_plugin_mcp_files(self._plugin_base_dirs(), (".app.json",), _parse_server_references)
+            | _discover_manifest_server_references()
+        )
 
     # --- private: MCP discovery ---
 

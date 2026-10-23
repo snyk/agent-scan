@@ -210,6 +210,11 @@ Legend: **✓** detected · **✗** the agent supports this but Agent Scan does 
 
 Claude Desktop plugin discovery is supported on macOS and Linux. For Claude Code, Guard's install and session-start discovery events also report logged connectors from `claude-code-sessions/*/*/local_*.json` and `local-agent-mode-sessions/*/*/local_*.json`, grouped by organization and deduplicated by connector UUID using the newest session metadata. Only each connector's UUID, name, URL, tool definitions and instructions are sent; other fields such as headers are dropped, and URL query values are redacted. On Windows, connector discovery uses `~/AppData/Roaming/Claude` with the same assumed session layout, which has not yet been verified on a Windows machine. Windows plugin discovery remains unsupported.
 
+Codex general scans and Guard discover app IDs from `<CODEX_HOME>/plugins/**/.app.json`
+and plugin manifest `apps` paths. They send server references and declaration paths
+to the respective backend for catalog resolution. Discovery does not read credentials
+or tool caches, or contact hosted apps. Unresolved apps appear as errors in scan results.
+
 ## Verifying Standalone Binaries
 
 We use GPG signing on the release checksums file to ensure distribution integrity and authenticity.
