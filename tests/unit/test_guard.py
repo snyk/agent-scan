@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import fnmatch
 import json
 import os
 import re
@@ -3490,7 +3491,335 @@ class TestHookScriptVersionPlaceholder:
         dest = tmp_path / "hooks" / name
         guard_module._copy_hook_script(dest)
 
-        assert dest.read_bytes() == _get_script_path(name).read_bytes()
+        section = _variables_section(dest.read_text())
+        assert f'"{version_info}"' in section
+        # A placeholder left unsubstituted travels to the platform as a literal, so the
+        # rendered section must hold no `__NAME__` -- including variables added later.
+        assert not _PLACEHOLDER_RE.search(section)
+
+    @pytest.mark.parametrize("name", _FORWARDER_SCRIPTS)
+    def test_copy_leaves_everything_outside_the_section_untouched(self, tmp_path, name):
+        """Install rewrites the section and nothing else.
+
+        The scripts hold `__NAME__`-shaped literals outside the section -- the fallbacks
+        below, and the sh script's curl status marker. A substitution that reached them
+        would silently change what the script does.
+        """
+        dest = tmp_path / "hooks" / name
+        guard_module._copy_hook_script(dest)
+
+        bundled_head, _, bundled_tail = _split_on_section(_get_script_path(name).read_text())
+        head, _, tail = _split_on_section(dest.read_text())
+
+        assert (head, tail) == (bundled_head, bundled_tail)
+
+    @pytest.mark.parametrize("name", _FORWARDER_SCRIPTS)
+    def test_every_placeholder_in_the_section_has_a_substitution(self, name):
+        section = _variables_section(_get_script_path(name).read_text())
+
+        declared = set(_PLACEHOLDER_RE.findall(section))
+        assert declared == {key.decode() for key in guard_module._hook_script_variables()}
+
+    @pytest.mark.parametrize("name", _FORWARDER_SCRIPTS)
+    def test_every_placeholder_has_a_fallback_outside_the_section(self, name):
+        """Each script scrubs a variable install never filled in.
+
+        The comparison is against the literal placeholder, so it has to sit outside the
+        section: substituting over it would rewrite the very literal it tests for.
+        """
+        head, _, tail = _split_on_section(_get_script_path(name).read_text())
+
+        for placeholder in guard_module._hook_script_variables():
+            assert placeholder.decode() in head + tail
+
+
+class TestHookScriptVariableValues:
+    """What install would write into the section is checked before it is handed out."""
+
+    # Shapes a release can plausibly produce, all inert inside the double-quoted shell
+    # literal they land in.
+    _ACCEPTED = ("0.6.2", "0.6.2+g1234f00", "1.2.3.dev0", "unknown", "1")
+
+    # Values that would break the rendered script, execute at hook time, or reach the
+    # platform as something it drops.
+    _REJECTED = (
+        "",
+        '0.6.2"; id; x="',
+        "$(id)",
+        "`id`",
+        "back\\slash",
+        "two\nlines",
+        "with space",
+        "1!2.0",
+        "_leading",
+        "a" * 65,
+    )
+
+    @pytest.mark.parametrize("value", _ACCEPTED)
+    def test_accepts_a_release_shaped_value(self, monkeypatch, value):
+        monkeypatch.setattr(version_module, "version_info", value)
+
+        assert guard_module._hook_script_variables() == {b"__AGENT_SCAN_VERSION__": value.encode()}
+        # Both consumers have to accept it: the shell that parses the script, and
+        # agent-monitor, which degrades anything outside its shape to "unknown".
+        assert _AGENT_MONITOR_CLI_VERSION_RE.fullmatch(value)
+
+    @pytest.mark.parametrize("value", _REJECTED)
+    def test_rejects_a_value_the_shell_or_the_platform_would_mangle(self, monkeypatch, value):
+        monkeypatch.setattr(version_module, "version_info", value)
+
+        with pytest.raises(ValueError, match="install-time"):
+            guard_module._hook_script_variables()
+
+        assert not _AGENT_MONITOR_CLI_VERSION_RE.fullmatch(value)
+
+    @pytest.mark.parametrize("name", _FORWARDER_SCRIPTS)
+    def test_install_fails_rather_than_writing_an_unusable_value(self, monkeypatch, tmp_path, name):
+        """The check gates the copy, so a rejected value never reaches a hook script."""
+        monkeypatch.setattr(version_module, "version_info", '0.6.2"; id; x="')
+        dest = tmp_path / "hooks" / name
+
+        with pytest.raises(ValueError, match="install-time"):
+            guard_module._copy_hook_script(dest)
+
+        assert not dest.exists()
+
+    def test_the_shipped_variables_are_the_cli_version(self):
+        """The sentinel-driven tests prove the plumbing; this pins what actually ships."""
+        assert guard_module._hook_script_variables() == {b"__AGENT_SCAN_VERSION__": version_info.encode()}
+
+
+# Windows' MoveFileEx, behind os.replace, cannot replace a file that any process holds
+# open, so a reader holding the old file across the write only exists on POSIX. There the
+# write falls back to in place (covered with a patched os.replace below).
+_POSIX_RENAME_OVER_OPEN_FILE = pytest.mark.skipif(
+    sys.platform == "win32", reason="Windows cannot rename over a file that is held open"
+)
+
+
+class TestAtomicWrite:
+    """Configs and hook scripts are replaced by a rename, never rewritten in place."""
+
+    @staticmethod
+    def _leftovers(directory: Path) -> list[str]:
+        return sorted(p.name for p in directory.iterdir() if p.name.endswith(".tmp"))
+
+    @_POSIX_RENAME_OVER_OPEN_FILE
+    def test_a_reader_holding_the_old_file_keeps_its_complete_content(self, tmp_path):
+        """What an agent reading the config, or bash running a hook script, has open."""
+        path = tmp_path / "settings.json"
+        path.write_text('{"old": true}\n')
+
+        with open(path) as reader:
+            guard_module._atomic_write(path, '{"new": true}\n')
+            assert reader.read() == '{"old": true}\n'
+
+        assert path.read_text() == '{"new": true}\n'
+        assert self._leftovers(tmp_path) == []
+
+    def test_windows_retries_a_rename_blocked_for_a_moment(self, tmp_path):
+        path = tmp_path / "settings.json"
+        path.write_text("original\n")
+        real_replace = os.replace
+        calls = []
+
+        def blocked_once(src, dst):
+            calls.append(src)
+            if len(calls) == 1:
+                raise PermissionError(13, "Access is denied")
+            real_replace(src, dst)
+
+        with (
+            patch(f"{_G}.IS_WINDOWS", True),
+            patch(f"{_G}.os.replace", side_effect=blocked_once),
+            patch(f"{_G}.time.sleep") as sleep,
+        ):
+            guard_module._atomic_write(path, "replacement\n")
+
+        assert len(calls) == 2
+        sleep.assert_called_once()
+        assert path.read_text() == "replacement\n"
+        assert self._leftovers(tmp_path) == []
+
+    def test_windows_falls_back_to_writing_in_place_while_the_rename_stays_blocked(self, tmp_path):
+        """A reader without FILE_SHARE_DELETE must not fail the install outright."""
+        path = tmp_path / "settings.json"
+        path.write_text("original\n")
+
+        with (
+            patch(f"{_G}.IS_WINDOWS", True),
+            patch(f"{_G}.os.replace", side_effect=PermissionError(13, "Access is denied")) as replace,
+            patch(f"{_G}.time.sleep"),
+        ):
+            guard_module._atomic_write(path, "replacement\n")
+
+        assert replace.call_count == 5
+        assert path.read_text() == "replacement\n"
+        assert self._leftovers(tmp_path) == []
+
+    def test_posix_does_not_mask_a_refused_rename(self, tmp_path):
+        path = tmp_path / "settings.json"
+        path.write_text("original\n")
+
+        with (
+            patch(f"{_G}.IS_WINDOWS", False),
+            patch(f"{_G}.os.replace", side_effect=PermissionError(13, "Permission denied")),
+            pytest.raises(PermissionError),
+        ):
+            guard_module._atomic_write(path, "replacement\n")
+
+        assert path.read_text() == "original\n"
+        assert self._leftovers(tmp_path) == []
+
+    def test_a_failed_write_leaves_the_original_and_no_temp_file(self, tmp_path):
+        path = tmp_path / "settings.json"
+        path.write_text("original\n")
+
+        with patch(f"{_G}.os.replace", side_effect=OSError("disk full")), pytest.raises(OSError, match="disk full"):
+            guard_module._atomic_write(path, "replacement\n")
+
+        assert path.read_text() == "original\n"
+        assert self._leftovers(tmp_path) == []
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+    def test_keeps_the_mode_of_the_file_it_replaces(self, tmp_path):
+        path = tmp_path / "hooks.json"
+        path.write_text("{}\n")
+        path.chmod(0o640)
+
+        guard_module._atomic_write(path, '{"hooks": {}}\n')
+
+        assert stat.S_IMODE(path.stat().st_mode) == 0o640
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+    def test_explicit_mode_wins(self, tmp_path):
+        path = tmp_path / "snyk-agent-guard.sh"
+        path.write_bytes(b"old")
+        path.chmod(0o644)
+
+        guard_module._atomic_write(path, b"new", mode=0o755)
+
+        assert stat.S_IMODE(path.stat().st_mode) == 0o755
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+    def test_a_new_file_gets_the_umask_default(self, tmp_path):
+        """mkstemp would create 0600, leaving a managed config unreadable to other users."""
+        reference = tmp_path / "reference"
+        reference.write_text("x")
+        path = tmp_path / "new.json"
+
+        guard_module._atomic_write(path, "{}\n")
+
+        assert stat.S_IMODE(path.stat().st_mode) == stat.S_IMODE(reference.stat().st_mode)
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+    def test_writes_through_a_symlinked_config(self, tmp_path):
+        """A config kept in a dotfiles repo stays a link to it."""
+        target = tmp_path / "dotfiles" / "settings.json"
+        target.parent.mkdir()
+        target.write_text("{}\n")
+        link = tmp_path / ".claude" / "settings.json"
+        link.parent.mkdir()
+        link.symlink_to(target)
+
+        guard_module._atomic_write(link, '{"hooks": {}}\n')
+
+        assert link.is_symlink()
+        assert target.read_text() == '{"hooks": {}}\n'
+        assert self._leftovers(target.parent) == []
+
+    def test_temp_file_matches_neither_policy_nor_script_globs(self, tmp_path):
+        """Copilot loads policy.d/*.json; _write_client_config hardens snyk-agent-guard*."""
+        names = []
+        real_replace = os.replace
+
+        def spy(src, dst):
+            names.append(Path(src).name)
+            real_replace(src, dst)
+
+        with patch(f"{_G}.os.replace", side_effect=spy):
+            guard_module._atomic_write(tmp_path / "snyk-agent-guard.json", "{}\n")
+
+        assert len(names) == 1
+        assert not fnmatch.fnmatch(names[0], "*.json")
+        assert not fnmatch.fnmatch(names[0], "snyk-agent-guard*")
+
+    @staticmethod
+    def _stale_install(tmp_path):
+        config = tmp_path / "settings.json"
+        config.write_text("{}\n")
+        script = guard_module._forwarder_script_path(config)
+        script.parent.mkdir(parents=True)
+        stale_script = b"#!/usr/bin/env bash\n# hook script installed by an earlier release\n"
+        script.write_bytes(stale_script)
+        return config, script, stale_script
+
+    def test_install_replaces_rather_than_rewrites_config_and_scripts(self, tmp_path):
+        """End to end through the writers install uses: every changed file is a new inode
+        (on Windows, a new file index)."""
+        config, script, stale_script = self._stale_install(tmp_path)
+        old_inodes = {config: config.stat().st_ino, script: script.stat().st_ino}
+
+        assert guard_module._copy_hook_script(script).updated
+        assert guard_module._write_json_if_changed(config, {"hooks": {}})
+
+        for path, inode in old_inodes.items():
+            assert path.stat().st_ino != inode, f"{path.name} was rewritten in place"
+        assert script.read_bytes() != stale_script
+        assert self._leftovers(config.parent) == []
+        assert self._leftovers(script.parent) == []
+
+    @_POSIX_RENAME_OVER_OPEN_FILE
+    def test_install_leaves_readers_of_the_old_config_and_script_intact(self, tmp_path):
+        config, script, stale_script = self._stale_install(tmp_path)
+
+        with open(config) as config_reader, open(script, "rb") as script_reader:
+            guard_module._copy_hook_script(script)
+            guard_module._write_json_if_changed(config, {"hooks": {}})
+
+            assert config_reader.read() == "{}\n"
+            assert script_reader.read() == stale_script
+
+
+class TestHookScriptVariableSubstitution:
+    """Only the section is rewritten, with whatever the variables mapping holds."""
+
+    _SCRIPT = b"".join(
+        (
+            b'head "__X__"\n',
+            guard_module._SECTION_BEGIN,
+            b'\nV="__X__"\n',
+            guard_module._SECTION_END,
+            b'\ntail "__X__"\n',
+        )
+    )
+
+    def test_substitutes_only_inside_the_section(self, monkeypatch):
+        monkeypatch.setattr(guard_module, "_hook_script_variables", lambda: {b"__X__": b"0.6.2"})
+
+        rendered = guard_module._substitute_hook_script_variables(self._SCRIPT)
+
+        assert b'V="0.6.2"' in rendered
+        assert rendered.count(b"__X__") == 2
+        assert rendered.startswith(b'head "__X__"\n')
+        assert rendered.endswith(b'tail "__X__"\n')
+
+    @pytest.mark.parametrize(
+        "content",
+        [
+            _SCRIPT.split(_SECTION_END.encode())[0],
+            guard_module._SECTION_END,
+            guard_module._SECTION_END + guard_module._SECTION_BEGIN,
+        ],
+    )
+    def test_only_a_complete_section_is_rewritten(self, content):
+        """Anything short of a BEGIN-then-END pair leaves the script as it was.
+
+        What the forwarders ship is pinned against the markers elsewhere. One that lost
+        its section keeps its placeholder, which the script's own fallback scrubs at hook
+        time rather than reporting it as a version.
+        """
+        assert guard_module._substitute_hook_script_variables(content) == content
 
     @pytest.mark.parametrize("name", _TRAMPOLINE_SCRIPTS)
     def test_trampolines_carry_no_placeholder(self, name):
