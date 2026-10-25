@@ -65,6 +65,13 @@ _DETECTION_RE = re.compile(
 _PERMISSION_DENIED = "__permission_denied__"
 _STDIN_READ_TIMEOUT_SECONDS = 5.0
 _DISCOVERY_TIMEOUT_SECONDS = 60.0
+# Per-hook timeout written on every synchronous guard hook. Claude Code and Codex
+# default to 600 s, Cursor to an undocumented platform default; a forwarder request
+# that hangs rather than fails would otherwise stall the agent for that long on every
+# event. Each agent treats a timed-out hook as fail-open. The value sits above the
+# forwarder scripts' 60 s request budget, so a hung request fails open inside the
+# script, with its diagnostic, before the agent kills the hook.
+HOOK_TIMEOUT_SECONDS = 65
 
 CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 CURSOR_HOOKS_PATH = Path.home() / ".cursor" / "hooks.json"
@@ -133,6 +140,9 @@ CURSOR_HOOK_EVENTS = [
     "subagentStart",
     "subagentStop",
 ]
+# Cursor documents these two as fire-and-forget: the agent loop never waits on them, so
+# they are not synchronous hooks and get no timeout.
+_CURSOR_FIRE_AND_FORGET_EVENTS = {"sessionStart", "sessionEnd"}
 
 COPILOT_HOOK_EVENTS = [
     "SessionStart",
@@ -695,9 +705,14 @@ def _prepare_claude_config(
     hooks = {}
 
     for event in CLAUDE_HOOK_EVENTS:
-        entry = {"type": "command", "command": command}
+        entry: dict = {"type": "command", "command": command}
         if IS_WINDOWS:
             entry["shell"] = "powershell"
+        if event != "SessionEnd":
+            # SessionEnd hooks share a 1.5 s budget that Claude Code raises to match a
+            # longer per-hook timeout, so a value here would delay every exit rather
+            # than bound a hang.
+            entry["timeout"] = HOOK_TIMEOUT_SECONDS
         group: dict = {"hooks": [entry]}
         if event in CLAUDE_EVENTS_WITH_MATCHER:
             group["matcher"] = "*"
@@ -753,8 +768,11 @@ def _prepare_cursor_config(
     hooks = {}
 
     for event in CURSOR_HOOK_EVENTS:
+        entry: dict = {"command": command}
+        if event not in _CURSOR_FIRE_AND_FORGET_EVENTS:
+            entry["timeout"] = HOOK_TIMEOUT_SECONDS
         existing = list(filtered.get(event, []))
-        existing.append({"command": command})
+        existing.append(entry)
         hooks[event] = existing
 
     if discover_command:
@@ -828,7 +846,7 @@ def _prepare_codex_config(
     hooks = {}
 
     for event in CODEX_HOOK_EVENTS:
-        entry = {"type": "command", "command": command}
+        entry = {"type": "command", "command": command, "timeout": HOOK_TIMEOUT_SECONDS}
         existing = list(filtered.get(event, []))
         existing.append({"hooks": [entry]})
         hooks[event] = existing
@@ -889,6 +907,7 @@ def _render_codex_requirements_toml(
         lines.append(f"[[hooks.{event}.hooks]]")
         lines.append('type = "command"')
         lines.append(f"command = {toml_escape(command)}")
+        lines.append(f"timeout = {HOOK_TIMEOUT_SECONDS}")
         lines.append("")
     if discover_command:
         lines.append("[[hooks.SessionStart]]")
@@ -932,18 +951,24 @@ def _prepare_codex_managed_config(
     old_events: list[str] = []
     old_guard_command: str | None = None
     old_discover_command: str | None = None
+    old_guard_timeout: int | None = None
     if path.exists():
         old_text = path.read_text()
         with contextlib.suppress(UnicodeDecodeError, ValueError):
-            old_events, old_guard_command, old_discover_command = _parse_codex_requirements_toml(old_text)
+            old_events, old_guard_command, old_discover_command, old_guard_timeout = _parse_codex_requirements_toml(
+                old_text
+            )
 
     old_event_set = set(old_events)
     new_event_set = set(CODEX_HOOK_EVENTS)
 
-    def _entries(event: str, guard: str | None, discover: str | None) -> list[dict]:
+    def _entries(event: str, guard: str | None, discover: str | None, timeout: int | None) -> list[dict]:
         entries: list[dict] = []
         if guard is not None:
-            entries.append({"type": "command", "command": guard})
+            guard_entry: dict = {"type": "command", "command": guard}
+            if timeout is not None:
+                guard_entry["timeout"] = timeout
+            entries.append(guard_entry)
         if event == "SessionStart" and discover is not None:
             entries.append({"type": "command", "command": discover, "async": True})
         return entries
@@ -952,8 +977,12 @@ def _prepare_codex_managed_config(
     modified = {}
     removed = {}
     for event in sorted(old_event_set | new_event_set):
-        expected = _entries(event, command, discover_command) if event in new_event_set else []
-        actual = _entries(event, old_guard_command, old_discover_command) if event in old_event_set else []
+        expected = _entries(event, command, discover_command, HOOK_TIMEOUT_SECONDS) if event in new_event_set else []
+        actual = (
+            _entries(event, old_guard_command, old_discover_command, old_guard_timeout)
+            if event in old_event_set
+            else []
+        )
         if not actual and expected:
             removed[event] = expected
         elif actual and not expected:
@@ -984,22 +1013,47 @@ def _is_discover_hook_command(command: str) -> bool:
     return bool(re.search(r"\bsnyk-agent-guard-discover(?:\.(?:sh|ps1))?\b", command, re.IGNORECASE))
 
 
-def _parse_codex_requirements_toml(text: str) -> tuple[list[str], str | None, str | None]:
-    """Extract Snyk Agent Guard events, guard command, and discovery command.
+def _parse_codex_requirements_toml(
+    text: str,
+) -> tuple[list[str], str | None, str | None, int | None]:
+    """Extract Snyk Agent Guard events, guard command, discovery command, and guard timeout.
 
-    Only scans hook command lines containing the agent-guard detection marker.
+    Only scans hook command lines containing the agent-guard detection marker. The
+    timeout is the ``timeout`` key of the first guard hook table, or None when that table
+    has none, so an install written before timeouts existed diffs as modified.
     """
     events: list[str] = []
     guard_command: str | None = None
     discover_command: str | None = None
+    guard_timeout: int | None = None
+    guard_timeout_resolved = False
     current_event: str | None = None
+    table_timeout: int | None = None
+    table_is_guard = False
     header_re = re.compile(r"^\[\[hooks\.([A-Za-z]+)(?:\.hooks)?\]\]\s*$")
     command_re = re.compile(r'^command\s*=\s*"((?:[^"\\]|\\.)*)"\s*$')
+    timeout_re = re.compile(r"^timeout\s*=\s*(\d+)\s*$")
+
+    def close_table() -> None:
+        # Keys inside a table may come in any order, so the timeout is only attributed
+        # once the table is complete and known to hold the guard command.
+        nonlocal guard_timeout, guard_timeout_resolved
+        if table_is_guard and not guard_timeout_resolved:
+            guard_timeout = table_timeout
+            guard_timeout_resolved = True
+
     for raw in text.splitlines():
         line = raw.strip()
         m = header_re.match(line)
         if m:
+            close_table()
             current_event = m.group(1)
+            table_timeout = None
+            table_is_guard = False
+            continue
+        m = timeout_re.match(line)
+        if m and current_event:
+            table_timeout = int(m.group(1))
             continue
         m = command_re.match(line)
         if m and current_event:
@@ -1011,14 +1065,17 @@ def _parse_codex_requirements_toml(text: str) -> tuple[list[str], str | None, st
             if _is_discover_hook_command(cmd):
                 if discover_command is None:
                     discover_command = cmd
-            elif guard_command is None:
-                guard_command = cmd
-    return events, guard_command, discover_command
+            else:
+                table_is_guard = True
+                if guard_command is None:
+                    guard_command = cmd
+    close_table()
+    return events, guard_command, discover_command, guard_timeout
 
 
 def _detect_codex_managed_install(path: Path) -> dict | None:
     text = path.read_text()
-    events, guard_command, _ = _parse_codex_requirements_toml(text)
+    events, guard_command, _, _ = _parse_codex_requirements_toml(text)
     if not events or guard_command is None:
         return None
     return _parse_command_info(guard_command, events)
@@ -1029,7 +1086,7 @@ def _uninstall_codex_managed(path: Path) -> None:
         rich.print("[dim]No requirements.toml found. Nothing to uninstall.[/dim]")
         return
     text = path.read_text()
-    events, _, _ = _parse_codex_requirements_toml(text)
+    events, _, _, _ = _parse_codex_requirements_toml(text)
     if not events:
         rich.print("[dim]No Agent Guard hooks found.[/dim]")
         return
@@ -1620,8 +1677,17 @@ _COPILOT_SCRIPT_KEYS = ("bash", "powershell", "command")
 
 
 def _copilot_command_entry(command: str) -> dict:
-    """Build a Copilot command-hook entry for this platform."""
-    return {"type": "command", "powershell" if IS_WINDOWS else "bash": command}
+    """Build a Copilot command-hook entry for this platform.
+
+    Copilot has no async hooks, so every entry (discovery included) is synchronous and
+    carries the timeout. Copilot's documented default is 30 s, below the forwarder's
+    request budget, so the value must be written for the script to fail open on its own.
+    """
+    return {
+        "type": "command",
+        "powershell" if IS_WINDOWS else "bash": command,
+        "timeoutSec": HOOK_TIMEOUT_SECONDS,
+    }
 
 
 def _copilot_hook_commands(entry: dict) -> Iterable[str]:
