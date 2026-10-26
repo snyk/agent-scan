@@ -3691,7 +3691,7 @@ class TestAtomicWrite:
         assert self._leftovers(tmp_path) == []
 
     def test_windows_falls_back_to_writing_in_place_while_the_rename_stays_blocked(self, tmp_path):
-        """A reader without FILE_SHARE_DELETE must not fail the install outright."""
+        """A file held open past the retries must not fail the install outright."""
         path = tmp_path / "settings.json"
         path.write_text("original\n")
 
@@ -3704,6 +3704,73 @@ class TestAtomicWrite:
 
         assert replace.call_count == 5
         assert path.read_text() == "replacement\n"
+        assert self._leftovers(tmp_path) == []
+
+    def test_windows_fallback_succeeds_when_the_temp_file_cannot_be_removed(self, tmp_path):
+        """A scanner holding the temp file must not turn a completed write into a failure."""
+        path = tmp_path / "settings.json"
+        path.write_text("original\n")
+        real_unlink = Path.unlink
+
+        def unlink(self, *args, **kwargs):
+            if self.name.endswith(".tmp"):
+                raise PermissionError(13, "Access is denied")
+            return real_unlink(self, *args, **kwargs)
+
+        with (
+            patch(f"{_G}.IS_WINDOWS", True),
+            patch(f"{_G}.os.replace", side_effect=PermissionError(13, "Access is denied")),
+            patch(f"{_G}.time.sleep"),
+            patch.object(Path, "unlink", unlink),
+        ):
+            guard_module._atomic_write(path, "replacement\n")
+
+        assert path.read_text() == "replacement\n"
+        # Left behind, but dot-prefixed so nothing loads or hardens it.
+        assert all(name.startswith(".") for name in self._leftovers(tmp_path))
+
+    def test_windows_fallback_succeeds_when_the_mode_cannot_be_applied(self, tmp_path):
+        path = tmp_path / "snyk-agent-guard.ps1"
+        path.write_bytes(b"old")
+        real_chmod = os.chmod
+
+        def chmod(target, mode, *args, **kwargs):
+            if Path(target) == path:
+                raise PermissionError(13, "Access is denied")
+            return real_chmod(target, mode, *args, **kwargs)
+
+        with (
+            patch(f"{_G}.IS_WINDOWS", True),
+            patch(f"{_G}.os.replace", side_effect=PermissionError(13, "Access is denied")),
+            patch(f"{_G}.time.sleep"),
+            patch(f"{_G}.os.chmod", side_effect=chmod),
+        ):
+            guard_module._atomic_write(path, b"new", mode=0o644)
+
+        assert path.read_bytes() == b"new"
+        assert self._leftovers(tmp_path) == []
+
+    def test_windows_fallback_still_fails_when_the_in_place_write_fails(self, tmp_path):
+        """Only cleanup is best-effort: a holder that refuses writes too fails the write."""
+        path = tmp_path / "settings.json"
+        path.write_text("original\n")
+        real_open = open
+
+        def open_(file, mode="r", *args, **kwargs):
+            if Path(file) == path and "w" in mode:
+                raise PermissionError(13, "The process cannot access the file")
+            return real_open(file, mode, *args, **kwargs)
+
+        with (
+            patch(f"{_G}.IS_WINDOWS", True),
+            patch(f"{_G}.os.replace", side_effect=PermissionError(13, "Access is denied")),
+            patch(f"{_G}.time.sleep"),
+            patch("builtins.open", side_effect=open_),
+            pytest.raises(PermissionError, match="cannot access"),
+        ):
+            guard_module._atomic_write(path, "replacement\n")
+
+        assert path.read_text() == "original\n"
         assert self._leftovers(tmp_path) == []
 
     def test_posix_does_not_mask_a_refused_rename(self, tmp_path):

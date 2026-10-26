@@ -2149,9 +2149,15 @@ def _atomic_write(path: Path, data: str | bytes, *, mode: int | None = None) -> 
                 # opened by Node, Rust or Python do.
                 with open(target, "w" if isinstance(data, str) else "wb") as f:
                     f.write(data)
+                # The target holds the new contents now, so what is left is cleanup, and
+                # a failure there (a scanner still holding the temp file, say) must not
+                # report the write as failed. A leftover temp file is dot-prefixed and
+                # matches none of the globs that load or harden these files.
                 if mode is not None:
-                    os.chmod(target, mode)
-                tmp.unlink()
+                    with contextlib.suppress(OSError):
+                        os.chmod(target, mode)
+                with contextlib.suppress(OSError):
+                    tmp.unlink()
     except BaseException:
         with contextlib.suppress(OSError):
             tmp.unlink()
