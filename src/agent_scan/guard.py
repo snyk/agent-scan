@@ -2029,7 +2029,7 @@ def _remove_hook_script(client: str, config_path: Path) -> None:
             rich.print(f"[green]\u2713[/green]  Removed hook script [dim]{dest}[/dim]")
 
 
-def _atomic_write(path: Path, data: str | bytes, *, mode: int | None = None) -> None:
+def _atomic_write(path: Path, data: str | bytes, *, mode: int | None = None, follow_symlinks: bool = True) -> None:
     """Replace *path* with *data* in a single rename.
 
     Agents read their hook config while guard rewrites it, and bash reads a hook script
@@ -2040,31 +2040,41 @@ def _atomic_write(path: Path, data: str | bytes, *, mode: int | None = None) -> 
     and, while the file stays open, the write falls back to in place.
 
     A symlinked *path* (a config kept in a dotfiles repo, say) is written through to its
-    target so the link survives. The replacement keeps the existing file's permission bits
-    unless *mode* is given and, where the platform allows, its owner, which a write in
-    place never changed; a new file gets the umask default, as ``open()`` would give it.
+    target so the link survives. With ``follow_symlinks=False`` the symlink itself is
+    replaced instead and never written through, for files whose location is not the
+    user's to redirect, such as one holding a credential. The replacement keeps the
+    existing file's permission bits unless *mode* is given and, where the platform allows,
+    its owner, which a write in place never changed; a new file gets the umask default, as
+    ``open()`` would give it. The temp file is created with the final permission bits
+    rather than adjusted afterwards, so a private file is never readable by others, even
+    briefly.
     Text is written in text mode, so newlines and encoding match ``Path.write_text``.
     """
-    target = path.resolve() if path.is_symlink() else path
+    target = path.resolve() if follow_symlinks and path.is_symlink() else path
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
-        existing = target.stat()
+        existing = target.lstat()
     except FileNotFoundError:
         existing = None
+    if existing is not None and stat.S_ISLNK(existing.st_mode):
+        # A symlink being replaced: what it points to is not this file's mode or owner.
+        existing = None
+    if mode is None and existing is not None:
+        mode = stat.S_IMODE(existing.st_mode)
 
     # Dot-prefixed so the Copilot policy.d/*.json glob and the snyk-agent-guard* hardening
     # glob in _write_client_config never pick up an in-flight temp file.
     tmp = target.with_name(f".{target.name}.{secrets.token_hex(8)}.tmp")
     # O_BINARY: Python does any newline translation itself; a CRT text-mode fd on Windows
     # would translate a second time.
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o666)
+    fd = os.open(
+        tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o666 if mode is None else mode
+    )
     try:
         with os.fdopen(fd, "w" if isinstance(data, str) else "wb") as f:
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
-        if mode is None and existing is not None:
-            mode = stat.S_IMODE(existing.st_mode)
         if mode is not None:
             os.chmod(tmp, mode)
         if existing is not None and hasattr(os, "chown"):
@@ -2088,12 +2098,21 @@ def _atomic_write(path: Path, data: str | bytes, *, mode: int | None = None) -> 
                     continue
                 # Still held: write in place, as guard did before, rather than fail the
                 # install. That needs the holder to share write access, as readers
-                # opened by Node, Rust or Python do.
+                # opened by Node, Rust or Python do. Never through a symlink that was
+                # meant to be replaced.
+                if target.is_symlink():
+                    raise
                 with open(target, "w" if isinstance(data, str) else "wb") as f:
                     f.write(data)
+                # The target holds the new contents now, so what is left is cleanup, and
+                # a failure there (a scanner still holding the temp file, say) must not
+                # report the write as failed. A leftover temp file is dot-prefixed and
+                # matches none of the globs that load or harden these files.
                 if mode is not None:
-                    os.chmod(target, mode)
-                tmp.unlink()
+                    with contextlib.suppress(OSError):
+                        os.chmod(target, mode)
+                with contextlib.suppress(OSError):
+                    tmp.unlink()
     except BaseException:
         with contextlib.suppress(OSError):
             tmp.unlink()
