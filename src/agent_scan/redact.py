@@ -29,6 +29,9 @@ REDACTED = "**REDACTED**"
 _PUSH_KEY_CONTEXTS = [
     re.compile(r"(PUSH_KEY=')(.*?)(')", re.IGNORECASE),
     re.compile(r"(-PushKey\s+')(.*?)(')", re.IGNORECASE),
+    # The double-quoted assignment install writes into the hook scripts:
+    # INSTALL_PUSH_KEY="…" (sh) and $INSTALL_PUSH_KEY = "…" (PowerShell).
+    re.compile(r'(PUSH_KEY\s*=\s*")(.*?)(")', re.IGNORECASE),
 ]
 
 
@@ -53,7 +56,8 @@ def _is_uuid_like(s: str) -> bool:
 def redact_push_keys(text: str, replacement: str = REDACTED) -> str:
     """Redact push-key values in *text*, including malformed UUIDs.
 
-    Recognises two context patterns (``PUSH_KEY='…'`` and ``-PushKey '…'``)
+    Recognises the hook command forms (``PUSH_KEY='…'`` and ``-PushKey '…'``) and the
+    hook script assignments (``INSTALL_PUSH_KEY="…"`` and ``$INSTALL_PUSH_KEY = "…"``),
     and replaces the value portion when it looks UUID-like — even when the
     UUID contains noise characters (extra dashes, spaces, underscores, …).
     """
