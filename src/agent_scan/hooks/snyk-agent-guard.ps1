@@ -3,7 +3,7 @@
 # Supports Claude Code, Cursor, Codex, and Github Copilot via the -Client argument.
 #
 # Usage:
-#   powershell -File snyk-agent-guard.ps1 -Client claude-code -PushKey '...' -RemoteUrl 'https://...'
+#   powershell -File snyk-agent-guard.ps1 -Client claude-code
 #
 # Reads a JSON payload from stdin and POSTs it (base64-encoded) to the Agent Guard endpoint.
 #

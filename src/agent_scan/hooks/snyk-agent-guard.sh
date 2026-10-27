@@ -4,10 +4,10 @@
 # Supports Claude Code, Cursor, Codex, and GitHub Copilot via the --client argument.
 #
 # Usage:
-#   PUSH_KEY='...' REMOTE_HOOKS_BASE_URL='...' bash snyk-agent-guard.sh --client claude-code
-#   PUSH_KEY='...' REMOTE_HOOKS_BASE_URL='...' bash snyk-agent-guard.sh --client cursor
-#   PUSH_KEY='...' REMOTE_HOOKS_BASE_URL='...' bash snyk-agent-guard.sh --client codex
-#   PUSH_KEY='...' REMOTE_HOOKS_BASE_URL='...' bash snyk-agent-guard.sh --client github-copilot
+#   bash snyk-agent-guard.sh --client claude-code
+#   bash snyk-agent-guard.sh --client cursor
+#   bash snyk-agent-guard.sh --client codex
+#   bash snyk-agent-guard.sh --client github-copilot
 #
 # Reads a JSON payload from stdin and POSTs it (base64-encoded) to the Agent Guard endpoint.
 #
