@@ -3,7 +3,7 @@
 # Supports Claude Code, Cursor, Codex, and Github Copilot via the -Client argument.
 #
 # Usage:
-#   powershell -File snyk-agent-guard.ps1 -Client claude-code -PushKey '...' -RemoteUrl 'https://...'
+#   powershell -File snyk-agent-guard.ps1 -Client claude-code
 #
 # Reads a JSON payload from stdin and POSTs it (base64-encoded) to the Agent Guard endpoint.
 #
@@ -36,8 +36,11 @@ param(
 $ErrorActionPreference = "Stop"
 
 # --- BEGIN install-time variables ---
-# Agent-scan CLI version (replaced at install time).
 $AGENT_SCAN_VERSION = "__AGENT_SCAN_VERSION__"
+$INSTALL_PUSH_KEY = "__AGENT_GUARD_PUSH_KEY__"
+$INSTALL_REMOTE_HOOKS_BASE_URL = "__AGENT_GUARD_REMOTE_HOOKS_BASE_URL__"
+$INSTALL_MACHINE_ID = '__AGENT_GUARD_MACHINE_ID__'
+$INSTALL_TENANT_ID = "__AGENT_GUARD_TENANT_ID__"
 # --- END install-time variables ---
 
 # Hook API version.
@@ -74,20 +77,23 @@ function FailOpen([string]$reason) {
 # Main
 # ---------------------------------------------------------------------------
 
-# Parameters take precedence over env vars.
-if (-not $PushKey) { $PushKey = if ($env:PUSH_KEY) { $env:PUSH_KEY } elseif ($env:PUSHKEY) { $env:PUSHKEY } else { $null } }
+# Installed values take precedence over parameters, which take precedence over env vars,
+# so neither a hook command edited in the agent config nor a stale env var can redirect a
+# filled-in script. Parameters and env vars are only a fallback for a script never filled
+# in (hook commands written before the values were installed passed them as parameters).
+if ($INSTALL_PUSH_KEY -ne "__AGENT_GUARD_PUSH_KEY__") { $PushKey = $INSTALL_PUSH_KEY } elseif (-not $PushKey) { $PushKey = if ($env:PUSH_KEY) { $env:PUSH_KEY } else { $env:PUSHKEY } }
 if (-not $PushKey) {
     Write-Error "PUSH_KEY is required (pass -PushKey or set env var)"
     exit 1
 }
 
-if (-not $RemoteUrl) { $RemoteUrl = $env:REMOTE_HOOKS_BASE_URL }
+if ($INSTALL_REMOTE_HOOKS_BASE_URL -ne "__AGENT_GUARD_REMOTE_HOOKS_BASE_URL__") { $RemoteUrl = $INSTALL_REMOTE_HOOKS_BASE_URL } elseif (-not $RemoteUrl) { $RemoteUrl = $env:REMOTE_HOOKS_BASE_URL }
 if (-not $RemoteUrl) {
     Write-Error "REMOTE_HOOKS_BASE_URL is required (pass -RemoteUrl or set env var)"
     exit 1
 }
 
-if (-not $MachineId) { $MachineId = $env:MACHINE_ID }
+if ($INSTALL_MACHINE_ID -ne "__AGENT_GUARD_MACHINE_ID__") { $MachineId = $INSTALL_MACHINE_ID } elseif (-not $MachineId) { $MachineId = $env:MACHINE_ID }
 if (-not $MachineId) {
     Write-Error "MACHINE_ID is required (pass -MachineId or set env var)"
     exit 1

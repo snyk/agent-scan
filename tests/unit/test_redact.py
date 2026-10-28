@@ -1303,6 +1303,42 @@ class TestRedactPushKeys:
         assert "bash script.sh --client claude-code" in result
         assert self.VALID_UUID not in result
 
+    @pytest.mark.parametrize(
+        "template, expected",
+        [
+            ('INSTALL_PUSH_KEY="{key}"', 'INSTALL_PUSH_KEY="**REDACTED**"'),
+            ('$INSTALL_PUSH_KEY = "{key}"', '$INSTALL_PUSH_KEY = "**REDACTED**"'),
+            ('export PUSH_KEY="{key}"', 'export PUSH_KEY="**REDACTED**"'),
+        ],
+    )
+    def test_double_quoted_hook_script_assignment(self, template, expected):
+        result = redact_push_keys(template.format(key=self.VALID_UUID))
+        assert self.VALID_UUID not in result
+        assert result == expected
+
+    def test_double_quoted_non_uuid_is_kept(self):
+        text = 'INSTALL_PUSH_KEY="__AGENT_GUARD_PUSH_KEY__"'
+        assert redact_push_keys(text) == text
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "snyk-agent-guard.sh",
+            "snyk-agent-guard.ps1",
+            "snyk-agent-guard-discover.sh",
+            "snyk-agent-guard-discover.ps1",
+        ],
+    )
+    def test_installed_hook_scripts(self, tmp_path, name):
+        """Whatever install embeds in a hook script, redaction recognises."""
+        from agent_scan.guard import _copy_hook_script
+
+        dest = tmp_path / "hooks" / name
+        _copy_hook_script(dest, push_key=self.VALID_UUID, url="https://api.snyk.io", machine_id="m", tenant_id="t")
+        assert self.VALID_UUID in dest.read_text(encoding="utf-8-sig")
+
+        assert self.VALID_UUID not in redact_push_keys(dest.read_text(encoding="utf-8-sig"))
+
 
 # ---------------------------------------------------------------------------
 # redact_push_keys_in_data (deep-traversal)
