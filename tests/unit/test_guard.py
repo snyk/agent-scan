@@ -955,7 +955,7 @@ class TestDiscoveryHookScriptFiles:
         content = discover_script.read_text()
         assert guard_module._SECTION_BEGIN.decode() in content
         assert guard_module._SECTION_END.decode() in content
-        assert "INSTALL_PUSH_KEY" in content
+        assert "INSTALL_CLIENT_ID" in content
         assert "INSTALL_REMOTE_HOOKS_BASE_URL" in content
         assert "INSTALL_MACHINE_ID" in content
         assert '"$AGENT_SCAN_COMMAND" guard discover "$@"' in content
@@ -981,11 +981,13 @@ class TestDiscoveryHookScriptFiles:
         script = tmp_path / "snyk-agent-guard-discover.sh"
         stub = tmp_path / "snyk-agent-scan"
         marker = tmp_path / "env"
-        stub.write_text('#!/bin/sh\nprintf "%s|%s|%s" "$PUSH_KEY" "$REMOTE_HOOKS_BASE_URL" "$MACHINE_ID" > "$MARKER"\n')
+        stub.write_text(
+            '#!/bin/sh\nprintf "%s|%s|%s" "$CLIENT_ID" "$REMOTE_HOOKS_BASE_URL" "$MACHINE_ID" > "$MARKER"\n'
+        )
         stub.chmod(0o755)
         guard_module._copy_hook_script(
             script,
-            push_key="installed-key",
+            push_key="installed-client-id",
             url="https://installed.example",
             machine_id="installed-machine",
             agent_scan_command=str(stub),
@@ -993,7 +995,7 @@ class TestDiscoveryHookScriptFiles:
         env = {
             **os.environ,
             "AGENT_SCAN_COMMAND": str(tmp_path / "ambient-snyk-agent-scan"),
-            "PUSH_KEY": "ambient-key",
+            "CLIENT_ID": "ambient-client-id",
             "REMOTE_HOOKS_BASE_URL": "https://ambient.example",
             "MACHINE_ID": "ambient-machine",
             "MARKER": str(marker),
@@ -1009,7 +1011,7 @@ class TestDiscoveryHookScriptFiles:
         )
 
         assert result.returncode == 0, result.stderr
-        assert marker.read_text() == "installed-key|https://installed.example|installed-machine"
+        assert marker.read_text() == "installed-client-id|https://installed.example|installed-machine"
 
     @pytest.mark.parametrize(
         "make_command",
@@ -1313,7 +1315,7 @@ class TestWindowsDiscoveryHookScriptFiles:
         content = discover_script.read_text()
         assert guard_module._SECTION_BEGIN.decode() in content
         assert guard_module._SECTION_END.decode() in content
-        assert "INSTALL_PUSH_KEY" in content
+        assert "INSTALL_CLIENT_ID" in content
         assert "INSTALL_REMOTE_HOOKS_BASE_URL" in content
         assert "INSTALL_MACHINE_ID" in content
 
@@ -3363,13 +3365,13 @@ _FORWARDER_SCRIPTS = ("snyk-agent-guard.sh", "snyk-agent-guard.ps1")
 _TRAMPOLINE_SCRIPTS = ("snyk-agent-guard-discover.sh", "snyk-agent-guard-discover.ps1")
 _FORWARDER_PLACEHOLDERS = {
     "__AGENT_SCAN_VERSION__",
-    "__AGENT_GUARD_PUSH_KEY__",
+    "__AGENT_GUARD_CLIENT_ID__",
     "__AGENT_GUARD_REMOTE_HOOKS_BASE_URL__",
     "__AGENT_GUARD_MACHINE_ID__",
     "__AGENT_GUARD_TENANT_ID__",
 }
 _TRAMPOLINE_PLACEHOLDERS = {
-    "__AGENT_GUARD_PUSH_KEY__",
+    "__AGENT_GUARD_CLIENT_ID__",
     "__AGENT_GUARD_REMOTE_HOOKS_BASE_URL__",
     "__AGENT_GUARD_MACHINE_ID__",
     "__AGENT_GUARD_AGENT_SCAN_COMMAND__",
@@ -3408,7 +3410,7 @@ def _copy_with_sentinel_version(monkeypatch, dest: Path, url: str = "https://api
         "_hook_script_variables",
         lambda **kwargs: {
             b"__AGENT_SCAN_VERSION__": _SENTINEL_VERSION.encode(),
-            b"__AGENT_GUARD_PUSH_KEY__": b"test-push-key",
+            b"__AGENT_GUARD_CLIENT_ID__": b"test-push-key",
             b"__AGENT_GUARD_REMOTE_HOOKS_BASE_URL__": url.encode(),
             b"__AGENT_GUARD_MACHINE_ID__": b"test-machine-id",
         },
@@ -3784,7 +3786,7 @@ class TestHookScriptVariableValues:
         """The sentinel-driven tests prove the plumbing; this pins what actually ships."""
         variables = guard_module._hook_script_variables()
         assert variables[b"__AGENT_SCAN_VERSION__"] == version_info.encode()
-        assert variables[b"__AGENT_GUARD_PUSH_KEY__"] == b""
+        assert variables[b"__AGENT_GUARD_CLIENT_ID__"] == b""
         assert variables[b"__AGENT_GUARD_REMOTE_HOOKS_BASE_URL__"]
         assert variables[b"__AGENT_GUARD_MACHINE_ID__"] == b""
 
@@ -3859,17 +3861,21 @@ class TestHookScriptVariableSubstitution:
     def test_reinstall_rotates_the_embedded_push_key(self, tmp_path, name):
         """Reinstalling over an existing script leaves no trace of the superseded key."""
         dest = tmp_path / "hooks" / name
-        guard_module._copy_hook_script(dest, push_key="pk-old", url="https://api.snyk.io", machine_id="machine-old")
-        assert "pk-old" in dest.read_text()
+        guard_module._copy_hook_script(
+            dest, push_key="client-id-old", url="https://api.snyk.io", machine_id="machine-old"
+        )
+        assert "client-id-old" in dest.read_text()
 
-        guard_module._copy_hook_script(dest, push_key="pk-new", url="https://api.eu.snyk.io", machine_id="machine-new")
+        guard_module._copy_hook_script(
+            dest, push_key="client-id-new", url="https://api.eu.snyk.io", machine_id="machine-new"
+        )
 
         rendered = dest.read_text()
-        assert "pk-old" not in rendered
+        assert "client-id-old" not in rendered
         assert "machine-old" not in rendered
         assert "https://api.snyk.io" not in rendered
         section = _variables_section(rendered)
-        assert "pk-new" in section
+        assert "client-id-new" in section
         assert "machine-new" in section
         assert "https://api.eu.snyk.io" in section
 
@@ -3884,13 +3890,13 @@ class TestHookScriptVariableSubstitution:
         """Revocation needs a tenant embedded in the script."""
         dest = tmp_path / "hooks" / name
         guard_module._copy_hook_script(
-            dest, push_key="pk-1", url="https://api.snyk.io", machine_id="machine-1", tenant_id="tenant-1"
+            dest, push_key="client-id-1", url="https://api.snyk.io", machine_id="machine-1", tenant_id="tenant-1"
         )
 
         info = guard_module._parse_command_info(command.format(path=dest), ["PreToolUse"], script_path=dest)
 
         assert info["tenant_id"] == "tenant-1"
-        assert info["auth_value"] == "pk-1"
+        assert info["auth_value"] == "client-id-1"
         assert info["url"] == "https://api.snyk.io"
 
     def test_a_command_tenant_still_wins_for_a_script_predating_the_variable(self, tmp_path):
@@ -3899,7 +3905,7 @@ class TestHookScriptVariableSubstitution:
         dest.parent.mkdir(parents=True)
         dest.write_text(
             f"{_SECTION_BEGIN}"
-            'INSTALL_PUSH_KEY="pk-1"\n'
+            'INSTALL_CLIENT_ID="client-id-1"\n'
             'INSTALL_REMOTE_HOOKS_BASE_URL="https://api.snyk.io"\n'
             f"{_SECTION_END}"
         )
@@ -3923,7 +3929,7 @@ class TestHookScriptVariableSubstitution:
             script_path = guard_module._forwarder_script_path(config_path)
             guard_module._copy_hook_script(
                 script_path,
-                push_key="pk-1",
+                push_key="client-id-1",
                 url="https://api.snyk.io",
                 machine_id="machine-1",
                 tenant_id="tenant-1",
@@ -3934,7 +3940,7 @@ class TestHookScriptVariableSubstitution:
             info = guard_module._detect_claude_install(config_path)
 
         assert info is not None
-        assert info["auth_value"] == "pk-1"
+        assert info["auth_value"] == "client-id-1"
         assert info["url"] == "https://api.snyk.io"
         assert info["tenant_id"] == "tenant-1"
 
@@ -3959,7 +3965,7 @@ class TestBashHookScript:
             timeout=10,
             env={
                 "PATH": "/usr/bin:/bin:/usr/local/bin",
-                "PUSH_KEY": "test-pk-123",
+                "CLIENT_ID": "test-client-id-123",
                 "REMOTE_HOOKS_BASE_URL": hook_server,
                 "MACHINE_ID": "machine-42",
             },
@@ -3969,7 +3975,7 @@ class TestBashHookScript:
         req = _HookHandler.last_request
         assert req is not None
         assert "/hidden/agent-monitor/hooks/claude-code" in req["path"]
-        assert req["headers"]["X-Client-Id"] == "test-pk-123"
+        assert req["headers"]["X-Client-Id"] == "test-client-id-123"
         assert req["body"].startswith("base64:")
         decoded = base64.b64decode(req["body"].removeprefix("base64:"))
         assert json.loads(decoded) == json.loads(payload)
@@ -3978,13 +3984,12 @@ class TestBashHookScript:
         script = tmp_path / "snyk-agent-guard.sh"
         guard_module._copy_hook_script(
             script,
-            push_key="installed-key",
+            push_key="installed-client-id",
             url=hook_server,
             machine_id="installed-machine",
             tenant_id="installed-tenant",
         )
-        monkeypatch.setenv("PUSH_KEY", "ambient-key")
-        monkeypatch.setenv("PUSHKEY", "ambient-key-alias")
+        monkeypatch.setenv("CLIENT_ID", "ambient-client-id")
         monkeypatch.setenv("REMOTE_HOOKS_BASE_URL", "https://ambient.example")
         monkeypatch.setenv("MACHINE_ID", "ambient-machine")
 
@@ -3998,7 +4003,7 @@ class TestBashHookScript:
         req = _HookHandler.last_request
         assert req is not None
         assert "/hidden/agent-monitor/hooks/claude-code" in req["path"]
-        assert req["headers"]["X-Client-Id"] == "installed-key"
+        assert req["headers"]["X-Client-Id"] == "installed-client-id"
         assert json.loads(req["headers"]["X-User"])["identifier"] == "installed-machine"
 
     def test_posts_large_payload_without_exec_argument_limit(self, hook_server):
@@ -4018,7 +4023,7 @@ class TestBashHookScript:
             timeout=10,
             env={
                 "PATH": "/usr/bin:/bin:/usr/local/bin",
-                "PUSH_KEY": "test-pk-large-payload",
+                "CLIENT_ID": "test-client-id-large-payload",
                 "REMOTE_HOOKS_BASE_URL": hook_server,
                 "MACHINE_ID": "machine-42",
             },
@@ -4041,7 +4046,7 @@ class TestBashHookScript:
             timeout=10,
             env={
                 "PATH": "/usr/bin:/bin:/usr/local/bin",
-                "PUSH_KEY": "test-pk-456",
+                "CLIENT_ID": "test-client-id-456",
                 "REMOTE_HOOKS_BASE_URL": hook_server,
                 "MACHINE_ID": "machine-42",
             },
@@ -4060,7 +4065,7 @@ class TestBashHookScript:
             timeout=10,
             env={
                 "PATH": "/usr/bin:/bin:/usr/local/bin",
-                "PUSH_KEY": "test-pk-codex",
+                "CLIENT_ID": "test-client-id-codex",
                 "REMOTE_HOOKS_BASE_URL": hook_server,
                 "MACHINE_ID": "machine-42",
             },
@@ -4079,7 +4084,7 @@ class TestBashHookScript:
             timeout=10,
             env={
                 "PATH": "/usr/bin:/bin:/usr/local/bin",
-                "PUSH_KEY": "test-pk-copilot",
+                "CLIENT_ID": "test-client-id-copilot",
                 "REMOTE_HOOKS_BASE_URL": hook_server,
                 "MACHINE_ID": "machine-42",
             },
@@ -4110,7 +4115,7 @@ class TestBashHookScript:
             timeout=10,
             env={
                 "PATH": "/usr/bin:/bin:/usr/local/bin",
-                "PUSH_KEY": "test-pk-surface",
+                "CLIENT_ID": "test-client-id-surface",
                 "REMOTE_HOOKS_BASE_URL": hook_server,
                 "MACHINE_ID": "machine-42",
                 "AI_AGENT": "github_copilot_vscode_agent",
@@ -4132,7 +4137,7 @@ class TestBashHookScript:
             timeout=10,
             env={
                 "PATH": "/usr/bin:/bin:/usr/local/bin",
-                "PUSH_KEY": "test-pk-copilot",
+                "CLIENT_ID": "test-client-id-copilot",
                 "REMOTE_HOOKS_BASE_URL": hook_server,
                 "MACHINE_ID": "machine-42",
             },
@@ -4150,7 +4155,7 @@ class TestBashHookScript:
             timeout=10,
             env={
                 "PATH": "/usr/bin:/bin:/usr/local/bin",
-                "PUSH_KEY": "test-pk",
+                "CLIENT_ID": "test-client-id",
                 "REMOTE_HOOKS_BASE_URL": hook_server,
                 "MACHINE_ID": "machine-42",
             },
@@ -4162,7 +4167,7 @@ class TestBashHookScript:
     @pytest.mark.parametrize("machine_id", ["my box", "Bob's Mac (corp) & co", "$(touch pwned) `id` $HOME"])
     def test_installed_machine_id_reaches_the_server_verbatim(self, tmp_path, hook_server, machine_id):
         script = tmp_path / "snyk-agent-guard.sh"
-        guard_module._copy_hook_script(script, push_key="installed-key", url=hook_server, machine_id=machine_id)
+        guard_module._copy_hook_script(script, push_key="installed-client-id", url=hook_server, machine_id=machine_id)
 
         result = subprocess.run(
             ["bash", str(script), "--client", "claude-code"],
@@ -4192,7 +4197,7 @@ class TestBashHookScript:
             timeout=10,
             env={
                 "PATH": "/usr/bin:/bin:/usr/local/bin",
-                "PUSH_KEY": "test-pk",
+                "CLIENT_ID": "test-client-id",
                 "REMOTE_HOOKS_BASE_URL": hook_server,
                 "MACHINE_ID": "machine-42",
             },
@@ -4215,7 +4220,7 @@ class TestBashHookScript:
             timeout=10,
             env={
                 "PATH": "/usr/bin:/bin:/usr/local/bin",
-                "PUSH_KEY": "test-pk",
+                "CLIENT_ID": "test-client-id",
                 "REMOTE_HOOKS_BASE_URL": hook_server,
                 "MACHINE_ID": "machine-42",
             },
@@ -4236,14 +4241,14 @@ class TestBashHookScript:
             timeout=10,
             env={
                 "PATH": "/usr/bin:/bin:/usr/local/bin",
-                "PUSH_KEY": "test-pk",
+                "CLIENT_ID": "test-client-id",
                 "REMOTE_HOOKS_BASE_URL": hook_server,
             },
         )
         assert result.returncode != 0
         assert "MACHINE_ID" in result.stderr
 
-    def test_missing_push_key_fails(self, hook_server):
+    def test_missing_client_id_fails(self, hook_server):
         script = _get_script_path("snyk-agent-guard.sh")
         result = subprocess.run(
             ["bash", str(script), "--client", "claude-code"],
@@ -4257,7 +4262,7 @@ class TestBashHookScript:
             },
         )
         assert result.returncode != 0
-        assert "PUSH_KEY" in result.stderr
+        assert "CLIENT_ID" in result.stderr
 
     def test_missing_url_fails(self):
         script = _get_script_path("snyk-agent-guard.sh")
@@ -4269,7 +4274,7 @@ class TestBashHookScript:
             timeout=10,
             env={
                 "PATH": "/usr/bin:/bin:/usr/local/bin",
-                "PUSH_KEY": "pk",
+                "CLIENT_ID": "test-client-id",
                 "MACHINE_ID": "machine-42",
             },
         )
@@ -4282,7 +4287,7 @@ class TestBashHookScript:
     def _failure_env(url: str) -> dict:
         return {
             "PATH": "/usr/bin:/bin:/usr/local/bin",
-            "PUSH_KEY": "test-pk-fail",
+            "CLIENT_ID": "test-client-id-fail",
             "REMOTE_HOOKS_BASE_URL": url,
             "MACHINE_ID": "machine-42",
         }
@@ -4542,8 +4547,8 @@ class TestPowerShellHookScript:
                 str(script),
                 "-Client",
                 "claude-code",
-                "-PushKey",
-                "test-pk-123",
+                "-ClientId",
+                "test-client-id-123",
                 "-RemoteUrl",
                 hook_server,
                 "-MachineId",
@@ -4559,7 +4564,7 @@ class TestPowerShellHookScript:
         req = _HookHandler.last_request
         assert req is not None
         assert "/hidden/agent-monitor/hooks/claude-code" in req["path"]
-        assert req["headers"]["X-Client-Id"] == "test-pk-123"
+        assert req["headers"]["X-Client-Id"] == "test-client-id-123"
         assert req["body"].startswith("base64:")
         decoded = base64.b64decode(req["body"].removeprefix("base64:"))
         assert json.loads(decoded) == json.loads(payload)
@@ -4574,8 +4579,8 @@ class TestPowerShellHookScript:
                 str(script),
                 "-Client",
                 "cursor",
-                "-PushKey",
-                "test-pk-456",
+                "-ClientId",
+                "test-client-id-456",
                 "-RemoteUrl",
                 hook_server,
                 "-MachineId",
@@ -4598,8 +4603,8 @@ class TestPowerShellHookScript:
                 str(script),
                 "-Client",
                 "claude-code",
-                "-PushKey",
-                "test-pk",
+                "-ClientId",
+                "test-client-id",
                 "-RemoteUrl",
                 hook_server,
                 "-MachineId",
@@ -4616,7 +4621,7 @@ class TestPowerShellHookScript:
 
     def test_installed_machine_id_with_a_space_reaches_the_server(self, tmp_path, hook_server):
         script = tmp_path / "snyk-agent-guard.ps1"
-        guard_module._copy_hook_script(script, push_key="installed-key", url=hook_server, machine_id="my box")
+        guard_module._copy_hook_script(script, push_key="installed-client-id", url=hook_server, machine_id="my box")
 
         result = subprocess.run(
             [self._ps_cmd(), "-File", str(script), "-Client", "claude-code"],
@@ -4633,7 +4638,9 @@ class TestPowerShellHookScript:
     def test_installed_values_win_over_parameters(self, tmp_path, hook_server):
         """A hook command edited in the agent config cannot redirect a filled-in script."""
         script = tmp_path / "snyk-agent-guard.ps1"
-        guard_module._copy_hook_script(script, push_key="installed-key", url=hook_server, machine_id="installed-box")
+        guard_module._copy_hook_script(
+            script, push_key="installed-client-id", url=hook_server, machine_id="installed-box"
+        )
 
         result = subprocess.run(
             [
@@ -4642,7 +4649,7 @@ class TestPowerShellHookScript:
                 str(script),
                 "-Client",
                 "claude-code",
-                "-PushKey",
+                "-ClientId",
                 "param-key",
                 "-RemoteUrl",
                 "http://127.0.0.1:9",
@@ -4657,7 +4664,7 @@ class TestPowerShellHookScript:
 
         assert result.returncode == 0, result.stderr
         req = _HookHandler.last_request
-        assert req["headers"]["X-Client-Id"] == "installed-key"
+        assert req["headers"]["X-Client-Id"] == "installed-client-id"
         assert json.loads(req["headers"]["X-User"])["identifier"] == "installed-box"
 
     def test_installed_script_reports_its_cli_version(self, monkeypatch, tmp_path, hook_server):
@@ -4689,8 +4696,8 @@ class TestPowerShellHookScript:
                 str(script),
                 "-Client",
                 "claude-code",
-                "-PushKey",
-                "test-pk",
+                "-ClientId",
+                "test-client-id",
                 "-RemoteUrl",
                 hook_server,
                 "-MachineId",
@@ -4718,8 +4725,8 @@ class TestPowerShellHookScript:
                 str(script),
                 "-Client",
                 "claude-code",
-                "-PushKey",
-                "test-pk",
+                "-ClientId",
+                "test-client-id",
                 "-RemoteUrl",
                 hook_server,
             ],
@@ -4732,11 +4739,10 @@ class TestPowerShellHookScript:
         assert result.returncode != 0
         assert "MACHINE_ID" in result.stderr
 
-    def test_missing_push_key_fails(self, hook_server):
+    def test_missing_client_id_fails(self, hook_server):
         script = _get_script_path("snyk-agent-guard.ps1")
         env = dict(__import__("os").environ)
-        env.pop("PUSH_KEY", None)
-        env.pop("PUSHKEY", None)
+        env.pop("CLIENT_ID", None)
         result = subprocess.run(
             [self._ps_cmd(), "-File", str(script), "-Client", "claude-code", "-RemoteUrl", hook_server],
             input="{}",
@@ -4756,8 +4762,8 @@ class TestPowerShellHookScript:
             str(script or _get_script_path("snyk-agent-guard.ps1")),
             "-Client",
             client,
-            "-PushKey",
-            "test-pk-fail",
+            "-ClientId",
+            "test-client-id-fail",
             "-RemoteUrl",
             url,
             "-MachineId",
@@ -4880,7 +4886,7 @@ class TestCursorStylePowerShellInvocation:
             timeout=15,
             env={
                 **os.environ,
-                "PUSH_KEY": "test-pk-cursor",
+                "CLIENT_ID": "test-client-id-cursor",
                 "REMOTE_HOOKS_BASE_URL": hook_server,
                 "MACHINE_ID": "machine-42",
             },
@@ -4890,7 +4896,7 @@ class TestCursorStylePowerShellInvocation:
         req = _HookHandler.last_request
         assert req is not None
         assert "/hidden/agent-monitor/hooks/claude-code" in req["path"]
-        assert req["headers"]["X-Client-Id"] == "test-pk-cursor"
+        assert req["headers"]["X-Client-Id"] == "test-client-id-cursor"
         decoded = base64.b64decode(req["body"].removeprefix("base64:"))
         assert json.loads(decoded) == json.loads(payload)
 
@@ -4919,7 +4925,7 @@ class TestCursorStyleBashInvocation:
             timeout=10,
             env={
                 "PATH": "/usr/bin:/bin:/usr/local/bin",
-                "PUSH_KEY": "test-pk-cursor",
+                "CLIENT_ID": "test-client-id-cursor",
                 "REMOTE_HOOKS_BASE_URL": hook_server,
                 "MACHINE_ID": "machine-42",
             },
@@ -4929,7 +4935,7 @@ class TestCursorStyleBashInvocation:
         req = _HookHandler.last_request
         assert req is not None
         assert "/hidden/agent-monitor/hooks/cursor" in req["path"]
-        assert req["headers"]["X-Client-Id"] == "test-pk-cursor"
+        assert req["headers"]["X-Client-Id"] == "test-client-id-cursor"
         decoded = base64.b64decode(req["body"].removeprefix("base64:"))
         assert json.loads(decoded) == json.loads(payload)
 
@@ -6514,6 +6520,43 @@ class TestGuardInstallMachineIdCli:
 
         assert exc.value.code == 2
         run.assert_not_called()
+
+
+class TestRunDiscoverPushKeySource:
+    """The trampolines export the push key as CLIENT_ID; earlier releases exported PUSH_KEY."""
+
+    @staticmethod
+    def _run(monkeypatch, env):
+        for name in ("CLIENT_ID", "PUSH_KEY"):
+            monkeypatch.delenv(name, raising=False)
+        for name, value in env.items():
+            monkeypatch.setenv(name, value)
+        monkeypatch.setenv("MACHINE_ID", "m-1")
+        monkeypatch.setattr(guard_module, "_read_hook_payload", lambda: "{}")
+        args = SimpleNamespace(client="claude-code", url="https://hooks.example", scope=DiscoveryScope.SERVERS)
+        with patch(f"{_G}._send_servers_discovered_event", return_value=True) as send:
+            code = guard_module._run_discover(args)
+        return code, send
+
+    @pytest.mark.parametrize(
+        "env, expected",
+        [
+            ({"CLIENT_ID": "client-id"}, "client-id"),
+            ({"PUSH_KEY": "legacy-key"}, "legacy-key"),
+            ({"CLIENT_ID": "client-id", "PUSH_KEY": "legacy-key"}, "client-id"),
+        ],
+    )
+    def test_reads_client_id_then_push_key(self, monkeypatch, env, expected):
+        code, send = self._run(monkeypatch, env)
+
+        assert code == 0
+        assert send.call_args.args[0] == expected
+
+    def test_fails_without_either(self, monkeypatch):
+        code, send = self._run(monkeypatch, {})
+
+        assert code == 1
+        send.assert_not_called()
 
 
 class TestGuardDiscoverCli:

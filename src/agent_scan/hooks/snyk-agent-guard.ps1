@@ -21,7 +21,7 @@ param(
     [string]$Client,
 
     [Parameter(Mandatory=$false)]
-    [string]$PushKey,
+    [string]$ClientId,
 
     [Parameter(Mandatory=$false)]
     [string]$RemoteUrl,
@@ -37,7 +37,7 @@ $ErrorActionPreference = "Stop"
 
 # --- BEGIN install-time variables ---
 $AGENT_SCAN_VERSION = "__AGENT_SCAN_VERSION__"
-$INSTALL_PUSH_KEY = "__AGENT_GUARD_PUSH_KEY__"
+$INSTALL_CLIENT_ID = "__AGENT_GUARD_CLIENT_ID__"
 $INSTALL_REMOTE_HOOKS_BASE_URL = "__AGENT_GUARD_REMOTE_HOOKS_BASE_URL__"
 $INSTALL_MACHINE_ID = '__AGENT_GUARD_MACHINE_ID__'
 $INSTALL_TENANT_ID = "__AGENT_GUARD_TENANT_ID__"
@@ -81,9 +81,9 @@ function FailOpen([string]$reason) {
 # so neither a hook command edited in the agent config nor a stale env var can redirect a
 # filled-in script. Parameters and env vars are only a fallback for a script never filled
 # in (hook commands written before the values were installed passed them as parameters).
-if ($INSTALL_PUSH_KEY -ne "__AGENT_GUARD_PUSH_KEY__") { $PushKey = $INSTALL_PUSH_KEY } elseif (-not $PushKey) { $PushKey = if ($env:PUSH_KEY) { $env:PUSH_KEY } else { $env:PUSHKEY } }
-if (-not $PushKey) {
-    Write-Error "PUSH_KEY is required (pass -PushKey or set env var)"
+if ($INSTALL_CLIENT_ID -ne "__AGENT_GUARD_CLIENT_ID__") { $ClientId = $INSTALL_CLIENT_ID } elseif (-not $ClientId) { $ClientId = $env:CLIENT_ID }
+if (-not $ClientId) {
+    Write-Error "CLIENT_ID is required (pass -ClientId or set env var)"
     exit 1
 }
 
@@ -179,7 +179,7 @@ try {
         "User-Agent"   = $userAgent
         "X-User"       = $xUser
         "Content-Type" = "text/plain"
-        "X-Client-Id"  = $PushKey
+        "X-Client-Id"  = $ClientId
     }
     if ($agentSurface) {
         $headers["X-Agent-Surface"] = $agentSurface

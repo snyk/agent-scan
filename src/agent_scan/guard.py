@@ -398,9 +398,9 @@ def _read_hook_payload() -> str:
 
 
 def _run_discover(args) -> int:
-    push_key = os.environ.get("PUSH_KEY", "")
+    push_key = os.environ.get("CLIENT_ID") or os.environ.get("PUSH_KEY", "")
     if not push_key:
-        rich.print("[bold red]Error:[/bold red] PUSH_KEY is required to run guard discovery.")
+        rich.print("[bold red]Error:[/bold red] CLIENT_ID or PUSH_KEY is required to run guard discovery.")
         return 1
 
     url = getattr(args, "url", None) or os.environ.get("REMOTE_HOOKS_BASE_URL") or DEFAULT_REMOTE_URL
@@ -1700,7 +1700,7 @@ def _read_hook_script_variables(path: Path) -> dict[str, str]:
     section = content[start:end]
     result: dict[str, str] = {}
     for name, variable in (
-        ("PUSH_KEY", "INSTALL_PUSH_KEY"),
+        ("PUSH_KEY", "INSTALL_CLIENT_ID"),
         ("REMOTE_HOOKS_BASE_URL", "INSTALL_REMOTE_HOOKS_BASE_URL"),
         ("TENANT_ID", "INSTALL_TENANT_ID"),
     ):
@@ -2044,7 +2044,7 @@ def _hook_script_variables(
 
     variables = {
         b"__AGENT_SCAN_VERSION__": version_info.encode(),
-        b"__AGENT_GUARD_PUSH_KEY__": push_key.encode(),
+        b"__AGENT_GUARD_CLIENT_ID__": push_key.encode(),
         b"__AGENT_GUARD_REMOTE_HOOKS_BASE_URL__": (url or DEFAULT_REMOTE_URL).encode(),
         b"__AGENT_GUARD_MACHINE_ID__": machine_id.encode(),
         b"__AGENT_GUARD_TENANT_ID__": tenant_id.encode(),
@@ -2052,7 +2052,7 @@ def _hook_script_variables(
     }
     for placeholder, value in variables.items():
         if not value and placeholder in {
-            b"__AGENT_GUARD_PUSH_KEY__",
+            b"__AGENT_GUARD_CLIENT_ID__",
             b"__AGENT_GUARD_MACHINE_ID__",
             b"__AGENT_GUARD_TENANT_ID__",
             b"__AGENT_GUARD_AGENT_SCAN_COMMAND__",

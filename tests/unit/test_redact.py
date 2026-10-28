@@ -1306,8 +1306,8 @@ class TestRedactPushKeys:
     @pytest.mark.parametrize(
         "template, expected",
         [
-            ('INSTALL_PUSH_KEY="{key}"', 'INSTALL_PUSH_KEY="**REDACTED**"'),
-            ('$INSTALL_PUSH_KEY = "{key}"', '$INSTALL_PUSH_KEY = "**REDACTED**"'),
+            ('INSTALL_CLIENT_ID="{key}"', 'INSTALL_CLIENT_ID="**REDACTED**"'),
+            ('$INSTALL_CLIENT_ID = "{key}"', '$INSTALL_CLIENT_ID = "**REDACTED**"'),
             ('export PUSH_KEY="{key}"', 'export PUSH_KEY="**REDACTED**"'),
         ],
     )
@@ -1317,7 +1317,7 @@ class TestRedactPushKeys:
         assert result == expected
 
     def test_double_quoted_non_uuid_is_kept(self):
-        text = 'INSTALL_PUSH_KEY="__AGENT_GUARD_PUSH_KEY__"'
+        text = 'INSTALL_CLIENT_ID="__AGENT_GUARD_CLIENT_ID__"'
         assert redact_push_keys(text) == text
 
     @pytest.mark.parametrize(
