@@ -9,7 +9,7 @@ param(
     [string]$Client,
 
     [Parameter(Mandatory=$false)]
-    [string]$PushKey,
+    [string]$ClientId,
 
     [Parameter(Mandatory=$false)]
     [string]$RemoteUrl,
@@ -28,7 +28,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 # --- BEGIN install-time variables ---
-$INSTALL_PUSH_KEY = "__AGENT_GUARD_PUSH_KEY__"
+$INSTALL_CLIENT_ID = "__AGENT_GUARD_CLIENT_ID__"
 $INSTALL_REMOTE_HOOKS_BASE_URL = "__AGENT_GUARD_REMOTE_HOOKS_BASE_URL__"
 $INSTALL_MACHINE_ID = '__AGENT_GUARD_MACHINE_ID__'
 $INSTALL_AGENT_SCAN_COMMAND = '__AGENT_GUARD_AGENT_SCAN_COMMAND__'
@@ -37,7 +37,7 @@ $INSTALL_AGENT_SCAN_COMMAND = '__AGENT_GUARD_AGENT_SCAN_COMMAND__'
 # Installed values take precedence over parameters, which take precedence over env vars,
 # so a hook command edited in the agent config cannot redirect a filled-in script.
 # Parameters and env vars are only a fallback for a script never filled in.
-if ($INSTALL_PUSH_KEY -ne "__AGENT_GUARD_PUSH_KEY__") { $env:PUSH_KEY = $INSTALL_PUSH_KEY } elseif ($PushKey) { $env:PUSH_KEY = $PushKey }
+if ($INSTALL_CLIENT_ID -ne "__AGENT_GUARD_CLIENT_ID__") { $env:CLIENT_ID = $INSTALL_CLIENT_ID } elseif ($ClientId) { $env:CLIENT_ID = $ClientId }
 if ($INSTALL_REMOTE_HOOKS_BASE_URL -ne "__AGENT_GUARD_REMOTE_HOOKS_BASE_URL__") { $env:REMOTE_HOOKS_BASE_URL = $INSTALL_REMOTE_HOOKS_BASE_URL } elseif ($RemoteUrl) { $env:REMOTE_HOOKS_BASE_URL = $RemoteUrl }
 if ($INSTALL_MACHINE_ID -ne "__AGENT_GUARD_MACHINE_ID__") { $MachineId = $INSTALL_MACHINE_ID } elseif (-not $MachineId) { $MachineId = $env:MACHINE_ID }
 if (-not $MachineId) { exit 0 }

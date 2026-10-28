@@ -23,7 +23,7 @@ set -euo pipefail
 
 # --- BEGIN install-time variables ---
 AGENT_SCAN_VERSION="__AGENT_SCAN_VERSION__"
-INSTALL_PUSH_KEY="__AGENT_GUARD_PUSH_KEY__"
+INSTALL_CLIENT_ID="__AGENT_GUARD_CLIENT_ID__"
 INSTALL_REMOTE_HOOKS_BASE_URL="__AGENT_GUARD_REMOTE_HOOKS_BASE_URL__"
 INSTALL_MACHINE_ID='__AGENT_GUARD_MACHINE_ID__'
 INSTALL_TENANT_ID="__AGENT_GUARD_TENANT_ID__"
@@ -165,10 +165,10 @@ hook_main() {
   [[ "$remote_url" != "__AGENT_GUARD_REMOTE_HOOKS_BASE_URL__" ]] || remote_url="${REMOTE_HOOKS_BASE_URL:-}"
   [[ -n "$remote_url" ]] || die "REMOTE_HOOKS_BASE_URL environment variable is not set"
 
-  local pushkey
-  pushkey="$INSTALL_PUSH_KEY"
-  [[ "$pushkey" != "__AGENT_GUARD_PUSH_KEY__" ]] || pushkey="${PUSH_KEY:-${PUSHKEY:-}}"
-  [[ -n "$pushkey" ]] || die "PUSH_KEY environment variable is not set"
+  local client_id
+  client_id="$INSTALL_CLIENT_ID"
+  [[ "$client_id" != "__AGENT_GUARD_CLIENT_ID__" ]] || client_id="${CLIENT_ID:-}"
+  [[ -n "$client_id" ]] || die "CLIENT_ID environment variable is not set"
   local machine_id="$INSTALL_MACHINE_ID"
   [[ "$machine_id" != "__AGENT_GUARD_MACHINE_ID__" ]] || machine_id="${MACHINE_ID:-}"
   [[ -n "$machine_id" ]] || die "MACHINE_ID environment variable is not set"
@@ -234,7 +234,7 @@ hook_main() {
     -H "User-Agent: ${user_agent}"
     -H "X-User: ${x_user}"
     -H "Content-Type: text/plain"
-    -H "X-Client-Id: ${pushkey}"
+    -H "X-Client-Id: ${client_id}"
     --data-binary @-
   )
   if [[ -n "$agent_surface" ]]; then
