@@ -20,7 +20,7 @@ from detect_secrets.settings import default_settings, get_plugins, transient_set
 
 from agent_scan.models.errors import ScanError
 from agent_scan.models.inspect import InspectedPath, InspectedServer
-from agent_scan.models.mcp import RemoteServer, StdioServer
+from agent_scan.models.mcp import RemoteServer, ServerReference, StdioServer
 
 logger = logging.getLogger(__name__)
 
@@ -745,7 +745,9 @@ def redact_error_text(text: str | None) -> str | None:
     return redact_text(redact_absolute_paths(text))
 
 
-def redact_server_config(server: StdioServer | RemoteServer) -> StdioServer | RemoteServer:
+def redact_server_config(
+    server: StdioServer | RemoteServer | ServerReference,
+) -> StdioServer | RemoteServer | ServerReference:
     """Redact sensitive values from an MCP server configuration in place."""
     if isinstance(server, StdioServer):
         # Redact all environment variables

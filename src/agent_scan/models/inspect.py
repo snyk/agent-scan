@@ -3,7 +3,7 @@
 from pydantic import BaseModel, Field
 
 from agent_scan.models.errors import CouldNotParseMCPConfig, FileNotFoundConfig, ScanError, UnknownConfigFormat
-from agent_scan.models.mcp import RemoteServer, ServerSignature, StdioServer
+from agent_scan.models.mcp import RemoteServer, ServerReference, ServerSignature, StdioServer
 from agent_scan.models.skill import DiscoveredSkill, SkillFile
 
 
@@ -27,7 +27,7 @@ class ClientToInspect(BaseModel):
     username: str | None = None
     mcp_configs: dict[
         str,
-        list[tuple[str, StdioServer | RemoteServer]]
+        list[tuple[str, StdioServer | RemoteServer | ServerReference]]
         | FileNotFoundConfig
         | UnknownConfigFormat
         | CouldNotParseMCPConfig,
@@ -42,7 +42,7 @@ class InspectedServer(BaseModel):
     # Absolute path of the config file this server was discovered in (e.g. a
     # project ``.mcp.json`` or ``~/.claude.json``).
     config_path: str | None = None
-    server: StdioServer | RemoteServer
+    server: StdioServer | RemoteServer | ServerReference
     signature: ServerSignature | None = None
     error: ScanError | None = None
 
