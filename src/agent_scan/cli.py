@@ -1329,11 +1329,13 @@ def _parse_ignore_failure_codes(args, ci_mode: bool) -> set[str]:
 def _apply_ignore_risks(response: ScanResponse, ignored_risks: set[str]) -> None:
     """Remove ignored risks before rendering and CI exit evaluation."""
     for path in response.scan_path_responses:
-        risk_indexes = [server.risk_indexes for server in path.server_risks]
-        risk_indexes.extend(skill.risk_indexes for skill in path.skill_risks)
-        for indexes in risk_indexes:
-            for name in ignored_risks & indexes.__class__.model_fields.keys():
-                setattr(indexes, name, None)
+        for server in path.server_risks:
+            for name in ignored_risks & McpServerRiskIndexes.model_fields.keys():
+                setattr(server.risk_indexes, name, None)
+            server.risk_score = server.compute_risk_score()
+        for skill in path.skill_risks:
+            for name in ignored_risks & SkillRiskIndexes.model_fields.keys():
+                setattr(skill.risk_indexes, name, None)
 
 
 def _has_risks(response: ScanResponse) -> bool:

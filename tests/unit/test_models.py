@@ -434,3 +434,31 @@ class TestMCPServerMap:
 
         with pytest.raises(ValidationError):
             MCPServerMap(servers={"bad": {"not_a": "server"}})
+
+
+class TestMcpServerRiskScore:
+    def test_risk_score_is_max_of_risk_signals(self):
+        from agent_scan.models.api.v20260710 import McpServerRiskResponse
+
+        server = McpServerRiskResponse.model_validate(
+            {
+                "name": "s",
+                "risk_indexes": {
+                    "private_data": {"score": 300, "evidence": "a"},
+                    "untrusted_content": {"score": 700, "evidence": "b"},
+                    "destructive_capabilities": {"score": 500, "evidence": "c"},
+                },
+            }
+        )
+        assert server.risk_score == 700
+
+    def test_risk_score_none_without_signals(self):
+        from agent_scan.models.api.v20260710 import McpServerRiskResponse
+
+        assert McpServerRiskResponse(name="s").risk_score is None
+
+    def test_provided_risk_score_is_ingested(self):
+        from agent_scan.models.api.v20260710 import McpServerRiskResponse
+
+        server = McpServerRiskResponse.model_validate({"name": "s", "risk_score": 420})
+        assert server.risk_score == 420

@@ -7,7 +7,7 @@ types under the path that was analyzed.
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from agent_scan.models.api.common import ScanUserInfo
 from agent_scan.models.errors import ScanError
@@ -164,7 +164,21 @@ class McpServerRiskResponse(BaseModel):
     name: str
     entities: list[McpEntitySummary] = Field(default_factory=list)
     risk_indexes: McpServerRiskIndexes = Field(default_factory=McpServerRiskIndexes)
+    # Unified risk score (the "risk_score" meta-data attribute of MCP servers, as exposed by maverick's rich_assets
+    # view). When the API omits it, it is computed as the MAX of the four risk signals in `risk_indexes`.
+    risk_score: int | None = Field(default=None, ge=0, le=RISK_SCORE_MAX)
     error: ScanError | None = None
+
+    @model_validator(mode="after")
+    def _default_risk_score(self) -> "McpServerRiskResponse":
+        if self.risk_score is None:
+            self.risk_score = self.compute_risk_score()
+        return self
+
+    def compute_risk_score(self) -> int | None:
+        """MAX of the four MCP risk signals; None when no signal is present."""
+        scores = [risk.score for _, risk in self.risk_indexes if risk is not None]
+        return max(scores) if scores else None
 
 
 # Skill risk models
