@@ -7,7 +7,7 @@ types under the path that was analyzed.
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from agent_scan.models.api.common import ScanUserInfo
 from agent_scan.models.errors import ScanError
@@ -164,7 +164,15 @@ class McpServerRiskResponse(BaseModel):
     name: str
     entities: list[McpEntitySummary] = Field(default_factory=list)
     risk_indexes: McpServerRiskIndexes = Field(default_factory=McpServerRiskIndexes)
+    risk_score: int | None = Field(default=None, ge=0, le=RISK_SCORE_MAX)
     error: ScanError | None = None
+
+    @model_validator(mode="after")
+    def _default_risk_score(self) -> "McpServerRiskResponse":
+        if self.risk_score is None:
+            scores = [risk.score for _, risk in self.risk_indexes if risk is not None]
+            self.risk_score = max(scores, default=None)
+        return self
 
 
 # Skill risk models
