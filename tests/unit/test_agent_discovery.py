@@ -2979,15 +2979,20 @@ def test_kiro_discoverer_detects_installation(tmp_path):
     assert KiroDiscoverer(tmp_path).client_exists() is not None
 
 
-def test_antigravity_discoverer_requires_antigravity_subdir(tmp_path):
-    """``~/.gemini`` alone is the Gemini CLI — only ``~/.gemini/antigravity`` proves the Antigravity IDE is installed."""
+@pytest.mark.parametrize("install_dir", ["antigravity", "antigravity-cli"])
+def test_antigravity_discoverer_requires_product_specific_subdir(tmp_path, install_dir):
+    """``~/.gemini`` alone is the Gemini CLI; either Antigravity product marker
+    identifies an IDE or standalone CLI installation."""
     from agent_scan.agents import AntigravityDiscoverer
 
     (tmp_path / ".gemini").mkdir()
     assert AntigravityDiscoverer(tmp_path).client_exists() is None
 
-    (tmp_path / ".gemini" / "antigravity").mkdir()
-    assert AntigravityDiscoverer(tmp_path).client_exists() is not None
+    (tmp_path / ".gemini" / install_dir).mkdir()
+    result = AntigravityDiscoverer(tmp_path).client_exists()
+
+    assert result is not None
+    assert result.endswith(f"/.gemini/{install_dir}")
 
 
 # --- user-scope MCP file parsing ---
@@ -5377,7 +5382,39 @@ def test_antigravity_shared_gemini_config_mcp_discovered(tmp_path):
     assert isinstance(server, StdioServer)
 
 
-# --- Antigravity: shared skills under ``~/.gemini/skills/`` ---
+# --- Antigravity: global and bundled skills ---
+
+
+def test_antigravity_current_global_skills_discovered(tmp_path):
+    """Antigravity 2.0's canonical global skills live under
+    ``~/.gemini/config/skills``."""
+    from agent_scan.agents import AntigravityDiscoverer
+
+    (tmp_path / ".gemini" / "antigravity-cli").mkdir(parents=True)
+    _write_skill(tmp_path / ".gemini" / "config" / "skills", "global-skill")
+
+    skills_dirs = AntigravityDiscoverer(tmp_path).discover_skills()
+
+    path = (tmp_path / ".gemini" / "config" / "skills").as_posix()
+    assert path in skills_dirs
+    assert {skill.name for skill in skills_dirs[path]} == {"global-skill"}
+
+
+def test_antigravity_cli_builtin_skills_discovered(tmp_path):
+    """The standalone Antigravity CLI's bundled skills live under
+    ``~/.gemini/antigravity-cli/builtin/skills``."""
+    from agent_scan.agents import AntigravityDiscoverer
+
+    builtin_skills = tmp_path / ".gemini" / "antigravity-cli" / "builtin" / "skills"
+    _write_skill(builtin_skills, "antigravity-guide")
+
+    skills_dirs = AntigravityDiscoverer(tmp_path).discover_skills()
+
+    assert builtin_skills.as_posix() in skills_dirs
+    assert {skill.name for skill in skills_dirs[builtin_skills.as_posix()]} == {"antigravity-guide"}
+
+
+# Legacy shared skills path under ``~/.gemini/skills/``.
 
 
 def test_antigravity_user_shared_skills_discovered(tmp_path):

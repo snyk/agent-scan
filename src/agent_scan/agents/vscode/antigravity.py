@@ -13,11 +13,12 @@ from agent_scan.well_known_clients import expand_path
 class AntigravityDiscoverer(VSCodeFamilyDiscoverer):
     name = "antigravity"
     # Same rationale as Windsurf: ``~/.gemini`` alone is the Gemini CLI.
-    # v1.x writes to ``Antigravity``, v2.0 writes to ``Antigravity IDE`` —
-    # scan both so users on either version surface. v1.x first so that
-    # ``_user_data_dir()`` (the single-path accessor) preserves prior behavior.
+    # The IDE writes to ``~/.gemini/antigravity``; the standalone v2 CLI writes
+    # to ``~/.gemini/antigravity-cli``. Either product-specific directory proves
+    # Antigravity is installed. The platform userdata names below cover IDE
+    # installs that have no dotfile marker.
     _user_data_dir_names = ("Antigravity", "Antigravity IDE")
-    _install_paths = ("~/.gemini/antigravity",)
+    _install_paths = ("~/.gemini/antigravity", "~/.gemini/antigravity-cli")
     # IDE-specific MCP plus the unified config that Antigravity CLI + IDE both
     # consult (``~/.gemini/config/mcp_config.json``) per the Google Cloud
     # Community docs on configuring MCP across the Antigravity stack.
@@ -38,21 +39,25 @@ class AntigravityDiscoverer(VSCodeFamilyDiscoverer):
     # Gemini's remote servers use the ``httpUrl`` key (Streamable HTTP), which
     # ``RemoteServer`` accepts as a URL alias (see its ``AliasChoices``).
     _gated_home_settings_files = ("~/.gemini/settings.json",)
-    # User-global skill dirs the Antigravity IDE reads, most-reliable first:
+    # User-global and bundled skill dirs Antigravity reads, current paths first:
+    #   * ``~/.gemini/config/skills`` — Antigravity 2.0's canonical global path.
+    #   * ``~/.gemini/antigravity-cli/builtin/skills`` — skills bundled with the
+    #     standalone Antigravity CLI.
     #   * ``~/.gemini/skills`` — shared across all Antigravity tools (CLI+IDE);
     #     the location skills reliably load from in practice.
-    #   * ``~/.agents/skills`` (PLURAL) — Antigravity 2.0's default global dir
-    #     and the ``npx`` skills-installer target (its ``.skill-lock.json`` lists
-    #     ``antigravity``).
-    #   * ``~/.gemini/antigravity/skills`` — the officially documented global
-    #     path (Google codelab); kept even though its real-world pickup is
-    #     unreliable.
+    #   * ``~/.agents/skills`` (PLURAL) — cross-agent compatibility path used by
+    #     existing installers and shared setups.
+    #   * ``~/.gemini/antigravity/skills`` — the pre-2.0 documented global path;
+    #     retained for older installations.
     #   * ``~/.agent/skills`` (SINGULAR) — the v1-era path, still read by 2.0 for
     #     backward compatibility. Kept as a harmless fallback.
     # NOT included: ``~/.gemini/antigravity-ide/skills`` (no first-party source
-    # documents it) and ``~/.gemini/antigravity-cli/skills`` (CLI-only, not read
-    # by the IDE). Workspace ``.agent``/``.agents`` paths are below.
+    # documents it) or ``~/.gemini/antigravity-cli/skills`` (the CLI uses the
+    # ``config/skills`` and ``builtin/skills`` roots above). Workspace
+    # ``.agent``/``.agents`` paths are below.
     _skills_dir_paths = (
+        "~/.gemini/config/skills",
+        "~/.gemini/antigravity-cli/builtin/skills",
         "~/.gemini/skills",
         "~/.agents/skills",
         "~/.gemini/antigravity/skills",
