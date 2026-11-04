@@ -92,6 +92,16 @@ class TestGuardInstallE2E:
         assert discover_script in discover_command
         assert str(config_file) not in discover_command
         assert ("-ConfigFile" if os.name == "nt" else "--file") not in discover_command
+
+        # The per-install values live in the guard configuration file next to the scripts,
+        # not in the hook commands.
+        guard_config = (tmp_path / "hooks" / "snyk-agent-guard.conf").read_text()
+        assert "PUSH_KEY=test-pk-e2e\n" in guard_config
+        assert f"REMOTE_HOOKS_BASE_URL={fake_hook_server}\n" in guard_config
+        hook_commands = [h["command"] for groups in settings["hooks"].values() for g in groups for h in g["hooks"]]
+        assert hook_commands
+        assert all("test-pk-e2e" not in c and fake_hook_server not in c for c in hook_commands)
+
         assert [request["body"]["hook_event_name"] for request in _FakeHookServer.requests] == [
             "hooksConfigured",
             "hooksConfiguredServerDiscovery",
