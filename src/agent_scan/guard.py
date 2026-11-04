@@ -2049,7 +2049,14 @@ def _atomic_write(path: Path, data: str | bytes, *, mode: int | None = None, fol
     rather than adjusted afterwards, so a private file is never readable by others, even
     briefly.
     Text is written in text mode, so newlines and encoding match ``Path.write_text``.
+
+    Run as root, the write is refused unless only root can change the directories on
+    the way to *path* (see ``_ensure_trusted_destination``), so no other user can
+    redirect it. The temp file's mode and owner are then set through its descriptor,
+    never by name, and by name it is only renamed or removed, neither of which follows
+    a symlink.
     """
+    _ensure_trusted_destination(path, follow_symlinks=follow_symlinks)
     target = path.resolve() if follow_symlinks and path.is_symlink() else path
     target.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -2075,13 +2082,16 @@ def _atomic_write(path: Path, data: str | bytes, *, mode: int | None = None, fol
             f.write(data)
             f.flush()
             os.fsync(f.fileno())
-        if mode is not None:
-            os.chmod(tmp, mode)
-        if existing is not None and hasattr(os, "chown"):
-            with contextlib.suppress(OSError):
-                tmp_stat = os.stat(tmp)
-                if (tmp_stat.st_uid, tmp_stat.st_gid) != (existing.st_uid, existing.st_gid):
-                    os.chown(tmp, existing.st_uid, existing.st_gid)
+            # Through the descriptor, not the name: the umask may have narrowed the
+            # creation mode, and a name in a directory someone else can write may no
+            # longer be this file. Windows chmod only toggles read-only.
+            if mode is not None and not IS_WINDOWS:
+                os.fchmod(f.fileno(), mode)
+            if existing is not None and hasattr(os, "fchown"):
+                with contextlib.suppress(OSError):
+                    tmp_stat = os.fstat(f.fileno())
+                    if (tmp_stat.st_uid, tmp_stat.st_gid) != (existing.st_uid, existing.st_gid):
+                        os.fchown(f.fileno(), existing.st_uid, existing.st_gid)
         for attempt in range(5):
             try:
                 os.replace(tmp, target)
@@ -2119,9 +2129,88 @@ def _atomic_write(path: Path, data: str | bytes, *, mode: int | None = None, fol
         raise
 
 
+class UntrustedDestinationError(PermissionError):
+    """A privileged write was refused because another user could redirect it."""
+
+
+def _is_privileged() -> bool:
+    return hasattr(os, "geteuid") and os.geteuid() == 0
+
+
+def _is_trusted_owner(uid: int) -> bool:
+    return uid == 0
+
+
+# Matches the kernel's own limit on symlinks resolved in one lookup (ELOOP).
+_MAX_SYMLINK_HOPS = 40
+
+
+def _untrusted_component(directory: Path, hops: int = 0) -> str | None:
+    """Describe the first part of *directory* another user could change, or None.
+
+    Walks *directory* from its root with ``lstat``. Every existing directory must be
+    owned by root and not writable by group or others, and every symlink must be owned
+    by root, with its target checked the same way. A missing part ends the walk: root
+    creates it inside a directory that has passed.
+    """
+    current: Path | None = None
+    for part in directory.parts:
+        current = Path(part) if current is None else current / part
+        try:
+            st = os.lstat(current)
+        except (FileNotFoundError, NotADirectoryError):
+            return None
+        if not _is_trusted_owner(st.st_uid):
+            return f"{current} is owned by uid {st.st_uid}"
+        if stat.S_ISLNK(st.st_mode):
+            if hops >= _MAX_SYMLINK_HOPS:
+                return f"{current} resolves through too many symlinks"
+            link = Path(os.readlink(current))
+            resolved = Path(os.path.normpath(current.parent / link))
+            reason = _untrusted_component(resolved, hops + 1)
+            if reason is not None:
+                return reason
+            current = resolved
+        elif st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            return f"{current} is writable by other users"
+    return None
+
+
+def _ensure_trusted_destination(path: Path, *, follow_symlinks: bool) -> None:
+    """Refuse a privileged write to *path* that another user could redirect.
+
+    Root writing into a directory a user can change (a user-scope install under
+    ``sudo``, whose HOME is still the user's) can be made to write, chmod or chown a
+    file of the user's choosing through a planted symlink. Checking with the file
+    descriptor closes single races but not a symlinked parent directory, so such a
+    write is not attempted at all. A tree only root can change cannot change between
+    this check and the write. Unprivileged runs, and Windows, are not checked: there
+    the writer can already rewrite every file it reaches.
+    """
+    if not _is_privileged():
+        return
+    path = Path(os.path.abspath(path))
+    reason = _untrusted_component(path.parent)
+    if reason is None and follow_symlinks:
+        try:
+            st = os.lstat(path)
+        except (FileNotFoundError, NotADirectoryError):
+            st = None
+        if st is not None and stat.S_ISLNK(st.st_mode):
+            # The leaf link lives in a directory that just passed, so only root made
+            # it; what it points at must pass too.
+            reason = _untrusted_component(Path(os.path.realpath(path)).parent)
+    if reason is not None:
+        raise UntrustedDestinationError(
+            f"refusing to write {path} as root: {reason}. Run user-scope installs without sudo."
+        )
+
+
 def _backup_file(path: Path) -> None:
     if path.exists():
         backup = Path(str(path) + ".backup")
+        # shutil.copy2 writes through a symlink at the backup path.
+        _ensure_trusted_destination(backup, follow_symlinks=True)
         shutil.copy2(path, backup)
         rich.print(f"[green]\u2713[/green]  Backed up [dim]{path}[/dim] \u2192 [dim]{backup}[/dim]")
 

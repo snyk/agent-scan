@@ -3828,6 +3828,157 @@ class TestAtomicWrite:
             assert script_reader.read() == stale_script
 
 
+@pytest.mark.skipif(IS_WINDOWS, reason="POSIX ownership and symlinks")
+class TestAtomicWriteAgainstAnotherUser:
+    """Neither a planted symlink nor a swapped temp file lets another user redirect a write."""
+
+    @staticmethod
+    def _temp_files(directory: Path) -> list[Path]:
+        return [p for p in directory.iterdir() if p.name.endswith(".tmp")]
+
+    def test_temp_file_mode_and_owner_are_never_set_by_name(self, tmp_path, monkeypatch):
+        def refuse_temp(name):
+            def call(path, *args, **kwargs):
+                assert not str(path).endswith(".tmp"), f"os.{name} on the temp file by name"
+                return original[name](path, *args, **kwargs)
+
+            return call
+
+        original = {name: getattr(os, name) for name in ("chmod", "chown", "stat")}
+        for name in original:
+            monkeypatch.setattr(os, name, refuse_temp(name))
+        path = tmp_path / "snyk-agent-guard.conf"
+        path.write_text("old\n")
+
+        guard_module._atomic_write(path, "new\n", mode=0o600)
+
+        assert path.read_text() == "new\n"
+        assert stat.S_IMODE(os.lstat(path).st_mode) == 0o600
+
+    def test_a_temp_file_swapped_for_a_symlink_mid_write_leaves_the_link_target_alone(self, tmp_path, monkeypatch):
+        """The race from the review: the user replaces the temp file before its mode is set."""
+        victim = tmp_path / "victim"
+        victim.write_text("keep\n")
+        victim.chmod(0o640)
+        path = tmp_path / "hooks.json"
+        path.write_text("{}\n")
+        path.chmod(0o644)
+        real_fsync = os.fsync
+
+        def swap_then_fsync(fd):
+            (tmp,) = self._temp_files(tmp_path)
+            tmp.unlink()
+            tmp.symlink_to(victim)
+            real_fsync(fd)
+
+        monkeypatch.setattr(os, "fsync", swap_then_fsync)
+
+        guard_module._atomic_write(path, '{"new": true}\n', mode=0o600)
+
+        assert victim.read_text() == "keep\n"
+        assert stat.S_IMODE(victim.stat().st_mode) == 0o640
+
+
+@pytest.mark.skipif(IS_WINDOWS, reason="POSIX ownership; the check does not run on Windows")
+class TestPrivilegedWriteIsRefusedOutsideRootOwnedTrees:
+    """Run as root, guard writes only where no other user can change the path."""
+
+    @pytest.fixture
+    def as_root(self, tmp_path, monkeypatch):
+        """Pretend to be root and that the test's own uid is root's.
+
+        Directories outside *tmp_path* (``/tmp`` on Linux is world-writable) are reported
+        as root-owned 0755, so each test decides the trust of the tree it builds. Returns
+        a setter that makes the test's uid untrusted, like a user's home under sudo.
+        """
+        my_uid = os.getuid()
+        trusted = {0, my_uid}
+        real_lstat = os.lstat
+
+        def lstat(path, *args, **kwargs):
+            if not Path(path).is_relative_to(tmp_path):
+                return os.stat_result((stat.S_IFDIR | 0o755, 0, 0, 1, 0, 0, 0, 0, 0, 0))
+            return real_lstat(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "lstat", lstat)
+        monkeypatch.setattr(guard_module, "_is_privileged", lambda: True)
+        monkeypatch.setattr(guard_module, "_is_trusted_owner", lambda uid: uid in trusted)
+        tmp_path.chmod(0o755)
+        return lambda: trusted.discard(my_uid)
+
+    def test_writes_into_a_tree_only_root_can_change(self, tmp_path, as_root):
+        path = tmp_path / "etc" / "cursor" / "hooks.json"
+
+        guard_module._atomic_write(path, "{}\n")
+
+        assert path.read_text() == "{}\n"
+
+    def test_refuses_a_directory_owned_by_another_user_and_creates_nothing(self, tmp_path, as_root):
+        as_root()  # tmp_path now stands for the user's HOME under sudo
+        path = tmp_path / ".cursor" / "hooks.json"
+
+        with pytest.raises(guard_module.UntrustedDestinationError, match="is owned by uid"):
+            guard_module._atomic_write(path, "{}\n")
+
+        assert not (tmp_path / ".cursor").exists()
+
+    def test_refuses_a_directory_others_can_write(self, tmp_path, as_root):
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        shared.chmod(0o775)
+
+        with pytest.raises(guard_module.UntrustedDestinationError, match="shared is writable by other users"):
+            guard_module._atomic_write(shared / "hooks.json", "{}\n")
+
+        assert list(shared.iterdir()) == []
+
+    def test_refuses_a_parent_symlinked_into_a_tree_others_can_write(self, tmp_path, as_root):
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        shared.chmod(0o777)
+        (tmp_path / ".cursor").symlink_to(shared)
+
+        with pytest.raises(guard_module.UntrustedDestinationError, match="shared is writable"):
+            guard_module._atomic_write(tmp_path / ".cursor" / "hooks.json", "{}\n")
+
+        assert list(shared.iterdir()) == []
+
+    def test_a_leaf_symlink_is_followed_only_into_a_trusted_tree(self, tmp_path, as_root):
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        shared.chmod(0o777)
+        real = shared / "real.json"
+        real.write_text("keep\n")
+        link = tmp_path / "hooks.json"
+        link.symlink_to(real)
+
+        with pytest.raises(guard_module.UntrustedDestinationError, match="shared is writable"):
+            guard_module._atomic_write(link, "{}\n")
+        assert real.read_text() == "keep\n"
+
+        # Replacing the link instead writes only into the trusted directory.
+        guard_module._atomic_write(link, "{}\n", follow_symlinks=False)
+        assert not link.is_symlink()
+        assert real.read_text() == "keep\n"
+
+    def test_backup_is_refused_before_it_is_written(self, tmp_path, as_root):
+        path = tmp_path / "hooks.json"
+        path.write_text("{}\n")
+        as_root()
+
+        with pytest.raises(guard_module.UntrustedDestinationError):
+            guard_module._write_json_if_changed(path, {"hooks": {}})
+
+        assert not Path(str(path) + ".backup").exists()
+        assert path.read_text() == "{}\n"
+
+    def test_install_reports_the_refusal_as_permission_denied(self, tmp_path, as_root, capsys):
+        as_root()
+        with patch.object(guard_module, "_run_install", side_effect=guard_module.UntrustedDestinationError("nope")):
+            assert guard_module.run_guard(SimpleNamespace(guard_command="install")) == 1
+        assert "Permission denied" in capsys.readouterr().out
+
+
 @pytest.mark.skipif(IS_WINDOWS, reason="bash script; skipped on Windows")
 class TestBashHookScript:
     """Integration: invoke the real .sh script against a local HTTP server."""
