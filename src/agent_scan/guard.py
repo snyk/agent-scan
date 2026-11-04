@@ -57,11 +57,14 @@ _T = TypeVar("_T")
 
 ALL_CLIENTS = ["claude", "cursor", "codex", "github-copilot"]
 DEFAULT_REMOTE_URL = "https://api.snyk.io"
-_DETECTION_RE = re.compile(
-    r"PUSH_KEY=.*snyk-agent-guard"
-    r"|snyk-agent-guard.*-PushKey\b",
-    re.DOTALL,
-)
+# Matches our hook commands by script name, so it recognises both the current commands,
+# which carry no values, and those written by earlier versions, which prefixed the script
+# with PUSH_KEY=... assignments (POSIX) or followed it with -PushKey ... (PowerShell).
+_DETECTION_RE = re.compile(r"""(?:^|[/\\'"\s])snyk-agent-guard(?:-discover)?\.(?:sh|ps1)(?:['"\s]|$)""")
+# Installation configuration read by the hook scripts, next to them in the hooks directory.
+# Not a .json file: Copilot loads every *.json file in ~/.copilot/hooks as a hook config.
+GUARD_CONFIG_NAME = "snyk-agent-guard.conf"
+_GUARD_CONFIG_KEYS = ("PUSH_KEY", "REMOTE_HOOKS_BASE_URL", "TENANT_ID", "MACHINE_ID", "AGENT_SCAN_COMMAND")
 _PERMISSION_DENIED = "__permission_denied__"
 _STDIN_READ_TIMEOUT_SECONDS = 5.0
 _DISCOVERY_TIMEOUT_SECONDS = 60.0
@@ -249,6 +252,8 @@ def _run_install(args) -> None:
     if client == "all" and getattr(args, "file", None):
         rich.print("[bold red]Error:[/bold red] --file cannot be used with client 'all'.")
         sys.exit(1)
+
+    _refuse_user_scope_install_as_root(managed, (_config_path(c, getattr(args, "file", None)) for c in clients))
 
     # Filter out clients whose agent is not installed on this machine.
     # Skipped when --file is explicitly provided (the caller knows where to write).
@@ -570,6 +575,109 @@ def _discover_script_path(config_path: Path) -> Path:
     return _hooks_dir(config_path) / name
 
 
+def _guard_config_path(config_path: Path) -> Path:
+    return _hooks_dir(config_path) / GUARD_CONFIG_NAME
+
+
+def _render_guard_config(values: dict[str, str]) -> bytes:
+    """Render the hook scripts' configuration file: one ``KEY=value`` line per set value.
+
+    The scripts split each line on the first ``=`` and take the rest verbatim, so values
+    need no quoting; only line breaks and NUL, which would end or corrupt a line, are
+    rejected. Raises ValueError before anything is written.
+    """
+    lines = ["# Snyk Agent Guard configuration. Written by `snyk-agent-scan guard install`."]
+    for key in _GUARD_CONFIG_KEYS:
+        value = values.get(key, "")
+        if not value:
+            continue
+        if any(c in value for c in "\n\r\0"):
+            raise ValueError(f"{key} must not contain line breaks or NUL characters")
+        lines.append(f"{key}={value}")
+    return ("\n".join(lines) + "\n").encode("utf-8")
+
+
+def _parse_guard_config(text: str) -> dict[str, str]:
+    """Parse guard configuration the way the hook scripts do: split on the first ``=``."""
+    values: dict[str, str] = {}
+    for line in text.splitlines():
+        key, sep, value = line.partition("=")
+        if sep and key in _GUARD_CONFIG_KEYS:
+            values[key] = value
+    return values
+
+
+def _read_guard_config(path: Path) -> dict[str, str]:
+    """Read the guard configuration file; {} if it is missing or unreadable."""
+    try:
+        return _parse_guard_config(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return {}
+
+
+def _write_file_no_follow(path: Path, content: bytes, mode: int) -> None:
+    """Write *content* to *path* with *mode*, replacing a symlink there rather than following it.
+
+    The mode is applied before the content is written, so a file that was readable by
+    others never holds the new content with its old permissions.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink():
+        path.unlink()
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    with os.fdopen(os.open(path, flags, mode), "wb") as f:
+        if not IS_WINDOWS:
+            os.fchmod(f.fileno(), mode)
+        f.write(content)
+
+
+def _write_guard_config(path: Path, content: bytes, *, managed: bool) -> bool:
+    """Write the guard configuration file. Returns True if its content changed.
+
+    The file holds the push key. A user install writes it private (0600): the install
+    runs as the user whose agent reads it, since a user install as root anywhere another
+    user controls is refused (see _refuse_user_scope_install_as_root). A managed install
+    is root-owned and must be readable by every user whose agent runs the hooks, hence
+    0644. A symlink planted at *path* is replaced rather than followed.
+    """
+    mode = 0o644 if managed else 0o600
+    if path.is_file() and not path.is_symlink() and path.read_bytes() == content:
+        if not IS_WINDOWS:
+            path.chmod(mode)
+        return False
+    _write_file_no_follow(path, content, mode)
+    rich.print(f"[green]\u2713[/green]  Wrote guard configuration to [dim]{path}[/dim]")
+    return True
+
+
+class _FileSnapshot(NamedTuple):
+    path: Path
+    content: bytes | None
+    mode: int | None
+
+
+def _snapshot_file(path: Path) -> _FileSnapshot:
+    if path.is_file():
+        return _FileSnapshot(path, path.read_bytes(), stat.S_IMODE(path.stat().st_mode))
+    return _FileSnapshot(path, None, None)
+
+
+def _restore_files(snapshots: Iterable[_FileSnapshot]) -> None:
+    """Put files back as snapshotted, removing those that did not exist. Best effort."""
+    for snap in snapshots:
+        try:
+            if snap.content is None:
+                snap.path.unlink(missing_ok=True)
+                continue
+            mode = snap.mode if snap.mode is not None else 0o644
+            if not snap.path.is_file() or snap.path.read_bytes() != snap.content:
+                _write_file_no_follow(snap.path, snap.content, mode)
+            elif not IS_WINDOWS:
+                snap.path.chmod(mode)
+        except OSError as exc:
+            rich.print(f"[yellow]Warning:[/yellow] Could not restore {snap.path}: {exc}")
+
+
 def _install_hooks(
     client: str,
     hook_client: str,
@@ -601,77 +709,80 @@ def _install_hooks(
             "[yellow]Warning:[/yellow] AGENT_SCAN_COMMAND is not set; "
             "the session-start discovery hook will not be installed"
         )
+    if not machine_id.strip():
+        raise ValueError("machine ID is required")
+    forwarder_script_path = _forwarder_script_path(config_path)
     discover_script_path = _discover_script_path(config_path)
-    discover_script_existed = discover_script_path.exists()
-
-    main_script = _copy_hook_script(_forwarder_script_path(config_path))
-    discover_script = _copy_hook_script(discover_script_path) if install_discovery else None
-
-    dest_path = main_script.path
-    script_updated = main_script.updated or bool(discover_script and discover_script.updated)
-    command = _build_hook_command(
-        push_key,
-        url,
-        dest_path,
-        hook_client,
-        tenant_id=tenant_id,
-        machine_id=machine_id,
+    guard_config_path = _guard_config_path(config_path)
+    # Rendered (and validated) before any file is touched.
+    guard_config = _render_guard_config(
+        {
+            "PUSH_KEY": push_key,
+            "REMOTE_HOOKS_BASE_URL": url,
+            "TENANT_ID": tenant_id,
+            "MACHINE_ID": machine_id,
+            "AGENT_SCAN_COMMAND": agent_scan_command or "",
+        }
     )
-    discover_command = None
-    if install_discovery:
-        assert agent_scan_command is not None
-        discover_command = _build_discover_hook_command(
-            push_key,
-            url,
-            discover_script_path,
-            agent_scan_command=agent_scan_command,
-            tenant_id=tenant_id,
-            machine_id=machine_id,
-            hook_client=hook_client,
+
+    # The install writes the configuration file, the scripts and the agent config, and is
+    # all-or-nothing: if it fails before the agent config is written, the other two are
+    # restored, so no script or configuration is left behind an agent
+    # config that was not updated.
+    snapshots = [_snapshot_file(p) for p in (forwarder_script_path, discover_script_path, guard_config_path)]
+    try:
+        # The configuration goes first: a script that finds none refuses to run, so the
+        # new scripts must never be live before the file they read is in place.
+        guard_config_updated = _write_guard_config(guard_config_path, guard_config, managed=scope == "managed")
+        main_script = _copy_hook_script(forwarder_script_path)
+        discover_script = _copy_hook_script(discover_script_path) if install_discovery else None
+
+        dest_path = main_script.path
+        script_updated = main_script.updated or bool(discover_script and discover_script.updated)
+        command = _build_hook_command(dest_path, hook_client)
+        discover_command = (
+            _build_discover_hook_command(discover_script_path, hook_client) if install_discovery else None
         )
-    prepared_config, prepared_content, hooks_diff, preserved = _prepare_client_config(
-        client,
-        command,
-        config_path,
-        discover_command=discover_command,
-    )
+        prepared_config, prepared_content, hooks_diff, preserved = _prepare_client_config(
+            client,
+            command,
+            config_path,
+            discover_command=discover_command,
+        )
 
-    first_install = not main_script.existed
-    config_changed = bool(hooks_diff["added"] or hooks_diff["modified"] or hooks_diff["removed"])
+        first_install = not main_script.existed
+        config_changed = bool(hooks_diff["added"] or hooks_diff["modified"] or hooks_diff["removed"])
 
-    if not _send_test_event(
-        push_key,
-        url,
-        hook_client,
-        dest_path,
-        first_install=first_install,
-        config_changed=config_changed,
-        hooks_diff=hooks_diff,
-        push_key_changed=push_key_changed,
-        current_checksum=main_script.current_checksum,
-        new_checksum=main_script.new_checksum,
-        discover_current_checksum=discover_script.current_checksum if discover_script else None,
-        discover_new_checksum=discover_script.new_checksum if discover_script else None,
-        machine_id=machine_id,
-    ):
-        if not main_script.existed:
-            dest_path.unlink(missing_ok=True)
-        if not discover_script_existed:
-            discover_script_path.unlink(missing_ok=True)
-        rich.print("[bold red]Aborting install \u2014 test event failed.[/bold red]")
-        raise SystemExit(1)
+        if not _send_test_event(
+            hook_client,
+            dest_path,
+            first_install=first_install,
+            config_changed=config_changed,
+            hooks_diff=hooks_diff,
+            push_key_changed=push_key_changed,
+            current_checksum=main_script.current_checksum,
+            new_checksum=main_script.new_checksum,
+            discover_current_checksum=discover_script.current_checksum if discover_script else None,
+            discover_new_checksum=discover_script.new_checksum if discover_script else None,
+        ):
+            rich.print("[bold red]Aborting install \u2014 test event failed.[/bold red]")
+            raise SystemExit(1)
 
-    config_written = _write_client_config(client, config_path, prepared_config, prepared_content, preserved)
+        config_written = _write_client_config(client, config_path, prepared_config, prepared_content, preserved)
+    except BaseException:
+        _restore_files(snapshots)
+        raise
     if not install_discovery and discover_script_path.exists():
         discover_script_path.unlink()
         rich.print(f"[green]✓[/green]  Removed stale hook script [dim]{discover_script_path}[/dim]")
 
-    if script_updated or config_written or minted:
+    if script_updated or guard_config_updated or config_written or minted:
         rich.print(f"[green]\u2713[/green]  {scope.title()} hooks installed for [bold]{label}[/bold]")
     else:
         rich.print(f"[green]\u2713[/green]  {label} {scope} hook integration up to date")
     rich.print(f"   Config:     [dim]{config_path}[/dim]")
     rich.print(f"   Script:     [dim]{dest_path}[/dim]")
+    rich.print(f"   Values:     [dim]{guard_config_path}[/dim]")
     rich.print(f"   Remote URL: [dim]{url}[/dim]")
     rich.print(f"   Push Key:   [yellow]{_mask_key(push_key)}[/yellow]")
     rich.print()
@@ -958,7 +1069,7 @@ def _prepare_codex_managed_config(
             removed[event] = expected
         elif actual and not expected:
             added[event] = actual
-        elif actual != expected:
+        elif _normalize_guard_hooks(actual) != _normalize_guard_hooks(expected):
             modified[event] = {
                 "expected_value": expected,
                 "actual_value": actual,
@@ -1021,7 +1132,7 @@ def _detect_codex_managed_install(path: Path) -> dict | None:
     events, guard_command, _ = _parse_codex_requirements_toml(text)
     if not events or guard_command is None:
         return None
-    return _parse_command_info(guard_command, events)
+    return _parse_command_info(events, path)
 
 
 def _uninstall_codex_managed(path: Path) -> None:
@@ -1052,6 +1163,7 @@ def _run_uninstall(args) -> None:
         sys.exit(1)
 
     clients = ALL_CLIENTS if client == "all" else [client]
+    _refuse_user_scope_install_as_root(managed, (_config_path(c, getattr(args, "file", None)) for c in clients))
 
     for c in clients:
         _uninstall_single_client(c, args, managed)
@@ -1084,6 +1196,11 @@ def _uninstall_single_client(client: str, args, managed: bool) -> None:
     # Try to revoke the push key
     if info and info.get("auth_value"):
         _try_revoke_push_key(info, label)
+    elif info:
+        rich.print(
+            "[dim]   Push key was not revoked: this install predates the guard configuration file, "
+            "so its push key is not available. Run `snyk-agent-scan guard install` first.[/dim]"
+        )
 
     rich.print()
 
@@ -1258,7 +1375,7 @@ def _detect_install(path: Path, events: list[str], commands: Callable[[dict], It
 
     if not installed_events or found_cmd is None:
         return None
-    return _parse_command_info(found_cmd, installed_events)
+    return _parse_command_info(installed_events, path)
 
 
 # ---------------------------------------------------------------------------
@@ -1349,11 +1466,8 @@ def _has_success_payload(stdout: str | None) -> bool:
 def _invoke_hook_script(
     script_path: Path,
     hook_client: str,
-    push_key: str,
-    url: str,
     payload: str,
     *,
-    machine_id: str,
     require_success_payload: bool = False,
 ) -> tuple[bool, str]:
     """Run the hook script with ``payload`` on stdin. Returns ``(ok, detail)``.
@@ -1364,18 +1478,9 @@ def _invoke_hook_script(
     """
     import subprocess
 
-    if not machine_id.strip():
-        raise ValueError("machine ID is required")
-
-    cmd, env = _render_argv(
-        _HookInvocation(
-            script_path=script_path,
-            hook_client=hook_client,
-            push_key=push_key,
-            url=url,
-            machine_id=machine_id,
-        )
-    )
+    # No values are passed: the script reads them from the guard configuration file, so
+    # the handshake also checks that the installed configuration works.
+    cmd = _render_argv(_HookInvocation(script_path=script_path, hook_client=hook_client))
 
     try:
         result = subprocess.run(
@@ -1384,7 +1489,6 @@ def _invoke_hook_script(
             capture_output=True,
             text=True,
             timeout=15,
-            env=env,
         )
         if result.returncode != 0:
             return False, result.stderr.strip() or f"exit code {result.returncode}"
@@ -1403,8 +1507,6 @@ def _invoke_hook_script(
 
 
 def _send_test_event(
-    push_key: str,
-    url: str,
     hook_client: str,
     script_path: Path,
     *,
@@ -1416,11 +1518,8 @@ def _send_test_event(
     new_checksum: str | None = None,
     discover_current_checksum: str | None = None,
     discover_new_checksum: str | None = None,
-    machine_id: str,
 ) -> bool:
     """Send a test hooksConfigured event by invoking the hook script. Returns True on success."""
-    if not machine_id.strip():
-        raise ValueError("machine ID is required")
     payload_dict: dict = {"hook_event_name": "hooksConfigured"}
     payload_dict[HOOK_CLIENTS[hook_client].session_field] = "hooks-setup"
     payload_dict["first_install"] = first_install
@@ -1445,15 +1544,7 @@ def _send_test_event(
     redact_push_keys_in_data(payload_dict)
     payload = json.dumps(payload_dict)
 
-    ok, detail = _invoke_hook_script(
-        script_path,
-        hook_client,
-        push_key,
-        url,
-        payload,
-        machine_id=machine_id,
-        require_success_payload=True,
-    )
+    ok, detail = _invoke_hook_script(script_path, hook_client, payload, require_success_payload=True)
     if ok:
         rich.print("[green]\u2713[/green]  Test event sent  [green]\u2192 OK[/green]")
         return True
@@ -1518,14 +1609,42 @@ def _send_servers_discovered_event(
 # ---------------------------------------------------------------------------
 
 
-def _normalize_push_keys(value: object) -> object:
-    """Replace push-key UUIDs with a placeholder for comparison purposes."""
+# The values hook commands carried before they moved into the guard configuration file, as
+# earlier versions rendered them: a leading run of single-quoted POSIX assignments, and
+# single-quoted PowerShell parameters.
+_LEGACY_POSIX_VALUES_RE = re.compile(
+    r"\A(?:(?:PUSH_KEY|REMOTE_HOOKS_BASE_URL|TENANT_ID|MACHINE_ID|AGENT_SCAN_COMMAND)='(?:[^']|'\"'\"')*' )+"
+)
+_LEGACY_POWERSHELL_VALUES_RE = re.compile(
+    r" -(?:PushKey|RemoteUrl|TenantId|MachineId|AgentScanCommand) '(?:[^']|'')*'(?= |\Z)"
+)
+
+
+def _strip_legacy_command_values(command: str) -> str:
+    """Drop the values a hook command written by an earlier version carried.
+
+    The hook scripts ignore them -- they read their values only from the hook
+    configuration file -- so a command carrying them runs exactly as one without them.
+    """
+    command = _LEGACY_POSIX_VALUES_RE.sub("", command, count=1)
+    return _LEGACY_POWERSHELL_VALUES_RE.sub("", command)
+
+
+def _normalize_guard_hooks(value: object) -> object:
+    """Normalize guard hook entries for comparison.
+
+    Push-key UUIDs are replaced with a placeholder, and the values earlier versions
+    carried on the hook command are dropped, so upgrading from such a version is not
+    reported as a configuration change.
+    """
     if isinstance(value, str):
+        if _is_agent_scan_command(value):
+            value = _strip_legacy_command_values(value)
         return redact_push_keys(value, "<PUSH_KEY>")
     if isinstance(value, dict):
-        return {k: _normalize_push_keys(v) for k, v in value.items()}
+        return {k: _normalize_guard_hooks(v) for k, v in value.items()}
     if isinstance(value, list):
-        return [_normalize_push_keys(item) for item in value]
+        return [_normalize_guard_hooks(item) for item in value]
     return value
 
 
@@ -1567,7 +1686,8 @@ def _compute_hooks_diff(old_hooks: dict, new_hooks: dict) -> dict:
     - "modified": keys present in both but with different values
       (each entry has "expected_value" and "actual_value")
 
-    Differences that consist solely of a push-key change are ignored.
+    Differences that consist solely of a push-key change, or of the values earlier
+    versions carried on the hook command, are ignored.
     """
     added = {}
     modified = {}
@@ -1583,8 +1703,8 @@ def _compute_hooks_diff(old_hooks: dict, new_hooks: dict) -> dict:
         elif old_guard and not new_guard:
             added[key] = copy.deepcopy(old_guard)
         else:
-            old_norm = _normalize_push_keys(copy.deepcopy(old_guard))
-            new_norm = _normalize_push_keys(copy.deepcopy(new_guard))
+            old_norm = _normalize_guard_hooks(copy.deepcopy(old_guard))
+            new_norm = _normalize_guard_hooks(copy.deepcopy(new_guard))
             if old_norm != new_norm:
                 modified[key] = {
                     "expected_value": copy.deepcopy(new_guard),
@@ -1653,45 +1773,22 @@ def _filter_cursor_hooks(hooks: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _parse_command_info(cmd: str, events: list[str]) -> dict:
-    url = _extract_env_from_cmd(cmd, "REMOTE_HOOKS_BASE_URL")
-    push_key = _extract_env_from_cmd(cmd, "PUSH_KEY")
-    tenant_id = _extract_env_from_cmd(cmd, "TENANT_ID")
+def _parse_command_info(events: list[str], config_path: Path) -> dict:
+    """Describe an installed hook: its values come from the guard configuration file, which
+    is what the scripts use."""
+    values = _read_guard_config(_guard_config_path(config_path))
+    url = values.get("REMOTE_HOOKS_BASE_URL", "")
+    push_key = values.get("PUSH_KEY", "")
     host = urlparse(url).netloc if url else "unknown"
 
     return {
         "host": host,
         "auth_type": "pushkey",
-        "auth_value": push_key or "",
-        "tenant_id": tenant_id,
+        "auth_value": push_key,
+        "tenant_id": values.get("TENANT_ID", ""),
         "url": url or DEFAULT_REMOTE_URL,
         "events": events,
     }
-
-
-_PS_PARAM_MAP = {
-    "PUSH_KEY": "PushKey",
-    "REMOTE_HOOKS_BASE_URL": "RemoteUrl",
-    "TENANT_ID": "TenantId",
-}
-
-
-def _extract_env_from_cmd(cmd: str, key: str) -> str:
-    # Try PowerShell -ParamName 'value' form
-    ps_name = _PS_PARAM_MAP.get(key)
-    if ps_name:
-        m = re.search(rf"-{re.escape(ps_name)}\s+'([^']*)'", cmd)
-        if m:
-            return m.group(1)
-    # Try KEY='...' form
-    m = re.search(rf"(?:^| ){re.escape(key)}='([^']*)'", cmd)
-    if m:
-        return m.group(1)
-    # Try KEY=value (no quotes)
-    m = re.search(rf"(?:^| ){re.escape(key)}=(\S+)", cmd)
-    if m:
-        return m.group(1)
-    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -1776,6 +1873,59 @@ def _preflight_writable(config_path: Path) -> None:
         raise PermissionError(f"Directory not writable: {parent}")
 
 
+def _refuse_user_scope_install_as_root(managed: bool, config_paths: Iterable[Path]) -> None:
+    """Exit if a user-scope command running as root would write where another user has control.
+
+    A user-scope install writes a private (0600) guard configuration next to the agent
+    configuration. Run as root into another user's home -- ``sudo`` keeps HOME on macOS,
+    or ``--file`` names a path there -- it would be root's and unreadable to the user's
+    hooks, and root would write through any symlink the user placed there. So each
+    destination, and every existing directory above it, must be owned by root and
+    writable by no one else: root's own home passes, a user's home or ``/tmp`` does not.
+    ADS runs user-scope commands as the target user. Not checked on Windows.
+    """
+    if managed or not hasattr(os, "geteuid") or os.geteuid() != 0:
+        return
+    for config_path in config_paths:
+        untrusted = _first_untrusted_component(config_path)
+        if untrusted is not None:
+            rich.print(
+                f"[bold red]Error:[/bold red] Running as root, but {untrusted} belongs to another user "
+                "or is writable by others. Run user-scope commands as the user whose agent this is, "
+                "without sudo, or use --managed for a system-wide install."
+            )
+            sys.exit(1)
+
+
+def _first_untrusted_component(config_path: Path) -> Path | None:
+    """The first existing path component of a user install's destination root does not control.
+
+    Both the path as given and its resolved form are walked, so a symlink cannot lead out
+    of a root-owned tree: a symlink must itself be owned by root, and its target is
+    checked through the resolved path. Components that do not exist yet are skipped; the
+    install creates them as root.
+    """
+    targets = []
+    for target in (config_path, _hooks_dir(config_path)):
+        targets += [Path(os.path.abspath(target)), target.resolve()]
+    for target in targets:
+        for component in (target, *target.parents):
+            try:
+                st = os.lstat(component)
+            except (FileNotFoundError, NotADirectoryError):
+                continue
+            except OSError:
+                return component
+            if st.st_uid != 0:
+                return component
+            # A symlink's own mode bits are meaningless (always 0777 on Linux).
+            if stat.S_ISLNK(st.st_mode):
+                continue
+            if st.st_mode & stat.S_IWOTH or (st.st_mode & stat.S_IWGRP and st.st_gid != 0):
+                return component
+    return None
+
+
 def _revoke_after_failure(url: str, tenant_id: str, snyk_token: str, push_key: str) -> None:
     """Best-effort revocation of a push key after a failed install."""
     rich.print("[dim]Revoking minted push key...[/dim]")
@@ -1787,116 +1937,43 @@ def _revoke_after_failure(url: str, tenant_id: str, snyk_token: str, push_key: s
 
 
 class _HookInvocation(NamedTuple):
-    """What a hook script needs, independent of how the values are handed over."""
+    """How a hook script is invoked. Its values come from the guard configuration file."""
 
     script_path: Path
     hook_client: str
-    push_key: str
-    url: str
-    machine_id: str = ""
-    tenant_id: str = ""
-    agent_scan_command: str = ""
     scope: str = ""
     quote_client: bool = False
 
 
 def _render_posix_command(invocation: _HookInvocation) -> str:
-    parts = [
-        f"PUSH_KEY={_shell_quote(invocation.push_key)}",
-        f"REMOTE_HOOKS_BASE_URL={_shell_quote(invocation.url)}",
-    ]
-    if invocation.tenant_id:
-        parts.append(f"TENANT_ID={_shell_quote(invocation.tenant_id)}")
-    if invocation.machine_id:
-        parts.append(f"MACHINE_ID={_shell_quote(invocation.machine_id)}")
-    if invocation.agent_scan_command:
-        parts.append(f"AGENT_SCAN_COMMAND={_shell_quote(invocation.agent_scan_command)}")
-    parts.append(f"bash {_shell_quote(invocation.script_path.as_posix())}")
     client = _shell_quote(invocation.hook_client) if invocation.quote_client else invocation.hook_client
-    parts.append(f"--client {client}")
+    parts = [f"bash {_shell_quote(invocation.script_path.as_posix())}", f"--client {client}"]
     if invocation.scope:
         parts.append(f"--scope {invocation.scope}")
     return " ".join(parts)
 
 
 def _render_powershell_command(invocation: _HookInvocation) -> str:
-    parts = [
-        "powershell",
-        "-File",
-        _ps_quote(str(invocation.script_path)),
-        "-Client",
-        invocation.hook_client,
-        "-PushKey",
-        _ps_quote(invocation.push_key),
-        "-RemoteUrl",
-        _ps_quote(invocation.url),
-    ]
-    if invocation.tenant_id:
-        parts.extend(["-TenantId", _ps_quote(invocation.tenant_id)])
-    if invocation.machine_id:
-        parts.extend(["-MachineId", _ps_quote(invocation.machine_id)])
-    if invocation.agent_scan_command:
-        parts.extend(["-AgentScanCommand", _ps_quote(invocation.agent_scan_command)])
+    parts = ["powershell", "-File", _ps_quote(str(invocation.script_path)), "-Client", invocation.hook_client]
     if invocation.scope:
         parts.extend(["-Scope", invocation.scope])
     return " ".join(parts)
 
 
-def _render_argv(invocation: _HookInvocation) -> tuple[list[str], dict[str, str] | None]:
+def _render_argv(invocation: _HookInvocation) -> list[str]:
     if IS_WINDOWS:
-        argv = [
-            "powershell",
-            "-File",
-            str(invocation.script_path),
-            "-Client",
-            invocation.hook_client,
-            "-PushKey",
-            invocation.push_key,
-            "-RemoteUrl",
-            invocation.url,
-        ]
-        if invocation.machine_id:
-            argv.extend(["-MachineId", invocation.machine_id])
-        if invocation.agent_scan_command:
-            argv.extend(["-AgentScanCommand", invocation.agent_scan_command])
+        argv = ["powershell", "-File", str(invocation.script_path), "-Client", invocation.hook_client]
         if invocation.scope:
             argv.extend(["-Scope", invocation.scope])
-        return argv, None
-
-    env = {
-        **os.environ,
-        "PUSH_KEY": invocation.push_key,
-        "REMOTE_HOOKS_BASE_URL": invocation.url,
-    }
-    if invocation.tenant_id:
-        env["TENANT_ID"] = invocation.tenant_id
-    if invocation.machine_id:
-        env["MACHINE_ID"] = invocation.machine_id
-    if invocation.agent_scan_command:
-        env["AGENT_SCAN_COMMAND"] = invocation.agent_scan_command
+        return argv
     argv = ["bash", str(invocation.script_path), "--client", invocation.hook_client]
     if invocation.scope:
         argv.extend(["--scope", invocation.scope])
-    return argv, env
+    return argv
 
 
-def _build_hook_command(
-    push_key: str,
-    url: str,
-    script_path: Path,
-    hook_client: str,
-    *,
-    tenant_id: str = "",
-    machine_id: str = "",
-) -> str:
-    invocation = _HookInvocation(
-        script_path=script_path,
-        hook_client=hook_client,
-        push_key=push_key,
-        url=url,
-        machine_id=machine_id,
-        tenant_id=tenant_id,
-    )
+def _build_hook_command(script_path: Path, hook_client: str) -> str:
+    invocation = _HookInvocation(script_path=script_path, hook_client=hook_client)
     if IS_WINDOWS:
         return _render_powershell_command(invocation)
     return _render_posix_command(invocation)
@@ -1919,23 +1996,10 @@ def _agent_scan_command() -> str | None:
     return None
 
 
-def _build_discover_hook_command(
-    push_key: str,
-    url: str,
-    script_path: Path,
-    hook_client: str,
-    *,
-    agent_scan_command: str,
-    tenant_id: str = "",
-    machine_id: str = "",
-) -> str:
+def _build_discover_hook_command(script_path: Path, hook_client: str) -> str:
     invocation = _HookInvocation(
         script_path=script_path,
         hook_client=hook_client,
-        push_key=push_key,
-        url=url,
-        machine_id=machine_id,
-        agent_scan_command=agent_scan_command,
         scope="servers",
         quote_client=True,
     )
@@ -1944,25 +2008,8 @@ def _build_discover_hook_command(
     return _render_posix_command(invocation)
 
 
-def _build_hook_command_powershell(
-    push_key: str,
-    url: str,
-    script_path: Path,
-    hook_client: str,
-    *,
-    tenant_id: str = "",
-    machine_id: str = "",
-) -> str:
-    return _render_powershell_command(
-        _HookInvocation(
-            script_path=script_path,
-            hook_client=hook_client,
-            push_key=push_key,
-            url=url,
-            machine_id=machine_id,
-            tenant_id=tenant_id,
-        )
-    )
+def _build_hook_command_powershell(script_path: Path, hook_client: str) -> str:
+    return _render_powershell_command(_HookInvocation(script_path=script_path, hook_client=hook_client))
 
 
 def _shell_quote(s: str) -> str:
@@ -2023,7 +2070,11 @@ def _copy_hook_script(dest: Path) -> _CopiedScript:
 
 
 def _remove_hook_script(client: str, config_path: Path) -> None:
-    for dest in (_forwarder_script_path(config_path), _discover_script_path(config_path)):
+    for dest in (
+        _forwarder_script_path(config_path),
+        _discover_script_path(config_path),
+        _guard_config_path(config_path),
+    ):
         if dest.exists():
             dest.unlink()
             rich.print(f"[green]\u2713[/green]  Removed hook script [dim]{dest}[/dim]")
