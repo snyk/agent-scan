@@ -8,6 +8,22 @@ set -euo pipefail
 #
 # Configuration is read from snyk-agent-guard.conf next to this script, written by
 # `snyk-agent-scan guard install`.
+
+# The hook arguments are passed on to `guard discover`, so only --client and --scope are
+# accepted: anything else, such as --url, would apply to the push key read below.
+only_client_and_scope() {
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --client | --scope)
+        [[ $# -ge 2 && "$2" != -* ]] || return 1
+        shift 2
+        ;;
+      *) return 1 ;;
+    esac
+  done
+}
+only_client_and_scope "$@" || exit 0
+
 CONFIG_FILE="$(dirname "${BASH_SOURCE[0]}")/snyk-agent-guard.conf"
 [[ -f "$CONFIG_FILE" && -r "$CONFIG_FILE" ]] || exit 0
 
