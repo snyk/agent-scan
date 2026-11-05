@@ -899,6 +899,10 @@ def main():
         metavar="CONFIG_FILE",
     )
 
+    from agent_scan.remote_discovery import command as remote_discovery_command
+
+    remote_discovery_command.add_parser(subparsers)
+
     # HELP command
     help_parser = subparsers.add_parser(  # noqa: F841
         "help",
@@ -1049,6 +1053,10 @@ def main():
         sys.exit(1)
 
     args = parser.parse_args()
+
+    if args.command == "inspect-remote":
+        setup_logging(False, log_to_stderr=True)
+        sys.exit(asyncio.run(remote_discovery_command.run(args, str(version_info))))
 
     # Attach parsed control servers to args
     args.control_servers = control_servers
