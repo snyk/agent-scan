@@ -8,7 +8,6 @@ import hashlib
 import json
 import os
 import re
-import shutil
 import stat
 import sys
 import threading
@@ -44,7 +43,7 @@ from agent_scan.redact import redact_push_keys, redact_push_keys_in_data
 from agent_scan.utils import get_readable_home_directories, toml_escape, toml_unescape
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable
+    from collections.abc import Callable, Iterable, Mapping
 
     from agent_scan.models import ClientToInspect
 
@@ -456,6 +455,7 @@ def _prepare_client_config(
     config_path: Path,
     *,
     discover_command: str | None = None,
+    guard_values: Mapping[str, str] | None = None,
 ) -> tuple[dict | None, str | None, dict, int]:
     """Dispatch to the client-specific config preparation function.
 
@@ -466,15 +466,15 @@ def _prepare_client_config(
     preserved = 0
     if client == "claude":
         prepared_config, hooks_diff, preserved = _prepare_claude_config(
-            command, config_path, discover_command=discover_command
+            command, config_path, discover_command=discover_command, guard_values=guard_values
         )
     elif client == "cursor":
         prepared_config, hooks_diff, preserved = _prepare_cursor_config(
-            command, config_path, discover_command=discover_command
+            command, config_path, discover_command=discover_command, guard_values=guard_values
         )
     elif client == "github-copilot":
         prepared_config, hooks_diff, preserved = _prepare_copilot_config(
-            command, config_path, discover_command=discover_command
+            command, config_path, discover_command=discover_command, guard_values=guard_values
         )
     elif client == "codex":
         if _is_codex_requirements_toml(config_path):
@@ -482,10 +482,11 @@ def _prepare_client_config(
                 command,
                 config_path,
                 discover_command=discover_command,
+                guard_values=guard_values,
             )
         else:
             prepared_config, hooks_diff, preserved = _prepare_codex_config(
-                command, config_path, discover_command=discover_command
+                command, config_path, discover_command=discover_command, guard_values=guard_values
             )
     else:
         raise ValueError(f"Unknown client: {client}")
@@ -631,6 +632,27 @@ def _write_file_no_follow(path: Path, content: bytes, mode: int) -> None:
         f.write(content)
 
 
+def _set_mode_if_unchanged(path: Path, content: bytes, mode: int) -> bool:
+    """If *path* is a regular file holding exactly *content*, set its mode and return True.
+
+    The check and the chmod go through one descriptor opened without following
+    symlinks, so a symlink swapped in after the check cannot redirect the chmod.
+    """
+    if path.is_symlink():
+        return False
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return False
+    with os.fdopen(fd, "rb") as f:
+        if not stat.S_ISREG(os.fstat(fd).st_mode) or f.read(len(content) + 1) != content:
+            return False
+        if not IS_WINDOWS:
+            os.fchmod(fd, mode)
+    return True
+
+
 def _write_guard_config(path: Path, content: bytes, *, managed: bool) -> bool:
     """Write the guard configuration file. Returns True if its content changed.
 
@@ -641,9 +663,7 @@ def _write_guard_config(path: Path, content: bytes, *, managed: bool) -> bool:
     0644. A symlink planted at *path* is replaced rather than followed.
     """
     mode = 0o644 if managed else 0o600
-    if path.is_file() and not path.is_symlink() and path.read_bytes() == content:
-        if not IS_WINDOWS:
-            path.chmod(mode)
+    if _set_mode_if_unchanged(path, content, mode):
         return False
     _write_file_no_follow(path, content, mode)
     rich.print(f"[green]\u2713[/green]  Wrote guard configuration to [dim]{path}[/dim]")
@@ -714,16 +734,15 @@ def _install_hooks(
     forwarder_script_path = _forwarder_script_path(config_path)
     discover_script_path = _discover_script_path(config_path)
     guard_config_path = _guard_config_path(config_path)
+    guard_values = {
+        "PUSH_KEY": push_key,
+        "REMOTE_HOOKS_BASE_URL": url,
+        "TENANT_ID": tenant_id,
+        "MACHINE_ID": machine_id,
+        "AGENT_SCAN_COMMAND": agent_scan_command or "",
+    }
     # Rendered (and validated) before any file is touched.
-    guard_config = _render_guard_config(
-        {
-            "PUSH_KEY": push_key,
-            "REMOTE_HOOKS_BASE_URL": url,
-            "TENANT_ID": tenant_id,
-            "MACHINE_ID": machine_id,
-            "AGENT_SCAN_COMMAND": agent_scan_command or "",
-        }
-    )
+    guard_config = _render_guard_config(guard_values)
 
     # The install writes the configuration file, the scripts and the agent config, and is
     # all-or-nothing: if it fails before the agent config is written, the other two are
@@ -748,6 +767,7 @@ def _install_hooks(
             command,
             config_path,
             discover_command=discover_command,
+            guard_values=guard_values,
         )
 
         first_install = not main_script.existed
@@ -793,6 +813,7 @@ def _prepare_claude_config(
     path: Path,
     *,
     discover_command: str | None = None,
+    guard_values: Mapping[str, str] | None = None,
 ) -> tuple[dict, dict, int]:
     """Build new Claude settings with hooks and compute diff, without writing.
 
@@ -832,7 +853,7 @@ def _prepare_claude_config(
             hooks[event] = groups
 
     settings["hooks"] = hooks
-    diff = _compute_hooks_diff(old_hooks, hooks)
+    diff = _compute_hooks_diff(old_hooks, hooks, guard_values=guard_values)
     return settings, diff, preserved
 
 
@@ -849,6 +870,7 @@ def _prepare_cursor_config(
     path: Path,
     *,
     discover_command: str | None = None,
+    guard_values: Mapping[str, str] | None = None,
 ) -> tuple[dict, dict, int]:
     """Build new Cursor config with hooks and compute diff, without writing.
 
@@ -877,7 +899,7 @@ def _prepare_cursor_config(
             hooks[event] = entries
 
     data["hooks"] = hooks
-    diff = _compute_hooks_diff(old_hooks, hooks)
+    diff = _compute_hooks_diff(old_hooks, hooks, guard_values=guard_values)
     return data, diff, preserved
 
 
@@ -886,6 +908,7 @@ def _prepare_copilot_config(
     path: Path,
     *,
     discover_command: str | None = None,
+    guard_values: Mapping[str, str] | None = None,
 ) -> tuple[dict, dict, int]:
     """Build new GitHub Copilot hooks config and compute diff, without writing.
 
@@ -916,7 +939,7 @@ def _prepare_copilot_config(
             hooks[event] = entries
 
     data["hooks"] = hooks
-    diff = _compute_hooks_diff(old_hooks, hooks)
+    diff = _compute_hooks_diff(old_hooks, hooks, guard_values=guard_values)
     return data, diff, preserved
 
 
@@ -925,6 +948,7 @@ def _prepare_codex_config(
     path: Path,
     *,
     discover_command: str | None = None,
+    guard_values: Mapping[str, str] | None = None,
 ) -> tuple[dict, dict, int]:
     """Build new Codex config with hooks and compute diff, without writing.
 
@@ -953,7 +977,7 @@ def _prepare_codex_config(
             hooks[event] = groups
 
     data["hooks"] = hooks
-    diff = _compute_hooks_diff(old_hooks, hooks)
+    diff = _compute_hooks_diff(old_hooks, hooks, guard_values=guard_values)
     return data, diff, preserved
 
 
@@ -1022,6 +1046,7 @@ def _prepare_codex_managed_config(
     path: Path,
     *,
     discover_command: str | None = None,
+    guard_values: Mapping[str, str] | None = None,
 ) -> tuple[str, dict]:
     """Build new Codex managed TOML content and compute diff, without writing.
 
@@ -1059,6 +1084,7 @@ def _prepare_codex_managed_config(
             entries.append({"type": "command", "command": discover, "async": True})
         return entries
 
+    values = guard_values or {}
     added = {}
     modified = {}
     removed = {}
@@ -1069,7 +1095,7 @@ def _prepare_codex_managed_config(
             removed[event] = expected
         elif actual and not expected:
             added[event] = actual
-        elif _normalize_guard_hooks(actual) != _normalize_guard_hooks(expected):
+        elif _normalize_guard_hooks(actual, values) != _normalize_guard_hooks(expected, values):
             modified[event] = {
                 "expected_value": expected,
                 "actual_value": actual,
@@ -1612,39 +1638,71 @@ def _send_servers_discovered_event(
 # The values hook commands carried before they moved into the guard configuration file, as
 # earlier versions rendered them: a leading run of single-quoted POSIX assignments, and
 # single-quoted PowerShell parameters.
-_LEGACY_POSIX_VALUES_RE = re.compile(
-    r"\A(?:(?:PUSH_KEY|REMOTE_HOOKS_BASE_URL|TENANT_ID|MACHINE_ID|AGENT_SCAN_COMMAND)='(?:[^']|'\"'\"')*' )+"
+_LEGACY_POSIX_VALUE_RE = re.compile(
+    r"(PUSH_KEY|REMOTE_HOOKS_BASE_URL|TENANT_ID|MACHINE_ID|AGENT_SCAN_COMMAND)='((?:[^']|'\"'\"')*)' "
 )
-_LEGACY_POWERSHELL_VALUES_RE = re.compile(
-    r" -(?:PushKey|RemoteUrl|TenantId|MachineId|AgentScanCommand) '(?:[^']|'')*'(?= |\Z)"
+_LEGACY_POWERSHELL_VALUE_RE = re.compile(
+    r" -(PushKey|RemoteUrl|TenantId|MachineId|AgentScanCommand) '((?:[^']|'')*)'(?= |\Z)"
 )
+_LEGACY_POWERSHELL_KEYS = {
+    "PushKey": "PUSH_KEY",
+    "RemoteUrl": "REMOTE_HOOKS_BASE_URL",
+    "TenantId": "TENANT_ID",
+    "MachineId": "MACHINE_ID",
+    "AgentScanCommand": "AGENT_SCAN_COMMAND",
+}
+_PUSH_KEY_UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 
 
-def _strip_legacy_command_values(command: str) -> str:
-    """Drop the values a hook command written by an earlier version carried.
+def _is_installed_legacy_value(key: str, value: str, guard_values: Mapping[str, str]) -> bool:
+    """Whether a value on a legacy hook command is one this install writes anyway.
+
+    A push key only has to be a well-formed UUID, since a changed key is reported as
+    ``push_key_changed`` rather than as a hook change.
+    """
+    if value and value == guard_values.get(key):
+        return True
+    return key == "PUSH_KEY" and _PUSH_KEY_UUID_RE.fullmatch(value) is not None
+
+
+def _strip_legacy_command_values(command: str, guard_values: Mapping[str, str]) -> str:
+    """Drop the values a hook command written by an earlier version carried, where they
+    match *guard_values*, the values this install writes to the guard configuration file.
 
     The hook scripts ignore them -- they read their values only from the hook
     configuration file -- so a command carrying them runs exactly as one without them.
+    A value that differs is kept, so a redirected URL or a command that only parses as
+    a value under one shell's quoting rules is still reported as a change.
     """
-    command = _LEGACY_POSIX_VALUES_RE.sub("", command, count=1)
-    return _LEGACY_POWERSHELL_VALUES_RE.sub("", command)
+    pos = 0
+    while (m := _LEGACY_POSIX_VALUE_RE.match(command, pos)) is not None:
+        if not _is_installed_legacy_value(m[1], m[2].replace("'\"'\"'", "'"), guard_values):
+            break
+        pos = m.end()
+    command = command[pos:]
+
+    def drop(m: re.Match[str]) -> str:
+        key = _LEGACY_POWERSHELL_KEYS[m[1]]
+        return "" if _is_installed_legacy_value(key, m[2].replace("''", "'"), guard_values) else m[0]
+
+    return _LEGACY_POWERSHELL_VALUE_RE.sub(drop, command)
 
 
-def _normalize_guard_hooks(value: object) -> object:
+def _normalize_guard_hooks(value: object, guard_values: Mapping[str, str]) -> object:
     """Normalize guard hook entries for comparison.
 
     Push-key UUIDs are replaced with a placeholder, and the values earlier versions
-    carried on the hook command are dropped, so upgrading from such a version is not
-    reported as a configuration change.
+    carried on the hook command are dropped where they match *guard_values*, so
+    upgrading from such a version is not reported as a configuration change.
     """
     if isinstance(value, str):
         if _is_agent_scan_command(value):
-            value = _strip_legacy_command_values(value)
+            value = _strip_legacy_command_values(value, guard_values)
         return redact_push_keys(value, "<PUSH_KEY>")
     if isinstance(value, dict):
-        return {k: _normalize_guard_hooks(v) for k, v in value.items()}
+        return {k: _normalize_guard_hooks(v, guard_values) for k, v in value.items()}
     if isinstance(value, list):
-        return [_normalize_guard_hooks(item) for item in value]
+        return [_normalize_guard_hooks(item, guard_values) for item in value]
     return value
 
 
@@ -1674,7 +1732,7 @@ def _extract_guard_hooks(entries: list) -> list:
     return result
 
 
-def _compute_hooks_diff(old_hooks: dict, new_hooks: dict) -> dict:
+def _compute_hooks_diff(old_hooks: dict, new_hooks: dict, *, guard_values: Mapping[str, str] | None = None) -> dict:
     """Compare existing hooks (old) against expected hooks (new).
 
     Only guard (agent-scan) hooks are compared; customer hooks are ignored.
@@ -1687,8 +1745,10 @@ def _compute_hooks_diff(old_hooks: dict, new_hooks: dict) -> dict:
       (each entry has "expected_value" and "actual_value")
 
     Differences that consist solely of a push-key change, or of the values earlier
-    versions carried on the hook command, are ignored.
+    versions carried on the hook command where they match *guard_values* (the values
+    being installed), are ignored.
     """
+    guard_values = guard_values or {}
     added = {}
     modified = {}
     removed = {}
@@ -1703,8 +1763,8 @@ def _compute_hooks_diff(old_hooks: dict, new_hooks: dict) -> dict:
         elif old_guard and not new_guard:
             added[key] = copy.deepcopy(old_guard)
         else:
-            old_norm = _normalize_guard_hooks(copy.deepcopy(old_guard))
-            new_norm = _normalize_guard_hooks(copy.deepcopy(new_guard))
+            old_norm = _normalize_guard_hooks(copy.deepcopy(old_guard), guard_values)
+            new_norm = _normalize_guard_hooks(copy.deepcopy(new_guard), guard_values)
             if old_norm != new_norm:
                 modified[key] = {
                     "expected_value": copy.deepcopy(new_guard),
@@ -2081,9 +2141,16 @@ def _remove_hook_script(client: str, config_path: Path) -> None:
 
 
 def _backup_file(path: Path) -> None:
+    """Copy *path* to ``<path>.backup`` with its mode, and with push keys redacted.
+
+    Configs written by earlier versions carry the push key on the hook commands, and
+    the backup keeps the original's mode, which is often world-readable.
+    """
     if path.exists():
         backup = Path(str(path) + ".backup")
-        shutil.copy2(path, backup)
+        text = path.read_bytes().decode("utf-8", errors="surrogateescape")
+        content = redact_push_keys(text).encode("utf-8", errors="surrogateescape")
+        _write_file_no_follow(backup, content, stat.S_IMODE(path.stat().st_mode))
         rich.print(f"[green]\u2713[/green]  Backed up [dim]{path}[/dim] \u2192 [dim]{backup}[/dim]")
 
 

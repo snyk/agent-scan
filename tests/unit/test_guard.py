@@ -756,6 +756,30 @@ class TestWriteConfig:
         assert "Backed up" in output
         assert "Written" in output
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX modes and symlinks")
+    def test_backup_redacts_push_keys_keeps_the_mode_and_replaces_a_symlink(self, tmp_path):
+        from agent_scan.redact import REDACTED
+
+        path = tmp_path / "hooks.json"
+        key = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        legacy = f"PUSH_KEY='{key}' bash '/x/snyk-agent-guard.sh' --client cursor"
+        with patch(f"{_G}.rich"):
+            _write_config({"hooks": {"stop": [{"command": legacy}]}}, path, 0)
+        path.chmod(0o644)
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.write_text("untouched\n")
+        backup = Path(f"{path}.backup")
+        backup.symlink_to(elsewhere)
+
+        with patch(f"{_G}.rich"):
+            assert _write_config({"hooks": {}}, path, 0) is True
+
+        assert key not in backup.read_text()
+        assert json.loads(backup.read_text())["hooks"]["stop"][0]["command"] == legacy.replace(key, REDACTED)
+        assert stat.S_IMODE(backup.stat().st_mode) == 0o644
+        assert not backup.is_symlink()
+        assert elsewhere.read_text() == "untouched\n"
+
     def test_creates_parent_directory_when_missing(self, tmp_path):
         path = tmp_path / "missing" / "nested" / "hooks.json"
 
@@ -6572,6 +6596,14 @@ class TestRunInstallSendsServersDiscovered:
 # _compute_hooks_diff
 # ===================================================================
 
+_LEGACY_PUSH_KEY = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+_POSIX_GUARD_CMD = "bash '/p/snyk-agent-guard.sh' --client cursor"
+_LEGACY_POSIX_VALUES = (
+    f"PUSH_KEY='{_LEGACY_PUSH_KEY}' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' TENANT_ID='t1' MACHINE_ID='m1' "
+)
+_PS_GUARD_CMD = r"powershell -File 'C:\p\snyk-agent-guard.ps1' -Client cursor"
+_LEGACY_PS_VALUES = f" -PushKey '{_LEGACY_PUSH_KEY}' -RemoteUrl 'https://api.snyk.io' -TenantId 't1' -MachineId 'm1'"
+
 
 class TestComputeHooksDiff:
     def test_both_empty(self):
@@ -6746,10 +6778,7 @@ class TestComputeHooksDiff:
         assert result == {"added": {}, "modified": {}, "removed": {}}
 
     def test_push_key_plus_other_change_is_modified(self):
-        """If the command differs by push key AND something else, it IS modified.
-
-        The URL alone would not count: values carried on the command are ignored, since
-        the scripts only read the guard config file. The script path does count."""
+        """If the command differs by push key AND something else, it IS modified."""
         old = {
             "PreToolUse": [
                 {
@@ -6778,6 +6807,39 @@ class TestComputeHooksDiff:
         assert "PreToolUse" in result["modified"]
         assert result["modified"]["PreToolUse"]["expected_value"] == new["PreToolUse"]
         assert result["modified"]["PreToolUse"]["actual_value"] == old["PreToolUse"]
+
+    @pytest.mark.parametrize(
+        "old_cmd, modified",
+        [
+            pytest.param(f"{_LEGACY_POSIX_VALUES}{_POSIX_GUARD_CMD}", False, id="posix-matching"),
+            pytest.param(
+                f"{_LEGACY_POSIX_VALUES.replace('https://api.snyk.io', 'https://attacker.example')}{_POSIX_GUARD_CMD}",
+                True,
+                id="posix-redirected-url",
+            ),
+            pytest.param(f"PUSH_KEY='not-a-key' {_POSIX_GUARD_CMD}", True, id="posix-malformed-push-key"),
+            pytest.param(f"{_PS_GUARD_CMD}{_LEGACY_PS_VALUES}", False, id="powershell-matching"),
+            pytest.param(
+                f"{_PS_GUARD_CMD}{_LEGACY_PS_VALUES.replace('m1', 'other-machine')}",
+                True,
+                id="powershell-different-machine-id",
+            ),
+            # PowerShell also closes a string at curly quotes, so this runs Start-Process.
+            pytest.param(
+                f"{_PS_GUARD_CMD} -PushKey 'x\u2019; Start-Process calc; \u2018'", True, id="powershell-curly-quotes"
+            ),
+            # cmd.exe does not treat ' as a quote, so this runs calc.
+            pytest.param(f"{_PS_GUARD_CMD} -MachineId 'm1 & calc & rem '", True, id="cmd-ampersand"),
+        ],
+    )
+    def test_legacy_command_values_are_ignored_only_when_they_match_the_install(self, old_cmd, modified):
+        new_cmd = _PS_GUARD_CMD if old_cmd.startswith("powershell") else _POSIX_GUARD_CMD
+        result = _compute_hooks_diff(
+            {"preToolUse": [{"command": old_cmd}]},
+            {"preToolUse": [{"command": new_cmd}]},
+            guard_values={"REMOTE_HOOKS_BASE_URL": "https://api.snyk.io", "TENANT_ID": "t1", "MACHINE_ID": "m1"},
+        )
+        assert ("preToolUse" in result["modified"]) is modified
 
     def test_diff_is_deep_copied_from_sources(self):
         extra_cmd = "PUSH_KEY='x' bash '/extra/snyk-agent-guard.sh'"
@@ -7537,16 +7599,30 @@ class TestHookConfigFile:
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
     @pytest.mark.skipif(IS_WINDOWS, reason="symlinks need privileges on Windows")
-    def test_write_replaces_a_symlink_instead_of_following_it(self, tmp_path):
+    @pytest.mark.parametrize("target_content", [b"untouched\n", b"PUSH_KEY=pk\n"], ids=["different", "same"])
+    def test_write_replaces_a_symlink_instead_of_following_it(self, tmp_path, target_content):
         target = tmp_path / "elsewhere"
-        target.write_bytes(b"untouched\n")
+        target.write_bytes(target_content)
+        target.chmod(0o644)
         path = tmp_path / guard_module.GUARD_CONFIG_NAME
         path.symlink_to(target)
         with patch(f"{_G}.rich"):
-            guard_module._write_guard_config(path, b"PUSH_KEY=pk\n", managed=False)
+            assert guard_module._write_guard_config(path, b"PUSH_KEY=pk\n", managed=False) is True
         assert not path.is_symlink()
         assert path.read_bytes() == b"PUSH_KEY=pk\n"
-        assert target.read_bytes() == b"untouched\n"
+        assert target.read_bytes() == target_content
+        assert stat.S_IMODE(target.stat().st_mode) == 0o644
+
+    @pytest.mark.skipif(IS_WINDOWS, reason="symlinks need privileges on Windows")
+    def test_mode_fix_does_not_follow_a_symlink_swapped_in_after_the_check(self, tmp_path):
+        target = tmp_path / "elsewhere"
+        target.write_bytes(b"PUSH_KEY=pk\n")
+        target.chmod(0o644)
+        path = tmp_path / guard_module.GUARD_CONFIG_NAME
+        path.symlink_to(target)
+        with patch.object(Path, "is_symlink", return_value=False):
+            assert guard_module._set_mode_if_unchanged(path, b"PUSH_KEY=pk\n", 0o600) is False
+        assert stat.S_IMODE(target.stat().st_mode) == 0o644
 
     def test_restore_puts_files_back_and_removes_new_ones(self, tmp_path):
         existing, new = tmp_path / "existing", tmp_path / "new"
@@ -7884,6 +7960,33 @@ class TestHookScriptsReadOnlyTheHookConfig:
             "pk-file|https://file.example|machine-file|guard discover --client claude-code --scope servers\n"
         )
         assert not hijack.exists()
+
+    @pytest.mark.parametrize(
+        "extra",
+        [
+            ["--url", "https://attacker.example"],
+            ["--url=https://attacker.example"],
+            ["--scope", "--url"],
+            ["--client"],
+        ],
+    )
+    def test_discover_refuses_arguments_other_than_client_and_scope(self, tmp_path, extra):
+        marker = tmp_path / "invoked"
+        stub = tmp_path / "snyk-agent-scan"
+        stub.write_text(f"#!/bin/sh\ntouch '{marker}'\n")
+        stub.chmod(0o755)
+        script = self._install(
+            tmp_path,
+            "snyk-agent-guard-discover.sh",
+            f"PUSH_KEY=pk-file\nREMOTE_HOOKS_BASE_URL=https://file.example\nMACHINE_ID=machine-file\nAGENT_SCAN_COMMAND={stub}\n",
+        )
+        result = self._run(
+            ["bash", str(script), "--client", "claude-code", *extra],
+            {"PATH": "/usr/bin:/bin:/usr/local/bin"},
+            payload="{}",
+        )
+        assert result.returncode == 0, result.stderr
+        assert not marker.exists()
 
     def test_discover_without_guard_config_does_nothing(self, tmp_path):
         marker = tmp_path / "invoked"
