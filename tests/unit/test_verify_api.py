@@ -866,6 +866,53 @@ class TestAnalyzeMachineHttpErrors:
             assert path.server_risks == []
             assert path.skill_risks == []
 
+    @pytest.mark.asyncio
+    async def test_429_with_push_key_names_the_enterprise_quota(self):
+        """A push key is on the enterprise budget, so the public-tier upsell would misdirect."""
+        inspected_paths = self._make_inspected_paths()
+        analysis_url = "https://test.example.com/api"
+
+        with patch("agent_scan.verify_api.aiohttp.ClientSession") as mock_session_class:
+            mock_session = MagicMock()
+
+            mock_request_info = MagicMock()
+            mock_request_info.real_url = analysis_url
+
+            error = aiohttp.ClientResponseError(
+                request_info=mock_request_info,
+                history=(),
+                status=429,
+                message="Too Many Requests",
+            )
+
+            mock_response = AsyncMock()
+            mock_response.status = 429
+            mock_response.raise_for_status = MagicMock(side_effect=error)
+
+            mock_post = MagicMock()
+            mock_post.__aenter__ = AsyncMock(return_value=mock_response)
+            mock_post.__aexit__ = AsyncMock(return_value=None)
+
+            mock_session.post = MagicMock(return_value=mock_post)
+            mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+            mock_session.__aexit__ = AsyncMock(return_value=None)
+
+            mock_session_class.return_value = mock_session
+
+            result = await analyze_machine(
+                inspected_paths=inspected_paths,
+                analysis_url=analysis_url,
+                identifier=None,
+                push_key="test-push-key",
+                show_analysis_results=True,
+                max_retries=1,
+            )
+
+        for path in result.scan_path_responses:
+            assert path.error is not None
+            assert "Daily usage limit reached for the enterprise version of Agent-Scan" in path.error.message
+            assert "public version" not in path.error.message
+
 
 def _make_get_session(*, status, json_data=None, get_exc=None):
     """A mock ClientSession whose ``.get(...)`` yields a response with the given status/json."""
