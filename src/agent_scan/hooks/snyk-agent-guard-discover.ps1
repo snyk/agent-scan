@@ -1,24 +1,18 @@
 #
 # Session-start discovery trampoline for Snyk Agent Guard (Windows).
 # Sets the environment expected by `guard discover` and hands it this process's
-# stdin, from which it reads the hook payload. Parameters mirror snyk-agent-guard.ps1.
+# stdin, from which it reads the hook payload.
+#
+# Usage:
+#   powershell -File snyk-agent-guard-discover.ps1 -Client claude-code -Scope servers
+#
+# Configuration is read from snyk-agent-guard.conf next to this script, written by
+# `snyk-agent-scan guard install`.
 #
 param(
     [Parameter(Mandatory=$true)]
     [ValidateSet("claude-code","cursor","codex","github-copilot")]
     [string]$Client,
-
-    [Parameter(Mandatory=$false)]
-    [string]$PushKey,
-
-    [Parameter(Mandatory=$false)]
-    [string]$RemoteUrl,
-
-    [Parameter(Mandatory=$false)]
-    [string]$MachineId,
-
-    [Parameter(Mandatory=$false)]
-    [string]$AgentScanCommand,
 
     [Parameter(Mandatory=$false)]
     [ValidateSet("servers","skills","all")]
@@ -27,13 +21,20 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-if ($PushKey)   { $env:PUSH_KEY = $PushKey }
-if ($RemoteUrl) { $env:REMOTE_HOOKS_BASE_URL = $RemoteUrl }
-if (-not $MachineId) { $MachineId = $env:MACHINE_ID }
-if (-not $MachineId) { exit 0 }
-$env:MACHINE_ID = $MachineId
+$ConfigFile = Join-Path $PSScriptRoot "snyk-agent-guard.conf"
+if (-not (Test-Path -LiteralPath $ConfigFile -PathType Leaf)) { exit 0 }
+$Config = @{}
+foreach ($line in Get-Content -LiteralPath $ConfigFile -Encoding UTF8) {
+    $parts = $line.Split([char[]]@('='), 2)
+    if ($parts.Count -eq 2) { $Config[$parts[0]] = $parts[1] }
+}
 
-$cmd = if ($AgentScanCommand) { $AgentScanCommand } elseif ($env:AGENT_SCAN_COMMAND) { $env:AGENT_SCAN_COMMAND } else { $null }
+$env:PUSH_KEY = $Config["PUSH_KEY"]
+$env:REMOTE_HOOKS_BASE_URL = $Config["REMOTE_HOOKS_BASE_URL"]
+$env:MACHINE_ID = $Config["MACHINE_ID"]
+if (-not $env:MACHINE_ID) { exit 0 }
+
+$cmd = $Config["AGENT_SCAN_COMMAND"]
 if (-not $cmd) { exit 0 }
 
 $arguments = @("guard", "discover", "--client", $Client, "--scope", $Scope)

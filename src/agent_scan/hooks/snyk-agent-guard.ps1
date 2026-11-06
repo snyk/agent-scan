@@ -3,7 +3,10 @@
 # Supports Claude Code, Cursor, Codex, and Github Copilot via the -Client argument.
 #
 # Usage:
-#   powershell -File snyk-agent-guard.ps1 -Client claude-code -PushKey '...' -RemoteUrl 'https://...'
+#   powershell -File snyk-agent-guard.ps1 -Client claude-code
+#
+# Configuration is read from snyk-agent-guard.conf next to this script, written by
+# `snyk-agent-scan guard install` (see the Configuration section below).
 #
 # Reads a JSON payload from stdin and POSTs it (base64-encoded) to the Agent Guard endpoint.
 #
@@ -18,19 +21,7 @@
 param(
     [Parameter(Mandatory=$true)]
     [ValidateSet("claude-code","cursor","codex","github-copilot")]
-    [string]$Client,
-
-    [Parameter(Mandatory=$false)]
-    [string]$PushKey,
-
-    [Parameter(Mandatory=$false)]
-    [string]$RemoteUrl,
-
-    [Parameter(Mandatory=$false)]
-    [string]$TenantId,
-
-    [Parameter(Mandatory=$false)]
-    [string]$MachineId
+    [string]$Client
 )
 
 $ErrorActionPreference = "Stop"
@@ -72,22 +63,36 @@ function FailOpen([string]$reason) {
 # Main
 # ---------------------------------------------------------------------------
 
-# Parameters take precedence over env vars.
-if (-not $PushKey) { $PushKey = if ($env:PUSH_KEY) { $env:PUSH_KEY } elseif ($env:PUSHKEY) { $env:PUSHKEY } else { $null } }
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+
+# Installation configuration, written by `snyk-agent-scan guard install` next to this
+# script.
+$ConfigFile = Join-Path $PSScriptRoot "snyk-agent-guard.conf"
+if (-not (Test-Path -LiteralPath $ConfigFile -PathType Leaf)) {
+    Write-Error "Configuration file not found: $ConfigFile (run 'snyk-agent-scan guard install')"
+    exit 1
+}
+$Config = @{}
+foreach ($line in Get-Content -LiteralPath $ConfigFile -Encoding UTF8) {
+    $parts = $line.Split([char[]]@('='), 2)
+    if ($parts.Count -eq 2) { $Config[$parts[0]] = $parts[1] }
+}
+$PushKey = $Config["PUSH_KEY"]
+$RemoteUrl = $Config["REMOTE_HOOKS_BASE_URL"]
+$MachineId = $Config["MACHINE_ID"]
+
 if (-not $PushKey) {
-    Write-Error "PUSH_KEY is required (pass -PushKey or set env var)"
+    Write-Error "PUSH_KEY is not set in $ConfigFile"
     exit 1
 }
-
-if (-not $RemoteUrl) { $RemoteUrl = $env:REMOTE_HOOKS_BASE_URL }
 if (-not $RemoteUrl) {
-    Write-Error "REMOTE_HOOKS_BASE_URL is required (pass -RemoteUrl or set env var)"
+    Write-Error "REMOTE_HOOKS_BASE_URL is not set in $ConfigFile"
     exit 1
 }
-
-if (-not $MachineId) { $MachineId = $env:MACHINE_ID }
 if (-not $MachineId) {
-    Write-Error "MACHINE_ID is required (pass -MachineId or set env var)"
+    Write-Error "MACHINE_ID is not set in $ConfigFile"
     exit 1
 }
 
