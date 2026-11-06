@@ -1,4 +1,4 @@
-"""Drive one inspection: init, then run ops and post results until the backend is done."""
+"""Drive one discovery session: init, then run ops and post results until the backend is done."""
 
 import json
 import os
@@ -12,7 +12,7 @@ import aiohttp
 
 from agent_scan.agents.base import is_own_home
 from agent_scan.remote_discovery import trace as trace_output
-from agent_scan.remote_discovery.executor import CAPABILITIES, run_op, to_wire
+from agent_scan.remote_discovery.executor import run_op, to_wire
 from agent_scan.utils import get_readable_home_directories
 
 # Env vars the backend may use to relocate agent config folders (own home only).
@@ -26,7 +26,7 @@ class RemoteDiscoveryError(Exception):
 
 @dataclass
 class RemoteResult:
-    inspect_id: str = ""
+    session_id: str = ""
     found: dict[str, list[dict[str, Any]]] = field(
         default_factory=lambda: {"clients": [], "mcp_configs": [], "skills_dirs": []}
     )
@@ -98,27 +98,25 @@ async def run_remote_discovery(
     agents: list[str] | None = None,
     push_key: str | None = None,
     cli_version: str | None = None,
-    identifier: str | None = None,
     all_users: bool = False,
     trace: bool = False,
 ) -> RemoteResult:
     started = time.monotonic()
-    base = backend_url.rstrip("/") + "/hidden/agent-discovery/inspections"
+    base = backend_url.rstrip("/") + "/hidden/coding-agent-discovery/sessions"
     headers = {"X-Push-Key": push_key} if push_key else {}
     init = {
-        "client": {"os": sys.platform, "cli_version": cli_version, "capabilities": CAPABILITIES},
+        "client": {"os": sys.platform, "cli_version": cli_version},
         "homes": homes(all_users),
         "env": _env(),
         "cwd": to_wire(os.getcwd()),
         "scope": scope,
         "agents": agents or [],
-        "scan_user_info": {"identifier": identifier} if identifier else None,
     }
     result = RemoteResult()
     timeout = aiohttp.ClientTimeout(total=120)
     async with aiohttp.ClientSession(timeout=timeout) as session:
         response = await _post(session, base, init, headers, result, trace)
-        result.inspect_id = response["inspect_id"]
+        result.session_id = response["session_id"]
         result.supported_agents = response.get("supported_agents", [])
         while True:
             result.add(response["found"])
@@ -131,6 +129,6 @@ async def run_remote_discovery(
             step = {"round": response["round"], "results": [run_op(op) for op in ops]}
             result.rounds += 1
             result.ops += len(ops)
-            response = await _post(session, f"{base}/{result.inspect_id}/steps", step, headers, result, trace)
+            response = await _post(session, f"{base}/{result.session_id}/steps", step, headers, result, trace)
     result.duration_s = time.monotonic() - started
     return result
