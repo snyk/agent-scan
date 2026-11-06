@@ -18,7 +18,6 @@ logger = logging.getLogger(__name__)
 MAX_FILE_BYTES = 20 * 1024 * 1024
 MAX_FIND_MATCHES = 10_000
 MAX_FIND_READ_BYTES = 50 * 1024 * 1024
-CAPABILITIES = ["stat", "read", "find"]
 
 
 def to_wire(path: str) -> str:
@@ -103,7 +102,8 @@ def _find(op: dict[str, Any]) -> dict[str, Any]:
     dir_names = {fold(n) for n in op.get("dir_names", ())}
     max_depth = op["max_depth"]
     follow_child_links = op.get("follow_child_links", False)
-    roots, matches = [], []
+    roots: list[dict[str, Any]] = []
+    matches: list[dict[str, Any]] = []
     truncated = False
 
     def walk(root: str, dirpath: str, depth: int) -> None:
@@ -181,7 +181,7 @@ _RUNNERS = {"stat": _stat, "read": _read, "find": _find}
 def run_op(op: dict[str, Any]) -> dict[str, Any]:
     kind = op.get("kind")
     base = {"op_id": op["op_id"], "kind": kind}
-    runner = _RUNNERS.get(kind)
+    runner = _RUNNERS.get(kind) if isinstance(kind, str) else None
     if runner is None:
         return {**base, "status": "unsupported"}
     try:
