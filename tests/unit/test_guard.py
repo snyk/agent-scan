@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import base64
 import contextlib
+import hashlib
 import json
 import os
 import re
@@ -19,7 +20,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from typing import ClassVar
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 from unittest.mock import call as mock_call
 
 import pytest
@@ -4704,6 +4705,7 @@ class TestInstallHooksOrchestration:
         minted=False,
         config_exists=False,
         machine_id="machine-1",
+        push_key="pk-test",
     ):
         config = tmp_path / "config.json"
         if config_exists:
@@ -4711,7 +4713,7 @@ class TestInstallHooksOrchestration:
         _install_hooks(
             client,
             hook_client,
-            "pk-test",
+            push_key,
             "https://api.snyk.io",
             config,
             "user",
@@ -4992,6 +4994,8 @@ class TestInstallHooksOrchestration:
             new_checksum=_NEW_CHECKSUM,
             discover_current_checksum=_DISCOVER_CURRENT_CHECKSUM,
             discover_new_checksum=_DISCOVER_NEW_CHECKSUM,
+            config_current_checksum=None,
+            config_new_checksum=ANY,
         )
 
     def test_test_event_receives_empty_diff(self, ctx, tmp_path):
@@ -5009,6 +5013,8 @@ class TestInstallHooksOrchestration:
             new_checksum=_NEW_CHECKSUM,
             discover_current_checksum=_DISCOVER_CURRENT_CHECKSUM,
             discover_new_checksum=_DISCOVER_NEW_CHECKSUM,
+            config_current_checksum=None,
+            config_new_checksum=ANY,
         )
 
     def test_test_event_not_first_install(self, ctx, tmp_path):
@@ -5025,6 +5031,8 @@ class TestInstallHooksOrchestration:
             new_checksum=_NEW_CHECKSUM,
             discover_current_checksum=_DISCOVER_CURRENT_CHECKSUM,
             discover_new_checksum=_DISCOVER_NEW_CHECKSUM,
+            config_current_checksum=None,
+            config_new_checksum=ANY,
         )
 
     def test_test_event_push_key_changed(self, ctx, tmp_path):
@@ -5042,6 +5050,8 @@ class TestInstallHooksOrchestration:
             new_checksum=_NEW_CHECKSUM,
             discover_current_checksum=_DISCOVER_CURRENT_CHECKSUM,
             discover_new_checksum=_DISCOVER_NEW_CHECKSUM,
+            config_current_checksum=None,
+            config_new_checksum=ANY,
         )
 
     def test_test_event_push_key_unchanged(self, ctx, tmp_path):
@@ -5059,6 +5069,8 @@ class TestInstallHooksOrchestration:
             new_checksum=_NEW_CHECKSUM,
             discover_current_checksum=_DISCOVER_CURRENT_CHECKSUM,
             discover_new_checksum=_DISCOVER_NEW_CHECKSUM,
+            config_current_checksum=None,
+            config_new_checksum=ANY,
         )
 
     # ---------------------------------------------------------------
@@ -5094,6 +5106,78 @@ class TestInstallHooksOrchestration:
         _, kwargs = ctx["test_event"].call_args
         assert kwargs["discover_current_checksum"] == "discover-current"
         assert kwargs["discover_new_checksum"] == "discover-new"
+
+    # ---------------------------------------------------------------
+    # Test event: guard configuration checksums
+    # ---------------------------------------------------------------
+
+    @staticmethod
+    def _sha256(content: bytes) -> str:
+        return hashlib.sha256(content).hexdigest()
+
+    def test_config_checksums_first_install(self, ctx, tmp_path):
+        """No configuration file yet: no current checksum; new is that of the rendered file."""
+        self._call(tmp_path)
+        _, kwargs = ctx["test_event"].call_args
+        _, content = ctx["write_guard_config"].call_args.args
+        assert kwargs["config_current_checksum"] is None
+        assert kwargs["config_new_checksum"] == self._sha256(content)
+
+    def test_config_current_checksum_is_of_the_file_before_install(self, ctx, tmp_path):
+        """The current checksum is taken before the install overwrites the file."""
+        config = tmp_path / "config.json"
+        guard_config = guard_module._guard_config_path(config)
+        guard_config.parent.mkdir(parents=True, exist_ok=True)
+        original = b"PUSH_KEY=old\nREMOTE_HOOKS_BASE_URL=https://evil.example\n"
+        guard_config.write_bytes(original)
+
+        def overwrite(path, content, *, managed):
+            path.write_bytes(content)
+            return True
+
+        ctx["write_guard_config"].side_effect = overwrite
+        self._call(tmp_path, config_exists=True)
+
+        _, kwargs = ctx["test_event"].call_args
+        assert kwargs["config_current_checksum"] == self._sha256(original)
+        assert kwargs["config_new_checksum"] == self._sha256(guard_config.read_bytes())
+        assert kwargs["config_current_checksum"] != kwargs["config_new_checksum"]
+
+    def test_config_checksums_match_when_unchanged(self, ctx, tmp_path):
+        """Reinstalling over the file the previous install wrote reports equal checksums."""
+        self._call(tmp_path)
+        path, content = ctx["write_guard_config"].call_args.args
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+
+        self._call(tmp_path, config_exists=True)
+
+        _, kwargs = ctx["test_event"].call_args
+        assert kwargs["config_current_checksum"] == kwargs["config_new_checksum"] == self._sha256(content)
+
+    def test_push_key_rotation_keeps_config_current_checksum_equal_to_previous_new(self, ctx, tmp_path):
+        """Rotating the push key through guard install is not a configuration change.
+
+        The file on disk still holds what the previous install wrote, so its current checksum
+        equals the new checksum that install reported; only the new checksum moves.
+        """
+
+        def write(path, content, *, managed):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+            return True
+
+        ctx["write_guard_config"].side_effect = write
+        self._call(tmp_path, push_key="pk-old")
+        previous_new = ctx["test_event"].call_args.kwargs["config_new_checksum"]
+
+        ctx["detect_existing"].return_value = {"auth_value": "pk-old"}
+        self._call(tmp_path, config_exists=True, push_key="pk-new")
+
+        kwargs = ctx["test_event"].call_args.kwargs
+        assert kwargs["config_current_checksum"] == previous_new
+        assert kwargs["config_new_checksum"] != previous_new
+        assert kwargs["push_key_changed"] is True
 
     # ---------------------------------------------------------------
     # Test event failure: abort, cleanup, revoke
@@ -5322,6 +5406,24 @@ class TestSendTestEventHooksScript:
             "discover_current_checksum": "discover-old",
             "discover_new_checksum": "discover-new",
         }
+
+    def test_guard_config_checksums_are_included(self):
+        payload = self._capture_payload(
+            new_checksum="new222",
+            config_current_checksum="config-old",
+            config_new_checksum="config-new",
+        )
+
+        assert payload["hooks_script"] == {
+            "new_checksum": "new222",
+            "config_current_checksum": "config-old",
+            "config_new_checksum": "config-new",
+        }
+
+    def test_missing_guard_config_omits_current_checksum(self):
+        payload = self._capture_payload(new_checksum="new222", config_new_checksum="config-new")
+
+        assert payload["hooks_script"] == {"new_checksum": "new222", "config_new_checksum": "config-new"}
 
     def test_no_checksums_omits_hooks_script(self):
         payload = self._capture_payload(first_install=True)
