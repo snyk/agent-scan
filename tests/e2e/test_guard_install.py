@@ -247,3 +247,70 @@ class TestGuardInstallE2E:
         assert isinstance(session_discovery["body"]["servers"], list)
         assert isinstance(session_discovery["body"]["discovery_duration_ms"], int)
         assert session_discovery["body"]["discovery_duration_ms"] >= 0
+
+    @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
+    def test_guard_install_github_copilot(self, agent_scan_cmd, agent_scan_command, tmp_path, fake_hook_server):
+        # Mirror the real ~/.copilot/hooks/snyk-agent-guard.json layout: scripts land
+        # next to the config because its parent directory is named "hooks".
+        config_file = tmp_path / "hooks" / "snyk-agent-guard.json"
+        result = subprocess.run(
+            [
+                *agent_scan_cmd,
+                "guard",
+                "install",
+                "github-copilot",
+                "--file",
+                str(config_file),
+                "--url",
+                fake_hook_server,
+                "--machine-id",
+                "e2e-machine-id",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env={**os.environ, "PUSH_KEY": "test-pk-e2e", "AGENT_SCAN_COMMAND": str(agent_scan_command)},
+        )
+        assert result.returncode == 0, f"guard install failed:\nstdout: {result.stdout}\nstderr: {result.stderr}"
+
+        data = json.loads(config_file.read_text())
+        assert data["version"] == 1
+        assert "PreToolUse" in data["hooks"]
+        assert "Stop" in data["hooks"]
+        assert "SubagentStart" in data["hooks"]
+
+        script_key = "powershell" if os.name == "nt" else "bash"
+        forwarder_script = "snyk-agent-guard.ps1" if os.name == "nt" else "snyk-agent-guard.sh"
+        discover_script = "snyk-agent-guard-discover.ps1" if os.name == "nt" else "snyk-agent-guard-discover.sh"
+        assert all(entry.get("type") == "command" for entry in data["hooks"]["SessionStart"])
+        discovery_entries = [
+            entry for entry in data["hooks"]["SessionStart"] if discover_script in entry.get(script_key, "")
+        ]
+        assert len(discovery_entries) == 1
+        assert set(discovery_entries[0]) == {"type", script_key}
+        assert str(config_file) not in discovery_entries[0][script_key]
+        assert (config_file.parent / forwarder_script).is_file()
+        assert (config_file.parent / discover_script).is_file()
+
+        discover_result = subprocess.run(
+            [*agent_scan_cmd, "guard", "discover", "--client", "github-copilot"],
+            input=json.dumps({"cwd": str(tmp_path), "session_id": "e2e"}),
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env={
+                **os.environ,
+                "PUSH_KEY": "test-pk-e2e",
+                "REMOTE_HOOKS_BASE_URL": fake_hook_server,
+                "MACHINE_ID": "e2e-machine-id",
+            },
+        )
+        assert discover_result.returncode == 0, (
+            f"guard discover failed:\nstdout: {discover_result.stdout}\nstderr: {discover_result.stderr}"
+        )
+        session_discovery = _FakeHookServer.requests[-1]
+        assert session_discovery["body"]["hook_event_name"] == "sessionStartServerDiscovery"
+        assert session_discovery["body"]["session_id"] == "e2e"
+        assert isinstance(session_discovery["body"]["servers"], list)
+        assert isinstance(session_discovery["body"]["discovery_duration_ms"], int)
+        assert session_discovery["body"]["discovery_duration_ms"] >= 0
