@@ -748,7 +748,13 @@ def _install_hooks(
     # all-or-nothing: if it fails before the agent config is written, the other two are
     # restored, so no script or configuration is left behind an agent
     # config that was not updated.
-    snapshots = [_snapshot_file(p) for p in (forwarder_script_path, discover_script_path, guard_config_path)]
+    config_snapshot = _snapshot_file(guard_config_path)
+    snapshots = [_snapshot_file(forwarder_script_path), _snapshot_file(discover_script_path), config_snapshot]
+    # Checksummed like the scripts: agent-monitor compares the current checksum with the
+    # new one the previous install reported, so an edit made between installs is caught
+    # while a value this install legitimately changes (e.g. a rotated push key) is not.
+    config_current_checksum = None if config_snapshot.content is None else _sha256(config_snapshot.content)
+    config_new_checksum = _sha256(guard_config)
     try:
         # The configuration goes first: a script that finds none refuses to run, so the
         # new scripts must never be live before the file they read is in place.
@@ -784,6 +790,8 @@ def _install_hooks(
             new_checksum=main_script.new_checksum,
             discover_current_checksum=discover_script.current_checksum if discover_script else None,
             discover_new_checksum=discover_script.new_checksum if discover_script else None,
+            config_current_checksum=config_current_checksum,
+            config_new_checksum=config_new_checksum,
         ):
             rich.print("[bold red]Aborting install \u2014 test event failed.[/bold red]")
             raise SystemExit(1)
@@ -1544,6 +1552,8 @@ def _send_test_event(
     new_checksum: str | None = None,
     discover_current_checksum: str | None = None,
     discover_new_checksum: str | None = None,
+    config_current_checksum: str | None = None,
+    config_new_checksum: str | None = None,
 ) -> bool:
     """Send a test hooksConfigured event by invoking the hook script. Returns True on success."""
     payload_dict: dict = {"hook_event_name": "hooksConfigured"}
@@ -1565,6 +1575,10 @@ def _send_test_event(
         hooks_script["discover_current_checksum"] = discover_current_checksum
     if discover_new_checksum is not None:
         hooks_script["discover_new_checksum"] = discover_new_checksum
+    if config_current_checksum is not None:
+        hooks_script["config_current_checksum"] = config_current_checksum
+    if config_new_checksum is not None:
+        hooks_script["config_new_checksum"] = config_new_checksum
     if hooks_script:
         payload_dict["hooks_script"] = hooks_script
     redact_push_keys_in_data(payload_dict)
@@ -2104,6 +2118,10 @@ class _CopiedScript(NamedTuple):
     new_checksum: str
 
 
+def _sha256(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
+
 def _copy_hook_script(dest: Path) -> _CopiedScript:
     """Copy the bundled hook script named ``dest.name`` to *dest*.
 
@@ -2114,10 +2132,10 @@ def _copy_hook_script(dest: Path) -> _CopiedScript:
 
     source = importlib_resources.files("agent_scan.hooks").joinpath(dest.name)
     new_content = source.read_bytes()
-    new_checksum = hashlib.sha256(new_content).hexdigest()
+    new_checksum = _sha256(new_content)
 
     current_content = dest.read_bytes() if dest.exists() else None
-    current_checksum = None if current_content is None else hashlib.sha256(current_content).hexdigest()
+    current_checksum = None if current_content is None else _sha256(current_content)
 
     updated = current_content != new_content
     if updated:
