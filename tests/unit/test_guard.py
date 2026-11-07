@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import fnmatch
 import json
 import os
 import re
@@ -3496,6 +3497,486 @@ class TestHookScriptVersionPlaceholder:
     def test_trampolines_carry_no_placeholder(self, name):
         """The trampolines exec the CLI, which reports its own version directly."""
         assert _VERSION_PLACEHOLDER not in _get_script_path(name).read_bytes()
+
+
+# Windows' MoveFileEx, behind os.replace, cannot replace a file that any process holds
+# open, so a reader holding the old file across the write only exists on POSIX. There the
+# write falls back to in place (covered with a patched os.replace below).
+_POSIX_RENAME_OVER_OPEN_FILE = pytest.mark.skipif(
+    sys.platform == "win32", reason="Windows cannot rename over a file that is held open"
+)
+
+
+class TestAtomicWrite:
+    """Configs and hook scripts are replaced by a rename, never rewritten in place."""
+
+    @staticmethod
+    def _leftovers(directory: Path) -> list[str]:
+        return sorted(p.name for p in directory.iterdir() if p.name.endswith(".tmp"))
+
+    @_POSIX_RENAME_OVER_OPEN_FILE
+    def test_a_reader_holding_the_old_file_keeps_its_complete_content(self, tmp_path):
+        """What an agent reading the config, or bash running a hook script, has open."""
+        path = tmp_path / "settings.json"
+        path.write_text('{"old": true}\n')
+
+        with open(path) as reader:
+            guard_module._atomic_write(path, '{"new": true}\n')
+            assert reader.read() == '{"old": true}\n'
+
+        assert path.read_text() == '{"new": true}\n'
+        assert self._leftovers(tmp_path) == []
+
+    @pytest.mark.skipif(IS_WINDOWS, reason="symlinks need privileges on Windows")
+    def test_a_symlinked_path_is_written_through_by_default(self, tmp_path):
+        real = tmp_path / "real.json"
+        real.write_text("old\n")
+        link = tmp_path / "link.json"
+        link.symlink_to(real)
+
+        guard_module._atomic_write(link, "new\n")
+
+        assert link.is_symlink()
+        assert real.read_text() == "new\n"
+
+    @pytest.mark.skipif(IS_WINDOWS, reason="symlinks need privileges on Windows")
+    def test_follow_symlinks_false_replaces_the_link_and_leaves_its_target_alone(self, tmp_path):
+        victim = tmp_path / "victim"
+        victim.write_text("keep\n")
+        victim.chmod(0o640)
+        link = tmp_path / "snyk-agent-guard.conf"
+        link.symlink_to(victim)
+
+        guard_module._atomic_write(link, "PUSH_KEY=x\n", mode=0o600, follow_symlinks=False)
+
+        assert not link.is_symlink()
+        assert link.read_text() == "PUSH_KEY=x\n"
+        assert stat.S_IMODE(link.stat().st_mode) == 0o600
+        assert victim.read_text() == "keep\n"
+        assert stat.S_IMODE(victim.stat().st_mode) == 0o640
+
+    @pytest.mark.skipif(IS_WINDOWS, reason="symlinks need privileges on Windows")
+    def test_in_place_fallback_never_writes_through_a_symlink(self, tmp_path):
+        victim = tmp_path / "victim"
+        victim.write_text("keep\n")
+        link = tmp_path / "snyk-agent-guard.conf"
+        link.symlink_to(victim)
+
+        with (
+            patch(f"{_G}.IS_WINDOWS", True),
+            patch(f"{_G}.os.replace", side_effect=PermissionError(13, "Access is denied")),
+            patch(f"{_G}.time.sleep"),
+            pytest.raises(PermissionError),
+        ):
+            guard_module._atomic_write(link, "PUSH_KEY=x\n", follow_symlinks=False)
+
+        assert victim.read_text() == "keep\n"
+        assert self._leftovers(tmp_path) == []
+
+    @pytest.mark.skipif(IS_WINDOWS, reason="POSIX permission bits")
+    @pytest.mark.parametrize("existing", [False, True])
+    def test_the_temp_file_is_created_private_not_narrowed_afterwards(self, tmp_path, existing):
+        """A file holding a secret must never be readable by others, even before the chmod."""
+        path = tmp_path / "snyk-agent-guard.conf"
+        if existing:
+            path.write_text("old\n")
+            path.chmod(0o600)
+        seen = []
+        real_replace = os.replace
+
+        def spy(src, dst):
+            seen.append(stat.S_IMODE(os.stat(src).st_mode))
+            real_replace(src, dst)
+
+        old_umask = os.umask(0)
+        try:
+            with patch(f"{_G}.os.chmod"), patch(f"{_G}.os.replace", side_effect=spy):
+                guard_module._atomic_write(path, "PUSH_KEY=x\n", mode=None if existing else 0o600)
+        finally:
+            os.umask(old_umask)
+
+        assert seen == [0o600]
+
+    def test_windows_retries_a_rename_blocked_for_a_moment(self, tmp_path):
+        path = tmp_path / "settings.json"
+        path.write_text("original\n")
+        real_replace = os.replace
+        calls = []
+
+        def blocked_once(src, dst):
+            calls.append(src)
+            if len(calls) == 1:
+                raise PermissionError(13, "Access is denied")
+            real_replace(src, dst)
+
+        with (
+            patch(f"{_G}.IS_WINDOWS", True),
+            patch(f"{_G}.os.replace", side_effect=blocked_once),
+            patch(f"{_G}.time.sleep") as sleep,
+        ):
+            guard_module._atomic_write(path, "replacement\n")
+
+        assert len(calls) == 2
+        sleep.assert_called_once()
+        assert path.read_text() == "replacement\n"
+        assert self._leftovers(tmp_path) == []
+
+    def test_windows_falls_back_to_writing_in_place_while_the_rename_stays_blocked(self, tmp_path):
+        """A file held open past the retries must not fail the install outright."""
+        path = tmp_path / "settings.json"
+        path.write_text("original\n")
+
+        with (
+            patch(f"{_G}.IS_WINDOWS", True),
+            patch(f"{_G}.os.replace", side_effect=PermissionError(13, "Access is denied")) as replace,
+            patch(f"{_G}.time.sleep"),
+        ):
+            guard_module._atomic_write(path, "replacement\n")
+
+        assert replace.call_count == 5
+        assert path.read_text() == "replacement\n"
+        assert self._leftovers(tmp_path) == []
+
+    def test_windows_fallback_succeeds_when_the_temp_file_cannot_be_removed(self, tmp_path):
+        """A scanner holding the temp file must not turn a completed write into a failure."""
+        path = tmp_path / "settings.json"
+        path.write_text("original\n")
+        real_unlink = Path.unlink
+
+        def unlink(self, *args, **kwargs):
+            if self.name.endswith(".tmp"):
+                raise PermissionError(13, "Access is denied")
+            return real_unlink(self, *args, **kwargs)
+
+        with (
+            patch(f"{_G}.IS_WINDOWS", True),
+            patch(f"{_G}.os.replace", side_effect=PermissionError(13, "Access is denied")),
+            patch(f"{_G}.time.sleep"),
+            patch.object(Path, "unlink", unlink),
+        ):
+            guard_module._atomic_write(path, "replacement\n")
+
+        assert path.read_text() == "replacement\n"
+        # Left behind, but dot-prefixed so nothing loads or hardens it.
+        assert all(name.startswith(".") for name in self._leftovers(tmp_path))
+
+    def test_windows_fallback_succeeds_when_the_mode_cannot_be_applied(self, tmp_path):
+        path = tmp_path / "snyk-agent-guard.ps1"
+        path.write_bytes(b"old")
+        real_chmod = os.chmod
+
+        def chmod(target, mode, *args, **kwargs):
+            if Path(target) == path:
+                raise PermissionError(13, "Access is denied")
+            return real_chmod(target, mode, *args, **kwargs)
+
+        with (
+            patch(f"{_G}.IS_WINDOWS", True),
+            patch(f"{_G}.os.replace", side_effect=PermissionError(13, "Access is denied")),
+            patch(f"{_G}.time.sleep"),
+            patch(f"{_G}.os.chmod", side_effect=chmod),
+        ):
+            guard_module._atomic_write(path, b"new", mode=0o644)
+
+        assert path.read_bytes() == b"new"
+        assert self._leftovers(tmp_path) == []
+
+    def test_windows_fallback_still_fails_when_the_in_place_write_fails(self, tmp_path):
+        """Only cleanup is best-effort: a holder that refuses writes too fails the write."""
+        path = tmp_path / "settings.json"
+        path.write_text("original\n")
+        real_open = open
+
+        def open_(file, mode="r", *args, **kwargs):
+            if Path(file) == path and "w" in mode:
+                raise PermissionError(13, "The process cannot access the file")
+            return real_open(file, mode, *args, **kwargs)
+
+        with (
+            patch(f"{_G}.IS_WINDOWS", True),
+            patch(f"{_G}.os.replace", side_effect=PermissionError(13, "Access is denied")),
+            patch(f"{_G}.time.sleep"),
+            patch("builtins.open", side_effect=open_),
+            pytest.raises(PermissionError, match="cannot access"),
+        ):
+            guard_module._atomic_write(path, "replacement\n")
+
+        assert path.read_text() == "original\n"
+        assert self._leftovers(tmp_path) == []
+
+    def test_posix_does_not_mask_a_refused_rename(self, tmp_path):
+        path = tmp_path / "settings.json"
+        path.write_text("original\n")
+
+        with (
+            patch(f"{_G}.IS_WINDOWS", False),
+            patch(f"{_G}.os.replace", side_effect=PermissionError(13, "Permission denied")),
+            pytest.raises(PermissionError),
+        ):
+            guard_module._atomic_write(path, "replacement\n")
+
+        assert path.read_text() == "original\n"
+        assert self._leftovers(tmp_path) == []
+
+    def test_a_failed_write_leaves_the_original_and_no_temp_file(self, tmp_path):
+        path = tmp_path / "settings.json"
+        path.write_text("original\n")
+
+        with patch(f"{_G}.os.replace", side_effect=OSError("disk full")), pytest.raises(OSError, match="disk full"):
+            guard_module._atomic_write(path, "replacement\n")
+
+        assert path.read_text() == "original\n"
+        assert self._leftovers(tmp_path) == []
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+    def test_keeps_the_mode_of_the_file_it_replaces(self, tmp_path):
+        path = tmp_path / "hooks.json"
+        path.write_text("{}\n")
+        path.chmod(0o640)
+
+        guard_module._atomic_write(path, '{"hooks": {}}\n')
+
+        assert stat.S_IMODE(path.stat().st_mode) == 0o640
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+    def test_explicit_mode_wins(self, tmp_path):
+        path = tmp_path / "snyk-agent-guard.sh"
+        path.write_bytes(b"old")
+        path.chmod(0o644)
+
+        guard_module._atomic_write(path, b"new", mode=0o755)
+
+        assert stat.S_IMODE(path.stat().st_mode) == 0o755
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+    def test_a_new_file_gets_the_umask_default(self, tmp_path):
+        """mkstemp would create 0600, leaving a managed config unreadable to other users."""
+        reference = tmp_path / "reference"
+        reference.write_text("x")
+        path = tmp_path / "new.json"
+
+        guard_module._atomic_write(path, "{}\n")
+
+        assert stat.S_IMODE(path.stat().st_mode) == stat.S_IMODE(reference.stat().st_mode)
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+    def test_writes_through_a_symlinked_config(self, tmp_path):
+        """A config kept in a dotfiles repo stays a link to it."""
+        target = tmp_path / "dotfiles" / "settings.json"
+        target.parent.mkdir()
+        target.write_text("{}\n")
+        link = tmp_path / ".claude" / "settings.json"
+        link.parent.mkdir()
+        link.symlink_to(target)
+
+        guard_module._atomic_write(link, '{"hooks": {}}\n')
+
+        assert link.is_symlink()
+        assert target.read_text() == '{"hooks": {}}\n'
+        assert self._leftovers(target.parent) == []
+
+    def test_temp_file_matches_neither_policy_nor_script_globs(self, tmp_path):
+        """Copilot loads policy.d/*.json; _write_client_config hardens snyk-agent-guard*."""
+        names = []
+        real_replace = os.replace
+
+        def spy(src, dst):
+            names.append(Path(src).name)
+            real_replace(src, dst)
+
+        with patch(f"{_G}.os.replace", side_effect=spy):
+            guard_module._atomic_write(tmp_path / "snyk-agent-guard.json", "{}\n")
+
+        assert len(names) == 1
+        assert not fnmatch.fnmatch(names[0], "*.json")
+        assert not fnmatch.fnmatch(names[0], "snyk-agent-guard*")
+
+    @staticmethod
+    def _stale_install(tmp_path):
+        config = tmp_path / "settings.json"
+        config.write_text("{}\n")
+        script = guard_module._forwarder_script_path(config)
+        script.parent.mkdir(parents=True)
+        stale_script = b"#!/usr/bin/env bash\n# hook script installed by an earlier release\n"
+        script.write_bytes(stale_script)
+        return config, script, stale_script
+
+    def test_install_replaces_rather_than_rewrites_config_and_scripts(self, tmp_path):
+        """End to end through the writers install uses: every changed file is a new inode
+        (on Windows, a new file index)."""
+        config, script, stale_script = self._stale_install(tmp_path)
+        old_inodes = {config: config.stat().st_ino, script: script.stat().st_ino}
+
+        assert guard_module._copy_hook_script(script).updated
+        assert guard_module._write_json_if_changed(config, {"hooks": {}})
+
+        for path, inode in old_inodes.items():
+            assert path.stat().st_ino != inode, f"{path.name} was rewritten in place"
+        assert script.read_bytes() != stale_script
+        assert self._leftovers(config.parent) == []
+        assert self._leftovers(script.parent) == []
+
+    @_POSIX_RENAME_OVER_OPEN_FILE
+    def test_install_leaves_readers_of_the_old_config_and_script_intact(self, tmp_path):
+        config, script, stale_script = self._stale_install(tmp_path)
+
+        with open(config) as config_reader, open(script, "rb") as script_reader:
+            guard_module._copy_hook_script(script)
+            guard_module._write_json_if_changed(config, {"hooks": {}})
+
+            assert config_reader.read() == "{}\n"
+            assert script_reader.read() == stale_script
+
+
+@pytest.mark.skipif(IS_WINDOWS, reason="POSIX ownership and symlinks")
+class TestAtomicWriteAgainstAnotherUser:
+    """Neither a planted symlink nor a swapped temp file lets another user redirect a write."""
+
+    @staticmethod
+    def _temp_files(directory: Path) -> list[Path]:
+        return [p for p in directory.iterdir() if p.name.endswith(".tmp")]
+
+    def test_temp_file_mode_and_owner_are_never_set_by_name(self, tmp_path, monkeypatch):
+        def refuse_temp(name):
+            def call(path, *args, **kwargs):
+                assert not str(path).endswith(".tmp"), f"os.{name} on the temp file by name"
+                return original[name](path, *args, **kwargs)
+
+            return call
+
+        original = {name: getattr(os, name) for name in ("chmod", "chown", "stat")}
+        for name in original:
+            monkeypatch.setattr(os, name, refuse_temp(name))
+        path = tmp_path / "snyk-agent-guard.conf"
+        path.write_text("old\n")
+
+        guard_module._atomic_write(path, "new\n", mode=0o600)
+
+        assert path.read_text() == "new\n"
+        assert stat.S_IMODE(os.lstat(path).st_mode) == 0o600
+
+    def test_a_temp_file_swapped_for_a_symlink_mid_write_leaves_the_link_target_alone(self, tmp_path, monkeypatch):
+        """The race from the review: the user replaces the temp file before its mode is set."""
+        victim = tmp_path / "victim"
+        victim.write_text("keep\n")
+        victim.chmod(0o640)
+        path = tmp_path / "hooks.json"
+        path.write_text("{}\n")
+        path.chmod(0o644)
+        real_fsync = os.fsync
+
+        def swap_then_fsync(fd):
+            (tmp,) = self._temp_files(tmp_path)
+            tmp.unlink()
+            tmp.symlink_to(victim)
+            real_fsync(fd)
+
+        monkeypatch.setattr(os, "fsync", swap_then_fsync)
+
+        guard_module._atomic_write(path, '{"new": true}\n', mode=0o600)
+
+        assert victim.read_text() == "keep\n"
+        assert stat.S_IMODE(victim.stat().st_mode) == 0o640
+
+
+@pytest.mark.skipif(IS_WINDOWS, reason="POSIX ownership; the check does not run on Windows")
+class TestPrivilegedWriteIsRefusedOutsideRootOwnedTrees:
+    """Run as root, guard writes only where no other user can change the path."""
+
+    @pytest.fixture
+    def as_root(self, tmp_path, monkeypatch):
+        """Pretend to be root and that the test's own uid is root's.
+
+        Directories outside *tmp_path* (``/tmp`` on Linux is world-writable) are reported
+        as root-owned 0755, so each test decides the trust of the tree it builds. Returns
+        a setter that makes the test's uid untrusted, like a user's home under sudo.
+        """
+        my_uid = os.getuid()
+        trusted = {0, my_uid}
+        real_lstat = os.lstat
+
+        def lstat(path, *args, **kwargs):
+            if not Path(path).is_relative_to(tmp_path):
+                return os.stat_result((stat.S_IFDIR | 0o755, 0, 0, 1, 0, 0, 0, 0, 0, 0))
+            return real_lstat(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "lstat", lstat)
+        monkeypatch.setattr(guard_module, "_is_privileged", lambda: True)
+        monkeypatch.setattr(guard_module, "_is_trusted_owner", lambda uid: uid in trusted)
+        tmp_path.chmod(0o755)
+        return lambda: trusted.discard(my_uid)
+
+    def test_writes_into_a_tree_only_root_can_change(self, tmp_path, as_root):
+        path = tmp_path / "etc" / "cursor" / "hooks.json"
+
+        guard_module._atomic_write(path, "{}\n")
+
+        assert path.read_text() == "{}\n"
+
+    def test_refuses_a_directory_owned_by_another_user_and_creates_nothing(self, tmp_path, as_root):
+        as_root()  # tmp_path now stands for the user's HOME under sudo
+        path = tmp_path / ".cursor" / "hooks.json"
+
+        with pytest.raises(guard_module.UntrustedDestinationError, match="is owned by uid"):
+            guard_module._atomic_write(path, "{}\n")
+
+        assert not (tmp_path / ".cursor").exists()
+
+    def test_refuses_a_directory_others_can_write(self, tmp_path, as_root):
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        shared.chmod(0o775)
+
+        with pytest.raises(guard_module.UntrustedDestinationError, match="shared is writable by other users"):
+            guard_module._atomic_write(shared / "hooks.json", "{}\n")
+
+        assert list(shared.iterdir()) == []
+
+    def test_refuses_a_parent_symlinked_into_a_tree_others_can_write(self, tmp_path, as_root):
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        shared.chmod(0o777)
+        (tmp_path / ".cursor").symlink_to(shared)
+
+        with pytest.raises(guard_module.UntrustedDestinationError, match="shared is writable"):
+            guard_module._atomic_write(tmp_path / ".cursor" / "hooks.json", "{}\n")
+
+        assert list(shared.iterdir()) == []
+
+    def test_a_leaf_symlink_is_followed_only_into_a_trusted_tree(self, tmp_path, as_root):
+        shared = tmp_path / "shared"
+        shared.mkdir()
+        shared.chmod(0o777)
+        real = shared / "real.json"
+        real.write_text("keep\n")
+        link = tmp_path / "hooks.json"
+        link.symlink_to(real)
+
+        with pytest.raises(guard_module.UntrustedDestinationError, match="shared is writable"):
+            guard_module._atomic_write(link, "{}\n")
+        assert real.read_text() == "keep\n"
+
+        # Replacing the link instead writes only into the trusted directory.
+        guard_module._atomic_write(link, "{}\n", follow_symlinks=False)
+        assert not link.is_symlink()
+        assert real.read_text() == "keep\n"
+
+    def test_backup_is_refused_before_it_is_written(self, tmp_path, as_root):
+        path = tmp_path / "hooks.json"
+        path.write_text("{}\n")
+        as_root()
+
+        with pytest.raises(guard_module.UntrustedDestinationError):
+            guard_module._write_json_if_changed(path, {"hooks": {}})
+
+        assert not Path(str(path) + ".backup").exists()
+        assert path.read_text() == "{}\n"
+
+    def test_install_reports_the_refusal_as_permission_denied(self, tmp_path, as_root, capsys):
+        as_root()
+        with patch.object(guard_module, "_run_install", side_effect=guard_module.UntrustedDestinationError("nope")):
+            assert guard_module.run_guard(SimpleNamespace(guard_command="install")) == 1
+        assert "Permission denied" in capsys.readouterr().out
 
 
 @pytest.mark.skipif(IS_WINDOWS, reason="bash script; skipped on Windows")

@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import stat
 import sys
@@ -974,8 +975,7 @@ def _write_codex_managed_config(content: str, path: Path) -> bool:
         return False
     if path.exists():
         _backup_file(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content)
+    _atomic_write(path, content)
     rich.print(f"[green]✓[/green]  Written [dim]{path}[/dim]")
     return True
 
@@ -2014,7 +2014,7 @@ def _copy_hook_script(dest: Path) -> _CopiedScript:
 
     updated = current_content != new_content
     if updated:
-        dest.write_bytes(new_content)
+        _atomic_write(dest, new_content)
         rich.print(f"[green]\u2713[/green]  Copied hook script to [dim]{dest}[/dim]")
     if not IS_WINDOWS:
         dest.chmod(dest.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
@@ -2029,9 +2029,188 @@ def _remove_hook_script(client: str, config_path: Path) -> None:
             rich.print(f"[green]\u2713[/green]  Removed hook script [dim]{dest}[/dim]")
 
 
+def _atomic_write(path: Path, data: str | bytes, *, mode: int | None = None, follow_symlinks: bool = True) -> None:
+    """Replace *path* with *data* in a single rename.
+
+    Agents read their hook config while guard rewrites it, and bash reads a hook script
+    as it runs it, so writing in place could hand either one a partly written file.
+    Writing a sibling temp file and renaming it over *path* means a reader sees the old
+    file or the new one, and a hook already running keeps reading the file it opened.
+    Windows cannot rename over a file that is open, so there the rename is retried briefly
+    and, while the file stays open, the write falls back to in place.
+
+    A symlinked *path* (a config kept in a dotfiles repo, say) is written through to its
+    target so the link survives. With ``follow_symlinks=False`` the symlink itself is
+    replaced instead and never written through, for files whose location is not the
+    user's to redirect, such as one holding a credential. The replacement keeps the
+    existing file's permission bits unless *mode* is given and, where the platform allows,
+    its owner, which a write in place never changed; a new file gets the umask default, as
+    ``open()`` would give it. The temp file is created with the final permission bits
+    rather than adjusted afterwards, so a private file is never readable by others, even
+    briefly.
+    Text is written in text mode, so newlines and encoding match ``Path.write_text``.
+
+    Run as root, the write is refused unless only root can change the directories on
+    the way to *path* (see ``_ensure_trusted_destination``), so no other user can
+    redirect it. The temp file's mode and owner are then set through its descriptor,
+    never by name, and by name it is only renamed or removed, neither of which follows
+    a symlink.
+    """
+    _ensure_trusted_destination(path, follow_symlinks=follow_symlinks)
+    target = path.resolve() if follow_symlinks and path.is_symlink() else path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        existing = target.lstat()
+    except FileNotFoundError:
+        existing = None
+    if existing is not None and stat.S_ISLNK(existing.st_mode):
+        # A symlink being replaced: what it points to is not this file's mode or owner.
+        existing = None
+    if mode is None and existing is not None:
+        mode = stat.S_IMODE(existing.st_mode)
+
+    # Dot-prefixed so the Copilot policy.d/*.json glob and the snyk-agent-guard* hardening
+    # glob in _write_client_config never pick up an in-flight temp file.
+    tmp = target.with_name(f".{target.name}.{secrets.token_hex(8)}.tmp")
+    # O_BINARY: Python does any newline translation itself; a CRT text-mode fd on Windows
+    # would translate a second time.
+    fd = os.open(
+        tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o666 if mode is None else mode
+    )
+    try:
+        with os.fdopen(fd, "w" if isinstance(data, str) else "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+            # Through the descriptor, not the name: the umask may have narrowed the
+            # creation mode, and a name in a directory someone else can write may no
+            # longer be this file. Windows chmod only toggles read-only.
+            if mode is not None and not IS_WINDOWS:
+                os.fchmod(f.fileno(), mode)
+            if existing is not None and hasattr(os, "fchown"):
+                with contextlib.suppress(OSError):
+                    tmp_stat = os.fstat(f.fileno())
+                    if (tmp_stat.st_uid, tmp_stat.st_gid) != (existing.st_uid, existing.st_gid):
+                        os.fchown(f.fileno(), existing.st_uid, existing.st_gid)
+        for attempt in range(5):
+            try:
+                os.replace(tmp, target)
+                break
+            except PermissionError:
+                # Windows refuses the rename while any process holds the target open:
+                # MoveFileEx, which os.replace uses, cannot replace a file with open
+                # handles, even ones that share delete access. Agents read their config
+                # and close it again, so a short retry covers them.
+                if not IS_WINDOWS:
+                    raise
+                if attempt < 4:
+                    time.sleep(0.05 * (attempt + 1))
+                    continue
+                # Still held: write in place, as guard did before, rather than fail the
+                # install. That needs the holder to share write access, as readers
+                # opened by Node, Rust or Python do. Never through a symlink that was
+                # meant to be replaced.
+                if target.is_symlink():
+                    raise
+                with open(target, "w" if isinstance(data, str) else "wb") as f:
+                    f.write(data)
+                # The target holds the new contents now, so what is left is cleanup, and
+                # a failure there (a scanner still holding the temp file, say) must not
+                # report the write as failed. A leftover temp file is dot-prefixed and
+                # matches none of the globs that load or harden these files.
+                if mode is not None:
+                    with contextlib.suppress(OSError):
+                        os.chmod(target, mode)
+                with contextlib.suppress(OSError):
+                    tmp.unlink()
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+
+
+class UntrustedDestinationError(PermissionError):
+    """A privileged write was refused because another user could redirect it."""
+
+
+def _is_privileged() -> bool:
+    return hasattr(os, "geteuid") and os.geteuid() == 0
+
+
+def _is_trusted_owner(uid: int) -> bool:
+    return uid == 0
+
+
+# Matches the kernel's own limit on symlinks resolved in one lookup (ELOOP).
+_MAX_SYMLINK_HOPS = 40
+
+
+def _untrusted_component(directory: Path, hops: int = 0) -> str | None:
+    """Describe the first part of *directory* another user could change, or None.
+
+    Walks *directory* from its root with ``lstat``. Every existing directory must be
+    owned by root and not writable by group or others, and every symlink must be owned
+    by root, with its target checked the same way. A missing part ends the walk: root
+    creates it inside a directory that has passed.
+    """
+    current: Path | None = None
+    for part in directory.parts:
+        current = Path(part) if current is None else current / part
+        try:
+            st = os.lstat(current)
+        except (FileNotFoundError, NotADirectoryError):
+            return None
+        if not _is_trusted_owner(st.st_uid):
+            return f"{current} is owned by uid {st.st_uid}"
+        if stat.S_ISLNK(st.st_mode):
+            if hops >= _MAX_SYMLINK_HOPS:
+                return f"{current} resolves through too many symlinks"
+            link = Path(os.readlink(current))
+            resolved = Path(os.path.normpath(current.parent / link))
+            reason = _untrusted_component(resolved, hops + 1)
+            if reason is not None:
+                return reason
+            current = resolved
+        elif st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            return f"{current} is writable by other users"
+    return None
+
+
+def _ensure_trusted_destination(path: Path, *, follow_symlinks: bool) -> None:
+    """Refuse a privileged write to *path* that another user could redirect.
+
+    Root writing into a directory a user can change (a user-scope install under
+    ``sudo``, whose HOME is still the user's) can be made to write, chmod or chown a
+    file of the user's choosing through a planted symlink. Checking with the file
+    descriptor closes single races but not a symlinked parent directory, so such a
+    write is not attempted at all. A tree only root can change cannot change between
+    this check and the write. Unprivileged runs, and Windows, are not checked: there
+    the writer can already rewrite every file it reaches.
+    """
+    if not _is_privileged():
+        return
+    path = Path(os.path.abspath(path))
+    reason = _untrusted_component(path.parent)
+    if reason is None and follow_symlinks:
+        try:
+            st = os.lstat(path)
+        except (FileNotFoundError, NotADirectoryError):
+            st = None
+        if st is not None and stat.S_ISLNK(st.st_mode):
+            # The leaf link lives in a directory that just passed, so only root made
+            # it; what it points at must pass too.
+            reason = _untrusted_component(Path(os.path.realpath(path)).parent)
+    if reason is not None:
+        raise UntrustedDestinationError(
+            f"refusing to write {path} as root: {reason}. Run user-scope installs without sudo."
+        )
+
+
 def _backup_file(path: Path) -> None:
     if path.exists():
         backup = Path(str(path) + ".backup")
+        # shutil.copy2 writes through a symlink at the backup path.
+        _ensure_trusted_destination(backup, follow_symlinks=True)
         shutil.copy2(path, backup)
         rich.print(f"[green]\u2713[/green]  Backed up [dim]{path}[/dim] \u2192 [dim]{backup}[/dim]")
 
@@ -2051,16 +2230,12 @@ def _write_json_if_changed(path: Path, data: dict) -> bool:
         if old_content == new_content:
             return False
         _backup_file(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(new_content)
+    _atomic_write(path, new_content)
     return True
 
 
 def _write_json(path: Path, data: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
-        f.write("\n")
+    _atomic_write(path, json.dumps(data, indent=2) + "\n")
 
 
 def _preserved_note(count: int) -> str:
