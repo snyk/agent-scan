@@ -19,6 +19,7 @@ from agent_scan.models import (
     RemoteServer,
     ScanError,
     ServerHTTPError,
+    ServerReference,
     ServerStartupError,
     SkillFile,
     SkillScanError,
@@ -375,7 +376,7 @@ async def _inspect_remote_server(
 
 async def _inspect_server(
     name: str,
-    config: StdioServer | RemoteServer,
+    config: StdioServer | RemoteServer | ServerReference,
     config_path: str,
     timeout: int,
     tokens: list[TokenAndClientInfo],
@@ -384,6 +385,8 @@ async def _inspect_server(
     declined: bool,
     do_stdio_handshake: bool,
 ) -> InspectedServer:
+    if isinstance(config, ServerReference):
+        return InspectedServer(name=name, config_path=config_path, server=config)
     if declined:
         error = UserDeclinedError(
             message="Skipped by user consent (MCP server was not contacted)",

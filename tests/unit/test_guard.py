@@ -83,6 +83,13 @@ from agent_scan.pushkeys import GuardEnabledAccessDeniedError
 
 
 @pytest.fixture(autouse=True)
+def app_references():
+    # Guard tests must not inventory the developer's installed apps.
+    with patch("agent_scan.agents.codex.CodexDiscoverer._discover_server_references", return_value={}):
+        yield
+
+
+@pytest.fixture(autouse=True)
 def logged_connectors():
     # Guard tests must not read the developer's Desktop session history.
     with patch(

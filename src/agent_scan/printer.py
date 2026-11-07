@@ -14,6 +14,7 @@ from agent_scan.models import (
     InspectedPath,
     ScanError,
     ScanResponse,
+    ServerReference,
     SkillFile,
 )
 from agent_scan.models.api.v20260710 import (
@@ -167,6 +168,10 @@ def print_inspected_path(
         if server.error is not None and server.error.traceback:
             tracebacks.append((server.name, server.error.traceback))
         server_node = tree.add(_format_inspected_component_header(server.name, server.error))
+        if isinstance(server.server, ServerReference):
+            server_node.add(
+                Text(f"Server reference: {server.server.provider}/{server.server.id} ({server.config_path})")
+            )
         entities = server.signature.entities if server.signature is not None else []
         for entity in entities:
             server_node.add(_format_inspected_entity_line(entity, full_description))

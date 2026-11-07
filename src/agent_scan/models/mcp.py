@@ -80,6 +80,13 @@ _REMOTE_URL_ALIASES = ("url", "serverUrl", "httpUrl")
 SERVER_CONFIG_DISCRIMINATOR_KEYS = frozenset({"command", *_REMOTE_URL_ALIASES})
 
 
+class ServerReference(BaseModel):
+    """A provider-scoped server ID to resolve on the backend."""
+
+    provider: str = Field(min_length=1, max_length=1024)
+    id: str = Field(min_length=1, max_length=1024)
+
+
 class RemoteServer(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
     # ``serverUrl`` (Figma/Antigravity) and ``httpUrl`` (Gemini CLI Streamable HTTP)

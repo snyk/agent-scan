@@ -29,6 +29,7 @@ from agent_scan.models import (
     MCPConfig,
     MCPServerMap,
     RemoteServer,
+    ServerReference,
     StdioServer,
     UnknownConfigFormat,
 )
@@ -38,13 +39,16 @@ from agent_scan.skill_client import inspect_skills_dir
 logger = logging.getLogger(__name__)
 McpConfigsResult = dict[
     str,
-    list[tuple[str, StdioServer | RemoteServer]] | FileNotFoundConfig | UnknownConfigFormat | CouldNotParseMCPConfig,
+    list[tuple[str, StdioServer | RemoteServer | ServerReference]]
+    | FileNotFoundConfig
+    | UnknownConfigFormat
+    | CouldNotParseMCPConfig,
 ]
 SkillsDirsResult = dict[str, list[DiscoveredSkill] | FileNotFoundConfig]
 # Return type of the per-file MCP parsers (``_parse_mcp_file`` /
 # ``_parse_settings_mcp_gated``): parsed servers, a parse failure, or ``None``
-# when the file is absent/empty/not-MCP.
-McpScanResult = list[tuple[str, StdioServer | RemoteServer]] | CouldNotParseMCPConfig | None
+# when the file is absent/empty/not-MCP. Entries may be provider-scoped references.
+McpScanResult = list[tuple[str, StdioServer | RemoteServer | ServerReference]] | CouldNotParseMCPConfig | None
 
 
 @dataclass(frozen=True)
