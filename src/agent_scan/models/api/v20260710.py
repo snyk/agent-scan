@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 from agent_scan.models.api.common import ScanUserInfo
 from agent_scan.models.errors import ScanError
 from agent_scan.models.inspect import InspectedPath, InspectedServer, InspectedSkill
-from agent_scan.models.mcp import RemoteServer, ServerSignature, StdioServer
+from agent_scan.models.mcp import RemoteServer, ServerReference, ServerSignature, StdioServer
 from agent_scan.models.skill import SkillFile
 
 
@@ -38,7 +38,9 @@ def _error_for_request(error: ScanError | None) -> ScanError | None:
     return sanitized
 
 
-def _server_for_request(server: StdioServer | RemoteServer) -> StdioServer | RemoteServer:
+def _server_for_request(
+    server: StdioServer | RemoteServer | ServerReference,
+) -> StdioServer | RemoteServer | ServerReference:
     """Copy and sanitize a server config without changing local inspect output."""
     # See the lazy-import note in ``_error_for_request`` above.
     from agent_scan.redact import redact_server_config
@@ -53,7 +55,7 @@ def _server_for_request(server: StdioServer | RemoteServer) -> StdioServer | Rem
 class McpServerRequest(BaseModel):
     name: str
     config_path: str | None = None
-    server: StdioServer | RemoteServer
+    server: StdioServer | RemoteServer | ServerReference
     signature: ServerSignature | None = None
     error: ScanError | None = None
 
