@@ -1,8 +1,8 @@
 """Turn the backend's ``found`` items into the same ``ClientToInspect`` list that
 ``pipelines.discover_clients_to_inspect`` builds.
 
-The backend did all file parsing; this only validates server maps with our models and
-runs the signature check.
+The backend did all file parsing; this only validates server maps with our models, runs
+the signature check and resolves the keys the backend marks ``canonical``.
 """
 
 import os
@@ -11,6 +11,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from agent_scan.agents.base import _canonicalize_keys
 from agent_scan.models import (
     ClientToInspect,
     CouldNotParseMCPConfig,
@@ -62,10 +63,32 @@ def _native(path: str) -> str:
     return str(PureWindowsPath(path)) if os.name == "nt" else path
 
 
+def _skills(entry: dict[str, Any]) -> list[DiscoveredSkill]:
+    return [DiscoveredSkill(name=s["name"], path=_native(s["path"])) for s in entry["skills"]]
+
+
+def _merge(entries: list[tuple[dict[str, Any], Any]]) -> dict[str, Any]:
+    """``{**well_known, **discoverer}``, each last write wins per key. Discoverer
+    entries marked ``canonical`` are then re-keyed like ``_canonicalize_keys``."""
+    well_known: dict[str, Any] = {}
+    discoverer: dict[str, Any] = {}
+    canonical: set[str] = set()
+    for entry, value in entries:
+        if entry.get("well_known"):
+            well_known[entry["key"]] = value
+            continue
+        discoverer[entry["key"]] = value
+        if entry.get("canonical"):
+            canonical.add(entry["key"])
+    if canonical:
+        literal = {k: v for k, v in discoverer.items() if k not in canonical}
+        discoverer = {**literal, **_canonicalize_keys({k: v for k, v in discoverer.items() if k in canonical})}
+    return {**well_known, **discoverer}
+
+
 def build_clients(found: dict[str, list[dict[str, Any]]]) -> list[ClientToInspect]:
-    """One ``ClientToInspect`` per (client, username), in the backend's order. Entries are
-    applied in order and the last one for a key wins, like the pipeline's dict merges. A
-    dropped entry (``skip_if_empty``) doesn't overwrite an earlier one."""
+    """One ``ClientToInspect`` per (client, username), in the backend's order. A dropped
+    entry (``skip_if_empty``) doesn't overwrite an earlier one."""
     out: dict[tuple[str, str | None], ClientToInspect] = {}
     for client in found["clients"]:
         out.setdefault(
@@ -78,15 +101,15 @@ def build_clients(found: dict[str, list[dict[str, Any]]]) -> list[ClientToInspec
                 skills_dirs={},
             ),
         )
+    mcp: dict[tuple[str, str | None], list[tuple[dict[str, Any], Any]]] = {}
     for entry in found["mcp_configs"]:
-        client = out.get((entry["client"], entry.get("username")))
         value = mcp_value(entry)
-        if client is not None and value is not None:
-            client.mcp_configs[entry["key"]] = value
+        if value is not None:
+            mcp.setdefault((entry["client"], entry.get("username")), []).append((entry, value))
+    skills: dict[tuple[str, str | None], list[tuple[dict[str, Any], Any]]] = {}
     for entry in found["skills_dirs"]:
-        client = out.get((entry["client"], entry.get("username")))
-        if client is not None:
-            client.skills_dirs[entry["key"]] = [
-                DiscoveredSkill(name=s["name"], path=_native(s["path"])) for s in entry["skills"]
-            ]
+        skills.setdefault((entry["client"], entry.get("username")), []).append((entry, _skills(entry)))
+    for key, client in out.items():
+        client.mcp_configs = _merge(mcp.get(key, []))
+        client.skills_dirs = _merge(skills.get(key, []))
     return list(out.values())

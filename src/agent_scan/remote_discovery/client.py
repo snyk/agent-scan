@@ -15,8 +15,18 @@ from agent_scan.remote_discovery import trace as trace_output
 from agent_scan.remote_discovery.executor import run_op, to_wire
 from agent_scan.utils import get_readable_home_directories
 
-# Env vars the backend may use to relocate agent config folders (own home only).
-FORWARDED_ENV = ("CLAUDE_CONFIG_DIR", "CODEX_HOME", "VSCODE_PORTABLE", "XDG_CONFIG_HOME")
+# Env vars the backend may use to relocate agent config folders (own home only, except
+# the machine-wide Program Files roots).
+FORWARDED_ENV = (
+    "CLAUDE_CONFIG_DIR",
+    "CLAUDE_CODE_PLUGIN_CACHE_DIR",
+    "CLAUDE_CODE_PLUGIN_SEED_DIR",
+    "CODEX_HOME",
+    "VSCODE_PORTABLE",
+    "XDG_CONFIG_HOME",
+    "PROGRAMW6432",
+    "PROGRAMFILES",
+)
 MAX_ROUNDS = 25
 
 
