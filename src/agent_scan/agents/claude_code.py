@@ -193,6 +193,11 @@ class ClaudeCodeDiscoverer(ClaudePluginDiscoverer):
         projects = data.get("projects") if isinstance(data, dict) else None
         if not isinstance(projects, dict):
             projects = {}
+        # Raw keys by Path, since keys may use either separator on Windows; first key wins.
+        project_keys: dict[Path, str] = {}
+        for raw in projects:
+            if isinstance(raw, str):
+                project_keys.setdefault(Path(raw), raw)
 
         result: McpConfigsResult = {}
         # Iterate every opened project root *and* its ancestors up to filesystem
@@ -203,12 +208,13 @@ class ClaudeCodeDiscoverer(ClaudePluginDiscoverer):
             # Source 1: inline ``projects.<path>.mcpServers`` recorded in ``.claude.json``.
             # For an ancestor this only matches if that ancestor was itself opened
             # as a project (i.e. has its own ``projects`` entry); otherwise it misses.
-            project_config = projects.get(key)
+            raw_key = project_keys.get(path)
+            project_config = projects.get(raw_key) if raw_key is not None else None
             if isinstance(project_config, dict):
                 project_mcp = project_config.get("mcpServers")
                 if isinstance(project_mcp, dict) and project_mcp:
                     result[key] = self._validate_servers(
-                        project_mcp, source=f"projects.{key}.mcpServers in {config_path.as_posix()}"
+                        project_mcp, source=f"projects.{raw_key}.mcpServers in {config_path.as_posix()}"
                     )
 
             # Source 2: a ``.mcp.json`` file in the folder itself — checked at every

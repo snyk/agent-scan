@@ -387,6 +387,35 @@ def test_claude_code_discoverer_parses_project_mcp_servers(tmp_path):
     assert isinstance(server_a, StdioServer)
 
 
+def test_claude_code_discoverer_project_mcp_servers_matches_unnormalized_keys(tmp_path):
+    """A key that differs from its normalized path (trailing slash) still matches."""
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude.json").write_text(
+        '{"projects": {"/work/repo/": {"mcpServers": {"srv": {"command": "echo"}}}}}'
+    )
+
+    mcp_configs = ClaudeCodeDiscoverer(tmp_path)._discover_project_mcp_servers()
+
+    assert [name for name, _ in mcp_configs["/work/repo"]] == ["srv"]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows path semantics")
+def test_claude_code_discoverer_project_mcp_servers_matches_backslash_keys(tmp_path):
+    """Windows keys keep backslashes; they still match the normalized project path."""
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude.json").write_text(
+        json.dumps({"projects": {"C:\\work\\repo": {"mcpServers": {"srv": {"command": "echo"}}}}})
+    )
+
+    mcp_configs = ClaudeCodeDiscoverer(tmp_path)._discover_project_mcp_servers()
+
+    assert [name for name, _ in mcp_configs["C:/work/repo"]] == ["srv"]
+
+
 def test_claude_code_discoverer_project_mcp_servers_skips_projects_without_mcp(tmp_path):
     """Projects with no mcpServers key (or empty) don't produce entries."""
     from agent_scan.agents import ClaudeCodeDiscoverer
