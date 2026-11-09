@@ -1652,8 +1652,11 @@ def _send_servers_discovered_event(
 # The values hook commands carried before they moved into the guard configuration file, as
 # earlier versions rendered them: a leading run of single-quoted POSIX assignments, and
 # single-quoted PowerShell parameters.
+_POSIX_EMBEDDED_QUOTE = "'\"'\"'"  # how _shell_quote writes a ' inside a single-quoted value
 _LEGACY_POSIX_VALUE_RE = re.compile(
-    r"(PUSH_KEY|REMOTE_HOOKS_BASE_URL|TENANT_ID|MACHINE_ID|AGENT_SCAN_COMMAND)='((?:[^']|'\"'\"')*)' "
+    r"(PUSH_KEY|REMOTE_HOOKS_BASE_URL|TENANT_ID|MACHINE_ID|AGENT_SCAN_COMMAND)='((?:[^']|"
+    + re.escape(_POSIX_EMBEDDED_QUOTE)
+    + r")*)' "
 )
 _LEGACY_POWERSHELL_VALUE_RE = re.compile(
     r" -(PushKey|RemoteUrl|TenantId|MachineId|AgentScanCommand) '((?:[^']|'')*)'(?= |\Z)"
@@ -1690,7 +1693,7 @@ def _strip_legacy_command_values(command: str, guard_values: Mapping[str, str]) 
     """
     pos = 0
     while (m := _LEGACY_POSIX_VALUE_RE.match(command, pos)) is not None:
-        if not _is_installed_legacy_value(m[1], m[2].replace("'\"'\"'", "'"), guard_values):
+        if not _is_installed_legacy_value(m[1], m[2].replace(_POSIX_EMBEDDED_QUOTE, "'"), guard_values):
             break
         pos = m.end()
     command = command[pos:]

@@ -70,6 +70,7 @@ from agent_scan.guard import (
     _prepare_copilot_config,
     _prepare_cursor_config,
     _print_client_status,
+    _ps_quote,
     _run_install,
     _run_uninstall,
     _send_test_event,
@@ -6704,6 +6705,7 @@ _LEGACY_POSIX_VALUES = (
     f"PUSH_KEY='{_LEGACY_PUSH_KEY}' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' TENANT_ID='t1' MACHINE_ID='m1' "
 )
 _PS_GUARD_CMD = r"powershell -File 'C:\p\snyk-agent-guard.ps1' -Client cursor"
+_APOSTROPHE_COMMAND = "/Users/o'brien/.local/bin/snyk-agent-scan"
 _LEGACY_PS_VALUES = f" -PushKey '{_LEGACY_PUSH_KEY}' -RemoteUrl 'https://api.snyk.io' -TenantId 't1' -MachineId 'm1'"
 
 
@@ -6940,6 +6942,40 @@ class TestComputeHooksDiff:
             {"preToolUse": [{"command": old_cmd}]},
             {"preToolUse": [{"command": new_cmd}]},
             guard_values={"REMOTE_HOOKS_BASE_URL": "https://api.snyk.io", "TENANT_ID": "t1", "MACHINE_ID": "m1"},
+        )
+        assert ("preToolUse" in result["modified"]) is modified
+
+    @pytest.mark.parametrize(
+        "old_cmd, modified",
+        [
+            pytest.param(
+                f"AGENT_SCAN_COMMAND={_shell_quote(_APOSTROPHE_COMMAND)} {_POSIX_GUARD_CMD}",
+                False,
+                id="posix-matching",
+            ),
+            pytest.param(
+                f"AGENT_SCAN_COMMAND={_shell_quote(_APOSTROPHE_COMMAND + 'x')} {_POSIX_GUARD_CMD}",
+                True,
+                id="posix-different",
+            ),
+            pytest.param(
+                f"{_PS_GUARD_CMD} -AgentScanCommand {_ps_quote(_APOSTROPHE_COMMAND)}",
+                False,
+                id="powershell-matching",
+            ),
+            pytest.param(
+                f"{_PS_GUARD_CMD} -AgentScanCommand {_ps_quote(_APOSTROPHE_COMMAND + 'x')}",
+                True,
+                id="powershell-different",
+            ),
+        ],
+    )
+    def test_legacy_command_values_with_an_apostrophe_are_unquoted(self, old_cmd, modified):
+        new_cmd = _PS_GUARD_CMD if old_cmd.startswith("powershell") else _POSIX_GUARD_CMD
+        result = _compute_hooks_diff(
+            {"preToolUse": [{"command": old_cmd}]},
+            {"preToolUse": [{"command": new_cmd}]},
+            guard_values={"AGENT_SCAN_COMMAND": _APOSTROPHE_COMMAND},
         )
         assert ("preToolUse" in result["modified"]) is modified
 
