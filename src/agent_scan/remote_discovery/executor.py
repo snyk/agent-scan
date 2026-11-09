@@ -1,8 +1,7 @@
 """Run backend ops on the local filesystem. Ops are run literally; contents are never
 interpreted here.
 
-``find`` mirrors legacy's ``os.walk(followlinks=False)`` walks with depth pruning, or with
-``follow_links`` and ``skip_hidden`` its ``glob.glob(recursive=True)`` walks.
+``find`` mirrors legacy's ``os.walk(followlinks=False)`` walks with depth pruning.
 
 Paths use ``/`` both ways, also on Windows (``C:/Users/me``), which the OS accepts.
 """
@@ -18,8 +17,6 @@ logger = logging.getLogger(__name__)
 
 MAX_FILE_BYTES = 20 * 1024 * 1024
 MAX_FIND_MATCHES = 10_000
-# Bounds symlink loops when ``follow_links`` is set.
-MAX_FIND_DIRS = 50_000
 MAX_FIND_READ_BYTES = 50 * 1024 * 1024
 
 
@@ -105,19 +102,12 @@ def _find(op: dict[str, Any]) -> dict[str, Any]:
     dir_names = {fold(n) for n in op.get("dir_names", ())}
     max_depth = op["max_depth"]
     follow_child_links = op.get("follow_child_links", False)
-    follow_links = op.get("follow_links", False)
-    skip_hidden = op.get("skip_hidden", False)
     roots: list[dict[str, Any]] = []
     matches: list[dict[str, Any]] = []
     truncated = False
-    dirs_walked = 0
 
     def walk(root: str, dirpath: str, depth: int) -> None:
-        nonlocal truncated, dirs_walked
-        if dirs_walked >= MAX_FIND_DIRS:
-            truncated = True
-            return
-        dirs_walked += 1
+        nonlocal truncated
         try:
             with os.scandir(dirpath) as it:
                 entries = list(it)
@@ -155,9 +145,7 @@ def _find(op: dict[str, Any]) -> dict[str, Any]:
                         "is_symlink": is_symlink,
                     }
                 )
-            follow = not is_symlink or follow_links or (follow_child_links and depth == 0)
-            hidden = skip_hidden and entry.name.startswith(".")
-            if is_dir and depth + 1 < max_depth and follow and not hidden:
+            if is_dir and depth + 1 < max_depth and (not is_symlink or (follow_child_links and depth == 0)):
                 descend.append(path)
         for child in descend:
             walk(root, child, depth + 1)

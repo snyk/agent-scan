@@ -68,22 +68,18 @@ def _skills(entry: dict[str, Any]) -> list[DiscoveredSkill]:
 
 
 def _merge(entries: list[tuple[dict[str, Any], Any]]) -> dict[str, Any]:
-    """``{**well_known, **discoverer}``, each last write wins per key. Discoverer
-    entries marked ``canonical`` are then re-keyed like ``_canonicalize_keys``."""
-    well_known: dict[str, Any] = {}
-    discoverer: dict[str, Any] = {}
+    """Last write wins per key. Entries marked ``canonical`` are then re-keyed like
+    ``_canonicalize_keys``."""
+    merged: dict[str, Any] = {}
     canonical: set[str] = set()
     for entry, value in entries:
-        if entry.get("well_known"):
-            well_known[entry["key"]] = value
-            continue
-        discoverer[entry["key"]] = value
+        merged[entry["key"]] = value
         if entry.get("canonical"):
             canonical.add(entry["key"])
-    if canonical:
-        literal = {k: v for k, v in discoverer.items() if k not in canonical}
-        discoverer = {**literal, **_canonicalize_keys({k: v for k, v in discoverer.items() if k in canonical})}
-    return {**well_known, **discoverer}
+    if not canonical:
+        return merged
+    literal = {k: v for k, v in merged.items() if k not in canonical}
+    return {**literal, **_canonicalize_keys({k: v for k, v in merged.items() if k in canonical})}
 
 
 def build_clients(found: dict[str, list[dict[str, Any]]]) -> list[ClientToInspect]:
