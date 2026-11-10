@@ -27,6 +27,18 @@ def test_find_follows_only_child_links(tmp_path: Path) -> None:
     assert _find(root, file_names=[".mcp.json"], follow_child_links=True) == ["a/deep/.mcp.json"]
 
 
+def test_find_file_suffixes(tmp_path: Path) -> None:
+    (tmp_path / "x.json").mkdir()
+    for name in ("a.json", "b.md", "sub/c.json"):
+        (tmp_path / name).parent.mkdir(exist_ok=True)
+        (tmp_path / name).write_text("{}")
+    (tmp_path / "D.JSON").write_text("{}")
+
+    assert _find(tmp_path, file_suffixes=[".json"], max_depth=1) == ["a.json"]
+    assert _find(tmp_path, file_suffixes=[".json"], max_depth=1, ignore_case=True) == ["D.JSON", "a.json"]
+    assert _find(tmp_path, file_suffixes=[".json"]) == ["a.json", "sub/c.json"]
+
+
 def _mcp(key: str, name: str, **flags: bool) -> dict:
     return {
         "client": "claude code",

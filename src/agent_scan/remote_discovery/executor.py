@@ -99,6 +99,7 @@ def _root_status(root: str) -> str:
 def _find(op: dict[str, Any]) -> dict[str, Any]:
     fold = str.lower if op.get("ignore_case") else (lambda s: s)
     file_names = {fold(n) for n in op.get("file_names", ())}
+    file_suffixes = tuple(fold(s) for s in op.get("file_suffixes", ()))
     dir_names = {fold(n) for n in op.get("dir_names", ())}
     max_depth = op["max_depth"]
     follow_child_links = op.get("follow_child_links", False)
@@ -126,7 +127,7 @@ def _find(op: dict[str, Any]) -> dict[str, Any]:
                 is_symlink = False
             name = fold(entry.name)
             path = posixpath.join(dirpath, entry.name)
-            hit = name in (dir_names if is_dir else file_names)
+            hit = name in dir_names if is_dir else (name in file_names or name.endswith(file_suffixes))
             if hit:
                 if len(matches) >= MAX_FIND_MATCHES:
                     truncated = True
