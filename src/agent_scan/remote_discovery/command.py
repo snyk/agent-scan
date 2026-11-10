@@ -65,15 +65,15 @@ async def run(args: argparse.Namespace, cli_version: str | None) -> int:
         return 0
     legacy = await legacy_clients(args.scope, remote.supported_agents, args.scan_all_users)
     print(f"legacy: {legacy.seconds:.2f}s", file=sys.stderr)
-    discoverers = comparable(legacy.discoverers)
-    differences = diff(discoverers, comparable(clients))
+    truth = comparable(legacy.truth)
+    differences = diff(truth, comparable(clients))
     if differences.expected:
         rich.print(
             f"[bold yellow]EXPECTED[/bold yellow] {len(differences.expected)} backend-only (legacy misses these)"
         )
         for line in differences.expected:
             print(line)
-    extras = well_known_extras(comparable(legacy.well_known), discoverers)
+    extras = well_known_extras(comparable(legacy.well_known), truth)
     if extras:
         rich.print(f"[bold yellow]EXPECTED[/bold yellow] {len(extras)} legacy-only from the well-known table (dropped)")
         for line in extras:

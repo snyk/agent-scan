@@ -1,13 +1,14 @@
 """Compare legacy discovery with backend discovery for the agents the backend supports.
 
-The backend must reproduce legacy's discoverers (the pipeline's Phase B) exactly. Client
-order is not compared; clients are matched by name and username.
+The backend must reproduce legacy's discoverers (the pipeline's Phase B) exactly, and
+legacy's well-known client table (Phase A) for agents with no discoverer. Client order is
+not compared; clients are matched by name and username.
 
 Reported apart as expected:
 
 * what the backend finds and legacy misses (WSL folders, ``~/.cursor-server``);
-* what only legacy's well-known client table (Phase A) adds, which the backend drops on
-  purpose: duplicates under resolved keys and empty entries.
+* what only the well-known table adds for agents with a discoverer, which the backend
+  drops on purpose: duplicates under resolved keys and empty entries.
 
 Anything else that differs is a failure.
 """
@@ -16,7 +17,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from agent_scan.agents import DiscoveryScope, find_discoverers
+from agent_scan.agents import DISCOVERERS, DiscoveryScope, find_discoverers
 from agent_scan.inspect import get_mcp_config_per_client
 from agent_scan.models import ClientToInspect
 from agent_scan.utils import get_readable_home_directories
@@ -38,7 +39,9 @@ def comparable(clients: list[ClientToInspect]) -> list[dict[str, Any]]:
 
 @dataclass
 class Legacy:
-    discoverers: list[ClientToInspect]
+    # What the backend must match: discoverers, plus the table for agents without one.
+    truth: list[ClientToInspect]
+    # Table output for agents that have a discoverer.
     well_known: list[ClientToInspect]
     seconds: float
 
@@ -48,18 +51,19 @@ async def legacy_clients(scope: str, agents: list[str], all_users: bool = False)
     started = time.monotonic()
     discovery_scope = DiscoveryScope(scope)
     homes = get_readable_home_directories(all_users=all_users)
+    truth: list[ClientToInspect] = []
     well_known: list[ClientToInspect] = []
     for client in get_well_known_clients():
         if client.name in agents:
-            well_known.extend(await get_mcp_config_per_client(client, homes, scope=discovery_scope) or [])
-    discoverers: list[ClientToInspect] = []
+            found = await get_mcp_config_per_client(client, homes, scope=discovery_scope) or []
+            (well_known if client.name in DISCOVERERS else truth).extend(found)
     for home, username in homes:
         for discoverer in find_discoverers(home, target_folders=[]):
             cti = discoverer.discover(discovery_scope)
             if cti is not None and cti.name in agents:
                 cti.username = username
-                discoverers.append(cti)
-    return Legacy(discoverers, well_known, time.monotonic() - started)
+                truth.append(cti)
+    return Legacy(truth, well_known, time.monotonic() - started)
 
 
 def backend_only_expected(path: str) -> bool:
