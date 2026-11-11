@@ -15,21 +15,32 @@ from agent_scan.remote_discovery import trace as trace_output
 from agent_scan.remote_discovery.executor import run_op, to_wire
 from agent_scan.utils import get_readable_home_directories
 
-# Env vars the backend may use to relocate agent config folders (own home only, except
-# the machine-wide Program Files roots).
+# Env vars the backend may use to relocate agent config folders. They apply to the
+# scanning user's own home only, except the machine-wide Windows ones.
 FORWARDED_ENV = (
+    # Claude Code: replaces ~/.claude.
     "CLAUDE_CONFIG_DIR",
+    # Claude Code: extra plugin roots.
     "CLAUDE_CODE_PLUGIN_CACHE_DIR",
     "CLAUDE_CODE_PLUGIN_SEED_DIR",
+    # Codex: replaces ~/.codex.
     "CODEX_HOME",
+    # GitHub Copilot: replaces ~/.copilot.
     "COPILOT_HOME",
+    # OpenCode: an extra config file.
     "OPENCODE_CONFIG",
+    # OpenCode: an extra config folder (configs and skills).
     "OPENCODE_CONFIG_DIR",
+    # VS Code: portable mode data folder.
     "VSCODE_PORTABLE",
+    # OpenCode: <XDG_CONFIG_HOME>/opencode, scanned with ~/.config/opencode.
     "XDG_CONFIG_HOME",
+    # OpenCode: URL-pulled skills in <XDG_CACHE_HOME>/opencode, with ~/.cache/opencode.
     "XDG_CACHE_HOME",
+    # Windows, machine-wide: Claude Code's managed-mcp.json under Program Files.
     "PROGRAMW6432",
     "PROGRAMFILES",
+    # Windows, machine-wide: Codex's system config.toml and OpenCode's managed config.
     "PROGRAMDATA",
 )
 MAX_ROUNDS = 25
