@@ -1,0 +1,29 @@
+# Snyk (https://snyk.io) policy file, patches or ignores known vulnerabilities.
+version: v1.25.1
+# The cryptography ignores below have no expiry on purpose: the code owner decides when to move off the <49 pin.
+ignore:
+  SNYK-PYTHON-CRYPTOGRAPHY-18516620:
+    - '*':
+        reason: >-
+          Advisories affect X.509 verification and PKCS7 only; this project
+          imports only cryptography.fernet; no other package depends on
+          cryptography. Pinned <49 because 49+ publishes no macOS x86_64 wheels
+          (see pyproject.toml).
+        created: 2026-10-13T15:52:44.072Z
+  SNYK-PYTHON-CRYPTOGRAPHY-18516621:
+    - '*':
+        reason: >-
+          Advisories affect X.509 verification and PKCS7 only; this project
+          imports only cryptography.fernet; no other package depends on
+          cryptography. Pinned <49 because 49+ publishes no macOS x86_64 wheels
+          (see pyproject.toml).
+        created: 2026-10-13T15:52:46.478Z
+  SNYK-PYTHON-CRYPTOGRAPHY-18516622:
+    - '*':
+        reason: >-
+          Advisories affect X.509 verification and PKCS7 only; this project
+          imports only cryptography.fernet; no other package depends on
+          cryptography. Pinned <49 because 49+ publishes no macOS x86_64 wheels
+          (see pyproject.toml).
+        created: 2026-10-13T15:52:49.141Z
+patch: {}
