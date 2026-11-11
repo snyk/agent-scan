@@ -71,3 +71,60 @@ def test_merge_last_write_wins_and_canonical(tmp_path: Path) -> None:
     # Two spellings of one file merge under its resolved path.
     assert [name for name, _ in configs[real.resolve().as_posix()]] == ["via-link", "direct"]
     assert str(link) not in configs
+
+
+def _stdio_found(raw: dict, roots: list[str]) -> dict:
+    return {
+        "clients": [{"name": "codex", "client_path": "/x", "username": "me"}],
+        "mcp_configs": [
+            {
+                "client": "codex",
+                "username": "me",
+                "key": "/c.toml",
+                "candidates": [{"maps": [{"tool": raw}]}],
+                "fallback": {"kind": "parse_error", "message": "x"},
+                "stdio_roots": {"tool": roots},
+            }
+        ],
+        "skills_dirs": [],
+    }
+
+
+def test_stdio_roots_resolve_one_executable(tmp_path: Path, monkeypatch) -> None:
+    signed: list[str | None] = []
+
+    def fake_sign(server, *, signature_command=None):
+        signed.append(signature_command)
+        return server
+
+    monkeypatch.setattr("agent_scan.remote_discovery.builder.check_server_signature", fake_sign)
+    plugin = tmp_path / "plugin"
+    (plugin / "bin").mkdir(parents=True)
+    (plugin / "bin/run tool").write_text("#!/bin/sh\n")
+    raw = {"command": "./bin/run tool", "args": ["--x"], "cwd": "."}
+    found = _stdio_found(raw, [str(tmp_path / "missing"), str(plugin)])
+    (client,) = build_clients(found)
+    ((_, server),) = client.mcp_configs["/c.toml"]
+    executable = str((plugin / "bin/run tool").resolve())
+    assert signed == [executable]
+    # The uploaded command stays as configured; the resolved one is runtime context.
+    assert (server.command, server.args) == ("./bin/run tool", ["--x"])
+    assert (server.runtime_command, server.runtime_cwd) == (executable, str(plugin.resolve()))
+
+
+def test_stdio_roots_ignored_when_ambiguous_or_escaping(tmp_path: Path, monkeypatch) -> None:
+    signed: list[str | None] = []
+
+    def fake_sign(server, *, signature_command=None):
+        signed.append(signature_command)
+        return server
+
+    monkeypatch.setattr("agent_scan.remote_discovery.builder.check_server_signature", fake_sign)
+    for name in ("a", "b"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "tool").write_text("")
+    (tmp_path / "outside").write_text("")
+    roots = [str(tmp_path / "a"), str(tmp_path / "b")]
+    build_clients(_stdio_found({"command": "./tool", "cwd": "."}, roots))
+    build_clients(_stdio_found({"command": "../outside", "cwd": "."}, [str(tmp_path / "a")]))
+    assert signed == [None, None]

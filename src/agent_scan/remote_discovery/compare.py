@@ -19,7 +19,7 @@ from typing import Any
 
 from agent_scan.agents import DISCOVERERS, DiscoveryScope, find_discoverers
 from agent_scan.inspect import get_mcp_config_per_client
-from agent_scan.models import ClientToInspect
+from agent_scan.models import ClientToInspect, StdioServer
 from agent_scan.utils import get_readable_home_directories
 from agent_scan.well_known_clients import get_well_known_clients
 
@@ -32,9 +32,20 @@ def _strip_traceback(value: Any) -> Any:
     return value
 
 
+def _dump(client: ClientToInspect) -> dict[str, Any]:
+    """The client as JSON, with each stdio server's private runtime context added."""
+    dumped = _strip_traceback(client.model_dump(mode="json"))
+    for key, value in client.mcp_configs.items():
+        if not isinstance(value, list):
+            continue
+        for (_, server), (_, server_json) in zip(value, dumped["mcp_configs"][key], strict=True):
+            if isinstance(server, StdioServer) and server.runtime_command is not None:
+                server_json["runtime"] = [server.runtime_command, server.runtime_cwd]
+    return dumped
+
+
 def comparable(clients: list[ClientToInspect]) -> list[dict[str, Any]]:
-    dumped = [_strip_traceback(c.model_dump(mode="json")) for c in clients]
-    return sorted(dumped, key=lambda c: (c["name"], c["username"] or ""))
+    return sorted((_dump(c) for c in clients), key=lambda c: (c["name"], c["username"] or ""))
 
 
 @dataclass
