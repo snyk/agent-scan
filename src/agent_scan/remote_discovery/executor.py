@@ -10,6 +10,7 @@ import base64
 import logging
 import os
 import posixpath
+import re
 import stat as stat_module
 from typing import Any
 
@@ -18,6 +19,9 @@ logger = logging.getLogger(__name__)
 MAX_FILE_BYTES = 20 * 1024 * 1024
 MAX_FIND_MATCHES = 10_000
 MAX_FIND_READ_BYTES = 50 * 1024 * 1024
+MAX_ENV_NAMES = 64
+MAX_ENV_VALUE = 4096
+ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
 
 
 def to_wire(path: str) -> str:
@@ -176,7 +180,34 @@ def _read_matches(paths: list[str]) -> dict[str, Any]:
     return result
 
 
-_RUNNERS = {"stat": _stat, "read": _read, "find": _find}
+def _env_path(value: str) -> str | None:
+    if len(value) > MAX_ENV_VALUE or not os.path.isabs(value):
+        return None
+    return to_wire(value)
+
+
+def _env(op: dict[str, Any]) -> dict[str, Any]:
+    """Env vars the backend asked for. Only absolute paths leave the machine, so a
+    token or other non-path value is never sent, whatever name is asked for."""
+    names = op["names"][:MAX_ENV_NAMES]
+    path_lists = set(op.get("path_lists", ()))
+    values: dict[str, str | None] = {}
+    for name in names:
+        if not isinstance(name, str) or not ENV_NAME.fullmatch(name):
+            continue
+        raw = os.environ.get(name)
+        if not raw:
+            values[name] = None
+        elif name in path_lists:
+            kept = [p for p in (_env_path(e.strip()) for e in raw.split(os.pathsep) if e.strip()) if p]
+            joined = os.pathsep.join(kept)
+            values[name] = joined if joined and len(joined) <= MAX_ENV_VALUE else None
+        else:
+            values[name] = _env_path(raw)
+    return {"values": values}
+
+
+_RUNNERS = {"stat": _stat, "read": _read, "find": _find, "env": _env}
 
 
 def run_op(op: dict[str, Any]) -> dict[str, Any]:
