@@ -271,9 +271,7 @@ def test_policy_lets_a_slow_request_use_the_remaining_budget():
     session = _FakeSession()
 
     with _patch_session(session):
-        send_hook_event(
-            "https://api.snyk.io", "claude-code", "k", "{}", "m", retry_policy=RetryPolicy(1.0, 2.0, 60.0)
-        )
+        send_hook_event("https://api.snyk.io", "claude-code", "k", "{}", "m", retry_policy=RetryPolicy(1.0, 2.0, 60.0))
 
     total = session.posts[0]["timeout"].total
     assert _HOOK_REQUEST_TIMEOUT_SECONDS < total <= 60.0
