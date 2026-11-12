@@ -32,7 +32,14 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 lacks stdlib TOML
 
 from agent_scan.agents import DiscoveryScope
 from agent_scan.agents.claude_desktop import ClaudeDesktopDiscoverer
-from agent_scan.hook_events import HOOK_CLIENTS, send_hook_event
+from agent_scan.hook_events import (
+    HOOK_CLIENTS,
+    INSTALL_RETRY_POLICY,
+    RetryPolicy,
+    classify_failure_detail,
+    next_retry_delay,
+    send_hook_event,
+)
 from agent_scan.pushkeys import (
     GuardEnabledAccessDeniedError,
     _is_localhost,
@@ -65,6 +72,7 @@ _DETECTION_RE = re.compile(
 _PERMISSION_DENIED = "__permission_denied__"
 _STDIN_READ_TIMEOUT_SECONDS = 5.0
 _DISCOVERY_TIMEOUT_SECONDS = 60.0
+_HOOK_SCRIPT_TIMEOUT_SECONDS = 15.0
 
 CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 CURSOR_HOOKS_PATH = Path.home() / ".cursor" / "hooks.json"
@@ -320,21 +328,32 @@ def _run_install(args) -> None:
     minted = not headless  # True if we minted the key in this run
 
     first_installed_client: str | None = None
+    failed_clients: list[str] = []
     try:
         for c in clients:
-            _install_hooks(
-                c,
-                _hook_client_name(c),
-                push_key,
-                url,
-                _config_path(c, getattr(args, "file", None), managed=managed),
-                scope,
-                _client_label(c),
-                minted,
-                tenant_id,
-                snyk_token,
-                machine_id,
-            )
+            try:
+                _install_hooks(
+                    c,
+                    _hook_client_name(c),
+                    push_key,
+                    url,
+                    _config_path(c, getattr(args, "file", None), managed=managed),
+                    scope,
+                    _client_label(c),
+                    minted,
+                    tenant_id,
+                    snyk_token,
+                    machine_id,
+                )
+            except (SystemExit, Exception) as e:
+                # With client=all one client's failure must not block the others.
+                if client != "all":
+                    raise
+                failed_clients.append(c)
+                if not isinstance(e, SystemExit):
+                    rich.print(f"[bold red]Error:[/bold red] {_client_label(c)}: {e}")
+                rich.print(f"[yellow]Warning:[/yellow] Installation failed for {_client_label(c)}; continuing.")
+                continue
             if first_installed_client is None:
                 first_installed_client = _hook_client_name(c)
     except BaseException:
@@ -349,6 +368,9 @@ def _run_install(args) -> None:
                 _revoke_after_failure(url, tenant_id, snyk_token, push_key)
         raise
 
+    if failed_clients and first_installed_client is None and minted:
+        _revoke_after_failure(url, tenant_id, snyk_token, push_key)
+
     if first_installed_client is not None:
         _send_servers_discovered_event(
             push_key,
@@ -356,8 +378,13 @@ def _run_install(args) -> None:
             first_installed_client,
             machine_id,
             discovery_scope=DiscoveryScope.SERVERS,
-            max_retries=2,
+            retry_policy=INSTALL_RETRY_POLICY,
         )
+
+    if failed_clients:
+        names = ", ".join(_client_label(c) for c in failed_clients)
+        rich.print(f"[bold red]Error:[/bold red] Installation failed for: {names}.")
+        sys.exit(1)
 
 
 def _run_with_timeout(
@@ -639,7 +666,7 @@ def _install_hooks(
     first_install = not main_script.existed
     config_changed = bool(hooks_diff["added"] or hooks_diff["modified"] or hooks_diff["removed"])
 
-    if not _send_test_event(
+    test_event = _send_test_event(
         push_key,
         url,
         hook_client,
@@ -653,13 +680,17 @@ def _install_hooks(
         discover_current_checksum=discover_script.current_checksum if discover_script else None,
         discover_new_checksum=discover_script.new_checksum if discover_script else None,
         machine_id=machine_id,
-    ):
+    )
+    if test_event.status == "rejected":
         if not main_script.existed:
             dest_path.unlink(missing_ok=True)
         if not discover_script_existed:
             discover_script_path.unlink(missing_ok=True)
         rich.print("[bold red]Aborting install \u2014 test event failed.[/bold red]")
         raise SystemExit(1)
+    if test_event.status == "unconfirmed":
+        _warn_test_event_unconfirmed(test_event)
+        _report_test_event_unconfirmed(push_key, url, hook_client, machine_id, test_event)
 
     config_written = _write_client_config(client, config_path, prepared_config, prepared_content, preserved)
     if not install_discovery and discover_script_path.exists():
@@ -675,6 +706,31 @@ def _install_hooks(
     rich.print(f"   Remote URL: [dim]{url}[/dim]")
     rich.print(f"   Push Key:   [yellow]{_mask_key(push_key)}[/yellow]")
     rich.print()
+
+
+def _warn_test_event_unconfirmed(result: _TestEventResult) -> None:
+    rich.print(
+        f"[yellow]Warning:[/yellow] Test event was not confirmed after {result.attempts} "
+        f"attempt{'s' if result.attempts != 1 else ''} over {result.elapsed:.0f}s. "
+        f"Last error: [bold]{result.error}[/bold] \u2014 {_describe_error(result.error)}. "
+        "Continuing the installation; hooks will report once the service is reachable."
+    )
+
+
+def _report_test_event_unconfirmed(
+    push_key: str, url: str, hook_client: str, machine_id: str, result: _TestEventResult
+) -> None:
+    """Best-effort telemetry: the install continued although the test event never got through."""
+    payload_dict = {
+        "hook_event_name": "hooksConfiguredTestEventUnconfirmed",
+        HOOK_CLIENTS[hook_client].session_field: "hooks-setup",
+        "test_event_attempts": result.attempts,
+        "test_event_elapsed_ms": round(result.elapsed * 1000),
+        "test_event_last_error": result.error,
+    }
+    ok, detail = send_hook_event(url, hook_client, push_key, json.dumps(payload_dict), machine_id)
+    if not ok:
+        rich.print(f"[dim]Could not report the unconfirmed test event: {detail}[/dim]")
 
 
 def _prepare_claude_config(
@@ -1355,6 +1411,7 @@ def _invoke_hook_script(
     *,
     machine_id: str,
     require_success_payload: bool = False,
+    timeout: float = _HOOK_SCRIPT_TIMEOUT_SECONDS,
 ) -> tuple[bool, str]:
     """Run the hook script with ``payload`` on stdin. Returns ``(ok, detail)``.
 
@@ -1383,7 +1440,7 @@ def _invoke_hook_script(
             input=payload,
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=timeout,
             env=env,
         )
         if result.returncode != 0:
@@ -1402,6 +1459,29 @@ def _invoke_hook_script(
         return False, str(e)
 
 
+# What a failed-to-confirm test event means, keyed by error label, shown in the install warning.
+_ERROR_MEANINGS = {
+    "timeout": "the Agent Guard service did not answer in time",
+    "dns_failure": "the Agent Guard host name could not be resolved (network or DNS problem)",
+    "connection_refused": "the connection to the Agent Guard service was refused",
+    "connection_reset": "the connection to the Agent Guard service was dropped",
+}
+
+
+class _TestEventResult(NamedTuple):
+    status: str  # "sent", "rejected" (persistent, abort) or "unconfirmed" (outage outlasted retries)
+    attempts: int
+    elapsed: float
+    error: str  # short label such as dns_failure, timeout, http_error_503
+    detail: str
+
+
+def _describe_error(error: str) -> str:
+    if error.startswith("http_error_"):
+        return f"the Agent Guard service answered with HTTP {error.removeprefix('http_error_')}, a server-side failure"
+    return _ERROR_MEANINGS.get(error, "the test event could not be delivered")
+
+
 def _send_test_event(
     push_key: str,
     url: str,
@@ -1417,8 +1497,13 @@ def _send_test_event(
     discover_current_checksum: str | None = None,
     discover_new_checksum: str | None = None,
     machine_id: str,
-) -> bool:
-    """Send a test hooksConfigured event by invoking the hook script. Returns True on success."""
+) -> _TestEventResult:
+    """Send a test hooksConfigured event by invoking the hook script, retrying outages.
+
+    Timeouts, DNS failures, connection resets and HTTP 5xx are retried with backoff inside
+    ``INSTALL_RETRY_POLICY``'s time limit (the same rule as the install-time discovery event).
+    Anything else (API rejection, HTTP 4xx, a script error) is persistent and returned at once.
+    """
     if not machine_id.strip():
         raise ValueError("machine ID is required")
     payload_dict: dict = {"hook_event_name": "hooksConfigured"}
@@ -1445,20 +1530,36 @@ def _send_test_event(
     redact_push_keys_in_data(payload_dict)
     payload = json.dumps(payload_dict)
 
-    ok, detail = _invoke_hook_script(
-        script_path,
-        hook_client,
-        push_key,
-        url,
-        payload,
-        machine_id=machine_id,
-        require_success_payload=True,
-    )
-    if ok:
-        rich.print("[green]\u2713[/green]  Test event sent  [green]\u2192 OK[/green]")
-        return True
-    rich.print(f"[red]\u2717[/red]  Test event failed: {detail}")
-    return False
+    policy = INSTALL_RETRY_POLICY
+    started = time.monotonic()
+    attempts = 0
+    while True:
+        attempts += 1
+        ok, detail = _invoke_hook_script(
+            script_path,
+            hook_client,
+            push_key,
+            url,
+            payload,
+            machine_id=machine_id,
+            require_success_payload=True,
+            timeout=min(_HOOK_SCRIPT_TIMEOUT_SECONDS, policy.time_limit - (time.monotonic() - started)),
+        )
+        elapsed = time.monotonic() - started
+        if ok:
+            rich.print("[green]\u2713[/green]  Test event sent  [green]\u2192 OK[/green]")
+            return _TestEventResult("sent", attempts, elapsed, "", "")
+        failure = classify_failure_detail(detail)
+        if not failure.retryable:
+            rich.print(f"[red]\u2717[/red]  Test event failed: {detail}")
+            return _TestEventResult("rejected", attempts, elapsed, failure.label, detail)
+        delay = next_retry_delay(policy, attempts, started)
+        if delay is None:
+            return _TestEventResult("unconfirmed", attempts, elapsed, failure.label, detail)
+        rich.print(
+            f"[yellow]![/yellow]  Test event attempt {attempts} failed ({failure.label}); retrying in {delay:g}s..."
+        )
+        time.sleep(delay)
 
 
 def _send_servers_discovered_event(
@@ -1471,7 +1572,7 @@ def _send_servers_discovered_event(
     session_marker: str = "hooks-setup",
     target_folders: list[str] | None = None,
     discovery_scope: DiscoveryScope = DiscoveryScope.ALL,
-    max_retries: int = 1,
+    retry_policy: RetryPolicy | None = None,
 ) -> bool:
     """Discover MCP servers and send an install- or session-scoped discovery event.
 
@@ -1503,7 +1604,7 @@ def _send_servers_discovered_event(
     redact_push_keys_in_data(payload_dict)
     payload = json.dumps(payload_dict)
 
-    ok, detail = send_hook_event(url, hook_client, push_key, payload, machine_id, max_retries=max_retries)
+    ok, detail = send_hook_event(url, hook_client, push_key, payload, machine_id, retry_policy=retry_policy)
     if ok:
         server_count = sum(len(entry.get("servers", [])) for entry in servers)
         noun = "server" if server_count == 1 else "servers"

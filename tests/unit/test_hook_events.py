@@ -242,3 +242,24 @@ def test_http_errors_are_not_retried():
         send_hook_event("https://api.snyk.io", "claude-code", "push-key", "{}", "machine-1", max_retries=3)
 
     assert len(session.posts) == 1
+
+
+def test_http_5xx_is_retried_within_policy():
+    from agent_scan.hook_events import RetryPolicy
+
+    session = _FakeSession(status=503)
+
+    with _patch_session(session), patch("agent_scan.hook_events.asyncio.sleep") as sleep:
+        ok, detail = send_hook_event(
+            "https://api.snyk.io",
+            "claude-code",
+            "push-key",
+            "{}",
+            "machine-1",
+            retry_policy=RetryPolicy(1.0, 2.0, 10.0),
+        )
+
+    assert ok is False
+    assert detail == "HTTP 503"
+    assert len(session.posts) > 1
+    assert [c.args[0] for c in sleep.call_args_list][:2] == [1.0, 2.0]
