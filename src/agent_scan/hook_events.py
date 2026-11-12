@@ -89,7 +89,9 @@ def classify_failure_detail(detail: str) -> FailureKind:
         if code in _CURL_EXIT_ERRORS:
             return FailureKind(*_CURL_EXIT_ERRORS[code])
         return FailureKind(f"curl_error_{code}", False)
-    if re.search(r"name or service not known|could not resolve|no such host|nodename nor servname", text):
+    if re.search(
+        r"name or service not known|could not resolve|could not be resolved|no such host|nodename nor servname", text
+    ):
         return FailureKind("dns_failure", True)
     if "connection reset" in text or "connection was closed" in text or "forcibly closed" in text:
         return FailureKind("connection_reset", True)
@@ -157,6 +159,8 @@ async def _post_hook_event(
         policy = RetryPolicy(1.0, 2.0, float("inf"))
     else:
         max_retries = 2**31
+        # Time-bounded installs let a slow healthy response use the whole remaining budget.
+        request_timeout = float("inf")
     started = time.monotonic()
     detail = ""
     attempt = 0

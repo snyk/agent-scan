@@ -263,3 +263,17 @@ def test_http_5xx_is_retried_within_policy():
     assert detail == "HTTP 503"
     assert len(session.posts) > 1
     assert [c.args[0] for c in sleep.call_args_list][:2] == [1.0, 2.0]
+
+
+def test_policy_lets_a_slow_request_use_the_remaining_budget():
+    from agent_scan.hook_events import RetryPolicy
+
+    session = _FakeSession()
+
+    with _patch_session(session):
+        send_hook_event(
+            "https://api.snyk.io", "claude-code", "k", "{}", "m", retry_policy=RetryPolicy(1.0, 2.0, 60.0)
+        )
+
+    total = session.posts[0]["timeout"].total
+    assert _HOOK_REQUEST_TIMEOUT_SECONDS < total <= 60.0

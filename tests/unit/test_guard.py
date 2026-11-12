@@ -5687,6 +5687,9 @@ class TestSendTestEventRetry:
             "response did not confirm success: snyk-agent-guard: request failed (curl exit 6); failing open",
             "response did not confirm success: snyk-agent-guard: request failed (curl exit 56); failing open",
             "response did not confirm success: snyk-agent-guard: HTTP 503; failing open",
+            # Windows PowerShell 5.1 WebException DNS failure
+            "response did not confirm success: snyk-agent-guard: request failed: "
+            "The remote name could not be resolved: 'api.snyk.io'; failing open",
         ],
     )
     def test_transient_failure_is_retried_until_success(self, detail):
@@ -5741,8 +5744,32 @@ class TestSendTestEventRetry:
 
         assert result.status == "unconfirmed"
         assert result.error == "timeout"
-        assert now[0] <= limit
-        assert all(0 < t <= limit for t in timeouts)
+        overhead = guard_module._HOOK_SCRIPT_OVERHEAD_SECONDS
+        assert now[0] <= limit + overhead
+        assert all(0 < t <= limit + overhead for t in timeouts)
+
+    def test_slow_healthy_response_between_15_and_60_seconds_confirms(self):
+        """An answer that takes 20 s must not be killed at the old 15 s per-attempt cap."""
+        now = [0.0]
+
+        def slow_healthy(*args, **kwargs):
+            if kwargs["timeout"] < 20:
+                now[0] += kwargs["timeout"]
+                return False, "timeout"
+            now[0] += 20
+            return True, ""
+
+        with (
+            patch(f"{_G}._invoke_hook_script", side_effect=slow_healthy) as invoke,
+            patch(f"{_G}.time.sleep"),
+            patch(f"{_G}.time.monotonic", side_effect=lambda: now[0]),
+            patch(f"{_G}.rich"),
+        ):
+            result = _send_test_event("pk", "https://api.snyk.io", "claude-code", Path("/s.sh"), machine_id="m")
+
+        assert result.status == "sent"
+        assert invoke.call_count == 1
+        assert invoke.call_args.kwargs["timeout"] > 15
 
     def test_http_5xx_label(self):
         detail = "response did not confirm success: snyk-agent-guard: HTTP 502; failing open"

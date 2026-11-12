@@ -73,6 +73,8 @@ _PERMISSION_DENIED = "__permission_denied__"
 _STDIN_READ_TIMEOUT_SECONDS = 5.0
 _DISCOVERY_TIMEOUT_SECONDS = 60.0
 _HOOK_SCRIPT_TIMEOUT_SECONDS = 15.0
+# Extra time the forwarder subprocess gets beyond the install budget (interpreter startup, teardown).
+_HOOK_SCRIPT_OVERHEAD_SECONDS = 2.0
 
 CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 CURSOR_HOOKS_PATH = Path.home() / ".cursor" / "hooks.json"
@@ -1543,7 +1545,9 @@ def _send_test_event(
             payload,
             machine_id=machine_id,
             require_success_payload=True,
-            timeout=min(_HOOK_SCRIPT_TIMEOUT_SECONDS, policy.time_limit - (time.monotonic() - started)),
+            # A healthy but slow answer (up to the forwarder's own 60 s cap) must be able to finish,
+            # so each attempt gets what is left of the install budget, not the 15 s default.
+            timeout=max(policy.time_limit - (time.monotonic() - started), 0.0) + _HOOK_SCRIPT_OVERHEAD_SECONDS,
         )
         elapsed = time.monotonic() - started
         if ok:
