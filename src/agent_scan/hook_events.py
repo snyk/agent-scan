@@ -154,7 +154,7 @@ async def _post_hook_event(
     Without ``policy`` the loop makes up to ``max_retries`` attempts with a 1 s, 2 s, ... sleep.
     With ``policy`` it retries until the policy's time limit instead. HTTP 4xx is never retried.
     """
-    request_timeout = _HOOK_REQUEST_TIMEOUT_SECONDS
+    request_timeout: float = _HOOK_REQUEST_TIMEOUT_SECONDS
     if policy is None:
         policy = RetryPolicy(1.0, 2.0, float("inf"))
     else:
