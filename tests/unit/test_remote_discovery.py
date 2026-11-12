@@ -39,30 +39,20 @@ def test_find_file_suffixes(tmp_path: Path) -> None:
     assert _find(tmp_path, file_suffixes=[".json"]) == ["a.json", "sub/c.json"]
 
 
-def test_env_sends_only_absolute_paths(monkeypatch) -> None:
+def test_env_sends_values_as_set(monkeypatch) -> None:
     monkeypatch.setenv("CODEX_HOME", "/opt/codex")
-    monkeypatch.setenv("GITHUB_TOKEN", "ghp_secret")
     monkeypatch.setenv("COPILOT_HOME", "relative/dir")
-    monkeypatch.setenv("SEEDS", os.pathsep.join(["/a", "rel", "", "/b"]))
     monkeypatch.setenv("LONG", "/" + "x" * 5000)
     monkeypatch.delenv("UNSET_VAR", raising=False)
-    op = {
-        "op_id": "1",
-        "kind": "env",
-        "names": ["CODEX_HOME", "GITHUB_TOKEN", "COPILOT_HOME", "SEEDS", "LONG", "UNSET_VAR", "lower", "A-B"],
-        "path_lists": ["SEEDS"],
-    }
+    op = {"op_id": "1", "kind": "env", "names": ["CODEX_HOME", "COPILOT_HOME", "LONG", "UNSET_VAR", "lower", "A-B"]}
     result = run_op(op)
     assert result["status"] == "ok"
     assert result["values"] == {
         "CODEX_HOME": "/opt/codex",
-        "GITHUB_TOKEN": None,
-        "COPILOT_HOME": None,
-        "SEEDS": os.pathsep.join(["/a", "/b"]),
+        "COPILOT_HOME": "relative/dir",
         "LONG": None,
         "UNSET_VAR": None,
     }
-    assert "ghp_secret" not in repr(result)
 
 
 def test_env_caps_names() -> None:

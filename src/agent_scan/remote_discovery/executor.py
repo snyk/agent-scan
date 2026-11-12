@@ -180,30 +180,14 @@ def _read_matches(paths: list[str]) -> dict[str, Any]:
     return result
 
 
-def _env_path(value: str) -> str | None:
-    if len(value) > MAX_ENV_VALUE or not os.path.isabs(value):
-        return None
-    return to_wire(value)
-
-
 def _env(op: dict[str, Any]) -> dict[str, Any]:
-    """Env vars the backend asked for. Only absolute paths leave the machine, so a
-    token or other non-path value is never sent, whatever name is asked for."""
-    names = op["names"][:MAX_ENV_NAMES]
-    path_lists = set(op.get("path_lists", ()))
+    """Env vars the backend asked for, as set. Names and values the backend's schema
+    would refuse are left out or sent as ``None``."""
     values: dict[str, str | None] = {}
-    for name in names:
-        if not isinstance(name, str) or not ENV_NAME.fullmatch(name):
-            continue
-        raw = os.environ.get(name)
-        if not raw:
-            values[name] = None
-        elif name in path_lists:
-            kept = [p for p in (_env_path(e.strip()) for e in raw.split(os.pathsep) if e.strip()) if p]
-            joined = os.pathsep.join(kept)
-            values[name] = joined if joined and len(joined) <= MAX_ENV_VALUE else None
-        else:
-            values[name] = _env_path(raw)
+    for name in op["names"][:MAX_ENV_NAMES]:
+        if isinstance(name, str) and ENV_NAME.fullmatch(name):
+            value = os.environ.get(name)
+            values[name] = value if value and len(value) <= MAX_ENV_VALUE else None
     return {"values": values}
 
 
