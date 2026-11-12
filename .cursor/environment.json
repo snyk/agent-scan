@@ -1,0 +1,4 @@
+{
+  "name": "Agent Scan",
+  "install": "bash -c 'for root in \"$PWD\" \"/agent/repos/agent-scan\" \"/workspace\"; do if [[ -f \"$root/.cursor/install.sh\" ]]; then exec bash \"$root/.cursor/install.sh\"; fi; done; echo \"agent-scan install script not found\" >&2; exit 1'"
+}
