@@ -10,7 +10,7 @@ from unittest.mock import patch
 import aiohttp
 import pytest
 
-from agent_scan.hook_events import _HOOK_REQUEST_TIMEOUT_SECONDS, send_hook_event
+from agent_scan.hook_events import _HOOK_REQUEST_TIMEOUT_SECONDS, classify_failure_detail, send_hook_event
 from agent_scan.hook_version import HOOK_VERSION
 from agent_scan.version import version_info
 
@@ -275,3 +275,21 @@ def test_policy_lets_a_slow_request_use_the_remaining_budget():
 
     total = session.posts[0]["timeout"].total
     assert _HOOK_REQUEST_TIMEOUT_SECONDS < total <= 60.0
+
+
+@pytest.mark.parametrize(
+    "detail, expected",
+    [
+        (
+            "The underlying connection was closed: Could not establish trust relationship for the SSL/TLS secure channel.",
+            ("rejected", False),
+        ),
+        ("Could not create SSL/TLS secure channel", ("rejected", False)),
+        (
+            "The underlying connection was closed: An unexpected error occurred on a receive.",
+            ("connection_reset", True),
+        ),
+    ],
+)
+def test_classify_failure_detail_does_not_retry_certificate_failures(detail, expected):
+    assert tuple(classify_failure_detail(detail)) == expected

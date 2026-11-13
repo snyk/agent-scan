@@ -93,6 +93,11 @@ def classify_failure_detail(detail: str) -> FailureKind:
         r"name or service not known|could not resolve|could not be resolved|no such host|nodename nor servname", text
     ):
         return FailureKind("dns_failure", True)
+    # TLS/certificate trust failures are persistent. Checked before the "connection was closed" match,
+    # since PowerShell wraps them as "The underlying connection was closed: Could not establish trust
+    # relationship for the SSL/TLS secure channel."
+    if re.search(r"trust relationship|ssl/tls secure channel|certificate", text):
+        return FailureKind("rejected", False)
     if "connection reset" in text or "connection was closed" in text or "forcibly closed" in text:
         return FailureKind("connection_reset", True)
     if "connection refused" in text or "unable to connect" in text:
