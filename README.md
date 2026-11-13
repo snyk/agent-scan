@@ -67,7 +67,7 @@ Agent Scan helps you discover all your installed agent components (harnesses, MC
 
 ## Quick Start
 
-> **Note:** Free-tier users of Agent Scan (public, unauthenticated, or non-enterprise users) are subject to a daily usage limit. When the limit is reached, scans return a "Daily usage limit reached" message. For higher limits and enterprise features, [contact us](https://evo.ai.snyk.io/#contact-us).
+> **Note:** Free-tier users of Agent Scan using a SNYK_TOKEN are subject to a daily usage limit. When the limit is reached, scans return a "Daily usage limit reached" message. For higher limits and enterprise features, [contact us](https://evo.ai.snyk.io/#contact-us).
 
 Choose one of two ways to run Agent Scan:
 
