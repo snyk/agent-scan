@@ -10,7 +10,7 @@ from unittest.mock import patch
 import aiohttp
 import pytest
 
-from agent_scan.hook_events import _HOOK_REQUEST_TIMEOUT_SECONDS, send_hook_event
+from agent_scan.hook_events import _HOOK_REQUEST_TIMEOUT_SECONDS, classify_failure_detail, send_hook_event
 from agent_scan.hook_version import HOOK_VERSION
 from agent_scan.version import version_info
 
@@ -242,3 +242,54 @@ def test_http_errors_are_not_retried():
         send_hook_event("https://api.snyk.io", "claude-code", "push-key", "{}", "machine-1", max_retries=3)
 
     assert len(session.posts) == 1
+
+
+def test_http_5xx_is_retried_within_policy():
+    from agent_scan.hook_events import RetryPolicy
+
+    session = _FakeSession(status=503)
+
+    with _patch_session(session), patch("agent_scan.hook_events.asyncio.sleep") as sleep:
+        ok, detail = send_hook_event(
+            "https://api.snyk.io",
+            "claude-code",
+            "push-key",
+            "{}",
+            "machine-1",
+            retry_policy=RetryPolicy(1.0, 2.0, 10.0),
+        )
+
+    assert ok is False
+    assert detail == "HTTP 503"
+    assert len(session.posts) > 1
+    assert [c.args[0] for c in sleep.call_args_list][:2] == [1.0, 2.0]
+
+
+def test_policy_lets_a_slow_request_use_the_remaining_budget():
+    from agent_scan.hook_events import RetryPolicy
+
+    session = _FakeSession()
+
+    with _patch_session(session):
+        send_hook_event("https://api.snyk.io", "claude-code", "k", "{}", "m", retry_policy=RetryPolicy(1.0, 2.0, 60.0))
+
+    total = session.posts[0]["timeout"].total
+    assert _HOOK_REQUEST_TIMEOUT_SECONDS < total <= 60.0
+
+
+@pytest.mark.parametrize(
+    "detail, expected",
+    [
+        (
+            "The underlying connection was closed: Could not establish trust relationship for the SSL/TLS secure channel.",
+            ("rejected", False),
+        ),
+        ("Could not create SSL/TLS secure channel", ("rejected", False)),
+        (
+            "The underlying connection was closed: An unexpected error occurred on a receive.",
+            ("connection_reset", True),
+        ),
+    ],
+)
+def test_classify_failure_detail_does_not_retry_certificate_failures(detail, expected):
+    assert tuple(classify_failure_detail(detail)) == expected
