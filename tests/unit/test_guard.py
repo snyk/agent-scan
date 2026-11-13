@@ -3171,7 +3171,7 @@ class TestCodexManagedRequirementsToml:
 
         with (
             patch(f"{_G}.IS_WINDOWS", False),
-            patch(f"{_G}._send_test_event", return_value=True),
+            patch(f"{_G}._send_test_event", return_value=_TEST_EVENT_SENT),
             patch(f"{_G}.rich"),
             patch.dict(os.environ, {"AGENT_SCAN_COMMAND": "/usr/local/bin/snyk-agent-scan"}),
         ):
@@ -3205,7 +3205,7 @@ class TestCodexManagedRequirementsToml:
         with (
             patch(f"{_G}.IS_WINDOWS", False),
             patch(f"{_G}._agent_scan_command", return_value=None),
-            patch(f"{_G}._send_test_event", return_value=True),
+            patch(f"{_G}._send_test_event", return_value=_TEST_EVENT_SENT),
             patch(f"{_G}.rich") as rich,
         ):
             _install_hooks(
@@ -4550,6 +4550,9 @@ class TestRunInstallCallsEnsureGuardEnabled:
 # _install_hooks orchestration: detect → test event → write
 # ===================================================================
 
+_TEST_EVENT_SENT = guard_module._TestEventResult("sent", 1, 0.0, "", "")
+_TEST_EVENT_REJECTED = guard_module._TestEventResult("rejected", 1, 0.0, "rejected", "boom")
+_TEST_EVENT_UNCONFIRMED = guard_module._TestEventResult("unconfirmed", 5, 61.0, "dns_failure", "dns")
 _G = "agent_scan.guard"
 _NO_RETURN_VALUE = object()
 
@@ -4608,7 +4611,7 @@ class TestInstallHooksOrchestration:
             "prep_codex_managed": (f"{_G}._prepare_codex_managed_config", ("toml-content", _DIFF_REMOVED)),
             "is_toml": (f"{_G}._is_codex_requirements_toml", False),
             "detect_existing": (f"{_G}._detect_existing_install", None),
-            "test_event": (f"{_G}._send_test_event", True),
+            "test_event": (f"{_G}._send_test_event", _TEST_EVENT_SENT),
             "write": (f"{_G}._write_config", True),
             "write_codex_managed": (f"{_G}._write_codex_managed_config", True),
             "revoke": (f"{_G}._revoke_after_failure", _NO_RETURN_VALUE),
@@ -4789,7 +4792,7 @@ class TestInstallHooksOrchestration:
 
     def test_unset_agent_scan_command_keeps_stale_script_when_test_event_fails(self, ctx, tmp_path):
         ctx["agent_scan_command"].return_value = None
-        ctx["test_event"].return_value = False
+        ctx["test_event"].return_value = _TEST_EVENT_REJECTED
         discover_script = guard_module._discover_script_path(tmp_path / "config.json")
         discover_script.parent.mkdir(parents=True)
         discover_script.write_text("stale\n")
@@ -5037,26 +5040,26 @@ class TestInstallHooksOrchestration:
     # ---------------------------------------------------------------
 
     def test_test_event_failure_raises_system_exit(self, ctx, tmp_path):
-        ctx["test_event"].return_value = False
+        ctx["test_event"].return_value = _TEST_EVENT_REJECTED
         with pytest.raises(SystemExit):
             self._call(tmp_path, minted=True, config_exists=True)
 
     def test_test_event_failure_does_not_revoke_in_install_hooks(self, ctx, tmp_path):
-        ctx["test_event"].return_value = False
+        ctx["test_event"].return_value = _TEST_EVENT_REJECTED
         with pytest.raises(SystemExit):
             self._call(tmp_path, minted=True, config_exists=True)
         ctx["revoke"].assert_not_called()
 
     def test_test_event_failure_no_revoke_when_not_minted(self, ctx, tmp_path):
         ctx["main_script"] = guard_module._CopiedScript(ctx["dest"], False, True, None, _NEW_CHECKSUM)
-        ctx["test_event"].return_value = False
+        ctx["test_event"].return_value = _TEST_EVENT_REJECTED
         with pytest.raises(SystemExit):
             self._call(tmp_path, minted=False, config_exists=True)
         ctx["revoke"].assert_not_called()
 
     def test_test_event_failure_cleans_new_script(self, ctx, tmp_path):
         ctx["main_script"] = guard_module._CopiedScript(ctx["dest"], False, True, None, _NEW_CHECKSUM)
-        ctx["test_event"].return_value = False
+        ctx["test_event"].return_value = _TEST_EVENT_REJECTED
         with pytest.raises(SystemExit):
             self._call(tmp_path)
         ctx["dest"].unlink.assert_called_once_with(missing_ok=True)
@@ -5081,7 +5084,7 @@ class TestInstallHooksOrchestration:
             )
 
         ctx["copy"].side_effect = copy_scripts
-        ctx["test_event"].return_value = False
+        ctx["test_event"].return_value = _TEST_EVENT_REJECTED
 
         with pytest.raises(SystemExit):
             self._call(tmp_path)
@@ -5096,7 +5099,7 @@ class TestInstallHooksOrchestration:
         discover_script.parent.mkdir(parents=True)
         discover_script.write_text("existing\n")
         ctx["main_script"] = guard_module._CopiedScript(ctx["dest"], False, True, None, _NEW_CHECKSUM)
-        ctx["test_event"].return_value = False
+        ctx["test_event"].return_value = _TEST_EVENT_REJECTED
 
         with pytest.raises(SystemExit):
             self._call(tmp_path)
@@ -5111,13 +5114,23 @@ class TestInstallHooksOrchestration:
             _CURRENT_CHECKSUM,
             _NEW_CHECKSUM,
         )
-        ctx["test_event"].return_value = False
+        ctx["test_event"].return_value = _TEST_EVENT_REJECTED
         with pytest.raises(SystemExit):
             self._call(tmp_path, minted=True, config_exists=True)
         ctx["dest"].unlink.assert_not_called()
 
+    def test_unconfirmed_test_event_continues_and_reports(self, ctx, tmp_path):
+        ctx["test_event"].return_value = _TEST_EVENT_UNCONFIRMED
+        with (
+            patch(f"{_G}._report_test_event_unconfirmed") as report,
+        ):
+            self._call(tmp_path)
+        ctx["write"].assert_called_once()
+        report.assert_called_once()
+        assert any("not confirmed" in m for m in self._print_messages(ctx))
+
     def test_test_event_failure_does_not_write_config(self, ctx, tmp_path):
-        ctx["test_event"].return_value = False
+        ctx["test_event"].return_value = _TEST_EVENT_REJECTED
         with pytest.raises(SystemExit):
             self._call(tmp_path, minted=True, config_exists=True)
         ctx["write"].assert_not_called()
@@ -5646,6 +5659,145 @@ class TestInvokeHookScriptSuccessPayload:
         assert "failing open" in detail
 
 
+class TestSendTestEventRetry:
+    """Outages are retried inside the time limit; API rejections are persistent."""
+
+    @staticmethod
+    def _run(results, *, clock=None):
+        """``results`` are (ok, detail) tuples returned by successive hook-script invocations."""
+        now = [0.0]
+
+        def fake_sleep(seconds):
+            now[0] += seconds
+
+        with (
+            patch(f"{_G}._invoke_hook_script", side_effect=results) as invoke,
+            patch(f"{_G}.time.sleep", side_effect=fake_sleep) as sleep,
+            patch(f"{_G}.time.monotonic", side_effect=lambda: now[0]),
+            patch(f"{_G}.rich"),
+        ):
+            result = _send_test_event("pk", "https://api.snyk.io", "claude-code", Path("/s.sh"), machine_id="m")
+        return result, invoke, sleep
+
+    @pytest.mark.parametrize(
+        "detail",
+        [
+            "timeout",
+            "response did not confirm success: curl: (28) x\nsnyk-agent-guard: request timed out after 60s; failing open",
+            "response did not confirm success: snyk-agent-guard: request failed (curl exit 6); failing open",
+            "response did not confirm success: snyk-agent-guard: request failed (curl exit 56); failing open",
+            "response did not confirm success: snyk-agent-guard: HTTP 503; failing open",
+            # Windows PowerShell 5.1 WebException DNS failure
+            "response did not confirm success: snyk-agent-guard: request failed: "
+            "The remote name could not be resolved: 'api.snyk.io'; failing open",
+        ],
+    )
+    def test_transient_failure_is_retried_until_success(self, detail):
+        result, invoke, sleep = self._run([(False, detail), (False, detail), (True, "")])
+        assert result.status == "sent"
+        assert result.attempts == 3
+        assert [c.args[0] for c in sleep.call_args_list] == [1.0, 2.0]  # initial delay, then backoff
+
+    @pytest.mark.parametrize(
+        "detail",
+        [
+            "response did not confirm success (push key may be invalid)",
+            "response did not confirm success: snyk-agent-guard: HTTP 403; failing open",
+            "response did not confirm success: snyk-agent-guard: HTTP 400; failing open",
+            "bad script",
+        ],
+    )
+    def test_rejection_is_not_retried(self, detail):
+        result, invoke, sleep = self._run([(False, detail)])
+        assert result.status == "rejected"
+        assert invoke.call_count == 1
+        sleep.assert_not_called()
+
+    def test_time_limit_exceeded_returns_unconfirmed_with_last_error(self):
+        detail = "response did not confirm success: snyk-agent-guard: request failed (curl exit 6); failing open"
+        result, invoke, _ = self._run([(False, detail)] * 20)
+        assert result.status == "unconfirmed"
+        assert result.error == "dns_failure"
+        assert result.attempts == invoke.call_count
+        assert 1 < result.attempts < 20
+        assert result.elapsed < guard_module.INSTALL_RETRY_POLICY.time_limit
+
+    def test_limit_counts_attempt_duration_not_just_sleeps(self):
+        """Slow attempts eat into the same overall budget as the sleeps between them."""
+        now = [0.0]
+        timeouts = []
+        detail = "response did not confirm success: snyk-agent-guard: request timed out after 60s; failing open"
+
+        def slow_attempt(*args, **kwargs):
+            timeouts.append(kwargs["timeout"])
+            now[0] += kwargs["timeout"]  # every attempt runs until its timeout
+            return False, detail
+
+        limit = guard_module.INSTALL_RETRY_POLICY.time_limit
+        with (
+            patch(f"{_G}._invoke_hook_script", side_effect=slow_attempt),
+            patch(f"{_G}.time.sleep", side_effect=lambda s: now.__setitem__(0, now[0] + s)),
+            patch(f"{_G}.time.monotonic", side_effect=lambda: now[0]),
+            patch(f"{_G}.rich"),
+        ):
+            result = _send_test_event("pk", "https://api.snyk.io", "claude-code", Path("/s.sh"), machine_id="m")
+
+        assert result.status == "unconfirmed"
+        assert result.error == "timeout"
+        overhead = guard_module._HOOK_SCRIPT_OVERHEAD_SECONDS
+        assert now[0] <= limit + overhead
+        assert all(0 < t <= limit + overhead for t in timeouts)
+
+    def test_slow_healthy_response_between_15_and_60_seconds_confirms(self):
+        """An answer that takes 20 s must not be killed at the old 15 s per-attempt cap."""
+        now = [0.0]
+
+        def slow_healthy(*args, **kwargs):
+            if kwargs["timeout"] < 20:
+                now[0] += kwargs["timeout"]
+                return False, "timeout"
+            now[0] += 20
+            return True, ""
+
+        with (
+            patch(f"{_G}._invoke_hook_script", side_effect=slow_healthy) as invoke,
+            patch(f"{_G}.time.sleep"),
+            patch(f"{_G}.time.monotonic", side_effect=lambda: now[0]),
+            patch(f"{_G}.rich"),
+        ):
+            result = _send_test_event("pk", "https://api.snyk.io", "claude-code", Path("/s.sh"), machine_id="m")
+
+        assert result.status == "sent"
+        assert invoke.call_count == 1
+        assert invoke.call_args.kwargs["timeout"] > 15
+
+    def test_http_5xx_label(self):
+        detail = "response did not confirm success: snyk-agent-guard: HTTP 502; failing open"
+        result, _, _ = self._run([(False, detail)] * 20)
+        assert result.error == "http_error_502"
+
+
+class TestUnconfirmedTestEventInstall:
+    def test_warning_names_attempts_error_and_meaning(self):
+        with patch(f"{_G}.rich") as rich_mock:
+            guard_module._warn_test_event_unconfirmed(_TEST_EVENT_UNCONFIRMED)
+        text = rich_mock.print.call_args.args[0]
+        assert "5 attempts" in text
+        assert "dns_failure" in text
+        assert "resolved" in text
+
+    def test_report_sends_attributes(self):
+        with patch(f"{_G}.send_hook_event", return_value=(True, "")) as send:
+            guard_module._report_test_event_unconfirmed(
+                "pk", "https://api.snyk.io", "claude-code", "m", _TEST_EVENT_UNCONFIRMED
+            )
+        payload = json.loads(send.call_args.args[3])
+        assert payload["hook_event_name"] == "hooksConfiguredTestEventUnconfirmed"
+        assert payload["test_event_attempts"] == 5
+        assert payload["test_event_elapsed_ms"] == 61000
+        assert payload["test_event_last_error"] == "dns_failure"
+
+
 class TestSendTestEventSuccessPayload:
     def _send(self, stdout):
         completed = subprocess.CompletedProcess([], 0, stdout=stdout, stderr="")
@@ -5659,10 +5811,10 @@ class TestSendTestEventSuccessPayload:
             )
 
     def test_http_200_with_empty_body_fails(self):
-        assert self._send("{}") is False
+        assert self._send("{}").status == "rejected"
 
     def test_success_payload_passes(self):
-        assert self._send('{"success": true}') is True
+        assert self._send('{"success": true}').status == "sent"
 
 
 def test_run_with_timeout_raises_when_worker_exceeds_deadline():
@@ -6410,7 +6562,7 @@ class TestRunInstallSendsServersDiscovered:
             "claude-code",
             "machine-42",
             discovery_scope=DiscoveryScope.SERVERS,
-            max_retries=2,
+            retry_policy=guard_module.INSTALL_RETRY_POLICY,
         )
 
     def test_install_does_not_request_skills_discovery(self, tmp_path, monkeypatch):
@@ -6435,7 +6587,7 @@ class TestRunInstallSendsServersDiscovered:
         ):
             _run_install(self._args(tmp_path, machine_id="machine-42"))
 
-        assert send.call_args.kwargs["max_retries"] == 2
+        assert send.call_args.kwargs["retry_policy"] is guard_module.INSTALL_RETRY_POLICY
 
     def test_cursor_install_uses_cursor_endpoint(self, tmp_path, monkeypatch):
         monkeypatch.setenv("PUSH_KEY", "headless-pk")
@@ -7211,8 +7363,10 @@ class TestRunInstallAll:
             file=None,
             managed=False,
         )
-        with pytest.raises(RuntimeError, match="config write failed"):
+        with pytest.raises(SystemExit) as exc:
             _run_install(args)
+        assert exc.value.code == 1
+        assert call_count == len(ALL_CLIENTS)  # a failing client does not block the rest
         mock_revoke.assert_not_called()
 
     @patch("agent_scan.guard._revoke_after_failure")
@@ -7233,8 +7387,10 @@ class TestRunInstallAll:
             file=None,
             managed=False,
         )
-        with pytest.raises(RuntimeError, match="first client failed"):
+        with pytest.raises(SystemExit) as exc:
             _run_install(args)
+        assert exc.value.code == 1
+        assert mock_install.call_count == len(ALL_CLIENTS)
         mock_revoke.assert_called_once_with("https://api.snyk.io", "tid-1", "tok", "minted-pk")
 
 
