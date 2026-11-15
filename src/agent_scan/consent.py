@@ -16,6 +16,7 @@ from agent_scan.models import (
     StdioServer,
     UnknownConfigFormat,
 )
+from agent_scan.utils import _ENV_VAR_PATTERN
 
 # The consent UI is diagnostic chrome, not scan output, so it is rendered on stderr.
 _stderr_console = Console(stderr=True)
@@ -26,18 +27,45 @@ def _render_command(server: StdioServer) -> str:
     return " ".join(shlex.quote(p) for p in parts)
 
 
+def _render_value_redacted(value: str) -> str:
+    """Mask a config value, but keep its ``${NAME}`` references visible.
+
+    The scan substitutes each ``${NAME}`` with the scanner's own environment
+    variable before connecting, so the reference is what the user needs to see
+    to know which of their variables a server is about to read. The reference
+    itself is a variable name, not a secret. Literal text around it may be a
+    real secret, so every run of it is replaced by ``***``:
+    ``Bearer ${TOKEN}`` -> ``***${TOKEN}``, ``${A}${B}`` -> ``${A}${B}``,
+    ``sk-literal`` -> ``***``.
+    """
+    parts: list[str] = []
+    position = 0
+    for match in _ENV_VAR_PATTERN.finditer(value):
+        if match.start() > position:
+            parts.append("***")
+        parts.append(match.group(0))
+        position = match.end()
+    if position < len(value) or not parts:
+        parts.append("***")
+    return "".join(parts)
+
+
 def _render_env_redacted(server: StdioServer) -> str | None:
-    """Render env as ``KEY=***``. Values are never echoed back to the terminal."""
+    """Render env as ``KEY=<value>`` with literal text masked and ``${NAME}`` references shown."""
     if not server.env:
         return None
-    return ", ".join(f"{k}=***" for k in sorted(server.env.keys()))
+    return ", ".join(f"{k}={_render_value_redacted(v)}" for k, v in sorted(server.env.items()))
 
 
 def _render_headers_redacted(server: RemoteServer) -> str | None:
-    """Render header names without exposing values from the configuration."""
+    """Render headers as ``Name=<value>`` with literal text masked and ``${NAME}`` references shown.
+
+    The scan expands those references from the scanner's environment and sends the result to the
+    server, so they must be visible here for the consent decision to be an informed one.
+    """
     if not server.headers:
         return None
-    return ", ".join(f"{key}=***" for key in sorted(server.headers))
+    return ", ".join(f"{key}={_render_value_redacted(value)}" for key, value in sorted(server.headers.items()))
 
 
 def _render_url_redacted(url: str) -> str:

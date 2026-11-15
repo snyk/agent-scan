@@ -1,5 +1,7 @@
 """Unit tests for the mcp_client module."""
 
+import logging
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -17,9 +19,13 @@ from mcp.types import (
 )
 from pytest_lazy_fixtures import lf
 
+from agent_scan import mcp_client as mcp_client_module
+from agent_scan import oauth_store
 from agent_scan.mcp_client import (
     _check_server_pass,
     _create_mcp_http_client_without_redirects,
+    _guard_mcp_destination,
+    _resolve_scan_oauth_provider,
     check_server,
     get_client,
     scan_mcp_config_file,
@@ -148,6 +154,192 @@ async def test_streamable_http_client_does_not_follow_redirects():
             pass
 
     assert make_http_client.call_args.kwargs["follow_redirects"] is False
+
+
+@pytest.mark.asyncio
+@patch("agent_scan.mcp_client.stdio_client")
+async def test_get_client_expands_env_placeholders_for_stdio_server(mock_stdio_client, monkeypatch):
+    """get_client() must pass the EXPANDED env to StdioServerParameters, not
+    the literal ${VAR} placeholder from the parsed config."""
+    monkeypatch.setenv("AUTH_HEADER", "Bearer real-secret-value")
+
+    mock_read = AsyncMock()
+    mock_write = AsyncMock()
+    mock_client = AsyncMock()
+    mock_client.__aenter__.return_value = (mock_read, mock_write)
+    mock_stdio_client.return_value = mock_client
+
+    server = StdioServer(
+        command="npx",
+        args=["-y", "mcp-remote@0.3.0", "https://example.com/mcp", "--header", "Authorization:${AUTH_HEADER}"],
+        env={"AUTH_HEADER": "${AUTH_HEADER}"},
+    )
+
+    async with get_client(server, timeout=5):
+        pass
+
+    assert mock_stdio_client.call_count == 1
+    called_params = mock_stdio_client.call_args.args[0]
+    assert called_params.env == {"AUTH_HEADER": "Bearer real-secret-value"}
+    assert called_params.args == server.args
+    # The parsed model itself must be untouched -- still the literal placeholder.
+    assert server.env == {"AUTH_HEADER": "${AUTH_HEADER}"}
+
+
+@pytest.mark.asyncio
+@patch("agent_scan.mcp_client.streamablehttp_client_without_session")
+async def test_get_client_expands_env_placeholders_for_remote_http_server(mock_streamable_client, monkeypatch):
+    """get_client() must pass the EXPANDED headers to the HTTP transport, not
+    the literal ${VAR} placeholder from the parsed config."""
+    monkeypatch.setenv("LINEAR_API_TOKEN", "real-secret-value")
+
+    mock_read = AsyncMock()
+    mock_write = AsyncMock()
+    mock_client = AsyncMock()
+    mock_client.__aenter__.return_value = (mock_read, mock_write)
+    mock_streamable_client.return_value = mock_client
+
+    server = RemoteServer(
+        url="https://example.com/mcp",
+        type="http",
+        headers={"Authorization": "Bearer ${LINEAR_API_TOKEN}"},
+    )
+
+    async with get_client(server, timeout=5):
+        pass
+
+    assert mock_streamable_client.call_count == 1
+    called_kwargs = mock_streamable_client.call_args.kwargs
+    assert called_kwargs["headers"] == {"Authorization": "Bearer real-secret-value"}
+    # The parsed model itself must be untouched -- still the literal placeholder.
+    assert server.headers == {"Authorization": "Bearer ${LINEAR_API_TOKEN}"}
+
+
+@pytest.mark.asyncio
+@patch("agent_scan.mcp_client.sse_client")
+async def test_get_client_expands_env_placeholders_for_remote_sse_server(mock_sse_client, monkeypatch):
+    """get_client() must pass the EXPANDED headers to the SSE transport, not
+    the literal ${VAR} placeholder from the parsed config."""
+    monkeypatch.setenv("LINEAR_API_TOKEN", "real-secret-value")
+
+    mock_read = AsyncMock()
+    mock_write = AsyncMock()
+    mock_client = AsyncMock()
+    mock_client.__aenter__.return_value = (mock_read, mock_write)
+    mock_sse_client.return_value = mock_client
+
+    server = RemoteServer(
+        url="https://example.com/sse",
+        type="sse",
+        headers={"Authorization": "Bearer ${LINEAR_API_TOKEN}"},
+    )
+
+    async with get_client(server, timeout=5):
+        pass
+
+    assert mock_sse_client.call_count == 1
+    called_kwargs = mock_sse_client.call_args.kwargs
+    assert called_kwargs["headers"] == {"Authorization": "Bearer real-secret-value"}
+    # The parsed model itself must be untouched -- still the literal placeholder.
+    assert server.headers == {"Authorization": "Bearer ${LINEAR_API_TOKEN}"}
+
+
+@pytest.mark.asyncio
+async def test_resolve_scan_oauth_provider_guards_the_proactive_refresh():
+    """The proactive refresh runs before any guarded client exists, so it must be handed the destination guard."""
+    store = Mock()
+    store.get.return_value = Mock()  # an existing stored credential
+    with (
+        patch("agent_scan.mcp_client.OAuthTokenStore", return_value=store),
+        patch("agent_scan.mcp_client.PersistentTokenStorage"),
+        patch("agent_scan.mcp_client.ensure_fresh_token", new=AsyncMock()) as refresh,
+    ):
+        await _resolve_scan_oauth_provider("https://example.test/mcp", None)
+
+    assert _guard_mcp_destination in refresh.call_args.kwargs["request_hooks"]
+
+
+@pytest.mark.asyncio
+@patch("agent_scan.mcp_client.streamablehttp_client_without_session")
+async def test_get_client_logs_which_env_vars_a_remote_server_reads_without_values_or_url_secrets(
+    mock_streamable_client, monkeypatch, caplog
+):
+    """Unattended runs skip the consent prompt, so expansion leaves a names-only audit line."""
+    monkeypatch.setenv("LINEAR_API_TOKEN", "real-secret-value")
+    mock_client = AsyncMock()
+    mock_client.__aenter__.return_value = (AsyncMock(), AsyncMock())
+    mock_streamable_client.return_value = mock_client
+    server = RemoteServer(
+        url="https://example.com/mcp?api_key=URL-SECRET",
+        type="http",
+        headers={"Authorization": "Bearer ${LINEAR_API_TOKEN}"},
+    )
+
+    with caplog.at_level(logging.INFO, logger="agent_scan.utils"):
+        async with get_client(server, timeout=5, server_name="linear"):
+            pass
+
+    assert "linear" in caplog.text
+    assert "Authorization" in caplog.text
+    assert "LINEAR_API_TOKEN" in caplog.text
+    assert "real-secret-value" not in caplog.text
+    assert "URL-SECRET" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_streamablehttp_client_without_session_wires_redirect_guard(monkeypatch):
+    """Integration: the HTTP scan-path client must carry the token-exchange
+    redirect guard, since the MCP SDK's OAuthClientProvider can trigger its
+    own internal refresh through this same client on a 401 -- a path the
+    proactive ensure_fresh_token guard in oauth_store.py never sees."""
+    captured = {}
+
+    class _FakeAsyncClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    @asynccontextmanager
+    async def fake_streamable_http_client(url, http_client):
+        yield (None, None, None)
+
+    monkeypatch.setattr(mcp_client_module.httpx, "AsyncClient", _FakeAsyncClient)
+    monkeypatch.setattr(mcp_client_module, "streamable_http_client", fake_streamable_http_client)
+
+    async with streamablehttp_client_without_session(url="https://example.test/mcp", headers={}, timeout=5):
+        pass
+
+    hooks = captured["event_hooks"]["response"]
+    assert oauth_store._reject_redirected_token_exchange in hooks
+
+
+@pytest.mark.asyncio
+@patch("agent_scan.mcp_client.sse_client")
+async def test_get_client_sse_wires_redirect_guard(mock_sse_client):
+    """Integration: the SSE scan-path client must carry the same guard."""
+    mock_read = AsyncMock()
+    mock_write = AsyncMock()
+    mock_client = AsyncMock()
+    mock_client.__aenter__.return_value = (mock_read, mock_write)
+    mock_sse_client.return_value = mock_client
+
+    server = RemoteServer(url="https://example.com/sse", type="sse")
+
+    async with get_client(server, timeout=5):
+        pass
+
+    called_kwargs = mock_sse_client.call_args.kwargs
+    factory = called_kwargs["httpx_client_factory"]
+    client = factory(headers=None, timeout=None, auth=None)
+    try:
+        assert oauth_store._reject_redirected_token_exchange in client.event_hooks["response"]
+    finally:
+        await client.aclose()
 
 
 @pytest.mark.parametrize(
@@ -378,3 +570,66 @@ async def test_config_input_cannot_override_launched_command_or_cwd(tmp_path):
     params = make_stdio_client.call_args.args[0]
     assert params.command == str(declared)
     assert params.cwd is None
+
+
+class TestTransportProbing:
+    """check_server probes six transport/URL combinations unless probing is disabled."""
+
+    @staticmethod
+    def _failing_pass():
+        return AsyncMock(side_effect=RuntimeError("connect failed"))
+
+    @pytest.mark.asyncio
+    async def test_probing_tries_six_combinations_and_groups_errors(self):
+        config = RemoteServer(url="https://example.test/mcp-server/mcp", type="http")
+
+        with patch("agent_scan.mcp_client._check_server_pass", new=self._failing_pass()) as attempt:
+            with pytest.raises(ExceptionGroup):  # noqa: F821
+                await check_server(config, 5)
+
+        assert attempt.await_count == 6
+
+    @pytest.mark.asyncio
+    async def test_strict_mode_makes_exactly_one_attempt(self):
+        config = RemoteServer(url="https://example.test/mcp-server/mcp", type="http")
+
+        with patch("agent_scan.mcp_client._check_server_pass", new=self._failing_pass()) as attempt:
+            with pytest.raises(RuntimeError):
+                await check_server(config, 5, probe_transports=False)
+
+        assert attempt.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_strict_mode_raises_the_real_error_not_a_group(self):
+        """A single failure must surface its own exception, not ExceptionGroup(1 sub-exception)."""
+        config = RemoteServer(url="https://example.test/mcp-server/mcp", type="http")
+
+        with patch("agent_scan.mcp_client._check_server_pass", new=self._failing_pass()):
+            with pytest.raises(RuntimeError, match="connect failed"):
+                await check_server(config, 5, probe_transports=False)
+
+    @pytest.mark.asyncio
+    async def test_strict_mode_contacts_the_exact_url_without_suffix_rewriting(self):
+        """No /mcp or /sse appending: the caller said what this server is."""
+        config = RemoteServer(url="https://example.test/mcp-server/custom", type="sse")
+        seen: list[tuple[str, str]] = []
+
+        async def record(server_config, *args, **kwargs):
+            seen.append((server_config.type, server_config.url))
+            raise RuntimeError("connect failed")
+
+        with patch("agent_scan.mcp_client._check_server_pass", new=record):
+            with pytest.raises(RuntimeError):
+                await check_server(config, 5, probe_transports=False)
+
+        assert seen == [("sse", "https://example.test/mcp-server/custom")]
+
+    @pytest.mark.asyncio
+    async def test_strict_mode_without_a_type_falls_back_to_probing(self):
+        config = RemoteServer(url="https://example.test/mcp-server/mcp")
+
+        with patch("agent_scan.mcp_client._check_server_pass", new=self._failing_pass()) as attempt:
+            with pytest.raises(ExceptionGroup):  # noqa: F821
+                await check_server(config, 5, probe_transports=False)
+
+        assert attempt.await_count == 6
