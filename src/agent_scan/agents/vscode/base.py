@@ -345,6 +345,10 @@ class VSCodeFamilyDiscoverer(AgentDiscoverer, abstract=True):
         result.update(self._discover_code_workspace_skills())
         return result
 
+    def _local_only_mcp_servers(self) -> McpConfigsResult:
+        # Backend discovery doesn't parse extension JS yet.
+        return self._discover_extension_provider_mcp_servers()
+
     def _discover_home_skills_dirs(self) -> SkillsDirsResult:
         """Scan the home-relative skill directories declared in ``_skills_dir_paths``."""
         result: SkillsDirsResult = {}
