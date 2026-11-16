@@ -267,6 +267,31 @@ def _looks_like_mcp_payload(data: dict) -> bool:
     )
 
 
+def is_own_home(home: Path | None) -> bool:
+    """True when ``home`` is the scanning process's own user's home (see
+    :meth:`AgentDiscoverer._scans_own_home`)."""
+    candidates = {Path.home()}
+    try:
+        import pwd
+
+        candidates.add(Path(pwd.getpwuid(os.getuid()).pw_dir))
+    except (ImportError, AttributeError, KeyError, OSError):
+        pass
+    if home is None:
+        return False
+    if home in candidates:
+        return True
+    try:
+        resolved_home = home.resolve()
+        return any(resolved_home == candidate.resolve() for candidate in candidates)
+    except (OSError, RuntimeError, ValueError):
+        # Fail closed: an unresolvable path is not proof of own-home, and this gate
+        # decides whether *this* process's relocating env vars apply to it. Catching
+        # more than OSError only widens what maps to that same safe answer -- letting
+        # anything else escape here would abort the whole discovery.
+        return False
+
+
 class AgentDiscoverer(ABC):
     """Abstract per-agent discoverer.
 
@@ -319,24 +344,7 @@ class AgentDiscoverer(ABC):
         ``pwd``/``os.getuid`` are POSIX-only; the guarded import skips the extra
         candidate on Windows.
         """
-        candidates = {Path.home()}
-        try:
-            import pwd
-
-            candidates.add(Path(pwd.getpwuid(os.getuid()).pw_dir))
-        except (ImportError, AttributeError, KeyError, OSError):
-            pass
-        if self.home_directory in candidates:
-            return True
-        try:
-            resolved_home = self.home_directory.resolve()
-            return any(resolved_home == candidate.resolve() for candidate in candidates)
-        except (OSError, RuntimeError, ValueError):
-            # Fail closed: an unresolvable path is not proof of own-home, and this gate
-            # decides whether *this* process's relocating env vars apply to it. Catching
-            # more than OSError only widens what maps to that same safe answer -- letting
-            # anything else escape here would abort the whole discovery.
-            return False
+        return is_own_home(self.home_directory)
 
     def __init_subclass__(cls, *, abstract: bool = False, **kwargs: object) -> None:
         """Enforce a non-empty ``name`` on concrete subclasses.
