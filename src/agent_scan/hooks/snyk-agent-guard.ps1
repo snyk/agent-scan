@@ -30,7 +30,10 @@ param(
     [string]$TenantId,
 
     [Parameter(Mandatory=$false)]
-    [string]$MachineId
+    [string]$MachineId,
+
+    [Parameter(Mandatory=$false)]
+    [string]$MachineSerial
 )
 
 $ErrorActionPreference = "Stop"
@@ -143,8 +146,9 @@ function JsonEscape($s) {
     return $s
 }
 
-$xUser = '{{"hostname":"{0}","username":"{1}","identifier":"{2}","cli_version":"{3}"}}' -f `
-    (JsonEscape $hostname), (JsonEscape $username), (JsonEscape $MachineId), (JsonEscape $cliVersion)
+$serialJson = if ($MachineSerial) { '"' + (JsonEscape $MachineSerial) + '"' } else { 'null' }
+$xUser = '{{"hostname":"{0}","username":"{1}","identifier":"{2}","cli_version":"{3}","machine_serial":{4}}}' -f `
+    (JsonEscape $hostname), (JsonEscape $username), (JsonEscape $MachineId), (JsonEscape $cliVersion), $serialJson
 
 # Identify whether GitHub Copilot invoked this hook (see get_agent_surface in
 # snyk-agent-guard.sh for why the -Client argument cannot answer this: one Copilot hook

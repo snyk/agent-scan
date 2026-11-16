@@ -203,6 +203,7 @@ def send_hook_event(
     *,
     max_retries: int = 1,
     retry_policy: RetryPolicy | None = None,
+    machine_serial: str,
 ) -> tuple[bool, str]:
     """POST a hook event using the same wire contract as the hook scripts.
 
@@ -221,6 +222,7 @@ def send_hook_event(
     x_user = json.dumps(
         {
             "hostname": hostname,
+            "machine_serial": machine_serial or None,
             "username": get_username(),
             "identifier": machine_id,
             "cli_version": version_info,
