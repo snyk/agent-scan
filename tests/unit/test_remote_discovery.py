@@ -57,6 +57,41 @@ def test_env_sends_values_as_set(monkeypatch) -> None:
     }
 
 
+def test_find_read_skips_files_over_budget_without_reading(tmp_path: Path, monkeypatch) -> None:
+    from agent_scan.remote_discovery import executor
+
+    for name, size in (("a.json", 6), ("b.json", 6), ("c.json", 2)):
+        (tmp_path / name).write_bytes(b"x" * size)
+    monkeypatch.setattr(executor, "MAX_FIND_READ_BYTES", 10)
+    opened: list[str] = []
+    real_open = open
+
+    def spy(path, *a, **k):
+        opened.append(Path(path).name)
+        return real_open(path, *a, **k)
+
+    monkeypatch.setattr(executor, "open", spy, raising=False)
+    op = {"op_id": "1", "kind": "find", "roots": [str(tmp_path)], "max_depth": 1, "file_suffixes": [".json"]}
+    result = run_op({**op, "read": True})
+
+    read = sorted(Path(f["path"]).name for f in result["files"])
+    skipped = [Path(s["path"]).name for s in result["skipped"]]
+    assert sum(f["size"] for f in result["files"]) <= 10
+    assert len(read) == 2 and len(skipped) == 1
+    assert set(opened) == set(read)
+
+
+def test_cancelled_op_stops() -> None:
+    import threading
+
+    from agent_scan.remote_discovery.executor import OpCancelled
+
+    cancel = threading.Event()
+    cancel.set()
+    with pytest.raises(OpCancelled):
+        run_op({"op_id": "1", "kind": "find", "roots": ["/"], "max_depth": 6, "file_names": ["x"]}, cancel)
+
+
 def test_env_caps_names() -> None:
     names = [f"V{i}" for i in range(100)]
     assert len(run_op({"op_id": "1", "kind": "env", "names": names})["values"]) == 64
@@ -166,6 +201,10 @@ async def _serve(statuses: dict[str, list[int]]):
     bodies: dict[str, list[bytes]] = {}
 
     async def handle(request):
+        from agent_scan.remote_discovery.client import DISCOVERY_API_VERSION
+
+        if request.query.get("version") != DISCOVERY_API_VERSION:
+            return web.Response(status=404, text="no version")
         bodies.setdefault(request.path, []).append(await request.read())
         queue = statuses.get(request.path, [])
         if queue:
@@ -183,6 +222,7 @@ async def _serve(statuses: dict[str, list[int]]):
 
 
 _SESSIONS = "/hidden/coding-agent-discovery/sessions"
+_HOMES = [(Path("/Users/me"), "me")]
 _STEPS = f"{_SESSIONS}/s1/steps"
 
 
@@ -193,7 +233,7 @@ async def _discover(server):
 
     with (
         patch("agent_scan.remote_discovery.client.asyncio.sleep", new=AsyncMock()) as sleep,
-        patch("agent_scan.remote_discovery.client.get_readable_home_directories", return_value=[]),
+        patch("agent_scan.remote_discovery.client.get_readable_home_directories", return_value=_HOMES),
     ):
         result = await run_remote_discovery(str(server.make_url("/")).rstrip("/"))
     return result, sleep
@@ -210,6 +250,79 @@ async def test_init_retried_on_transient_status(status) -> None:
     assert len(bodies[_SESSIONS]) == 2
     assert result.retries == 1
     sleep.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_no_homes_skips_the_backend() -> None:
+    from unittest.mock import patch
+
+    from agent_scan.remote_discovery.client import run_remote_discovery
+
+    server, bodies = await _serve({})
+    try:
+        with patch("agent_scan.remote_discovery.client.get_readable_home_directories", return_value=[]):
+            result = await run_remote_discovery(str(server.make_url("/")).rstrip("/"), all_users=True)
+    finally:
+        await server.close()
+    assert bodies == {}
+    assert result.found == {"clients": [], "mcp_configs": [], "skills_dirs": []}
+    assert (result.session_id, result.rounds, result.partial) == ("", 0, False)
+
+
+@pytest.mark.asyncio
+async def test_init_sends_client_identifier() -> None:
+    import json
+    from unittest.mock import patch
+
+    from agent_scan.remote_discovery.client import run_remote_discovery
+
+    server, bodies = await _serve({})
+    try:
+        with patch("agent_scan.remote_discovery.client.get_readable_home_directories", return_value=_HOMES):
+            await run_remote_discovery(
+                str(server.make_url("/")).rstrip("/"), cli_version="1.2.3", identifier="machine-1"
+            )
+    finally:
+        await server.close()
+    client = json.loads(bodies[_SESSIONS][0])["client"]
+    assert client["identifier"] == "machine-1"
+    assert client["cli_version"] == "1.2.3"
+
+
+@pytest.mark.asyncio
+async def test_timeout_stops_a_slow_op() -> None:
+    import asyncio
+    import time
+    from unittest.mock import patch
+
+    from agent_scan.remote_discovery import client
+    from agent_scan.remote_discovery.executor import OpCancelled
+
+    stopped: list[bool] = []
+
+    def slow_op(op, cancel):
+        while not cancel.is_set():
+            time.sleep(0.01)
+        stopped.append(True)
+        raise OpCancelled
+
+    server, _bodies = await _serve({})
+    try:
+        with (
+            patch.object(client, "run_op", slow_op),
+            patch("agent_scan.remote_discovery.client.get_readable_home_directories", return_value=_HOMES),
+        ):
+            started = time.monotonic()
+            with pytest.raises(asyncio.TimeoutError):
+                await asyncio.wait_for(client.run_remote_discovery(str(server.make_url("/")).rstrip("/")), 0.3)
+            assert time.monotonic() - started < 2
+            for _ in range(100):
+                if stopped:
+                    break
+                await asyncio.sleep(0.01)
+    finally:
+        await server.close()
+    assert stopped == [True]
 
 
 @pytest.mark.asyncio
@@ -277,7 +390,7 @@ async def test_connection_errors_retried_then_raised() -> None:
         port = sock.getsockname()[1]
     with (
         patch("agent_scan.remote_discovery.client.asyncio.sleep", new=AsyncMock()) as sleep,
-        patch("agent_scan.remote_discovery.client.get_readable_home_directories", return_value=[]),
+        patch("agent_scan.remote_discovery.client.get_readable_home_directories", return_value=_HOMES),
         pytest.raises(aiohttp.ClientConnectionError),
     ):
         await run_remote_discovery(f"http://127.0.0.1:{port}")

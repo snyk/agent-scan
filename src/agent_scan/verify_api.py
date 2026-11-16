@@ -6,14 +6,14 @@ import os
 import ssl
 import sys
 import traceback
-from typing import Any
+from typing import Any, Literal, get_args
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import aiohttp
 import certifi
 import rich
 from mcp.types import Prompt, Resource, ResourceTemplate, Tool
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, ValidationError, field_validator
 from rich.markup import escape
 
 from agent_scan.models.api.common import ScanUserInfo
@@ -120,11 +120,21 @@ def _print_scan_sent_success(user_info: ScanUserInfo) -> None:
     rich.print(f"[green]Scan sent successfully[/green]{details}")
 
 
+RemoteDiscoveryMode = Literal["off", "shadow", "on"]
+
+
 class AgentScanConfig(BaseModel):
     """Per-tenant runtime toggles from ``/hidden/agent-scan/config``. Every toggle defaults to off."""
 
     async_analysis_enabled: bool = False
-    remote_discovery_enabled: bool = False
+    # off: local discovery. shadow: local, plus remote for comparison. on: remote only.
+    remote_discovery_mode: RemoteDiscoveryMode = "off"
+
+    @field_validator("remote_discovery_mode", mode="before")
+    @classmethod
+    def _unknown_mode_is_off(cls, value: Any) -> Any:
+        # A newer backend may add modes; an old CLI treats them as off.
+        return value if value in get_args(RemoteDiscoveryMode) else "off"
 
 
 def agent_scan_config_url(analysis_url: str) -> str:

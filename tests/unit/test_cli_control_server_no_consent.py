@@ -81,7 +81,7 @@ class TestControlServerPushKeySkipsConsent:
             patch("agent_scan.cli.collect_consent") as mock_consent,
             patch("agent_scan.cli.fetch_agent_scan_config", new=AsyncMock(return_value=AgentScanConfig())),
             patch(
-                "agent_scan.cli.discover_clients_to_inspect",
+                "agent_scan.pipelines.discover_clients_to_inspect",
                 new=AsyncMock(return_value=(_fake_client_with_stdio(), [], [])),
             ),
             patch("agent_scan.pipelines.inspect_pipeline", new=mock_inspect),
@@ -112,7 +112,7 @@ class TestControlServerPushKeySkipsConsent:
             patch("agent_scan.cli.collect_consent") as mock_consent,
             patch("agent_scan.cli.fetch_agent_scan_config", new=AsyncMock(return_value=AgentScanConfig())),
             patch(
-                "agent_scan.cli.discover_clients_to_inspect",
+                "agent_scan.pipelines.discover_clients_to_inspect",
                 new=AsyncMock(return_value=(_fake_client_with_stdio(), [], [])),
             ),
             patch(

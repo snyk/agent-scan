@@ -9,6 +9,7 @@ import pytest
 
 from agent_scan.cli import run_scan
 from agent_scan.models import ClientToInspect, InspectedPath, ScanResponse
+from agent_scan.pipelines import RemoteOutcome
 from agent_scan.verify_api import AgentScanConfig
 from tests.unit.test_cli_control_server_no_consent import _push_key_scan_args
 
@@ -22,11 +23,12 @@ _REMOTE: _Discovered = (
 _LOCAL: _Discovered = ([ClientToInspect(name="local", client_path="/l", mcp_configs={}, skills_dirs={})], [], ["alice"])
 
 
-async def _run(args, config: AgentScanConfig, remote_result=(_REMOTE, None)):
+async def _run(args, config: AgentScanConfig, remote_result: RemoteOutcome | None = None):
+    remote_result = remote_result or RemoteOutcome(_REMOTE, supported_agents=["remote", "local"])
     with (
         patch("agent_scan.cli.fetch_agent_scan_config", new=AsyncMock(return_value=config)) as fetch,
-        patch("agent_scan.cli.discover_clients_remotely", new=AsyncMock(return_value=remote_result)) as remote,
-        patch("agent_scan.cli.discover_clients_to_inspect", new=AsyncMock(return_value=_LOCAL)) as local,
+        patch("agent_scan.pipelines.discover_clients_remotely", new=AsyncMock(return_value=remote_result)) as remote,
+        patch("agent_scan.pipelines.discover_clients_to_inspect", new=AsyncMock(return_value=_LOCAL)) as local,
         patch("agent_scan.pipelines.inspect_pipeline", new=AsyncMock(return_value=([], []))) as inspect,
         patch(
             "agent_scan.pipelines.analyze_machine", new=AsyncMock(return_value=ScanResponse(scan_path_responses=[]))
@@ -36,54 +38,124 @@ async def _run(args, config: AgentScanConfig, remote_result=(_REMOTE, None)):
     return fetch, remote, local, inspect, analyze
 
 
+def _inspected(inspect) -> list[str]:
+    return [c.name for c in inspect.await_args.kwargs["clients_to_inspect"]]
+
+
+def _discovery(analyze) -> dict:
+    return analyze.await_args.kwargs["scan_context"]["discovery"]
+
+
+_COUNTS = {"clients": 1, "mcp_configs": 0, "mcp_servers": 0, "skills_dirs": 0}
+
+
 @pytest.mark.asyncio
-async def test_remote_discovery_enabled_uses_backend_and_reuses_config():
-    config = AgentScanConfig(remote_discovery_enabled=True, async_analysis_enabled=True)
+async def test_on_uses_remote_only_and_reuses_config():
+    config = AgentScanConfig(remote_discovery_mode="on", async_analysis_enabled=True)
     fetch, remote, local, inspect, analyze = await _run(_push_key_scan_args(), config)
 
     fetch.assert_awaited_once()
     assert fetch.await_args.args[1] == "some-user-push-key"
     remote.assert_awaited_once()
     assert remote.await_args.args[1] == "https://some.analysis.endpoint.com"
+    assert remote.await_args.kwargs["identifier"] == "some-machine-id-dh7g62dyug7d"
     local.assert_not_awaited()
-    assert [c.name for c in inspect.await_args.kwargs["clients_to_inspect"]] == ["remote"]
+    assert _inspected(inspect) == ["remote"]
     assert analyze.await_args.kwargs["agent_scan_config"] == config
-    assert analyze.await_args.kwargs["scan_context"]["discovery"] == {"source": "remote"}
+    assert _discovery(analyze) == {"mode": "on", "source": "remote", "remote": _COUNTS}
 
 
 @pytest.mark.asyncio
-async def test_remote_discovery_disabled_uses_local():
-    _fetch, remote, local, inspect, analyze = await _run(_push_key_scan_args(), AgentScanConfig())
+async def test_on_failure_pushes_only_local_only_pieces():
+    config = AgentScanConfig(remote_discovery_mode="on")
+    with patch("agent_scan.pipelines.get_readable_home_directories", return_value=[]):
+        _fetch, _remote, local, inspect, analyze = await _run(
+            _push_key_scan_args(), config, remote_result=RemoteOutcome(None, "http_503")
+        )
 
-    remote.assert_not_awaited()
-    local.assert_awaited_once()
-    assert [c.name for c in inspect.await_args.kwargs["clients_to_inspect"]] == ["local"]
-    assert analyze.await_args.kwargs["scan_context"]["discovery"] == {"source": "local"}
-
-
-@pytest.mark.asyncio
-async def test_remote_discovery_failure_falls_back_to_local():
-    config = AgentScanConfig(remote_discovery_enabled=True)
-    _fetch, remote, local, inspect, analyze = await _run(
-        _push_key_scan_args(), config, remote_result=(None, "http_503")
-    )
-
-    remote.assert_awaited_once()
-    local.assert_awaited_once()
-    assert [c.name for c in inspect.await_args.kwargs["clients_to_inspect"]] == ["local"]
-    assert analyze.await_args.kwargs["scan_context"]["discovery"] == {
-        "source": "remote_fallback",
-        "fallback_reason": "http_503",
+    local.assert_not_awaited()
+    assert _inspected(inspect) == []
+    assert _discovery(analyze) == {
+        "mode": "on",
+        "source": "remote",
+        "remote": {"clients": 0, "mcp_configs": 0, "mcp_servers": 0, "skills_dirs": 0},
+        "remote_error_reason": "http_503",
     }
 
 
 @pytest.mark.asyncio
-async def test_explicit_paths_always_use_local():
-    config = AgentScanConfig(remote_discovery_enabled=True)
-    _fetch, remote, local, _inspect, _analyze = await _run(_push_key_scan_args(files=["/x/mcp.json"]), config)
+async def test_on_partial_pushes_what_was_found():
+    config = AgentScanConfig(remote_discovery_mode="on")
+    _fetch, _remote, _local, inspect, analyze = await _run(
+        _push_key_scan_args(), config, remote_result=RemoteOutcome(_REMOTE, partial=True)
+    )
+
+    assert _inspected(inspect) == ["remote"]
+    assert _discovery(analyze) == {"mode": "on", "source": "remote", "remote": _COUNTS, "partial": True}
+
+
+@pytest.mark.asyncio
+async def test_shadow_ignores_partial_remote():
+    config = AgentScanConfig(remote_discovery_mode="shadow")
+    _fetch, _remote, _local, inspect, analyze = await _run(
+        _push_key_scan_args(), config, remote_result=RemoteOutcome(_REMOTE, partial=True)
+    )
+
+    assert _inspected(inspect) == ["local"]
+    assert _discovery(analyze)["remote_error_reason"] == "partial"
+
+
+@pytest.mark.asyncio
+async def test_off_uses_local():
+    _fetch, remote, local, inspect, analyze = await _run(_push_key_scan_args(), AgentScanConfig())
 
     remote.assert_not_awaited()
     local.assert_awaited_once()
+    assert _inspected(inspect) == ["local"]
+    assert _discovery(analyze) == {"mode": "off", "source": "local", "local": _COUNTS}
+
+
+@pytest.mark.asyncio
+async def test_shadow_uses_local_and_reports_diff():
+    config = AgentScanConfig(remote_discovery_mode="shadow")
+    _fetch, remote, local, inspect, analyze = await _run(_push_key_scan_args(), config)
+
+    remote.assert_awaited_once()
+    local.assert_awaited_once()
+    assert _inspected(inspect) == ["local"]
+    discovery = _discovery(analyze)
+    assert discovery["mode"] == "shadow" and discovery["source"] == "local"
+    assert discovery["local"] == discovery["remote"] == _COUNTS
+    # Clients without configs have no keys to compare.
+    assert discovery["comparison"] == "identical"
+
+
+@pytest.mark.asyncio
+async def test_shadow_remote_failure_keeps_local():
+    config = AgentScanConfig(remote_discovery_mode="shadow")
+    _fetch, _remote, _local, inspect, analyze = await _run(
+        _push_key_scan_args(), config, remote_result=RemoteOutcome(None, "http_503")
+    )
+
+    assert _inspected(inspect) == ["local"]
+    assert _discovery(analyze) == {
+        "mode": "shadow",
+        "source": "local",
+        "local": _COUNTS,
+        "comparison": "failed",
+        "remote_error_reason": "http_503",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["shadow", "on"])
+async def test_explicit_paths_always_use_local(mode):
+    config = AgentScanConfig(remote_discovery_mode=mode)
+    _fetch, remote, local, _inspect, analyze = await _run(_push_key_scan_args(files=["/x/mcp.json"]), config)
+
+    remote.assert_not_awaited()
+    local.assert_awaited_once()
+    assert _discovery(analyze)["remote_skipped"] == "not_eligible"
 
 
 @pytest.mark.asyncio
@@ -101,7 +173,7 @@ async def test_without_push_key_skips_config_and_uses_local(env, overrides):
     """The config API is push-key authed, so token users never fetch it or use remote discovery."""
     with patch.dict(os.environ, env, clear=False):
         fetch, remote, local, _inspect, analyze = await _run(
-            _push_key_scan_args(**overrides), AgentScanConfig(remote_discovery_enabled=True)
+            _push_key_scan_args(**overrides), AgentScanConfig(remote_discovery_mode="on")
         )
 
     fetch.assert_not_awaited()
@@ -115,7 +187,7 @@ async def test_without_push_key_skips_config_and_uses_local(env, overrides):
 async def test_push_key_wins_over_snyk_token():
     with patch.dict(os.environ, {"SNYK_TOKEN": "snyk-tok"}, clear=False):
         fetch, remote, local, _inspect, _analyze = await _run(
-            _push_key_scan_args(), AgentScanConfig(remote_discovery_enabled=True)
+            _push_key_scan_args(), AgentScanConfig(remote_discovery_mode="on")
         )
 
     assert fetch.await_args.args[1] == "some-user-push-key"

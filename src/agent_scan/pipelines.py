@@ -2,13 +2,14 @@ import asyncio
 import getpass
 import logging
 import os
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import aiohttp
 from pydantic import BaseModel, Field
 
-from agent_scan.agents import DiscoveryScope, find_discoverers
+from agent_scan.agents import DISCOVERERS, DiscoveryScope, find_discoverers
 from agent_scan.direct_scanner import direct_scan_to_server_config, is_direct_scan
 from agent_scan.inspect import (
     get_mcp_config_per_client,
@@ -27,8 +28,9 @@ from agent_scan.models import (
 from agent_scan.redact import redact_inspected_path
 from agent_scan.remote_discovery.builder import build_clients
 from agent_scan.remote_discovery.client import RemoteDiscoveryError, run_remote_discovery
+from agent_scan.remote_discovery.parity import LocalPhaseKeys, client_keys, compare, counts
 from agent_scan.utils import get_readable_home_directories
-from agent_scan.verify_api import AgentScanConfig, analyze_machine
+from agent_scan.verify_api import AgentScanConfig, RemoteDiscoveryMode, analyze_machine
 from agent_scan.well_known_clients import get_well_known_clients
 
 logger = logging.getLogger(__name__)
@@ -54,7 +56,7 @@ class AnalyzeArgs(BaseModel):
     skip_ssl_verify: bool = False
     show_analysis_results: bool = False
     agent_scan_config: AgentScanConfig | None = None
-    # Extra scan_metadata for the analysis request; it ends up on the Maverick machine asset.
+    # Extra scan_metadata for the analysis request.
     scan_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -70,10 +72,13 @@ class PushArgs(BaseModel):
 
 async def discover_clients_to_inspect(
     inspect_args: InspectArgs,
+    phase_keys: LocalPhaseKeys | None = None,
 ) -> tuple[list[ClientToInspect], list[InspectedPath], list[str]]:
     """
     Discover the clients/configs that would be inspected, without actually
     starting any MCP servers.
+
+    ``phase_keys``, if given, collects what each phase found, for shadow comparison.
     """
     home_dirs_with_users = get_readable_home_directories(all_users=inspect_args.all_users)
     all_usernames: list[str] = [username for _path, username in home_dirs_with_users]
@@ -125,6 +130,8 @@ async def discover_clients_to_inspect(
         for client in get_well_known_clients():
             ctis = await get_mcp_config_per_client(client, home_dirs_with_users, scope=inspect_args.discovery_scope)
             if ctis:
+                if phase_keys is not None and client.name in DISCOVERERS:
+                    phase_keys.well_known.update(k for cti in ctis for k in client_keys(cti))
                 clients_to_inspect.extend(ctis)
             else:
                 logger.info(f"Client {client.name} does not exist on this machine. {client.client_exists_paths}")
@@ -140,6 +147,8 @@ async def discover_clients_to_inspect(
                 if cti is None:
                     continue
                 cti.username = username
+                if phase_keys is not None:
+                    phase_keys.discoverers.update(client_keys(cti))
                 _merge_client(clients_to_inspect, cti)
 
     return clients_to_inspect, unresolved_paths, _scanned_usernames(clients_to_inspect, inspect_args, all_usernames)
@@ -204,17 +213,27 @@ def supports_remote_discovery(inspect_args: InspectArgs) -> bool:
     return not inspect_args.paths and not inspect_args.target_folders
 
 
+@dataclass
+class RemoteOutcome:
+    discovered: DiscoveredClients | None
+    # Bounded label, set when ``discovered`` is None.
+    failure_reason: str | None = None
+    supported_agents: list[str] = field(default_factory=list)
+    # The backend hit a limit; ``discovered`` holds what it found before that.
+    partial: bool = False
+
+
 async def discover_clients_remotely(
     inspect_args: InspectArgs,
     discovery_url: str,
     push_key: str,
     cli_version: str | None = None,
+    identifier: str | None = None,
     skip_ssl_verify: bool = False,
-) -> tuple[DiscoveredClients | None, str | None]:
+) -> RemoteOutcome:
     """``discover_clients_to_inspect`` through the coding-agent-discovery service.
 
-    Returns ``(None, reason)`` if the backend fails or its result is partial, so the
-    caller can run legacy discovery instead. ``reason`` is a bounded label.
+    A backend failure leaves ``discovered`` None. Never raises.
     """
     try:
         remote = await run_remote_discovery(
@@ -222,16 +241,16 @@ async def discover_clients_remotely(
             scope=inspect_args.discovery_scope.value,
             push_key=push_key,
             cli_version=cli_version,
+            identifier=identifier,
             all_users=inspect_args.all_users,
             skip_ssl_verify=skip_ssl_verify,
         )
         clients_to_inspect = build_clients(remote.found)
     except Exception as e:
-        logger.warning("Remote discovery failed (%s: %s); using local discovery.", type(e).__name__, e)
-        return None, _fallback_reason(e)
+        logger.warning("Remote discovery failed (%s: %s).", type(e).__name__, e)
+        return RemoteOutcome(None, _fallback_reason(e))
     if remote.partial:
-        logger.warning("Remote discovery returned a partial result; using local discovery.")
-        return None, "partial"
+        logger.warning("Remote discovery returned a partial result.")
     logger.info(
         "Remote discovery: %d clients, %d rounds, %d ops, %d retries, %.2fs, partial=%s",
         len(clients_to_inspect),
@@ -244,7 +263,92 @@ async def discover_clients_remotely(
     home_dirs_with_users = get_readable_home_directories(all_users=inspect_args.all_users)
     _merge_local_only(clients_to_inspect, home_dirs_with_users, inspect_args.discovery_scope)
     all_usernames = [username for _path, username in home_dirs_with_users]
-    return (clients_to_inspect, [], _scanned_usernames(clients_to_inspect, inspect_args, all_usernames)), None
+    discovered: DiscoveredClients = (
+        clients_to_inspect,
+        [],
+        _scanned_usernames(clients_to_inspect, inspect_args, all_usernames),
+    )
+    return RemoteOutcome(discovered, supported_agents=remote.supported_agents, partial=remote.partial)
+
+
+# Upper bound on what shadow discovery adds to a scan.
+SHADOW_TIMEOUT_S = 90.0
+
+
+async def discover_clients(
+    inspect_args: InspectArgs,
+    mode: RemoteDiscoveryMode,
+    discovery_url: str = "",
+    push_key: str | None = None,
+    cli_version: str | None = None,
+    identifier: str | None = None,
+    skip_ssl_verify: bool = False,
+) -> tuple[DiscoveredClients, dict[str, Any]]:
+    """Discover per ``mode`` and return the clients plus the ``discovery`` scan metadata.
+
+    * off: local discovery.
+    * shadow: local discovery is used; remote also runs and is compared against it.
+    * on: remote discovery is used, with no local fallback: a failure gives only the
+      local-only pieces and a partial result is used as is.
+
+    Remote needs a push key and whole-machine discovery; otherwise every mode is local.
+    """
+    if mode == "off" or not push_key or not supports_remote_discovery(inspect_args):
+        discovered = await discover_clients_to_inspect(inspect_args)
+        metadata: dict[str, Any] = {"mode": mode, "source": "local", "local": counts(discovered[0])}
+        if mode != "off":
+            metadata["remote_skipped"] = "not_eligible"
+        return discovered, metadata
+    run_remote = discover_clients_remotely(
+        inspect_args,
+        discovery_url,
+        push_key,
+        cli_version=cli_version,
+        identifier=identifier,
+        skip_ssl_verify=skip_ssl_verify,
+    )
+    if mode == "on":
+        outcome = await run_remote
+        if outcome.discovered is None:
+            homes = get_readable_home_directories(all_users=inspect_args.all_users)
+            local_only: list[ClientToInspect] = []
+            _merge_local_only(local_only, homes, inspect_args.discovery_scope)
+            usernames = _scanned_usernames(local_only, inspect_args, [u for _path, u in homes])
+            return (local_only, [], usernames), {
+                "mode": "on",
+                "source": "remote",
+                "remote": counts(local_only),
+                "remote_error_reason": outcome.failure_reason or "error",
+            }
+        metadata = {"mode": "on", "source": "remote", "remote": counts(outcome.discovered[0])}
+        if outcome.partial:
+            metadata["partial"] = True
+        return outcome.discovered, metadata
+
+    phase_keys = LocalPhaseKeys()
+    try:
+        discovered = await discover_clients_to_inspect(inspect_args, phase_keys=phase_keys)
+    except BaseException:
+        run_remote.close()
+        raise
+    metadata = {"mode": "shadow", "source": "local", "local": counts(discovered[0])}
+    try:
+        outcome = await asyncio.wait_for(run_remote, SHADOW_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        logger.warning("Shadow remote discovery timed out after %.0fs.", SHADOW_TIMEOUT_S)
+        return discovered, {**metadata, "comparison": "failed", "remote_error_reason": "shadow_timeout"}
+    if outcome.discovered is None or outcome.partial:
+        reason = "partial" if outcome.discovered is not None else outcome.failure_reason
+        return discovered, {**metadata, "comparison": "failed", "remote_error_reason": reason}
+    remote_clients = outcome.discovered[0]
+    try:
+        parity = compare(discovered[0], remote_clients, outcome.supported_agents, phase_keys)
+    except Exception:
+        logger.exception("Shadow discovery comparison failed.")
+        parity = {"comparison": "failed", "remote_error_reason": "compare_error"}
+    if parity["comparison"] == "different":
+        logger.warning("Shadow remote discovery differs from local discovery.")
+    return discovered, {**metadata, "remote": counts(remote_clients), **parity}
 
 
 def _fallback_reason(error: Exception) -> str:

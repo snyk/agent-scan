@@ -37,11 +37,9 @@ from agent_scan.pipelines import (
     AnalyzeArgs,
     InspectArgs,
     PushArgs,
-    discover_clients_remotely,
-    discover_clients_to_inspect,
+    discover_clients,
     inspect_analyze_push_pipeline,
     inspect_pipeline,
-    supports_remote_discovery,
 )
 from agent_scan.printer import print_inspected_machine, print_scan_response
 from agent_scan.utils import ensure_unicode_console, get_hostname, get_push_key, parse_headers, suppress_stdout
@@ -1218,6 +1216,7 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> ScanRespo
     # here so every downstream consumer (PushArgs, the pipeline) sees the
     # same already-resolved value instead of re-deriving it.
     push_key: str | None = _effective_push_key(args) if mode == "scan" else None
+    identifier: str | None = _effective_identifier(args) if mode == "scan" else None
 
     # Only push-key tenants have a config endpoint; everyone else keeps the defaults.
     agent_scan_config = AgentScanConfig()
@@ -1225,23 +1224,15 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> ScanRespo
         agent_scan_config = await fetch_agent_scan_config(args.analysis_url, push_key, skip_ssl_verify=skip_ssl_verify)
 
     # Step 1: Discover everything we would inspect without starting any server.
-    discovered = None
-    discovery_metadata: dict[str, str] = {"source": "local"}
-    if push_key and agent_scan_config.remote_discovery_enabled and supports_remote_discovery(inspect_args):
-        discovered, fallback_reason = await discover_clients_remotely(
-            inspect_args,
-            discovery_base_url(args.analysis_url),
-            push_key,
-            cli_version=version_info,
-            skip_ssl_verify=skip_ssl_verify,
-        )
-        discovery_metadata = (
-            {"source": "remote"}
-            if discovered is not None
-            else {"source": "remote_fallback", "fallback_reason": fallback_reason or "error"}
-        )
-    if discovered is None:
-        discovered = await discover_clients_to_inspect(inspect_args)
+    discovered, discovery_metadata = await discover_clients(
+        inspect_args,
+        agent_scan_config.remote_discovery_mode,
+        discovery_url=discovery_base_url(args.analysis_url),
+        push_key=push_key,
+        cli_version=version_info,
+        identifier=identifier,
+        skip_ssl_verify=skip_ssl_verify,
+    )
     clients_to_inspect, unresolved_paths, scanned_usernames = discovered
 
     # Collect consent when applicable; otherwise show the
@@ -1255,7 +1246,6 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> ScanRespo
 
     if mode == "scan":
         control_servers: list[ControlServer] = args.control_servers if hasattr(args, "control_servers") else []
-        identifier: str | None = _effective_identifier(args)
 
         analyze_args = AnalyzeArgs(
             analysis_url=args.analysis_url,
@@ -1265,7 +1255,7 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> ScanRespo
             skip_ssl_verify=skip_ssl_verify,
             show_analysis_results=_should_show_analysis_results(args),
             agent_scan_config=agent_scan_config,
-            # Keep values stable across scans: Maverick re-ingests when the machine asset changes.
+            # Keep values stable across scans of an unchanged machine.
             scan_metadata={"discovery": discovery_metadata},
         )
         push_args = PushArgs(

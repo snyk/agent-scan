@@ -2,9 +2,11 @@
 
 import asyncio
 import json
+import logging
 import os
 import random
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path, PureWindowsPath
@@ -17,6 +19,10 @@ from agent_scan.remote_discovery.executor import run_op, to_wire
 from agent_scan.utils import get_readable_home_directories
 from agent_scan.verify_api import RETRYABLE_TRANSPORT_EXCEPTIONS, setup_tcp_connector
 
+logger = logging.getLogger(__name__)
+
+# The gateway 404s /hidden routes without a version; this is the service's published spec version.
+DISCOVERY_API_VERSION = "2025-09-02"
 MAX_ROUNDS = 25
 MAX_RETRIES = 3
 RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
@@ -100,6 +106,15 @@ def _retry_delay(attempt: int, retry_after: float | None) -> float:
     return min(max(delay, 0.0), MAX_RETRY_DELAY_S)
 
 
+async def _run_ops(ops: list[dict[str, Any]], cancel: threading.Event) -> list[dict[str, Any]]:
+    """Run ops off the event loop, so a caller's timeout can stop a long find or read."""
+    try:
+        return await asyncio.to_thread(lambda: [run_op(op, cancel) for op in ops])
+    except asyncio.CancelledError:
+        cancel.set()
+        raise
+
+
 def wsl_distro(home: Path) -> str | None:
     """The distro of a WSL home (``\\\\wsl.localhost\\<distro>\\...``) on Windows."""
     if sys.platform != "win32":
@@ -128,25 +143,33 @@ async def run_remote_discovery(
     agents: list[str] | None = None,
     push_key: str | None = None,
     cli_version: str | None = None,
+    identifier: str | None = None,
     all_users: bool = False,
     skip_ssl_verify: bool = False,
 ) -> RemoteResult:
     started = time.monotonic()
     base = backend_url.rstrip("/") + "/hidden/coding-agent-discovery/sessions"
+    query = f"?version={DISCOVERY_API_VERSION}"
     headers = {"X-Push-Key": push_key} if push_key else {}
+    home_list = homes(all_users)
+    if not home_list:
+        # The backend rejects an empty homes list, and local discovery finds nothing either.
+        logger.info("Remote discovery skipped: no readable home directories.")
+        return RemoteResult(duration_s=time.monotonic() - started)
     init = {
-        "client": {"os": sys.platform, "cli_version": cli_version},
-        "homes": homes(all_users),
+        "client": {"os": sys.platform, "cli_version": cli_version, "identifier": identifier},
+        "homes": home_list,
         "cwd": to_wire(os.getcwd()),
         "scope": scope,
         "agents": agents or [],
     }
     result = RemoteResult()
+    cancel = threading.Event()
     timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_S)
     async with aiohttp.ClientSession(
         timeout=timeout, connector=setup_tcp_connector(skip_ssl_verify), trust_env=True
     ) as session:
-        response = await _post(session, base, init, headers, result)
+        response = await _post(session, base + query, init, headers, result)
         result.session_id = response["session_id"]
         result.supported_agents = response.get("supported_agents", [])
         while True:
@@ -157,9 +180,9 @@ async def run_remote_discovery(
             if result.rounds >= MAX_ROUNDS:
                 raise RemoteDiscoveryError("too many rounds", "too_many_rounds")
             ops = response["ops"]
-            step = {"round": response["round"], "results": [run_op(op) for op in ops]}
+            step = {"round": response["round"], "results": await _run_ops(ops, cancel)}
             result.rounds += 1
             result.ops += len(ops)
-            response = await _post(session, f"{base}/{result.session_id}/steps", step, headers, result)
+            response = await _post(session, f"{base}/{result.session_id}/steps{query}", step, headers, result)
     result.duration_s = time.monotonic() - started
     return result

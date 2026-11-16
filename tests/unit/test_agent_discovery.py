@@ -11705,6 +11705,24 @@ def test_opencode_discover_local_only_returns_only_project_history(tmp_path):
     }
 
 
+def test_opencode_discover_local_only_keeps_absolute_paths_from_project_configs(tmp_path):
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    project = tmp_path / "work" / "repo"
+    project.mkdir(parents=True)
+    _seed_opencode_db(tmp_path / ".local" / "share" / "opencode" / "opencode.db", [project.as_posix()])
+    abs_skills = tmp_path / "team" / "abs-skills"
+    (project / "opencode.json").write_text(json.dumps({"skills": {"paths": [abs_skills.as_posix(), "~/home-skills"]}}))
+    _write_skill(abs_skills, "abs-skill")
+    _write_skill(tmp_path / "home-skills", "home-skill")
+
+    cti = OpenCodeDiscoverer(tmp_path).discover_local_only()
+
+    assert cti is not None
+    assert set(cti.skills_dirs) == {abs_skills.as_posix(), (tmp_path / "home-skills").as_posix()}
+
+
 def test_opencode_discover_local_only_without_projects_is_empty(tmp_path):
     from agent_scan.agents import OpenCodeDiscoverer
 

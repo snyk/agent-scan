@@ -217,7 +217,7 @@ class OpenCodeDiscoverer(AgentDiscoverer):
 
     def _local_only_skills(self) -> SkillsDirsResult:
         result = self._discover_project_skills()
-        result.update(self._discover_config_skills_paths(relative_only=True))
+        result.update(self._discover_config_skills_paths(local_only=True))
         return result
 
     # --- folder resolution ---
@@ -603,10 +603,7 @@ class OpenCodeDiscoverer(AgentDiscoverer):
         for base in self._global_config_dirs():
             for filename in _CONFIG_FILENAMES:
                 candidates.append(base / filename)
-        for project in self._discovery_paths_with_ancestors():
-            for base in self._project_config_bases(project):
-                for filename in _CONFIG_FILENAMES:
-                    candidates.append(base / filename)
+        candidates.extend(self._project_candidate_config_files())
         managed = self._managed_config_dir()
         if managed is not None:
             for filename in _CONFIG_FILENAMES:
@@ -616,7 +613,16 @@ class OpenCodeDiscoverer(AgentDiscoverer):
             candidates.append(env_path)
         return candidates
 
-    def _discover_config_skills_paths(self, *, relative_only: bool = False) -> SkillsDirsResult:
+    def _project_candidate_config_files(self) -> list[Path]:
+        """Config files under opened projects (found through the SQLite project list)."""
+        return [
+            base / filename
+            for project in self._discovery_paths_with_ancestors()
+            for base in self._project_config_bases(project)
+            for filename in _CONFIG_FILENAMES
+        ]
+
+    def _discover_config_skills_paths(self, *, local_only: bool = False) -> SkillsDirsResult:
         """Scan every ``skills.paths`` entry referenced from any opencode.json.
 
         Per ``packages/core/src/v1/config/skills.ts``:
@@ -636,13 +642,15 @@ class OpenCodeDiscoverer(AgentDiscoverer):
         Malformed config files (already reported by MCP discovery) are skipped
         here — we only consume the ``skills.paths`` array on success.
 
-        ``relative_only`` keeps just the worktree-relative entries.
+        ``local_only`` keeps what backend discovery can't resolve: every entry from
+        project config files, and the worktree-relative entries from the rest.
         """
         result: SkillsDirsResult = {}
         # opencode's instance dirs (the db ``worktree`` leaves); computed once so
         # the relative-entry resolution below doesn't re-read the SQLite db per
         # candidate config file.
         worktrees = self._all_discovery_folders()
+        project_files = set(self._project_candidate_config_files()) if local_only else set()
         for config_path in self._iter_candidate_config_files():
             data = self._load_json_file(config_path)
             if not isinstance(data, dict):
@@ -656,7 +664,7 @@ class OpenCodeDiscoverer(AgentDiscoverer):
             for entry in paths:
                 if not isinstance(entry, str) or not entry:
                     continue
-                if relative_only and not self._is_relative_skills_path_entry(entry):
+                if local_only and config_path not in project_files and not self._is_relative_skills_path_entry(entry):
                     continue
                 for resolved in self._resolve_skills_path_entry(entry, worktrees):
                     self._record_skills_at(result, resolved)

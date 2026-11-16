@@ -12,6 +12,8 @@ import os
 import posixpath
 import re
 import stat as stat_module
+import threading
+from collections.abc import Callable
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -22,6 +24,15 @@ MAX_FIND_READ_BYTES = 50 * 1024 * 1024
 MAX_ENV_NAMES = 64
 MAX_ENV_VALUE = 4096
 ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
+
+
+class OpCancelled(Exception):
+    """The caller stopped waiting; the op stops at the next file or directory."""
+
+
+def _check(cancel: threading.Event | None) -> None:
+    if cancel is not None and cancel.is_set():
+        raise OpCancelled
 
 
 def to_wire(path: str) -> str:
@@ -36,7 +47,7 @@ def _realpath(path: str) -> str | None:
         return None
 
 
-def _stat(op: dict[str, Any]) -> dict[str, Any]:
+def _stat(op: dict[str, Any], cancel: threading.Event | None = None) -> dict[str, Any]:
     entries = []
     for path in op["paths"]:
         try:
@@ -55,9 +66,12 @@ def _stat(op: dict[str, Any]) -> dict[str, Any]:
     return {"entries": entries}
 
 
-def _read(op: dict[str, Any]) -> dict[str, Any]:
+def _read(op: dict[str, Any], cancel: threading.Event | None = None, budget: int | None = None) -> dict[str, Any]:
+    """``budget`` caps the total bytes read; files that don't fit are skipped unread."""
     files, missing, skipped = [], [], []
     for path in op["paths"]:
+        _check(cancel)
+        limit = MAX_FILE_BYTES if budget is None else min(MAX_FILE_BYTES, budget)
         try:
             if not os.path.exists(path):
                 missing.append(path)
@@ -66,17 +80,19 @@ def _read(op: dict[str, Any]) -> dict[str, Any]:
             if not stat_module.S_ISREG(info.st_mode):
                 skipped.append({"path": path, "reason": "not_regular_file", "realpath": _realpath(path)})
                 continue
-            if info.st_size > MAX_FILE_BYTES:
+            if info.st_size > limit:
                 skipped.append({"path": path, "reason": "too_large", "realpath": _realpath(path)})
                 continue
             with open(path, "rb") as f:
-                data = f.read(MAX_FILE_BYTES + 1)
-            if len(data) > MAX_FILE_BYTES:
+                data = f.read(limit + 1)
+            if len(data) > limit:
                 skipped.append({"path": path, "reason": "too_large", "realpath": _realpath(path)})
                 continue
         except (OSError, ValueError):
             skipped.append({"path": path, "reason": "unreadable", "realpath": _realpath(path)})
             continue
+        if budget is not None:
+            budget -= len(data)
         files.append(
             {
                 "path": path,
@@ -100,7 +116,7 @@ def _root_status(root: str) -> str:
         return "unreadable"
 
 
-def _find(op: dict[str, Any]) -> dict[str, Any]:
+def _find(op: dict[str, Any], cancel: threading.Event | None = None) -> dict[str, Any]:
     fold = str.lower if op.get("ignore_case") else (lambda s: s)
     file_names = {fold(n) for n in op.get("file_names", ())}
     file_suffixes = tuple(fold(s) for s in op.get("file_suffixes", ()))
@@ -113,6 +129,7 @@ def _find(op: dict[str, Any]) -> dict[str, Any]:
 
     def walk(root: str, dirpath: str, depth: int) -> None:
         nonlocal truncated
+        _check(cancel)
         try:
             with os.scandir(dirpath) as it:
                 entries = list(it)
@@ -162,25 +179,12 @@ def _find(op: dict[str, Any]) -> dict[str, Any]:
             walk(root, root, 0)
     out = {"roots": roots, "matches": matches, "truncated": truncated}
     if op.get("read"):
-        out.update(_read_matches([m["path"] for m in matches if not m["is_dir"]]))
+        paths = [m["path"] for m in matches if not m["is_dir"]]
+        out.update(_read({"paths": paths}, cancel, budget=MAX_FIND_READ_BYTES))
     return out
 
 
-def _read_matches(paths: list[str]) -> dict[str, Any]:
-    """``read`` for find hits, with a total size cap per op."""
-    result = _read({"paths": paths})
-    files, total = [], 0
-    for f in result["files"]:
-        total += f["size"]
-        if total > MAX_FIND_READ_BYTES:
-            result["skipped"].append({"path": f["path"], "reason": "too_large", "realpath": f["realpath"]})
-        else:
-            files.append(f)
-    result["files"] = files
-    return result
-
-
-def _env(op: dict[str, Any]) -> dict[str, Any]:
+def _env(op: dict[str, Any], cancel: threading.Event | None = None) -> dict[str, Any]:
     """Env vars the backend asked for, as set. Names and values the backend's schema
     would refuse are left out or sent as ``None``."""
     values: dict[str, str | None] = {}
@@ -191,17 +195,20 @@ def _env(op: dict[str, Any]) -> dict[str, Any]:
     return {"values": values}
 
 
-_RUNNERS = {"stat": _stat, "read": _read, "find": _find, "env": _env}
+_Runner = Callable[[dict[str, Any], threading.Event | None], dict[str, Any]]
+_RUNNERS: dict[str, _Runner] = {"stat": _stat, "read": _read, "find": _find, "env": _env}
 
 
-def run_op(op: dict[str, Any]) -> dict[str, Any]:
+def run_op(op: dict[str, Any], cancel: threading.Event | None = None) -> dict[str, Any]:
     kind = op.get("kind")
     base = {"op_id": op["op_id"], "kind": kind}
     runner = _RUNNERS.get(kind) if isinstance(kind, str) else None
     if runner is None:
         return {**base, "status": "unsupported"}
     try:
-        return {**base, "status": "ok", **runner(op)}
+        return {**base, "status": "ok", **runner(op, cancel)}
+    except OpCancelled:
+        raise
     except Exception:
         logger.exception("Discovery op %s failed", kind)
         return {**base, "status": "error"}

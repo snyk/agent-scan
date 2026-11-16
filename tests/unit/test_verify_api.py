@@ -1017,14 +1017,19 @@ class TestFetchAgentScanConfig:
 
     @pytest.mark.asyncio
     async def test_parses_all_toggles(self):
-        json_data = {"async_analysis_enabled": True, "remote_discovery_enabled": True, "future_toggle": 1}
+        json_data = {"async_analysis_enabled": True, "remote_discovery_mode": "shadow", "future_toggle": 1}
         with patch("agent_scan.verify_api.aiohttp.ClientSession") as mock_cls:
             mock_cls.return_value = _make_get_session(status=200, json_data=json_data)
             config = await fetch_agent_scan_config(self._ANALYSIS_URL, "push-abc")
-        assert config == AgentScanConfig(async_analysis_enabled=True, remote_discovery_enabled=True)
+        assert config == AgentScanConfig(async_analysis_enabled=True, remote_discovery_mode="shadow")
+
+    @pytest.mark.parametrize("mode", ["future", None, 1])
+    def test_unknown_remote_discovery_mode_is_off(self, mode):
+        config = AgentScanConfig.model_validate({"async_analysis_enabled": True, "remote_discovery_mode": mode})
+        assert config == AgentScanConfig(async_analysis_enabled=True, remote_discovery_mode="off")
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("json_data", [[], {"remote_discovery_enabled": "maybe"}], ids=["list", "bad_type"])
+    @pytest.mark.parametrize("json_data", [[], {"async_analysis_enabled": "maybe"}], ids=["list", "bad_type"])
     async def test_invalid_payload_returns_defaults(self, json_data):
         with patch("agent_scan.verify_api.aiohttp.ClientSession") as mock_cls:
             mock_cls.return_value = _make_get_session(status=200, json_data=json_data)
