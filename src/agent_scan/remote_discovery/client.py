@@ -1,7 +1,9 @@
 """Drive one discovery session: init, then run ops and post results until the backend is done."""
 
+import asyncio
 import json
 import os
+import random
 import sys
 import time
 from dataclasses import dataclass, field
@@ -13,9 +15,14 @@ import aiohttp
 from agent_scan.agents.base import is_own_home
 from agent_scan.remote_discovery.executor import run_op, to_wire
 from agent_scan.utils import get_readable_home_directories
-from agent_scan.verify_api import setup_tcp_connector
+from agent_scan.verify_api import RETRYABLE_TRANSPORT_EXCEPTIONS, setup_tcp_connector
 
 MAX_ROUNDS = 25
+MAX_RETRIES = 3
+RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
+# Per request; the backend's own session deadline is 600 s.
+REQUEST_TIMEOUT_S = 60
+MAX_RETRY_DELAY_S = 10.0
 
 
 class RemoteDiscoveryError(Exception):
@@ -37,6 +44,7 @@ class RemoteResult:
     ops: int = 0
     duration_s: float = 0.0
     bytes_sent: int = 0
+    retries: int = 0
 
     def add(self, found: dict[str, list[dict[str, Any]]]) -> None:
         for name in self.found:
@@ -50,16 +58,46 @@ async def _post(
     headers: dict[str, str],
     result: RemoteResult,
 ) -> dict[str, Any]:
+    """POST with retries on 429/5xx, timeouts and connection errors.
+
+    Resending the same bytes is safe: the backend replays a step it has already applied.
+    """
     body = json.dumps(payload).encode()
-    result.bytes_sent += len(body)
-    async with session.post(url, data=body, headers={**headers, "Content-Type": "application/json"}) as response:
-        if response.status >= 400:
-            # Detail only: bounded reason strings, never request content.
-            raise RemoteDiscoveryError(
-                f"{url} returned {response.status}: {(await response.text())[:300]}", f"http_{response.status}"
-            )
-        data = await response.json()
-    return data
+    for attempt in range(MAX_RETRIES + 1):
+        result.bytes_sent += len(body)
+        retry_after: float | None = None
+        try:
+            async with session.post(
+                url, data=body, headers={**headers, "Content-Type": "application/json"}
+            ) as response:
+                if response.status < 400:
+                    return await response.json()
+                if response.status not in RETRYABLE_STATUSES or attempt == MAX_RETRIES:
+                    # Detail only: bounded reason strings, never request content.
+                    raise RemoteDiscoveryError(
+                        f"{url} returned {response.status}: {(await response.text())[:300]}",
+                        f"http_{response.status}",
+                    )
+                retry_after = _retry_after(response.headers.get("Retry-After"))
+        except RETRYABLE_TRANSPORT_EXCEPTIONS:
+            if attempt == MAX_RETRIES:
+                raise
+        result.retries += 1
+        await asyncio.sleep(_retry_delay(attempt, retry_after))
+    raise AssertionError("unreachable")
+
+
+def _retry_after(value: str | None) -> float | None:
+    try:
+        return float(value) if value is not None else None
+    except ValueError:
+        return None
+
+
+def _retry_delay(attempt: int, retry_after: float | None) -> float:
+    """Retry-After when given, else 1 s, 2 s, 4 s with jitter so a fleet doesn't retry in step."""
+    delay = retry_after if retry_after is not None else 2**attempt * random.uniform(0.75, 1.25)
+    return min(max(delay, 0.0), MAX_RETRY_DELAY_S)
 
 
 def wsl_distro(home: Path) -> str | None:
@@ -104,7 +142,7 @@ async def run_remote_discovery(
         "agents": agents or [],
     }
     result = RemoteResult()
-    timeout = aiohttp.ClientTimeout(total=120)
+    timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT_S)
     async with aiohttp.ClientSession(
         timeout=timeout, connector=setup_tcp_connector(skip_ssl_verify), trust_env=True
     ) as session:

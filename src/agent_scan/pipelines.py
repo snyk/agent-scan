@@ -233,10 +233,11 @@ async def discover_clients_remotely(
         logger.warning("Remote discovery returned a partial result; using local discovery.")
         return None, "partial"
     logger.info(
-        "Remote discovery: %d clients, %d rounds, %d ops, %.2fs, partial=%s",
+        "Remote discovery: %d clients, %d rounds, %d ops, %d retries, %.2fs, partial=%s",
         len(clients_to_inspect),
         remote.rounds,
         remote.ops,
+        remote.retries,
         remote.duration_s,
         remote.partial,
     )

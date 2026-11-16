@@ -3,6 +3,8 @@
 import os
 from pathlib import Path
 
+import pytest
+
 from agent_scan.remote_discovery.builder import build_clients
 from agent_scan.remote_discovery.executor import run_op
 
@@ -149,3 +151,134 @@ def test_stdio_roots_ignored_when_ambiguous_or_escaping(tmp_path: Path, monkeypa
     build_clients(_stdio_found({"command": "./tool", "cwd": "."}, roots))
     build_clients(_stdio_found({"command": "../outside", "cwd": "."}, [str(tmp_path / "a")]))
     assert signed == [None, None]
+
+
+# --- run_remote_discovery retries ---
+
+_EMPTY_FOUND: dict[str, list[dict]] = {"clients": [], "mcp_configs": [], "skills_dirs": []}
+
+
+async def _serve(statuses: dict[str, list[int]]):
+    """A discovery backend that answers each path with the given statuses in turn, then 200."""
+    from aiohttp import web
+    from aiohttp.test_utils import TestServer
+
+    bodies: dict[str, list[bytes]] = {}
+
+    async def handle(request):
+        bodies.setdefault(request.path, []).append(await request.read())
+        queue = statuses.get(request.path, [])
+        if queue:
+            return web.Response(status=queue.pop(0), text="busy")
+        if request.path.endswith("/sessions"):
+            ops = [{"op_id": "1", "kind": "env", "names": []}]
+            return web.json_response({"session_id": "s1", "round": 1, "ops": ops, "found": _EMPTY_FOUND, "done": False})
+        return web.json_response({"session_id": "s1", "round": 2, "ops": [], "found": _EMPTY_FOUND, "done": True})
+
+    app = web.Application()
+    app.router.add_post("/{tail:.*}", handle)
+    server = TestServer(app)
+    await server.start_server()
+    return server, bodies
+
+
+_SESSIONS = "/hidden/coding-agent-discovery/sessions"
+_STEPS = f"{_SESSIONS}/s1/steps"
+
+
+async def _discover(server):
+    from unittest.mock import AsyncMock, patch
+
+    from agent_scan.remote_discovery.client import run_remote_discovery
+
+    with (
+        patch("agent_scan.remote_discovery.client.asyncio.sleep", new=AsyncMock()) as sleep,
+        patch("agent_scan.remote_discovery.client.get_readable_home_directories", return_value=[]),
+    ):
+        result = await run_remote_discovery(str(server.make_url("/")).rstrip("/"))
+    return result, sleep
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [429, 500, 502, 503, 504])
+async def test_init_retried_on_transient_status(status) -> None:
+    server, bodies = await _serve({_SESSIONS: [status]})
+    try:
+        result, sleep = await _discover(server)
+    finally:
+        await server.close()
+    assert len(bodies[_SESSIONS]) == 2
+    assert result.retries == 1
+    sleep.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_step_retry_resends_identical_body() -> None:
+    server, bodies = await _serve({_STEPS: [502, 503]})
+    try:
+        result, _sleep = await _discover(server)
+    finally:
+        await server.close()
+    assert len(bodies[_STEPS]) == 3
+    assert len(set(bodies[_STEPS])) == 1
+    assert result.retries == 2
+
+
+@pytest.mark.asyncio
+async def test_gives_up_after_max_retries() -> None:
+    from agent_scan.remote_discovery.client import MAX_RETRIES, RemoteDiscoveryError
+
+    server, bodies = await _serve({_SESSIONS: [503] * (MAX_RETRIES + 1)})
+    try:
+        with pytest.raises(RemoteDiscoveryError) as exc:
+            await _discover(server)
+    finally:
+        await server.close()
+    assert exc.value.reason == "http_503"
+    assert len(bodies[_SESSIONS]) == MAX_RETRIES + 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 401, 404, 409, 410, 413])
+async def test_client_errors_not_retried(status) -> None:
+    from agent_scan.remote_discovery.client import RemoteDiscoveryError
+
+    server, bodies = await _serve({_SESSIONS: [status]})
+    try:
+        with pytest.raises(RemoteDiscoveryError) as exc:
+            await _discover(server)
+    finally:
+        await server.close()
+    assert exc.value.reason == f"http_{status}"
+    assert len(bodies[_SESSIONS]) == 1
+
+
+def test_retry_delay_honors_retry_after_and_caps() -> None:
+    from agent_scan.remote_discovery.client import MAX_RETRY_DELAY_S, _retry_after, _retry_delay
+
+    assert _retry_delay(0, _retry_after("2")) == 2.0
+    assert _retry_delay(0, _retry_after("600")) == MAX_RETRY_DELAY_S
+    assert _retry_after("Wed, 21 Oct 2026 07:28:00 GMT") is None
+    assert 0.75 <= _retry_delay(0, None) <= 1.25
+    assert 3.0 <= _retry_delay(2, None) <= 5.0
+
+
+@pytest.mark.asyncio
+async def test_connection_errors_retried_then_raised() -> None:
+    import socket
+    from unittest.mock import AsyncMock, patch
+
+    import aiohttp
+
+    from agent_scan.remote_discovery.client import MAX_RETRIES, run_remote_discovery
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    with (
+        patch("agent_scan.remote_discovery.client.asyncio.sleep", new=AsyncMock()) as sleep,
+        patch("agent_scan.remote_discovery.client.get_readable_home_directories", return_value=[]),
+        pytest.raises(aiohttp.ClientConnectionError),
+    ):
+        await run_remote_discovery(f"http://127.0.0.1:{port}")
+    assert sleep.await_count == MAX_RETRIES
