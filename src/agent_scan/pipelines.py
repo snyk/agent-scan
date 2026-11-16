@@ -1,8 +1,11 @@
+import asyncio
 import getpass
 import logging
 import os
 from pathlib import Path
+from typing import Any
 
+import aiohttp
 from pydantic import BaseModel, Field
 
 from agent_scan.agents import DiscoveryScope, find_discoverers
@@ -23,12 +26,14 @@ from agent_scan.models import (
 )
 from agent_scan.redact import redact_inspected_path
 from agent_scan.remote_discovery.builder import build_clients
-from agent_scan.remote_discovery.client import run_remote_discovery
+from agent_scan.remote_discovery.client import RemoteDiscoveryError, run_remote_discovery
 from agent_scan.utils import get_readable_home_directories
 from agent_scan.verify_api import AgentScanConfig, analyze_machine
 from agent_scan.well_known_clients import get_well_known_clients
 
 logger = logging.getLogger(__name__)
+
+DiscoveredClients = tuple[list[ClientToInspect], list[InspectedPath], list[str]]
 
 
 class InspectArgs(BaseModel):
@@ -49,6 +54,8 @@ class AnalyzeArgs(BaseModel):
     skip_ssl_verify: bool = False
     show_analysis_results: bool = False
     agent_scan_config: AgentScanConfig | None = None
+    # Extra scan_metadata for the analysis request; it ends up on the Maverick machine asset.
+    scan_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class PushArgs(BaseModel):
@@ -203,10 +210,11 @@ async def discover_clients_remotely(
     push_key: str,
     cli_version: str | None = None,
     skip_ssl_verify: bool = False,
-) -> tuple[list[ClientToInspect], list[InspectedPath], list[str]] | None:
+) -> tuple[DiscoveredClients | None, str | None]:
     """``discover_clients_to_inspect`` through the coding-agent-discovery service.
 
-    Returns None if the backend fails, so the caller can run legacy discovery instead.
+    Returns ``(None, reason)`` if the backend fails or its result is partial, so the
+    caller can run legacy discovery instead. ``reason`` is a bounded label.
     """
     try:
         remote = await run_remote_discovery(
@@ -219,9 +227,11 @@ async def discover_clients_remotely(
         )
         clients_to_inspect = build_clients(remote.found)
     except Exception as e:
-        # Includes malformed responses (KeyError/TypeError), not just transport errors.
         logger.warning("Remote discovery failed (%s: %s); using local discovery.", type(e).__name__, e)
-        return None
+        return None, _fallback_reason(e)
+    if remote.partial:
+        logger.warning("Remote discovery returned a partial result; using local discovery.")
+        return None, "partial"
     logger.info(
         "Remote discovery: %d clients, %d rounds, %d ops, %.2fs, partial=%s",
         len(clients_to_inspect),
@@ -233,7 +243,19 @@ async def discover_clients_remotely(
     home_dirs_with_users = get_readable_home_directories(all_users=inspect_args.all_users)
     _merge_local_only(clients_to_inspect, home_dirs_with_users, inspect_args.discovery_scope)
     all_usernames = [username for _path, username in home_dirs_with_users]
-    return clients_to_inspect, [], _scanned_usernames(clients_to_inspect, inspect_args, all_usernames)
+    return (clients_to_inspect, [], _scanned_usernames(clients_to_inspect, inspect_args, all_usernames)), None
+
+
+def _fallback_reason(error: Exception) -> str:
+    if isinstance(error, RemoteDiscoveryError):
+        return error.reason
+    if isinstance(error, asyncio.TimeoutError):
+        return "timeout"
+    if isinstance(error, aiohttp.ClientError):
+        return "connection"
+    if isinstance(error, KeyError | TypeError | ValueError):
+        return "malformed_response"
+    return "error"
 
 
 async def inspect_pipeline(
@@ -304,7 +326,7 @@ async def inspect_analyze_push_pipeline(
         do_stdio_handshake=do_stdio_handshake,
     )
 
-    scan_context = {"cli_version": push_args.version}
+    scan_context = {"cli_version": push_args.version, **analyze_args.scan_metadata}
     # analyze
     response = await analyze_machine(
         inspected_paths,

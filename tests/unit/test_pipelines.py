@@ -233,8 +233,9 @@ async def test_discover_clients_remotely_builds_clients():
             skip_ssl_verify=True,
         )
 
-    assert result is not None
-    clients, unresolved, usernames = result
+    discovered, reason = result
+    assert discovered is not None and reason is None
+    clients, unresolved, usernames = discovered
     assert [(c.name, c.username) for c in clients] == [("cursor", "alice")]
     assert unresolved == []
     assert usernames == ["alice"]
@@ -250,14 +251,48 @@ async def test_discover_clients_remotely_builds_clients():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "error",
-    [RemoteDiscoveryError("503"), aiohttp.ClientConnectionError("down"), TimeoutError(), KeyError("found")],
-    ids=["backend_error", "connection", "timeout", "malformed_response"],
+    "error, reason",
+    [
+        (RemoteDiscoveryError("503", "http_503"), "http_503"),
+        (RemoteDiscoveryError("rounds", "too_many_rounds"), "too_many_rounds"),
+        (aiohttp.ClientConnectionError("down"), "connection"),
+        (TimeoutError(), "timeout"),
+        (KeyError("found"), "malformed_response"),
+        (RuntimeError("x"), "error"),
+    ],
+    ids=["backend_error", "too_many_rounds", "connection", "timeout", "malformed_response", "other"],
 )
-async def test_discover_clients_remotely_returns_none_on_failure(error):
+async def test_discover_clients_remotely_returns_reason_on_failure(error, reason):
     with patch("agent_scan.pipelines.run_remote_discovery", new_callable=AsyncMock, side_effect=error):
         result = await discover_clients_remotely(InspectArgs(timeout=10, tokens=[], paths=[]), "https://x", "k")
-    assert result is None
+    assert result == (None, reason)
+
+
+@pytest.mark.asyncio
+async def test_discover_clients_remotely_treats_partial_as_failure():
+    remote = RemoteResult(partial=True)
+    with (
+        patch("agent_scan.pipelines.run_remote_discovery", new_callable=AsyncMock, return_value=remote),
+        patch("agent_scan.pipelines.find_discoverers") as find,
+    ):
+        result = await discover_clients_remotely(InspectArgs(timeout=10, tokens=[], paths=[]), "https://x", "k")
+    assert result == (None, "partial")
+    find.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_scan_metadata_merged_into_scan_context():
+    with (
+        patch("agent_scan.pipelines.inspect_pipeline", new_callable=AsyncMock, return_value=([], [])),
+        patch("agent_scan.pipelines.analyze_machine", new_callable=AsyncMock) as analyze,
+    ):
+        await inspect_analyze_push_pipeline(
+            InspectArgs(timeout=10, tokens=[], paths=[]),
+            AnalyzeArgs(analysis_url="https://x", scan_metadata={"discovery": {"source": "remote"}}),
+            PushArgs(control_servers=[], push_key="k", version="0.6.0"),
+        )
+
+    assert analyze.await_args.kwargs["scan_context"] == {"cli_version": "0.6.0", "discovery": {"source": "remote"}}
 
 
 class _FakeDiscoverer:
@@ -297,8 +332,9 @@ async def test_discover_clients_remotely_merges_local_only_sources(tmp_path):
             InspectArgs(timeout=10, tokens=[], paths=[], discovery_scope=DiscoveryScope.SERVERS), "https://x", "k"
         )
 
-    assert result is not None
-    clients = {(c.name, c.username): c for c in result[0]}
+    discovered, _reason = result
+    assert discovered is not None
+    clients = {(c.name, c.username): c for c in discovered[0]}
     assert set(clients) == {("vscode", "alice"), ("opencode", "alice")}
     assert clients[("vscode", "alice")].mcp_configs == {"/ext.js": []}
     assert clients[("opencode", "alice")].skills_dirs == {"/p": []}
@@ -310,9 +346,12 @@ async def test_discover_clients_remotely_merges_local_only_sources(tmp_path):
 async def test_discover_clients_remotely_skips_local_only_when_backend_fails():
     with (
         patch(
-            "agent_scan.pipelines.run_remote_discovery", new_callable=AsyncMock, side_effect=RemoteDiscoveryError("x")
+            "agent_scan.pipelines.run_remote_discovery",
+            new_callable=AsyncMock,
+            side_effect=RemoteDiscoveryError("x", "http_500"),
         ),
         patch("agent_scan.pipelines.find_discoverers") as find,
     ):
-        assert await discover_clients_remotely(InspectArgs(timeout=10, tokens=[], paths=[]), "https://x", "k") is None
+        result = await discover_clients_remotely(InspectArgs(timeout=10, tokens=[], paths=[]), "https://x", "k")
+    assert result == (None, "http_500")
     find.assert_not_called()

@@ -22,7 +22,7 @@ _REMOTE: _Discovered = (
 _LOCAL: _Discovered = ([ClientToInspect(name="local", client_path="/l", mcp_configs={}, skills_dirs={})], [], ["alice"])
 
 
-async def _run(args, config: AgentScanConfig, remote_result=_REMOTE):
+async def _run(args, config: AgentScanConfig, remote_result=(_REMOTE, None)):
     with (
         patch("agent_scan.cli.fetch_agent_scan_config", new=AsyncMock(return_value=config)) as fetch,
         patch("agent_scan.cli.discover_clients_remotely", new=AsyncMock(return_value=remote_result)) as remote,
@@ -48,25 +48,33 @@ async def test_remote_discovery_enabled_uses_backend_and_reuses_config():
     local.assert_not_awaited()
     assert [c.name for c in inspect.await_args.kwargs["clients_to_inspect"]] == ["remote"]
     assert analyze.await_args.kwargs["agent_scan_config"] == config
+    assert analyze.await_args.kwargs["scan_context"]["discovery"] == {"source": "remote"}
 
 
 @pytest.mark.asyncio
 async def test_remote_discovery_disabled_uses_local():
-    _fetch, remote, local, inspect, _analyze = await _run(_push_key_scan_args(), AgentScanConfig())
+    _fetch, remote, local, inspect, analyze = await _run(_push_key_scan_args(), AgentScanConfig())
 
     remote.assert_not_awaited()
     local.assert_awaited_once()
     assert [c.name for c in inspect.await_args.kwargs["clients_to_inspect"]] == ["local"]
+    assert analyze.await_args.kwargs["scan_context"]["discovery"] == {"source": "local"}
 
 
 @pytest.mark.asyncio
 async def test_remote_discovery_failure_falls_back_to_local():
     config = AgentScanConfig(remote_discovery_enabled=True)
-    _fetch, remote, local, inspect, _analyze = await _run(_push_key_scan_args(), config, remote_result=None)
+    _fetch, remote, local, inspect, analyze = await _run(
+        _push_key_scan_args(), config, remote_result=(None, "http_503")
+    )
 
     remote.assert_awaited_once()
     local.assert_awaited_once()
     assert [c.name for c in inspect.await_args.kwargs["clients_to_inspect"]] == ["local"]
+    assert analyze.await_args.kwargs["scan_context"]["discovery"] == {
+        "source": "remote_fallback",
+        "fallback_reason": "http_503",
+    }
 
 
 @pytest.mark.asyncio

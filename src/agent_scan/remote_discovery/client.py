@@ -19,7 +19,10 @@ MAX_ROUNDS = 25
 
 
 class RemoteDiscoveryError(Exception):
-    pass
+    def __init__(self, message: str, reason: str) -> None:
+        super().__init__(message)
+        # Bounded label for scan metadata, e.g. ``http_503``.
+        self.reason = reason
 
 
 @dataclass
@@ -52,7 +55,9 @@ async def _post(
     async with session.post(url, data=body, headers={**headers, "Content-Type": "application/json"}) as response:
         if response.status >= 400:
             # Detail only: bounded reason strings, never request content.
-            raise RemoteDiscoveryError(f"{url} returned {response.status}: {(await response.text())[:300]}")
+            raise RemoteDiscoveryError(
+                f"{url} returned {response.status}: {(await response.text())[:300]}", f"http_{response.status}"
+            )
         data = await response.json()
     return data
 
@@ -112,7 +117,7 @@ async def run_remote_discovery(
             if response["done"]:
                 break
             if result.rounds >= MAX_ROUNDS:
-                raise RemoteDiscoveryError("too many rounds")
+                raise RemoteDiscoveryError("too many rounds", "too_many_rounds")
             ops = response["ops"]
             step = {"round": response["round"], "results": [run_op(op) for op in ops]}
             result.rounds += 1
