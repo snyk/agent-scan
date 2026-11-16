@@ -46,6 +46,10 @@ jobs:
           cache-dependency-glob: "uv.lock"
       - name: Run tests
         run: uv run --frozen make ci
+      # Managed (system-wide) guard install/uninstall. Writes to /etc, /Library or ProgramData, so it
+      # only runs on disposable runners: passwordless sudo on Linux/macOS, elevated session on Windows.
+      - name: Run managed guard e2e tests (root/admin)
+        run: uv run --frozen make ci-managed
       - name: Upload binary artifact
         if: github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@v4

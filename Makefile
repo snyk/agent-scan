@@ -1,4 +1,4 @@
-.PHONY: run test tests coverage ci pre-commit clean binary build shiv publish-pypi publish reset-uv install-dev-server-cursor install-dev-server-windsurf
+.PHONY: run test tests coverage ci ci-managed pre-commit clean binary build shiv publish-pypi publish reset-uv install-dev-server-cursor install-dev-server-windsurf
 
 # Pass extra arguments via ARGS, e.g.: make test ARGS="-v -k test_basic tests/e2e/"
 ARGS ?=
@@ -31,6 +31,12 @@ coverage:
 ci:
 	$(MAKE) binary
 	AGENT_SCAN_ENVIRONMENT=ci uv run --extra test -m pytest -vv --runner=binary $(PYTEST_PATH_ARGS) $(ARGS)
+
+# Managed (root/Administrator) guard install/uninstall e2e. Writes to system config paths, so it is
+# opt-in and meant for disposable CI machines: needs passwordless sudo (Linux/macOS) or an elevated shell (Windows).
+ci-managed:
+	@test -e dist/agent-scan -o -e dist/agent-scan.exe || $(MAKE) binary
+	AGENT_SCAN_E2E_MANAGED=1 AGENT_SCAN_ENVIRONMENT=ci uv run --extra test -m pytest -vv --runner=binary -m managed tests/e2e/test_guard_managed.py $(ARGS)
 
 pre-commit:
 	uv sync

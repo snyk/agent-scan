@@ -75,6 +75,9 @@ testpaths = ["tests"]
 # tests/ subdirs (unit, e2e, skills, mcp_servers, ...) onto sys.path. The specs deliberately live under
 # tests/ and are not part of the shipped agent_scan wheel.
 pythonpath = ["tests/canary_specs"]
+markers = [
+    "managed: e2e tests that write to system-wide managed config paths and need root/Administrator (opt-in via AGENT_SCAN_E2E_MANAGED=1)",
+]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
