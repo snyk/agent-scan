@@ -87,7 +87,7 @@ json_escape() {
     printf -v char '\\%03o' "$code"
     printf -v char '%b' "$char"
     printf -v escaped '\\u%04x' "$code"
-    s="${s//"$char"/"$escaped"}"
+    s="${s//$char/$escaped}"
   done
   printf '%s' "$s"
 }
