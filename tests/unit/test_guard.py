@@ -286,7 +286,7 @@ class TestExtractEnvFromCmd:
             "main",
             False,
             "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' TENANT_ID='tenant' "
-            "MACHINE_ID='machine' bash '/x/snyk-agent-guard.sh' --client claude-code",
+            "MACHINE_ID='machine' MACHINE_SERIAL='' bash '/x/snyk-agent-guard.sh' --client claude-code",
         ),
         (
             "main",
@@ -297,7 +297,7 @@ class TestExtractEnvFromCmd:
         (
             "discover",
             False,
-            "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' MACHINE_ID='machine' "
+            "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' MACHINE_ID='machine' MACHINE_SERIAL='' "
             "AGENT_SCAN_COMMAND='/usr/local/bin/snyk-agent-scan' bash '/x/snyk-agent-guard-discover.sh' "
             "--client 'claude-code' --scope servers",
         ),
@@ -361,9 +361,10 @@ class TestBuildHookCommand:
         if serial:
             expected = "-MachineSerial 'C02''XYZ123'" if windows else "MACHINE_SERIAL='C02'\"'\"'XYZ123'"
             assert expected in command
-        else:
+        elif windows:
             assert "-MachineSerial" not in command
-            assert "MACHINE_SERIAL" not in command
+        else:
+            assert "MACHINE_SERIAL=''" in command
 
     @pytest.mark.skipif(sys.platform == "win32", reason="bash command format")
     def test_without_tenant_bash(self):
@@ -711,7 +712,7 @@ class TestHookInvocationRenderers:
         ]
         assert env == {
             "EXISTING": "value",
-            "MACHINE_SERIAL": "inherited-serial",
+            "MACHINE_SERIAL": "",
             "PUSH_KEY": "pk",
             "REMOTE_HOOKS_BASE_URL": "https://api.snyk.io",
             "TENANT_ID": "tenant",
@@ -753,7 +754,7 @@ class TestHookInvocationRenderers:
         ]
         assert env is None
 
-    def test_render_posix_command_skips_empty_optional_fields(self):
+    def test_render_posix_command_preserves_empty_serial(self):
         invocation = guard_module._HookInvocation(
             script_path=Path("/hooks/snyk-agent-guard.sh"),
             hook_client="claude-code",
@@ -764,7 +765,7 @@ class TestHookInvocationRenderers:
         command = guard_module._render_posix_command(invocation)
 
         assert command == (
-            "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' "
+            "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' MACHINE_SERIAL='' "
             "bash '/hooks/snyk-agent-guard.sh' --client claude-code"
         )
 
@@ -3723,27 +3724,36 @@ class TestBashHookScript:
         assert result.returncode == 0
         assert json.loads(result.stdout) == {"ok": True}
 
-    @pytest.mark.parametrize("serial", ["", 'C02"XYZ\\123'])
-    def test_machine_id_sets_x_user_identifier(self, hook_server, serial, monkeypatch):
+    @pytest.mark.parametrize("serial", ["", 'C02"XYZ\\123', "control-\x01\b\f\x1f"])
+    @pytest.mark.parametrize("direct", [False, True], ids=["saved-command", "install-test"])
+    def test_machine_id_sets_x_user_identifier(self, hook_server, serial, monkeypatch, direct):
         monkeypatch.setenv("MACHINE_SERIAL", "ambient-serial")
         script = _get_script_path("snyk-agent-guard.sh")
-        command = _build_hook_command(
-            "test-pk", hook_server, script, "claude-code", machine_id="machine-42", machine_serial=serial or ""
-        )
-        result = subprocess.run(
-            ["bash", "-c", command],
-            input='{"hook_event_name":"test","session_id":"s1"}',
-            capture_output=True,
-            text=True,
-            timeout=10,
-            env={
-                "PATH": "/usr/bin:/bin:/usr/local/bin",
-                "PUSH_KEY": "test-pk",
-                "REMOTE_HOOKS_BASE_URL": hook_server,
-                "MACHINE_ID": "machine-42",
-            },
-        )
-        assert result.returncode == 0, result.stderr
+        payload = '{"hook_event_name":"test","session_id":"s1"}'
+        if direct:
+            ok, detail = guard_module._invoke_hook_script(
+                script,
+                "claude-code",
+                "test-pk",
+                hook_server,
+                payload,
+                machine_id="machine-42",
+                machine_serial=serial,
+            )
+            assert ok, detail
+        else:
+            command = _build_hook_command(
+                "test-pk", hook_server, script, "claude-code", machine_id="machine-42", machine_serial=serial
+            )
+            result = subprocess.run(
+                ["bash", "-c", command],
+                input=payload,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env={**os.environ, "MACHINE_SERIAL": "ambient-serial"},
+            )
+            assert result.returncode == 0, result.stderr
         x_user = json.loads(_HookHandler.last_request["headers"]["X-User"])
         assert x_user["identifier"] == "machine-42"
         assert x_user["hostname"]
@@ -4160,7 +4170,7 @@ class TestPowerShellHookScript:
         assert result.returncode == 0, result.stderr
         assert "/hidden/agent-monitor/hooks/cursor" in _HookHandler.last_request["path"]
 
-    @pytest.mark.parametrize("serial", [None, "", "C02XYZ123"])
+    @pytest.mark.parametrize("serial", [None, "", "C02XYZ123", "control-\x01\b\f\x1f"])
     def test_machine_id_sets_x_user_identifier(self, hook_server, serial, monkeypatch):
         monkeypatch.setenv("MACHINE_SERIAL", "ignored-env-serial")
         script = _get_script_path("snyk-agent-guard.ps1")

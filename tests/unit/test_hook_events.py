@@ -53,7 +53,7 @@ def _patch_session(session: _FakeSession):
 
 
 @pytest.mark.parametrize("client", ["claude-code", "cursor", "codex"])
-@pytest.mark.parametrize("serial", ["", "C02XYZ123"])
+@pytest.mark.parametrize("serial", ["", "C02XYZ123", "control-\x01\b\f\x1f"])
 def test_sends_existing_hook_wire_contract(client, serial, monkeypatch):
     monkeypatch.setenv("MACHINE_SERIAL", "ambient-serial")
     session = _FakeSession()

@@ -1941,8 +1941,8 @@ def _render_posix_command(invocation: _HookInvocation) -> str:
         parts.append(f"TENANT_ID={_shell_quote(invocation.tenant_id)}")
     if invocation.machine_id:
         parts.append(f"MACHINE_ID={_shell_quote(invocation.machine_id)}")
-    if invocation.machine_serial:
-        parts.append(f"MACHINE_SERIAL={_shell_quote(invocation.machine_serial)}")
+    # Preserve an empty captured serial too; later hook environments must not supply a different value.
+    parts.append(f"MACHINE_SERIAL={_shell_quote(invocation.machine_serial)}")
     if invocation.agent_scan_command:
         parts.append(f"AGENT_SCAN_COMMAND={_shell_quote(invocation.agent_scan_command)}")
     parts.append(f"bash {_shell_quote(invocation.script_path.as_posix())}")
@@ -2005,13 +2005,12 @@ def _render_argv(invocation: _HookInvocation) -> tuple[list[str], dict[str, str]
         **os.environ,
         "PUSH_KEY": invocation.push_key,
         "REMOTE_HOOKS_BASE_URL": invocation.url,
+        "MACHINE_SERIAL": invocation.machine_serial,
     }
     if invocation.tenant_id:
         env["TENANT_ID"] = invocation.tenant_id
     if invocation.machine_id:
         env["MACHINE_ID"] = invocation.machine_id
-    if invocation.machine_serial:
-        env["MACHINE_SERIAL"] = invocation.machine_serial
     if invocation.agent_scan_command:
         env["AGENT_SCAN_COMMAND"] = invocation.agent_scan_command
     argv = ["bash", str(invocation.script_path), "--client", invocation.hook_client]

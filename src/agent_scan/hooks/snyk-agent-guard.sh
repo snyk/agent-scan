@@ -81,6 +81,14 @@ json_escape() {
   s="${s//$'\t'/\\t}"
   s="${s//$'\r'/\\r}"
   s="${s//$'\n'/\\n}"
+  # JSON strings cannot contain any literal C0 control character. NUL cannot occur in an environment value.
+  local code char escaped
+  for (( code=1; code<32; code++ )); do
+    printf -v char '\\%03o' "$code"
+    printf -v char '%b' "$char"
+    printf -v escaped '\\u%04x' "$code"
+    s="${s//"$char"/"$escaped"}"
+  done
   printf '%s' "$s"
 }
 
