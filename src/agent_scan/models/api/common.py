@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 class ScanUserInfo(BaseModel):
     hostname: str | None = None
+    machine_serial: str | None = None
     username: list[str] | None = None
     identifier: str | None = None
     ip_address: str | None = None

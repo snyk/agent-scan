@@ -542,11 +542,18 @@ class TestAnalyzeMachineUserInfo:
         return mock_session
 
     @pytest.mark.asyncio
-    async def test_uses_scanned_usernames_when_provided(self):
+    @pytest.mark.parametrize(
+        "serial, expected_serial",
+        [(None, None), ("", None), (" \t", None), (' serial-"\\\x01 ', 'serial-"\\\x01')],
+    )
+    async def test_uses_scanned_usernames_when_provided(self, monkeypatch, serial, expected_serial):
         """When scanned_usernames is passed, the payload's username is that list."""
         inspected_paths = [InspectedPath(path="/test/path")]
         analysis_url = "https://test.example.com/api"
         scanned_usernames = ["alice", "bob"]
+        monkeypatch.delenv("MACHINE_SERIAL", raising=False)
+        if serial is not None:
+            monkeypatch.setenv("MACHINE_SERIAL", serial)
 
         with (
             patch("agent_scan.verify_api.aiohttp.ClientSession") as mock_session_class,
@@ -559,7 +566,7 @@ class TestAnalyzeMachineUserInfo:
             await analyze_machine(
                 inspected_paths=inspected_paths,
                 analysis_url=analysis_url,
-                identifier=None,
+                identifier="machine-id",
                 scanned_usernames=scanned_usernames,
             )
 
@@ -568,6 +575,8 @@ class TestAnalyzeMachineUserInfo:
             payload = json.loads(call_kwargs["data"])
             assert payload["scan_user_info"]["username"] == scanned_usernames
             assert payload["scan_user_info"]["hostname"] == "test-host"
+            assert payload["scan_user_info"]["identifier"] == "machine-id"
+            assert payload["scan_user_info"]["machine_serial"] == expected_serial
 
     @pytest.mark.asyncio
     async def test_falls_back_to_local_username_when_scanned_usernames_not_provided(self):

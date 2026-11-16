@@ -129,7 +129,13 @@ class TestFullScanFlow:
     """Test cases for end-to-end scanning workflows."""
 
     @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
-    def test_v20260710_mcp_scan_request_response_and_ci(self, agent_scan_cmd, v20260710_analysis_server):
+    @pytest.mark.parametrize("serial", [None, "serial-e2e"])
+    def test_v20260710_mcp_scan_request_response_and_ci(
+        self, agent_scan_cmd, v20260710_analysis_server, monkeypatch, serial
+    ):
+        monkeypatch.delenv("MACHINE_SERIAL", raising=False)
+        if serial is not None:
+            monkeypatch.setenv("MACHINE_SERIAL", serial)
         config = "tests/mcp_servers/configs_files/math_config.json"
         result = subprocess.run(
             [
@@ -141,6 +147,8 @@ class TestFullScanFlow:
                 config,
                 "--analysis-url",
                 v20260710_analysis_server,
+                "--machine-id",
+                "e2e-machine-id",
             ],
             capture_output=True,
             text=True,
@@ -153,6 +161,9 @@ class TestFullScanFlow:
         risk = risk_indexes["private_data"]
         assert risk == {"score": 750, "evidence": "Reads private records", "affected_tools": [0]}
         request = _V20260710AnalysisHandler.requests[0]
+        assert request["scan_user_info"]["machine_serial"] == serial
+        assert request["scan_user_info"]["identifier"] == "e2e-machine-id"
+        assert request["scan_user_info"]["hostname"]
         assert len(request["scan_path_requests"]) == 1
         path_request = request["scan_path_requests"][0]
         assert [server["name"] for server in path_request["servers"]] == ["Math"]
