@@ -13,6 +13,7 @@ import aiohttp
 import certifi
 import rich
 from mcp.types import Prompt, Resource, ResourceTemplate, Tool
+from pydantic import BaseModel, ValidationError
 from rich.markup import escape
 
 from agent_scan.models.api.common import ScanUserInfo
@@ -119,20 +120,37 @@ def _print_scan_sent_success(user_info: ScanUserInfo) -> None:
     rich.print(f"[green]Scan sent successfully[/green]{details}")
 
 
-async def _async_analysis_enabled(
-    config_url: str,
-    push_key: str,
-    trace_configs: list | None,
-    skip_ssl_verify: bool,
-    max_retries: int = 2,
-) -> bool:
-    """Ask the backend whether this push-key's tenant routes to async analysis.
+class AgentScanConfig(BaseModel):
+    """Per-tenant runtime toggles from ``/hidden/agent-scan/config``. Every toggle defaults to off."""
 
-    Returns False on any error, non-2xx, or after exhausting retries so the caller
-    falls back to the synchronous path. Transient failures (5xx, connection issues,
-    timeouts) are retried with a short timeout and exponential backoff; deterministic
-    4xx responses are not retried.
+    async_analysis_enabled: bool = False
+    remote_discovery_enabled: bool = False
+
+
+def agent_scan_config_url(analysis_url: str) -> str:
+    return _force_analysis_api_version(analysis_url).replace(_SYNC_ANALYSIS_PATH, _AGENT_SCAN_CONFIG_PATH)
+
+
+def discovery_base_url(analysis_url: str) -> str:
+    """Scheme and host of the analysis URL; the discovery service lives on the same gateway."""
+    parsed = urlsplit(analysis_url)
+    return urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+
+
+async def fetch_agent_scan_config(
+    analysis_url: str,
+    push_key: str,
+    trace_configs: list | None = None,
+    skip_ssl_verify: bool = False,
+    max_retries: int = 2,
+) -> AgentScanConfig:
+    """Fetch the push-key tenant's runtime config.
+
+    Returns the all-off default on any error, non-2xx, or after exhausting retries, so
+    callers fall back to legacy discovery and synchronous analysis. Transient failures
+    (5xx, connection issues, timeouts) are retried with exponential backoff; 4xx are not.
     """
+    config_url = agent_scan_config_url(analysis_url)
     for attempt in range(max_retries):
         try:
             async with backend_client_session(trace_configs, skip_ssl_verify) as session:
@@ -142,13 +160,14 @@ async def _async_analysis_enabled(
                     timeout=aiohttp.ClientTimeout(total=_CONFIG_REQUEST_TIMEOUT),
                 ) as response:
                     if response.status == 200:
-                        data = await response.json()
-                        return bool(data.get("async_analysis_enabled", False))
+                        try:
+                            return AgentScanConfig.model_validate(await response.json())
+                        except (ValueError, ValidationError) as e:
+                            logger.warning("Agent Scan config response is invalid (%s); using defaults.", e)
+                            return AgentScanConfig()
                     if response.status < 500:
-                        logger.warning(
-                            "Agent Scan config request returned %s; using synchronous analysis.", response.status
-                        )
-                        return False
+                        logger.warning("Agent Scan config request returned %s; using defaults.", response.status)
+                        return AgentScanConfig()
                     logger.warning(
                         "Agent Scan config request returned %s (attempt %d/%d).",
                         response.status,
@@ -159,14 +178,14 @@ async def _async_analysis_enabled(
             logger.warning("Agent Scan config request failed (attempt %d/%d): %s", attempt + 1, max_retries, e)
         except aiohttp.ClientError as e:
             # Non-transient transport error (e.g. malformed URL): retrying will not help.
-            logger.warning("Agent Scan config request failed (%s); using synchronous analysis.", e)
-            return False
+            logger.warning("Agent Scan config request failed (%s); using defaults.", e)
+            return AgentScanConfig()
 
         if attempt < max_retries - 1:
             await asyncio.sleep(2**attempt)  # 1s, 2s, ...
 
-    logger.warning("Agent Scan config request failed after %d attempt(s); using synchronous analysis.", max_retries)
-    return False
+    logger.warning("Agent Scan config request failed after %d attempt(s); using defaults.", max_retries)
+    return AgentScanConfig()
 
 
 async def _response_detail(response: aiohttp.ClientResponse) -> str | None:
@@ -503,6 +522,7 @@ async def analyze_machine(
     scan_context: dict | None = None,
     scanned_usernames: list[str] | None = None,
     show_analysis_results: bool = False,
+    agent_scan_config: AgentScanConfig | None = None,
 ) -> ScanResponse:
     """
     Analyze the scan paths with the analysis server.
@@ -519,6 +539,7 @@ async def analyze_machine(
         scan_context: Optional dict containing scan metadata to include in the request
         show_analysis_results: Force synchronous analysis so results are returned instead of
             submitting asynchronously (push-key tenants default to async)
+        agent_scan_config: Config already fetched for this push key; fetched here when omitted
     """
     analysis_url = _force_analysis_api_version(analysis_url)
     logger.debug(f"Analyzing scan path with URL: {analysis_url}")
@@ -555,8 +576,11 @@ async def analyze_machine(
         # The analysis_url in this case has authentication through push_key (not on api-gateway)
         headers["X-Push-Key"] = push_key
         if not show_analysis_results:
-            config_url = analysis_url.replace(_SYNC_ANALYSIS_PATH, _AGENT_SCAN_CONFIG_PATH)
-            if await _async_analysis_enabled(config_url, push_key, trace_configs, skip_ssl_verify):
+            if agent_scan_config is None:
+                agent_scan_config = await fetch_agent_scan_config(
+                    analysis_url, push_key, trace_configs, skip_ssl_verify
+                )
+            if agent_scan_config.async_analysis_enabled:
                 async_url = analysis_url.replace(_SYNC_ANALYSIS_PATH, _ASYNC_ANALYSIS_PATH)
                 success, error_text, exc = await _submit_async_analysis(
                     async_url, payload, headers, identifier, trace_configs, skip_ssl_verify, max_retries
