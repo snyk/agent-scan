@@ -37,12 +37,15 @@ from agent_scan.pipelines import (
     AnalyzeArgs,
     InspectArgs,
     PushArgs,
+    discover_clients_remotely,
     discover_clients_to_inspect,
     inspect_analyze_push_pipeline,
     inspect_pipeline,
+    supports_remote_discovery,
 )
 from agent_scan.printer import print_inspected_machine, print_scan_response
 from agent_scan.utils import ensure_unicode_console, get_hostname, get_push_key, parse_headers, suppress_stdout
+from agent_scan.verify_api import AgentScanConfig, discovery_base_url, fetch_agent_scan_config
 from agent_scan.version import version_info
 
 # Configure logging to suppress all output by default
@@ -1170,12 +1173,15 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> ScanRespo
 
     Flow:
     1. Build InspectArgs from CLI args.
-    2. Discover the clients/configs that would be inspected.
-    3. If interactive and --dangerously-run-mcp-servers is not set, prompt
+    2. For push-key scans, fetch the tenant's Agent Scan config once.
+    3. Discover the clients/configs that would be inspected, through the
+       discovery backend when the config enables it, otherwise locally.
+    4. If interactive and --dangerously-run-mcp-servers is not set, prompt
        the user per MCP server for consent. Declined servers are recorded as
        user_declined errors and never contacted.
-    4. Run the existing inspect / analyze / push pipeline with the filtered
-       plan and optional live stderr streaming.
+    5. Run the existing inspect / analyze / push pipeline with the filtered
+       plan and optional live stderr streaming. The same config picks sync
+       or async analysis.
     """
     verbose: bool = hasattr(args, "verbose") and args.verbose
     scan_all_users: bool = hasattr(args, "scan_all_users") and args.scan_all_users
@@ -1206,8 +1212,31 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> ScanRespo
     decision = decide_handshake(args)
     dangerously_run_mcp_servers: bool = bool(getattr(args, "dangerously_run_mcp_servers", False))
 
+    skip_ssl_verify: bool = bool(hasattr(args, "skip_ssl_verify") and args.skip_ssl_verify)
+    # --machine-id / --push-key take precedence over the deprecated
+    # --control-identifier / --control-server-H equivalents. Resolved once
+    # here so every downstream consumer (PushArgs, the pipeline) sees the
+    # same already-resolved value instead of re-deriving it.
+    push_key: str | None = _effective_push_key(args) if mode == "scan" else None
+
+    # Only push-key tenants have a config endpoint; everyone else keeps the defaults.
+    agent_scan_config = AgentScanConfig()
+    if push_key:
+        agent_scan_config = await fetch_agent_scan_config(args.analysis_url, push_key, skip_ssl_verify=skip_ssl_verify)
+
     # Step 1: Discover everything we would inspect without starting any server.
-    clients_to_inspect, unresolved_paths, scanned_usernames = await discover_clients_to_inspect(inspect_args)
+    discovered = None
+    if push_key and agent_scan_config.remote_discovery_enabled and supports_remote_discovery(inspect_args):
+        discovered = await discover_clients_remotely(
+            inspect_args,
+            discovery_base_url(args.analysis_url),
+            push_key,
+            cli_version=version_info,
+            skip_ssl_verify=skip_ssl_verify,
+        )
+    if discovered is None:
+        discovered = await discover_clients_to_inspect(inspect_args)
+    clients_to_inspect, unresolved_paths, scanned_usernames = discovered
 
     # Collect consent when applicable; otherwise show the
     # dangerous-flag banner to users at the terminal. Silent
@@ -1219,15 +1248,8 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> ScanRespo
         _print_dangerous_warning(suppress_io)
 
     if mode == "scan":
-        skip_ssl_verify: bool = bool(hasattr(args, "skip_ssl_verify") and args.skip_ssl_verify)
-
         control_servers: list[ControlServer] = args.control_servers if hasattr(args, "control_servers") else []
-        # --machine-id / --push-key take precedence over the deprecated
-        # --control-identifier / --control-server-H equivalents. Resolved once
-        # here so every downstream consumer (PushArgs, the pipeline) sees the
-        # same already-resolved value instead of re-deriving it.
         identifier: str | None = _effective_identifier(args)
-        push_key: str | None = _effective_push_key(args)
 
         analyze_args = AnalyzeArgs(
             analysis_url=args.analysis_url,
@@ -1236,6 +1258,7 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> ScanRespo
             max_retries=3,
             skip_ssl_verify=skip_ssl_verify,
             show_analysis_results=_should_show_analysis_results(args),
+            agent_scan_config=agent_scan_config,
         )
         push_args = PushArgs(
             control_servers=control_servers,

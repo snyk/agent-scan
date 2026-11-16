@@ -22,8 +22,10 @@ from agent_scan.models import (
     TokenAndClientInfo,
 )
 from agent_scan.redact import redact_inspected_path
+from agent_scan.remote_discovery.builder import build_clients
+from agent_scan.remote_discovery.client import run_remote_discovery
 from agent_scan.utils import get_readable_home_directories
-from agent_scan.verify_api import analyze_machine
+from agent_scan.verify_api import AgentScanConfig, analyze_machine
 from agent_scan.well_known_clients import get_well_known_clients
 
 logger = logging.getLogger(__name__)
@@ -46,6 +48,7 @@ class AnalyzeArgs(BaseModel):
     max_retries: int = 3
     skip_ssl_verify: bool = False
     show_analysis_results: bool = False
+    agent_scan_config: AgentScanConfig | None = None
 
 
 class PushArgs(BaseModel):
@@ -130,22 +133,52 @@ async def discover_clients_to_inspect(
                 if cti is None:
                     continue
                 cti.username = username
-                existing = next(
-                    (c for c in clients_to_inspect if c.name == cti.name and c.username == cti.username),
-                    None,
-                )
-                if existing is None:
-                    clients_to_inspect.append(cti)
-                else:
-                    # Dict union: legacy keys first (insertion order), ABC keys appended.
-                    # ABC values win on key collision (e.g., both phases emit a server
-                    # under ``~/.claude.json``). Distinct keys from each phase coexist
-                    # — same-name servers under different keys are kept as separate
-                    # registrations (e.g., the same ``github`` server configured in
-                    # two projects must both reach the inspector).
-                    existing.mcp_configs = {**existing.mcp_configs, **cti.mcp_configs}
-                    existing.skills_dirs = {**existing.skills_dirs, **cti.skills_dirs}
+                _merge_client(clients_to_inspect, cti)
 
+    return clients_to_inspect, unresolved_paths, _scanned_usernames(clients_to_inspect, inspect_args, all_usernames)
+
+
+def _merge_client(clients_to_inspect: list[ClientToInspect], cti: ClientToInspect) -> None:
+    """Add ``cti``, or union it into the entry with the same (name, username)."""
+    existing = next(
+        (c for c in clients_to_inspect if c.name == cti.name and c.username == cti.username),
+        None,
+    )
+    if existing is None:
+        clients_to_inspect.append(cti)
+        return
+    # Dict union: existing keys first (insertion order), new keys appended.
+    # New values win on key collision (e.g., both phases emit a server
+    # under ``~/.claude.json``). Distinct keys from each source coexist
+    # — same-name servers under different keys are kept as separate
+    # registrations (e.g., the same ``github`` server configured in
+    # two projects must both reach the inspector).
+    existing.mcp_configs = {**existing.mcp_configs, **cti.mcp_configs}
+    existing.skills_dirs = {**existing.skills_dirs, **cti.skills_dirs}
+
+
+def _merge_local_only(
+    clients_to_inspect: list[ClientToInspect],
+    home_dirs_with_users: list[tuple[Path, str]],
+    scope: DiscoveryScope,
+) -> None:
+    """Merge in what backend discovery can't read yet (see ``discover_local_only``)."""
+    for home_directory, username in home_dirs_with_users:
+        for discoverer in find_discoverers(home_directory):
+            try:
+                cti = discoverer.discover_local_only(scope)
+            except Exception:
+                logger.exception("Discoverer %s.discover_local_only() raised; skipping", type(discoverer).__name__)
+                continue
+            if cti is None or not (cti.mcp_configs or cti.skills_dirs):
+                continue
+            cti.username = username
+            _merge_client(clients_to_inspect, cti)
+
+
+def _scanned_usernames(
+    clients_to_inspect: list[ClientToInspect], inspect_args: InspectArgs, all_usernames: list[str]
+) -> list[str]:
     # Only report usernames where an agent was detected in their home directory.
     # When no usernames were associated with detected agents:
     #   - Discovery mode with --scan-all-users: fall back to all readable usernames.
@@ -153,13 +186,54 @@ async def discover_clients_to_inspect(
     #     to avoid disclosing unrelated usernames on the machine.
     detected_usernames: list[str] = sorted({cti.username for cti in clients_to_inspect if cti.username is not None})
     if detected_usernames:
-        scanned_usernames = detected_usernames
-    elif not inspect_args.paths and inspect_args.all_users:
-        scanned_usernames = all_usernames
-    else:
-        scanned_usernames = [getpass.getuser()]
+        return detected_usernames
+    if not inspect_args.paths and inspect_args.all_users:
+        return all_usernames
+    return [getpass.getuser()]
 
-    return clients_to_inspect, unresolved_paths, scanned_usernames
+
+def supports_remote_discovery(inspect_args: InspectArgs) -> bool:
+    """Backend discovery only covers whole-machine discovery, not explicit paths or target folders."""
+    return not inspect_args.paths and not inspect_args.target_folders
+
+
+async def discover_clients_remotely(
+    inspect_args: InspectArgs,
+    discovery_url: str,
+    push_key: str,
+    cli_version: str | None = None,
+    skip_ssl_verify: bool = False,
+) -> tuple[list[ClientToInspect], list[InspectedPath], list[str]] | None:
+    """``discover_clients_to_inspect`` through the coding-agent-discovery service.
+
+    Returns None if the backend fails, so the caller can run legacy discovery instead.
+    """
+    try:
+        remote = await run_remote_discovery(
+            discovery_url,
+            scope=inspect_args.discovery_scope.value,
+            push_key=push_key,
+            cli_version=cli_version,
+            all_users=inspect_args.all_users,
+            skip_ssl_verify=skip_ssl_verify,
+        )
+        clients_to_inspect = build_clients(remote.found)
+    except Exception as e:
+        # Includes malformed responses (KeyError/TypeError), not just transport errors.
+        logger.warning("Remote discovery failed (%s: %s); using local discovery.", type(e).__name__, e)
+        return None
+    logger.info(
+        "Remote discovery: %d clients, %d rounds, %d ops, %.2fs, partial=%s",
+        len(clients_to_inspect),
+        remote.rounds,
+        remote.ops,
+        remote.duration_s,
+        remote.partial,
+    )
+    home_dirs_with_users = get_readable_home_directories(all_users=inspect_args.all_users)
+    _merge_local_only(clients_to_inspect, home_dirs_with_users, inspect_args.discovery_scope)
+    all_usernames = [username for _path, username in home_dirs_with_users]
+    return clients_to_inspect, [], _scanned_usernames(clients_to_inspect, inspect_args, all_usernames)
 
 
 async def inspect_pipeline(
@@ -245,6 +319,7 @@ async def inspect_analyze_push_pipeline(
         scan_context=scan_context,
         scanned_usernames=scanned_usernames,
         show_analysis_results=analyze_args.show_analysis_results,
+        agent_scan_config=analyze_args.agent_scan_config,
     )
 
     return response

@@ -12,6 +12,7 @@ import pytest
 
 from agent_scan.cli import run_scan
 from agent_scan.models import ClientToInspect, ControlServer, InspectedPath, ScanResponse, StdioServer
+from agent_scan.verify_api import AgentScanConfig
 
 
 def _push_key_scan_args(**overrides) -> Namespace:
@@ -78,6 +79,7 @@ class TestControlServerPushKeySkipsConsent:
 
         with (
             patch("agent_scan.cli.collect_consent") as mock_consent,
+            patch("agent_scan.cli.fetch_agent_scan_config", new=AsyncMock(return_value=AgentScanConfig())),
             patch(
                 "agent_scan.cli.discover_clients_to_inspect",
                 new=AsyncMock(return_value=(_fake_client_with_stdio(), [], [])),
@@ -108,6 +110,7 @@ class TestControlServerPushKeySkipsConsent:
 
         with (
             patch("agent_scan.cli.collect_consent") as mock_consent,
+            patch("agent_scan.cli.fetch_agent_scan_config", new=AsyncMock(return_value=AgentScanConfig())),
             patch(
                 "agent_scan.cli.discover_clients_to_inspect",
                 new=AsyncMock(return_value=(_fake_client_with_stdio(), [], [])),
