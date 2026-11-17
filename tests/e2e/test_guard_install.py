@@ -96,7 +96,9 @@ def _scripts_dir(config_file: Path) -> Path:
     return config_file.parent if config_file.parent.name == "hooks" else config_file.parent / "hooks"
 
 
-def _install(agent_scan_cmd, agent_scan_command, client: str, config_file: Path, url: str) -> None:
+def _install(
+    agent_scan_cmd, agent_scan_command, client: str, config_file: Path, url: str, machine_id: str = "e2e-machine-id"
+) -> None:
     result = _run_cli(
         agent_scan_cmd,
         "guard",
@@ -107,7 +109,7 @@ def _install(agent_scan_cmd, agent_scan_command, client: str, config_file: Path,
         "--url",
         url,
         "--machine-id",
-        "e2e-machine-id",
+        machine_id,
         env=_guard_env(PUSH_KEY="test-pk-e2e", AGENT_SCAN_COMMAND=str(agent_scan_command)),
     )
     assert result.returncode == 0, f"guard install failed:\n{_describe(result)}"
@@ -371,6 +373,29 @@ class TestGuardUninstallE2E:
         again = _uninstall(agent_scan_cmd, client, config_file)
         assert "No Agent Guard hooks found" in again.stdout
         assert config_file.read_text() == content
+
+    @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
+    @pytest.mark.parametrize(("client", "config_name", "user_hook", "event"), CLIENT_CASES)
+    def test_reinstall_with_new_machine_id_backs_up_user_config(
+        self, agent_scan_cmd, agent_scan_command, tmp_path, fake_hook_server, client, config_name, user_hook, event
+    ):
+        config_file = tmp_path / config_name
+        config_file.parent.mkdir(parents=True, exist_ok=True)
+        seeded: dict = {"hooks": {event: [user_hook]}}
+        if client in {"cursor", "github-copilot"}:
+            seeded = {"version": 1, **seeded}
+        config_file.write_text(json.dumps(seeded))
+
+        _install(agent_scan_cmd, agent_scan_command, client, config_file, fake_hook_server, "machine-1")
+        # The re-install rewrites Guard's previous config; the backup is that config minus Guard.
+        _install(agent_scan_cmd, agent_scan_command, client, config_file, fake_hook_server, "machine-2")
+        assert "machine-2" in config_file.read_text()
+        backup = Path(f"{config_file}.backup")
+        assert json.loads(backup.read_text()) == seeded
+
+        _uninstall(agent_scan_cmd, client, config_file)
+        assert json.loads(config_file.read_text()) == seeded
+        assert json.loads(backup.read_text()) == seeded
 
     @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
     @pytest.mark.parametrize(("client", "config_name", "user_hook", "event"), CLIENT_CASES)

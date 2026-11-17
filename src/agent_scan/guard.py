@@ -567,7 +567,7 @@ def _write_client_config(
         assert prepared_content is not None
         return _write_codex_managed_config(prepared_content, config_path)
     assert prepared_config is not None
-    changed = _write_config(prepared_config, config_path, preserved)
+    changed = _write_config(prepared_config, config_path, preserved, client=client)
     if _is_copilot_policy_path(config_path):
         # Applied whether or not the config changed: an already-present file may have
         # been written with a permissive umask, in which case Copilot ignores it.
@@ -809,9 +809,9 @@ def _prepare_claude_config(
     return settings, diff, preserved
 
 
-def _write_config(config: dict, path: Path, preserved: int) -> bool:
-    """Write a client config to disk. Returns True if the file changed."""
-    if not _write_json_if_changed(path, config):
+def _write_config(config: dict, path: Path, preserved: int, *, client: str) -> bool:
+    """Write *client*'s JSON config to disk. Returns True if the file changed."""
+    if not _write_json_if_changed(path, config, client=client):
         return False
     rich.print(f"[green]\u2713[/green]  Written [dim]{path}[/dim]{_preserved_note(preserved)}")
     return True
@@ -1483,10 +1483,17 @@ def _write_codex_managed_config(content: str, path: Path) -> bool:
     if path.exists() and _read_codex_requirements_text(path) == content:
         return False
     if path.exists():
-        _backup_file(path)
+        _backup_file(path, lambda: _codex_requirements_without_guard(path), newline="")
     _atomic_write_text(path, content, newline="")
     rich.print(f"[green]✓[/green]  Written [dim]{path}[/dim]")
     return True
+
+
+def _codex_requirements_without_guard(path: Path) -> str | None:
+    """requirements.toml at ``path`` without Agent Guard, or None if it has no Guard entries."""
+    text = _read_codex_requirements_text(path)
+    stripped = _strip_guard_from_codex_requirements(text, path)
+    return None if stripped == text else stripped
 
 
 def _is_discover_hook_command(command: str) -> bool:
@@ -1591,11 +1598,7 @@ def _uninstall_single_client(client: str, args, managed: bool) -> None:
     if client == "codex" and _is_codex_requirements_toml(config_path):
         _uninstall_codex_managed(config_path)
     elif client in ALL_CLIENTS:
-        _uninstall_hooks(
-            config_path,
-            filter_hooks=_uninstall_filter_for(client),
-            prune_empty_hooks=client != "cursor",
-        )
+        _uninstall_hooks(config_path, client=client)
 
     # Remove hook script
     _remove_hook_script(client, config_path)
@@ -1632,33 +1635,50 @@ def _try_revoke_push_key(info: dict, label: str) -> None:
         rich.print(f"[yellow]Warning:[/yellow] Could not revoke push key: {e}")
 
 
-def _uninstall_hooks(
-    path: Path,
-    *,
-    filter_hooks: Callable[[dict], dict],
-    prune_empty_hooks: bool,
-) -> None:
+def _strip_guard_from_json_config(data: dict, client: str) -> dict:
+    """Return *client*'s JSON config ``data`` with every Agent Guard hook removed.
+
+    Pure: ``data`` is not modified. This is exactly what uninstall leaves in the
+    file, and what the install backup holds when the file already has Guard hooks.
+    Hook entries are matched by _uninstall_filter_for(client). When nothing is
+    removed, the result equals ``data``. When the last hook goes,
+    the ``hooks`` key is dropped, except for Cursor, which keeps ``"hooks": {}``.
+
+    Raises AttributeError/TypeError if ``hooks`` or its entries have an
+    unexpected shape.
+    """
+    hooks = data.get("hooks", {})
+    filtered = _uninstall_filter_for(client)(hooks)
+    if _count_hook_groups(filtered) == _count_hook_groups(hooks):
+        # The filters only drop whole entries (and the event lists they empty),
+        # so equal counts mean no Guard hook was found.
+        return data
+    result = dict(data)
+    if filtered or client == "cursor":
+        result["hooks"] = filtered
+    else:
+        del result["hooks"]
+    return result
+
+
+def _count_hook_groups(hooks: dict) -> int:
+    return sum(len(groups) for groups in hooks.values())
+
+
+def _uninstall_hooks(path: Path, *, client: str) -> None:
     if not path.exists():
         rich.print(f"[dim]No {path.name} found. Nothing to uninstall.[/dim]")
         return
 
     data = _read_json_or_empty(path)
-    hooks = data.get("hooks", {})
-
-    total_before = sum(len(groups) for groups in hooks.values())
-    filtered = filter_hooks(hooks)
-    total_after = sum(len(groups) for groups in filtered.values())
-
-    removed = total_before - total_after
-    if removed == 0:
+    stripped = _strip_guard_from_json_config(data, client)
+    if stripped == data:
         rich.print("[dim]No Agent Guard hooks found.[/dim]")
         return
 
-    if filtered or not prune_empty_hooks:
-        data["hooks"] = filtered
-    else:
-        data.pop("hooks", None)
-    _write_json(path, data)
+    total_after = _count_hook_groups(stripped.get("hooks", {}))
+    removed = _count_hook_groups(data.get("hooks", {})) - total_after
+    _write_json(path, stripped)
     rich.print(f"[green]\u2713[/green]  Removed {removed} Agent Guard hook(s){_preserved_note(total_after)}")
 
 
@@ -2615,11 +2635,37 @@ def _remove_hook_script(client: str, config_path: Path) -> None:
             rich.print(f"[green]\u2713[/green]  Removed hook script [dim]{dest}[/dim]")
 
 
-def _backup_file(path: Path) -> None:
-    if path.exists():
-        backup = Path(str(path) + ".backup")
+def _backup_file(path: Path, guard_free_content: Callable[[], str | None], *, newline: str | None = None) -> None:
+    """Back up ``path`` to ``<path>.backup`` before install rewrites it.
+
+    The backup never holds Agent Guard config (its PUSH_KEY in particular):
+
+    - ``guard_free_content()`` returns None when the file has no Guard entries:
+      the backup is a byte copy of the file.
+    - It returns the file's content with Guard removed (what uninstall would
+      leave) when the file has Guard entries, e.g. on a re-install: that text is
+      written atomically, with the live file's permission bits (and ``newline``, see
+      _atomic_write_text).
+    - If it raises ValueError (including CodexRequirementsError and JSON/UTF-8
+      decode errors), TypeError or AttributeError, no backup is written, any
+      existing backup is left as is, and a warning is printed.
+    """
+    if not path.exists():
+        return
+    backup = Path(str(path) + ".backup")
+    try:
+        content = guard_free_content()
+    except (ValueError, TypeError, AttributeError) as exc:
+        rich.print(
+            f"[yellow]Warning:[/yellow] Not backing up {path}: could not remove the Agent Guard "
+            f"config from the copy ({exc}). Any existing {backup.name} is left unchanged."
+        )
+        return
+    if content is None:
         shutil.copy2(path, backup)
-        rich.print(f"[green]\u2713[/green]  Backed up [dim]{path}[/dim] \u2192 [dim]{backup}[/dim]")
+    else:
+        _atomic_write_text(backup, content, mode=stat.S_IMODE(path.stat().st_mode), newline=newline)
+    rich.print(f"[green]\u2713[/green]  Backed up [dim]{path}[/dim] \u2192 [dim]{backup}[/dim]")
 
 
 def _create_sibling_temp_file(target: Path, mode: int) -> tuple[int, Path]:
@@ -2639,7 +2685,7 @@ def _create_sibling_temp_file(target: Path, mode: int) -> tuple[int, Path]:
     raise FileExistsError(f"Could not create a temporary file next to {target}")
 
 
-def _atomic_write_text(path: Path, content: str, *, newline: str | None = None) -> None:
+def _atomic_write_text(path: Path, content: str, *, mode: int | None = None, newline: str | None = None) -> None:
     """Replace ``path`` with ``content`` (UTF-8) atomically.
 
     The content goes to a temp file in the target's directory, is fsynced, and
@@ -2654,7 +2700,8 @@ def _atomic_write_text(path: Path, content: str, *, newline: str | None = None) 
       ``newline=""`` writes ``content`` as is.
     - An existing target keeps its permission bits (POSIX) and, when running
       as root, its owner and group (best effort). A new file gets the usual
-      umask-based permissions.
+      umask-based permissions. ``mode``, if given, sets the permission bits
+      instead (POSIX); the content is never readable beyond them, even briefly.
     - Limitation: nothing else carries over, because the target becomes a new
       file. ACLs, extended attributes (e.g. a hand-set SELinux label) and file
       flags are lost, the file gets its directory's inherited ACL, and other
@@ -2669,14 +2716,18 @@ def _atomic_write_text(path: Path, content: str, *, newline: str | None = None) 
     except FileNotFoundError:
         existing = None
 
-    # Start private when replacing an existing file; copymode below restores its bits.
-    fd, tmp = _create_sibling_temp_file(target, 0o600 if existing is not None else 0o666)
+    # Start private when replacing an existing file or setting a mode; the chmod below sets the bits.
+    private = existing is not None or mode is not None
+    fd, tmp = _create_sibling_temp_file(target, 0o600 if private else 0o666)
     try:
-        if existing is not None and not IS_WINDOWS:
+        if not IS_WINDOWS:
             # On Windows chmod only toggles the read-only flag; copying it would
             # make the temp file impossible to clean up if os.replace fails.
-            shutil.copymode(target, tmp)
-            if hasattr(os, "geteuid") and os.geteuid() == 0:
+            if mode is not None:
+                os.chmod(tmp, mode)
+            elif existing is not None:
+                shutil.copymode(target, tmp)
+            if existing is not None and hasattr(os, "geteuid") and os.geteuid() == 0:
                 with contextlib.suppress(OSError):
                     os.chown(tmp, existing.st_uid, existing.st_gid)
         with os.fdopen(fd, "w", encoding="utf-8", newline=newline) as f:
@@ -2728,16 +2779,26 @@ def _read_json_or_empty(path: Path) -> dict:
         return json.load(f)
 
 
-def _write_json_if_changed(path: Path, data: dict) -> bool:
-    """Write JSON to path only if content differs. Backs up before writing. Returns True if written."""
+def _write_json_if_changed(path: Path, data: dict, *, client: str) -> bool:
+    """Write *client*'s JSON config to path only if content differs. Returns True if written.
+
+    The current file is backed up first, without any Agent Guard hooks (see _backup_file).
+    """
     new_content = _dump_config_json(data)
     if path.exists():
         old_content = path.read_text(encoding="utf-8")
         if old_content == new_content:
             return False
-        _backup_file(path)
+        _backup_file(path, lambda: _json_config_without_guard(path, client))
     _atomic_write_text(path, new_content)
     return True
+
+
+def _json_config_without_guard(path: Path, client: str) -> str | None:
+    """*client*'s JSON config at ``path`` without Agent Guard, or None if it has no Guard hooks."""
+    data = _read_json_or_empty(path)
+    stripped = _strip_guard_from_json_config(data, client)
+    return None if stripped == data else _dump_config_json(stripped)
 
 
 def _write_json(path: Path, data: dict) -> None:
