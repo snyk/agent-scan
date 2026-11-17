@@ -2261,6 +2261,24 @@ def _atomic_write_text(path: Path, content: str) -> None:
                 os.close(dir_fd)
 
 
+_LONE_SURROGATE_RE = re.compile("[\ud800-\udfff]")
+
+
+def _dump_config_json(data: dict) -> str:
+    """Serialise a user's agent config for writing back to disk.
+
+    Non-ASCII characters are written as-is, so a user's ``"café ☕"`` stays
+    readable after install/uninstall instead of becoming ``\\u`` escapes.
+
+    The one exception is a lone surrogate: ``json.load`` accepts ``"\\ud800"``,
+    but the resulting character cannot be encoded as UTF-8, so the write would
+    fail. Such characters are re-escaped (they can only occur inside JSON
+    strings), which keeps the file valid UTF-8 and loads back to the same value.
+    """
+    content = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
+    return _LONE_SURROGATE_RE.sub(lambda m: f"\\u{ord(m.group()):04x}", content)
+
+
 def _read_json_or_empty(path: Path) -> dict:
     if not path.exists():
         return {}
@@ -2270,7 +2288,7 @@ def _read_json_or_empty(path: Path) -> dict:
 
 def _write_json_if_changed(path: Path, data: dict) -> bool:
     """Write JSON to path only if content differs. Backs up before writing. Returns True if written."""
-    new_content = json.dumps(data, indent=2) + "\n"
+    new_content = _dump_config_json(data)
     if path.exists():
         old_content = path.read_text(encoding="utf-8")
         if old_content == new_content:
@@ -2281,7 +2299,7 @@ def _write_json_if_changed(path: Path, data: dict) -> bool:
 
 
 def _write_json(path: Path, data: dict) -> None:
-    _atomic_write_text(path, json.dumps(data, indent=2) + "\n")
+    _atomic_write_text(path, _dump_config_json(data))
 
 
 def _preserved_note(count: int) -> str:

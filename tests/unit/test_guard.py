@@ -1201,6 +1201,74 @@ class TestAtomicConfigWrites:
         assert path.read_bytes().decode("utf-8").replace("\r\n", "\n") == content
 
 
+def _prepare_user_json_config(client: str, path: Path) -> tuple[dict, int]:
+    """Prepare a user-level JSON install for *client*: (new_config, preserved)."""
+    prepare, command = {
+        "claude": (_prepare_claude_config, AGENT_SCAN_CMD),
+        "cursor": (_prepare_cursor_config, CURSOR_AGENT_SCAN_CMD),
+        "codex": (_prepare_codex_config, CODEX_AGENT_SCAN_CMD),
+    }[client]
+    config, _, preserved = prepare(command, path)
+    return config, preserved
+
+
+_NON_ASCII_USER_VALUES = {
+    "theme": "caf\u00e9 \u2615",
+    "\u540d\u524d": "\u30c6\u30b9\u30c8",
+    "emoji": "\U0001f600",
+}
+
+
+class TestNonAsciiConfigRoundTrip:
+    """Rewritten configs keep the user's non-ASCII text literal, not as \\u escapes."""
+
+    @staticmethod
+    def _read_text(path: Path) -> str:
+        return path.read_bytes().decode("utf-8")
+
+    def _assert_user_values_literal(self, path: Path) -> None:
+        text = self._read_text(path)
+        assert "\\u" not in text
+        for key, value in _NON_ASCII_USER_VALUES.items():
+            assert key in text
+            assert value in text
+        data = json.loads(text)
+        for key, value in _NON_ASCII_USER_VALUES.items():
+            assert data[key] == value
+
+    @pytest.mark.parametrize("client", ["claude", "cursor", "codex"])
+    def test_install_then_uninstall_keeps_non_ascii_literal(self, tmp_path, client):
+        path = tmp_path / "config.json"
+        path.write_bytes((json.dumps(_NON_ASCII_USER_VALUES, indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
+
+        config, preserved = _prepare_user_json_config(client, path)
+        assert _write_config(config, path, preserved) is True
+        self._assert_user_values_literal(path)
+
+        # Re-installing compares against the literal text on disk, so it is a no-op.
+        config, preserved = _prepare_user_json_config(client, path)
+        assert _write_config(config, path, preserved) is False
+
+        _uninstall_test_client(client, path)
+        self._assert_user_values_literal(path)
+        assert not json.loads(self._read_text(path)).get("hooks")
+
+    @pytest.mark.parametrize("client", ["claude", "cursor", "codex"])
+    def test_lone_surrogate_stays_escaped_and_does_not_crash(self, tmp_path, client):
+        # A lone surrogate cannot be encoded as UTF-8, so it must be written back
+        # as an escape; the rest of the file still keeps its literal characters.
+        path = tmp_path / "config.json"
+        path.write_bytes('{\n  "note": "\\ud800 caf\u00e9"\n}\n'.encode())
+
+        config, preserved = _prepare_user_json_config(client, path)
+        _write_config(config, path, preserved)
+        _uninstall_test_client(client, path)
+
+        text = self._read_text(path)
+        assert '"note": "\\ud800 caf\u00e9"' in text
+        assert json.loads(text)["note"] == "\ud800 caf\u00e9"
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX discovery script")
 class TestDiscoveryHookScriptFiles:
     def test_copy_writes_executable_discovery_script_next_to_forwarder(self, tmp_path):
