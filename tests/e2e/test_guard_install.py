@@ -358,14 +358,16 @@ class TestGuardUninstallE2E:
 
         _install(agent_scan_cmd, agent_scan_command, client, config_file, fake_hook_server)
         assert "snyk-agent-guard" in config_file.read_text()
+        # Install backed up the seeded user config under Guard's own backup name.
+        assert Path(f"{config_file}.snyk-agent-guard.backup").read_text() == seeded_text
 
         result = _uninstall(agent_scan_cmd, client, config_file)
         content = config_file.read_text()
         assert "snyk-agent-guard" not in content
         assert json.loads(content)["hooks"] == {event: [user_hook]}
         _assert_scripts_removed(config_file)
-        # Install's backup of the seeded user config survives uninstall.
-        assert Path(f"{config_file}.backup").read_text() == seeded_text
+        # Uninstall removes Guard's backup once the file is Guard-free.
+        assert not Path(f"{config_file}.snyk-agent-guard.backup").exists()
         assert "was not revoked" in result.stdout
         assert _FakeHookServer.deletes == []
 
@@ -390,12 +392,12 @@ class TestGuardUninstallE2E:
         # The re-install rewrites Guard's previous config; the backup is that config minus Guard.
         _install(agent_scan_cmd, agent_scan_command, client, config_file, fake_hook_server, "machine-2")
         assert "machine-2" in config_file.read_text()
-        backup = Path(f"{config_file}.backup")
+        backup = Path(f"{config_file}.snyk-agent-guard.backup")
         assert json.loads(backup.read_text()) == seeded
 
         _uninstall(agent_scan_cmd, client, config_file)
         assert json.loads(config_file.read_text()) == seeded
-        assert json.loads(backup.read_text()) == seeded
+        assert not backup.exists()
 
     @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
     @pytest.mark.parametrize(("client", "config_name", "user_hook", "event"), CLIENT_CASES)

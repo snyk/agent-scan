@@ -127,6 +127,11 @@ def _write(path: Path, data) -> None:
     path.write_text(json.dumps(data, indent=2) + "\n")
 
 
+def _guard_backup(path: Path) -> Path:
+    """Where install backs up ``path`` (Guard's own name, unlike a plain ``.backup``)."""
+    return Path(f"{path}.snyk-agent-guard.backup")
+
+
 def _setup_claude_hooks(cmd: str, path: Path) -> None:
     settings, _, preserved = _prepare_claude_config(cmd, path)
     _write_config(settings, path, preserved, client="claude")
@@ -1035,7 +1040,7 @@ class TestWriteConfig:
         assert _write_config(config, path, 0, client="cursor") is False
 
         assert capsys.readouterr().out == ""
-        assert not Path(f"{path}.backup").exists()
+        assert not _guard_backup(path).exists()
 
     def test_returns_true_and_backs_up_when_content_changed(self, tmp_path, capsys):
         path = tmp_path / "hooks.json"
@@ -1046,7 +1051,7 @@ class TestWriteConfig:
 
         assert _write_config(updated, path, 0, client="cursor") is True
 
-        backup = Path(f"{path}.backup")
+        backup = _guard_backup(path)
         assert json.loads(backup.read_text()) == original
         assert json.loads(path.read_text()) == updated
         output = capsys.readouterr().out
@@ -3620,7 +3625,7 @@ class TestCodexRequirementsInPlace:
         path = tmp_path / "requirements.toml"
         path.write_text(_CODEX_ADMIN_POLICY, encoding="utf-8")
         _codex_managed_install(path, discover_command=CODEX_DISCOVER_CMD)
-        Path(f"{path}.backup").unlink()
+        _guard_backup(path).unlink()
         installed = path.read_bytes()
 
         content, diff = _prepare_codex_managed_config(CODEX_AGENT_SCAN_CMD, path, discover_command=CODEX_DISCOVER_CMD)
@@ -3630,7 +3635,7 @@ class TestCodexRequirementsInPlace:
         write.assert_not_called()
         assert diff == {"added": {}, "modified": {}, "removed": {}}
         assert path.read_bytes() == installed
-        assert not Path(f"{path}.backup").exists()
+        assert not _guard_backup(path).exists()
 
     def test_reinstall_with_new_push_key_changes_only_guard_command_lines(self, tmp_path):
         path = tmp_path / "requirements.toml"
@@ -8465,7 +8470,7 @@ class TestInstallBackupWithoutGuard:
 
         assert self._install(client, path)
 
-        assert Path(f"{path}.backup").read_bytes() == original
+        assert _guard_backup(path).read_bytes() == original
         assert "PUSH_KEY" in path.read_text(encoding="utf-8")
 
     @pytest.mark.parametrize("client", _BACKUP_JSON_CLIENTS)
@@ -8477,7 +8482,7 @@ class TestInstallBackupWithoutGuard:
 
         assert self._install(client, path, "pk-second")
 
-        backup_text = Path(f"{path}.backup").read_text(encoding="utf-8")
+        backup_text = _guard_backup(path).read_text(encoding="utf-8")
         assert json.loads(backup_text) == user_config
         assert "pk-second" in path.read_text(encoding="utf-8")
         # Invariant: the backup is exactly what uninstall leaves in the previous file.
@@ -8497,7 +8502,7 @@ class TestInstallBackupWithoutGuard:
 
         assert self._install(client, path, "pk-second")
 
-        backup = json.loads(Path(f"{path}.backup").read_text(encoding="utf-8"))
+        backup = json.loads(_guard_backup(path).read_text(encoding="utf-8"))
         assert backup == guard_module._strip_guard_from_json_config(backup, client)
         assert not backup.get("hooks")
 
@@ -8505,7 +8510,7 @@ class TestInstallBackupWithoutGuard:
     def test_identical_reinstall_writes_nothing(self, tmp_path, client):
         path = self._seed(client, tmp_path)
         self._install(client, path)
-        backup = Path(f"{path}.backup")
+        backup = _guard_backup(path)
         backup_bytes = backup.read_bytes()
         live_bytes = path.read_bytes()
 
@@ -8524,7 +8529,7 @@ class TestInstallBackupWithoutGuard:
         path = self._seed(client, tmp_path)
         path.chmod(0o600)
         self._install(client, path, "pk-first")
-        backup = Path(f"{path}.backup")
+        backup = _guard_backup(path)
         assert stat.S_IMODE(backup.stat().st_mode) == 0o600
         if existing_backup_mode is None:
             backup.unlink()
@@ -8575,7 +8580,7 @@ class TestCodexRequirementsInstallBackup:
         with patch(f"{_G}.rich"):
             assert self._install(path)
 
-        assert Path(f"{path}.backup").read_bytes() == original
+        assert _guard_backup(path).read_bytes() == original
 
     def test_first_install_backup_keeps_admins_dirs_equal_to_guards(self, tmp_path):
         path = tmp_path / "requirements.toml"
@@ -8585,7 +8590,7 @@ class TestCodexRequirementsInstallBackup:
         with patch(f"{_G}.rich"):
             assert self._install(path)
 
-        assert Path(f"{path}.backup").read_bytes() == original
+        assert _guard_backup(path).read_bytes() == original
 
     @pytest.mark.parametrize(
         "policy", [_CODEX_ADMIN_POLICY, _CODEX_POLICY_WITHOUT_HOOKS], ids=["with-hooks", "without-hooks"]
@@ -8602,7 +8607,7 @@ class TestCodexRequirementsInstallBackup:
 
             assert self._install(path, "pk-second")
 
-        backup_text = Path(f"{path}.backup").read_text(encoding="utf-8")
+        backup_text = _guard_backup(path).read_text(encoding="utf-8")
         assert backup_text == _strip_guard_from_codex_requirements(previous, path)
         assert backup_text.startswith(policy)
         if policy == _CODEX_POLICY_WITHOUT_HOOKS:
@@ -8615,7 +8620,7 @@ class TestCodexRequirementsInstallBackup:
         path.write_text(_CODEX_ADMIN_POLICY, encoding="utf-8")
         with patch(f"{_G}.rich"):
             self._install(path)
-        backup = Path(f"{path}.backup")
+        backup = _guard_backup(path)
         backup_bytes = backup.read_bytes()
 
         with patch(f"{_G}._backup_file") as backup_file, patch(f"{_G}._atomic_write_text") as write:
@@ -8631,7 +8636,7 @@ class TestCodexRequirementsInstallBackup:
         path = tmp_path / "requirements.toml"
         path.write_text(_CODEX_ADMIN_POLICY, encoding="utf-8")
         path.chmod(0o600)
-        backup = Path(f"{path}.backup")
+        backup = _guard_backup(path)
         with patch(f"{_G}.rich"):
             self._install(path, "pk-first")
             if existing_backup_mode is None:
@@ -8682,12 +8687,13 @@ class TestReinstallBackupRepro:
             patch(f"{_G}.rich"),
         ):
             self._install(client, path, "machine-1")
-            assert Path(f"{path}.backup").read_bytes() == user_bytes
+            assert _guard_backup(path).read_bytes() == user_bytes
             self._install(client, path, "machine-2")
             assert "MACHINE_ID='machine-2'" in path.read_text(encoding="utf-8")
+            assert json.loads(_guard_backup(path).read_text(encoding="utf-8")) == user_config
             guard_module._uninstall_single_client(client, SimpleNamespace(file=str(path)), managed=False)
 
-        assert json.loads(Path(f"{path}.backup").read_text(encoding="utf-8")) == user_config
+        assert not _guard_backup(path).exists()
         assert json.loads(path.read_text(encoding="utf-8")) == user_config
 
     def test_codex_requirements_reinstall_with_new_machine_id_then_uninstall(self, tmp_path, monkeypatch):
@@ -8703,7 +8709,246 @@ class TestReinstallBackupRepro:
             self._install("codex", path, "machine-1")
             self._install("codex", path, "machine-2")
             assert "MACHINE_ID='machine-2'" in path.read_text(encoding="utf-8")
+            backup_text = _guard_backup(path).read_text(encoding="utf-8")
+            assert backup_text.startswith(_CODEX_ADMIN_POLICY)
             guard_module._uninstall_single_client("codex", SimpleNamespace(file=str(path)), managed=True)
 
-        backup_text = Path(f"{path}.backup").read_text(encoding="utf-8")
-        assert backup_text.startswith(_CODEX_ADMIN_POLICY)
+        assert not _guard_backup(path).exists()
+        assert path.read_text(encoding="utf-8").startswith(_CODEX_ADMIN_POLICY)
+
+
+# ===================================================================
+# Install backups have Guard's own name; uninstall removes only Guard's backups
+# ===================================================================
+
+_FOREIGN_BACKUP = b'{"written by": "another tool"}\r\n'
+_CODEX_TOML_CASE = "codex-requirements"
+_BACKUP_ALL_CASES = [*_BACKUP_JSON_CLIENTS, _CODEX_TOML_CASE]
+
+
+def _legacy_guard_backup_text(client: str, path: Path) -> str:
+    """What an older Guard version left in ``<path>.backup``: a copy of the file with Guard's hooks."""
+    if client == _CODEX_TOML_CASE:
+        return guard_module._render_codex_requirements_toml(CODEX_AGENT_SCAN_CMD, path)
+    _, prepare, command, user_config = _BACKUP_JSON_CASES[client]
+    scratch = path.parent / "legacy-scratch" / path.name
+    _write(scratch, user_config)
+    config, _, _ = prepare(command, scratch)
+    shutil.rmtree(scratch.parent)
+    return guard_module._dump_config_json(config)
+
+
+class TestGuardOwnedBackups:
+    @pytest.fixture(autouse=True)
+    def _quiet_posix(self):
+        with patch(f"{_G}.IS_WINDOWS", False), patch(f"{_G}.rich"):
+            yield
+
+    @staticmethod
+    def _seed(case: str, tmp_path: Path) -> Path:
+        if case == _CODEX_TOML_CASE:
+            path = tmp_path / "requirements.toml"
+            path.write_text(_CODEX_ADMIN_POLICY, encoding="utf-8")
+            return path
+        return TestInstallBackupWithoutGuard._seed(case, tmp_path)
+
+    @staticmethod
+    def _install(case: str, path: Path, push_key: str = "pk-first") -> None:
+        if case == _CODEX_TOML_CASE:
+            content, _ = _prepare_codex_managed_config(_with_push_key(CODEX_AGENT_SCAN_CMD, push_key), path)
+            _write_client_config("codex", path, None, content, 0)
+        else:
+            TestInstallBackupWithoutGuard._install(case, path, push_key)
+
+    @staticmethod
+    def _uninstall(case: str, path: Path) -> None:
+        if case == _CODEX_TOML_CASE:
+            guard_module._uninstall_codex_managed(path)
+        else:
+            _uninstall_test_client(case, path)
+
+    @pytest.mark.parametrize("case", _BACKUP_ALL_CASES)
+    def test_install_writes_the_guard_named_backup(self, tmp_path, case):
+        path = self._seed(case, tmp_path)
+        original = path.read_bytes()
+
+        self._install(case, path)
+
+        assert _guard_backup(path).read_bytes() == original
+        assert guard_module._guard_backup_path(path) == _guard_backup(path)
+
+    @pytest.mark.parametrize("case", _BACKUP_ALL_CASES)
+    def test_foreign_plain_backup_survives_install_reinstall_and_uninstall(self, tmp_path, case):
+        path = self._seed(case, tmp_path)
+        foreign = Path(f"{path}.backup")
+        foreign.write_bytes(_FOREIGN_BACKUP)
+
+        self._install(case, path, "pk-first")
+        self._install(case, path, "pk-second")
+        assert foreign.read_bytes() == _FOREIGN_BACKUP
+        self._uninstall(case, path)
+
+        assert foreign.read_bytes() == _FOREIGN_BACKUP
+
+    @pytest.mark.parametrize("case", _BACKUP_ALL_CASES)
+    def test_uninstall_removes_guard_backup(self, tmp_path, case):
+        path = self._seed(case, tmp_path)
+        self._install(case, path)
+        assert _guard_backup(path).exists()
+
+        with patch(f"{_G}.rich") as mock_rich:
+            self._uninstall(case, path)
+
+        assert not _guard_backup(path).exists()
+        assert not _is_agent_scan_command(path.read_text(encoding="utf-8"))
+        printed = " ".join(str(c.args[0]) for c in mock_rich.print.call_args_list)
+        assert f"[dim]Removed Agent Guard backup {_guard_backup(path)}[/dim]" in printed
+
+    @pytest.mark.parametrize("case", _BACKUP_ALL_CASES)
+    def test_uninstall_finishes_and_warns_when_backup_cannot_be_deleted(self, tmp_path, case):
+        path = self._seed(case, tmp_path)
+        self._install(case, path)
+        backup = _guard_backup(path)
+        real_unlink = Path.unlink
+
+        def unlink(self, *args, **kwargs):
+            if self == backup:
+                raise PermissionError("denied")
+            return real_unlink(self, *args, **kwargs)
+
+        with patch.object(Path, "unlink", unlink), patch(f"{_G}.rich") as mock_rich:
+            self._uninstall(case, path)
+
+        assert not _is_agent_scan_command(path.read_text(encoding="utf-8"))
+        printed = " ".join(str(c.args[0]) for c in mock_rich.print.call_args_list)
+        assert f"Could not remove {backup} (denied); delete it manually." in printed
+
+    @pytest.mark.parametrize("case", _BACKUP_ALL_CASES)
+    def test_uninstall_without_guard_hooks_removes_leftover_guard_backup(self, tmp_path, case):
+        path = self._seed(case, tmp_path)
+        before = path.read_bytes()
+        _guard_backup(path).write_bytes(before)
+
+        self._uninstall(case, path)
+
+        assert not _guard_backup(path).exists()
+        assert path.read_bytes() == before
+
+    @pytest.mark.parametrize("case", _BACKUP_ALL_CASES)
+    def test_uninstall_with_missing_config_removes_leftover_guard_backup(self, tmp_path, case):
+        path = self._seed(case, tmp_path)
+        _guard_backup(path).write_bytes(path.read_bytes())
+        path.unlink()
+
+        self._uninstall(case, path)
+
+        assert not _guard_backup(path).exists()
+
+    @pytest.mark.parametrize("case", _BACKUP_ALL_CASES)
+    def test_legacy_backup_with_guard_command_removed_on_install(self, tmp_path, case):
+        path = self._seed(case, tmp_path)
+        legacy = Path(f"{path}.backup")
+        legacy.write_text(_legacy_guard_backup_text(case, path), encoding="utf-8")
+        assert "PUSH_KEY" in legacy.read_text(encoding="utf-8")
+
+        with patch(f"{_G}.rich") as mock_rich:
+            self._install(case, path)
+
+        assert not legacy.exists()
+        printed = " ".join(str(c.args[0]) for c in mock_rich.print.call_args_list)
+        assert f"Removed old Agent Guard backup {legacy}" in printed
+
+    @pytest.mark.parametrize("case", _BACKUP_ALL_CASES)
+    def test_legacy_backup_with_guard_command_removed_on_up_to_date_install(self, tmp_path, case):
+        path = self._seed(case, tmp_path)
+        self._install(case, path)
+        legacy = Path(f"{path}.backup")
+        legacy.write_text(_legacy_guard_backup_text(case, path), encoding="utf-8")
+
+        self._install(case, path)
+
+        assert not legacy.exists()
+
+    @pytest.mark.parametrize("case", _BACKUP_ALL_CASES)
+    def test_legacy_backup_with_guard_command_removed_on_uninstall(self, tmp_path, case):
+        path = self._seed(case, tmp_path)
+        self._install(case, path)
+        legacy = Path(f"{path}.backup")
+        legacy.write_text(_legacy_guard_backup_text(case, path), encoding="utf-8")
+
+        self._uninstall(case, path)
+
+        assert not legacy.exists()
+        assert not _guard_backup(path).exists()
+
+    def test_legacy_backup_with_powershell_command_removed(self, tmp_path):
+        path = tmp_path / "settings.json"
+        _write(path, {"theme": "dark"})
+        command = guard_module._build_hook_command_powershell(
+            "pk-legacy",
+            "https://api.snyk.io",
+            Path(r"C:\Users\me\.claude\hooks\snyk-agent-guard.ps1"),
+            "claude-code",
+            machine_serial="",
+        )
+        legacy = Path(f"{path}.backup")
+        _write(legacy, {"hooks": {"Stop": [_claude_group(command)]}})
+
+        _uninstall_test_client("claude", path)
+
+        assert not legacy.exists()
+
+    @pytest.mark.parametrize("case", _BACKUP_ALL_CASES)
+    @pytest.mark.parametrize(
+        "content",
+        [
+            _FOREIGN_BACKUP,
+            # Mentions Guard but holds no Guard hook command (no PUSH_KEY).
+            b'{"note": "uninstalled snyk-agent-guard last week"}\n',
+            # Holds the command but is not UTF-8: cannot be checked, so it stays.
+            b"\xff\xfe PUSH_KEY='pk' bash '/h/snyk-agent-guard.sh'\n",
+        ],
+        ids=["foreign", "mentions-guard", "not-utf8"],
+    )
+    def test_legacy_backup_without_readable_guard_command_kept(self, tmp_path, case, content):
+        path = self._seed(case, tmp_path)
+        legacy = Path(f"{path}.backup")
+        legacy.write_bytes(content)
+
+        self._install(case, path)
+        assert legacy.read_bytes() == content
+        self._uninstall(case, path)
+
+        assert legacy.read_bytes() == content
+
+    @pytest.mark.parametrize("client", _BACKUP_JSON_CLIENTS)
+    def test_install_uninstall_cycle_leaves_only_the_original_files(self, tmp_path, monkeypatch, client):
+        monkeypatch.delenv("SNYK_TOKEN", raising=False)
+        path = TestInstallBackupWithoutGuard._seed(client, tmp_path)
+        original_bytes = path.read_bytes()
+        original_files = sorted(p for p in tmp_path.rglob("*") if p.is_file())
+
+        with patch(f"{_G}._send_test_event", return_value=_TEST_EVENT_SENT):
+            TestReinstallBackupRepro._install(client, path, "machine-1")
+            TestReinstallBackupRepro._install(client, path, "machine-2")
+            assert _guard_backup(path).exists()
+            guard_module._uninstall_single_client(client, SimpleNamespace(file=str(path)), managed=False)
+
+        assert sorted(p for p in tmp_path.rglob("*") if p.is_file()) == original_files
+        assert json.loads(path.read_bytes()) == json.loads(original_bytes)
+
+    def test_codex_requirements_install_uninstall_cycle_leaves_only_the_original_files(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("SNYK_TOKEN", raising=False)
+        path = tmp_path / "requirements.toml"
+        path.write_text(_CODEX_ADMIN_POLICY, encoding="utf-8")
+        original_files = sorted(p for p in tmp_path.rglob("*") if p.is_file())
+
+        with patch(f"{_G}._send_test_event", return_value=_TEST_EVENT_SENT):
+            TestReinstallBackupRepro._install("codex", path, "machine-1")
+            TestReinstallBackupRepro._install("codex", path, "machine-2")
+            assert _guard_backup(path).exists()
+            guard_module._uninstall_single_client("codex", SimpleNamespace(file=str(path)), managed=True)
+
+        assert sorted(p for p in tmp_path.rglob("*") if p.is_file()) == original_files
+        # Guard's managed_dir stays while other hooks remain (see _strip_guard_from_codex_requirements).
+        assert path.read_text(encoding="utf-8").startswith(_CODEX_ADMIN_POLICY)

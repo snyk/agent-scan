@@ -71,6 +71,10 @@ _DETECTION_RE = re.compile(
     re.DOTALL,
 )
 _PERMISSION_DENIED = "__permission_denied__"
+# Install backs up a config file to ``<file>`` + this suffix. The name is Guard's own
+# (unlike a plain ``<file>.backup``, which other tools also write), so uninstall can
+# delete it without reading it.
+_GUARD_BACKUP_SUFFIX = ".snyk-agent-guard.backup"
 _STDIN_READ_TIMEOUT_SECONDS = 5.0
 _DISCOVERY_TIMEOUT_SECONDS = 60.0
 _HOOK_SCRIPT_TIMEOUT_SECONDS = 15.0
@@ -565,9 +569,12 @@ def _write_client_config(
         raise ValueError(f"Unknown client: {client}")
     if client == "codex" and _is_codex_requirements_toml(config_path):
         assert prepared_content is not None
-        return _write_codex_managed_config(prepared_content, config_path)
+        changed = _write_codex_managed_config(prepared_content, config_path)
+        _remove_legacy_guard_backup(config_path)
+        return changed
     assert prepared_config is not None
     changed = _write_config(prepared_config, config_path, preserved, client=client)
+    _remove_legacy_guard_backup(config_path)
     if _is_copilot_policy_path(config_path):
         # Applied whether or not the config changed: an already-present file may have
         # been written with a permissive umask, in which case Copilot ignores it.
@@ -1541,13 +1548,20 @@ def _detect_codex_managed_install(path: Path) -> dict | None:
 
 
 def _uninstall_codex_managed(path: Path) -> None:
+    """Remove Agent Guard's entries from requirements.toml at ``path``, then Guard's backups of it.
+
+    The backups are removed only once the file is free of Guard entries; if
+    anything raises first, they are left in place.
+    """
     if not path.exists():
         rich.print("[dim]No requirements.toml found. Nothing to uninstall.[/dim]")
+        _remove_guard_backups(path)
         return
     text = _read_codex_requirements_text(path)
     # Any line, so hooks written with another TOML string form are found too.
     if not any(_is_agent_scan_command(line) for line in text.splitlines()):
         rich.print("[dim]No Agent Guard hooks found.[/dim]")
+        _remove_guard_backups(path)
         return
     events, _, _ = _parse_codex_requirements_toml(text)
     try:
@@ -1562,6 +1576,7 @@ def _uninstall_codex_managed(path: Path) -> None:
     _atomic_write_text(path, new_text, newline="")
     removed = f"{len(events)} Agent Guard hook(s)" if events else "Agent Guard hooks"
     rich.print(f"[green]✓[/green]  Removed {removed} from [dim]{path}[/dim]")
+    _remove_guard_backups(path)
 
 
 # ---------------------------------------------------------------------------
@@ -1666,20 +1681,28 @@ def _count_hook_groups(hooks: dict) -> int:
 
 
 def _uninstall_hooks(path: Path, *, client: str) -> None:
+    """Remove Agent Guard's hooks from *client*'s JSON config at ``path``, then Guard's backups of it.
+
+    The backups are removed only once the file is free of Guard hooks; if
+    anything raises first (e.g. invalid JSON), they are left in place.
+    """
     if not path.exists():
         rich.print(f"[dim]No {path.name} found. Nothing to uninstall.[/dim]")
+        _remove_guard_backups(path)
         return
 
     data = _read_json_or_empty(path)
     stripped = _strip_guard_from_json_config(data, client)
     if stripped == data:
         rich.print("[dim]No Agent Guard hooks found.[/dim]")
+        _remove_guard_backups(path)
         return
 
     total_after = _count_hook_groups(stripped.get("hooks", {}))
     removed = _count_hook_groups(data.get("hooks", {})) - total_after
     _write_json(path, stripped)
     rich.print(f"[green]\u2713[/green]  Removed {removed} Agent Guard hook(s){_preserved_note(total_after)}")
+    _remove_guard_backups(path)
 
 
 # ---------------------------------------------------------------------------
@@ -2635,8 +2658,57 @@ def _remove_hook_script(client: str, config_path: Path) -> None:
             rich.print(f"[green]\u2713[/green]  Removed hook script [dim]{dest}[/dim]")
 
 
+def _guard_backup_path(path: Path) -> Path:
+    """Where install backs up ``path``: ``<path>.snyk-agent-guard.backup``."""
+    return Path(str(path) + _GUARD_BACKUP_SUFFIX)
+
+
+def _remove_guard_backups(path: Path) -> None:
+    """Delete Guard's backups of ``path``. Call only once ``path`` is free of Agent Guard config.
+
+    Removes ``<path>.snyk-agent-guard.backup`` (Guard's by name) and a legacy
+    ``<path>.backup`` that holds a Guard hook command (see _remove_legacy_guard_backup).
+    """
+    backup = _guard_backup_path(path)
+    if backup.is_file() and _unlink_backup(backup):
+        rich.print(f"[dim]Removed Agent Guard backup {backup}[/dim]")
+    _remove_legacy_guard_backup(path)
+
+
+def _unlink_backup(backup: Path) -> bool:
+    """Delete ``backup``; on failure warn and carry on, since the config itself is already done."""
+    try:
+        backup.unlink()
+    except OSError as exc:
+        rich.print(f"[yellow]Warning:[/yellow] Could not remove {backup} ({exc}); delete it manually.")
+        return False
+    return True
+
+
+def _remove_legacy_guard_backup(path: Path) -> None:
+    """Delete ``<path>.backup`` if it holds an Agent Guard hook command.
+
+    Older Guard versions backed up to ``<path>.backup``, and a copy taken while
+    Guard was installed carries its PUSH_KEY. The name is not Guard's own (other
+    tools and users write it too), so the file is deleted only if a line of it
+    matches _is_agent_scan_command; this works for JSON and TOML alike. Anything
+    else, including a file that cannot be read or decoded as UTF-8, is left alone.
+    """
+    legacy = Path(str(path) + ".backup")
+    if not legacy.is_file():
+        return
+    try:
+        text = legacy.read_bytes().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return
+    if not any(_is_agent_scan_command(line) for line in text.splitlines()):
+        return
+    if _unlink_backup(legacy):
+        rich.print(f"[dim]Removed old Agent Guard backup {legacy} (it contained the Agent Guard hook command)[/dim]")
+
+
 def _backup_file(path: Path, guard_free_content: Callable[[], str | None], *, newline: str | None = None) -> None:
-    """Back up ``path`` to ``<path>.backup`` before install rewrites it.
+    """Back up ``path`` to ``<path>.snyk-agent-guard.backup`` before install rewrites it.
 
     The backup never holds Agent Guard config (its PUSH_KEY in particular):
 
@@ -2652,7 +2724,7 @@ def _backup_file(path: Path, guard_free_content: Callable[[], str | None], *, ne
     """
     if not path.exists():
         return
-    backup = Path(str(path) + ".backup")
+    backup = _guard_backup_path(path)
     try:
         content = guard_free_content()
     except (ValueError, TypeError, AttributeError) as exc:
