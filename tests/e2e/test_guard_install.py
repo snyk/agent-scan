@@ -408,13 +408,10 @@ class TestGuardUninstallE2E:
         _install(agent_scan_cmd, agent_scan_command, client, config_file, fake_hook_server)
 
         _uninstall(agent_scan_cmd, client, config_file)
-        data = json.loads(config_file.read_text())
-        if client == "cursor":
-            # Cursor keeps an empty hooks object; the other clients drop the key entirely.
-            assert data["hooks"] == {}
-        else:
-            assert "hooks" not in data
         _assert_scripts_removed(config_file)
+        # Install created the file and the hooks dir (Copilot's config lives inside it);
+        # nothing else was in them, so both are gone.
+        assert list(tmp_path.iterdir()) == []
 
     @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
     @pytest.mark.parametrize(("client", "config_name", "user_hook", "event"), CLIENT_CASES)

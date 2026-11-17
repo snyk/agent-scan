@@ -75,6 +75,13 @@ _PERMISSION_DENIED = "__permission_denied__"
 # (unlike a plain ``<file>.backup``, which other tools also write), so uninstall can
 # delete it without reading it.
 _GUARD_BACKUP_SUFFIX = ".snyk-agent-guard.backup"
+# What install adds to a JSON config besides its hooks; see _uninstall_hooks.
+_GUARD_JSON_SCAFFOLDING: dict[str, tuple[dict, ...]] = {
+    "claude": ({}, {"hooks": {}}),
+    "codex": ({}, {"hooks": {}}),
+    "cursor": ({"version": 1}, {"version": 1, "hooks": {}}),
+    "github-copilot": ({"version": 1}, {"version": 1, "hooks": {}}),
+}
 _STDIN_READ_TIMEOUT_SECONDS = 5.0
 _DISCOVERY_TIMEOUT_SECONDS = 60.0
 _HOOK_SCRIPT_TIMEOUT_SECONDS = 15.0
@@ -1683,6 +1690,13 @@ def _count_hook_groups(hooks: dict) -> int:
 def _uninstall_hooks(path: Path, *, client: str) -> None:
     """Remove Agent Guard's hooks from *client*'s JSON config at ``path``, then Guard's backups of it.
 
+    If removing Guard's hooks leaves nothing but the scaffolding install adds
+    (_GUARD_JSON_SCAFFOLDING, e.g. ``{}`` or Cursor's/Copilot's ``{"version": 1}``), the
+    file is deleted instead of rewritten, so a file that install created does
+    not outlive Guard. The rule looks only at the content: a file that held
+    just ``{}`` before install is deleted too, which every agent treats the
+    same as no file. A symlinked config is always rewritten, never deleted.
+
     The backups are removed only once the file is free of Guard hooks; if
     anything raises first (e.g. invalid JSON), they are left in place.
     """
@@ -1700,8 +1714,13 @@ def _uninstall_hooks(path: Path, *, client: str) -> None:
 
     total_after = _count_hook_groups(stripped.get("hooks", {}))
     removed = _count_hook_groups(data.get("hooks", {})) - total_after
-    _write_json(path, stripped)
-    rich.print(f"[green]\u2713[/green]  Removed {removed} Agent Guard hook(s){_preserved_note(total_after)}")
+    if stripped in _GUARD_JSON_SCAFFOLDING.get(client, ()) and not path.is_symlink():
+        path.unlink()
+        rich.print(f"[green]\u2713[/green]  Removed {removed} Agent Guard hook(s)")
+        rich.print(f"[dim]Removed {path} (nothing else was left in it)[/dim]")
+    else:
+        _write_json(path, stripped)
+        rich.print(f"[green]\u2713[/green]  Removed {removed} Agent Guard hook(s){_preserved_note(total_after)}")
     _remove_guard_backups(path)
 
 
@@ -2652,10 +2671,24 @@ def _copy_hook_script(dest: Path) -> _CopiedScript:
 
 
 def _remove_hook_script(client: str, config_path: Path) -> None:
+    """Delete Guard's hook scripts, then their directory if that left it empty."""
+    removed_any = False
     for dest in (_forwarder_script_path(config_path), _discover_script_path(config_path)):
         if dest.exists():
             dest.unlink()
             rich.print(f"[green]\u2713[/green]  Removed hook script [dim]{dest}[/dim]")
+            removed_any = True
+    if removed_any:
+        _remove_dir_if_empty(_hooks_dir(config_path))
+
+
+def _remove_dir_if_empty(path: Path) -> None:
+    """Remove directory ``path`` if it is empty; leave it (silently) otherwise or on any error."""
+    try:
+        os.rmdir(path)
+    except OSError:
+        return
+    rich.print(f"[dim]Removed empty directory {path}[/dim]")
 
 
 def _guard_backup_path(path: Path) -> Path:

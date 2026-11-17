@@ -881,6 +881,7 @@ class TestPrepareCursorDiscoveryHook:
 
     def test_uninstall_removes_discovery_entry(self, tmp_path):
         path = tmp_path / "hooks.json"
+        _write(path, {"version": 1, "user": True})
         data, _, preserved = _prepare_cursor_config(
             AGENT_SCAN_CMD,
             path,
@@ -954,6 +955,7 @@ class TestPrepareGitHubCopilotDiscoveryHook:
 
     def test_uninstall_removes_discovery_entry(self, tmp_path):
         path = tmp_path / "snyk-agent-guard.json"
+        _write(path, {"version": 1, "user": True})
         data, _, preserved = _prepare_copilot_config(
             COPILOT_AGENT_SCAN_CMD,
             path,
@@ -1014,6 +1016,7 @@ class TestPrepareCodexDiscoveryHook:
 
     def test_uninstall_removes_discovery_entry(self, tmp_path):
         path = tmp_path / "hooks.json"
+        _write(path, {"user": True})
         data, _, preserved = _prepare_codex_config(
             AGENT_SCAN_CMD,
             path,
@@ -1023,7 +1026,7 @@ class TestPrepareCodexDiscoveryHook:
 
         _uninstall_test_client("codex", path)
 
-        assert "hooks" not in json.loads(path.read_text())
+        assert json.loads(path.read_text()) == {"user": True}
 
 
 class TestWriteConfig:
@@ -1542,9 +1545,11 @@ class TestDiscoveryHookScriptFiles:
 
         _run_uninstall(SimpleNamespace(client="claude", file=str(config), managed=False))
 
-        assert "hooks" not in json.loads(config.read_text())
+        # Install created the file and the hooks directory; uninstall leaves neither.
+        assert not config.exists()
         assert not main_script.exists()
         assert not discover_script.exists()
+        assert list(tmp_path.iterdir()) == []
 
 
 class TestWindowsDiscoveryHookScriptFiles:
@@ -1654,15 +1659,16 @@ class TestUninstallClaude:
         _write(
             path,
             {
+                "theme": "dark",
                 "hooks": {
                     "PreToolUse": [_claude_group(AGENT_SCAN_CMD, "*")],
-                }
+                },
             },
         )
         _uninstall_test_client("claude", path)
 
         data = json.loads(path.read_text())
-        assert "hooks" not in data
+        assert data == {"theme": "dark"}
 
     def test_preserves_agentguard(self, tmp_path):
         path = tmp_path / "settings.json"
@@ -1836,11 +1842,11 @@ class TestUninstallCursor:
 
     def test_leaves_empty_hooks_when_all_removed(self, tmp_path):
         path = tmp_path / "hooks.json"
-        _write(path, {"version": 1, "hooks": {"stop": [_cursor_entry(CURSOR_AGENT_SCAN_CMD)]}})
+        _write(path, {"version": 1, "theme": "dark", "hooks": {"stop": [_cursor_entry(CURSOR_AGENT_SCAN_CMD)]}})
         _uninstall_test_client("cursor", path)
 
         data = json.loads(path.read_text())
-        assert data["hooks"] == {}
+        assert data == {"version": 1, "theme": "dark", "hooks": {}}
 
     def test_preserves_agentguard(self, tmp_path):
         path = tmp_path / "hooks.json"
@@ -1862,14 +1868,12 @@ class TestUninstallCursor:
         assert len(data["hooks"]["stop"]) == 1
         assert data["hooks"]["stop"][0]["command"] == CURSOR_AGENTGUARD_CMD
 
-    def test_full_install_then_uninstall(self, tmp_path):
+    def test_full_install_then_uninstall_removes_file_install_created(self, tmp_path):
         path = tmp_path / "hooks.json"
         _setup_cursor_hooks(CURSOR_AGENT_SCAN_CMD, path)
         _uninstall_test_client("cursor", path)
 
-        data = json.loads(path.read_text())
-        assert data["hooks"] == {}
-        assert data["version"] == 1
+        assert not path.exists()
 
 
 # ===================================================================
@@ -2017,12 +2021,12 @@ class TestUninstallGitHubCopilot:
         assert len(data["hooks"]["Stop"]) == 1
         assert data["hooks"]["Stop"][0]["command"] == COPILOT_AGENTGUARD_CMD
 
-    def test_full_install_then_uninstall(self, tmp_path):
+    def test_full_install_then_uninstall_removes_file_install_created(self, tmp_path):
         path = tmp_path / "snyk-agent-guard.json"
         _setup_copilot_hooks(COPILOT_AGENT_SCAN_CMD, path)
         _uninstall_test_client("github-copilot", path)
 
-        assert "hooks" not in json.loads(path.read_text())
+        assert not path.exists()
 
     @pytest.mark.parametrize("key", ["bash", "powershell", "command"])
     def test_removes_agent_scan_hooks_under_any_script_key(self, tmp_path, key):
@@ -2378,8 +2382,7 @@ class TestManagedInstallClaude:
         _setup_claude_hooks(AGENT_SCAN_CMD, path)
         _uninstall_test_client("claude", path)
 
-        data = json.loads(path.read_text())
-        assert "hooks" not in data
+        assert not path.exists()
 
 
 class TestManagedInstallCursor:
@@ -2406,8 +2409,7 @@ class TestManagedInstallCursor:
         _setup_cursor_hooks(CURSOR_AGENT_SCAN_CMD, path)
         _uninstall_test_client("cursor", path)
 
-        data = json.loads(path.read_text())
-        assert data["hooks"] == {}
+        assert not path.exists()
 
 
 # ===================================================================
@@ -2791,11 +2793,11 @@ class TestUninstallCodex:
 
     def test_removes_hooks_key_when_empty(self, tmp_path):
         path = tmp_path / "hooks.json"
-        _write(path, {"hooks": {"PreToolUse": [_claude_group(CODEX_AGENT_SCAN_CMD)]}})
+        _write(path, {"theme": "dark", "hooks": {"PreToolUse": [_claude_group(CODEX_AGENT_SCAN_CMD)]}})
         _uninstall_test_client("codex", path)
 
         data = json.loads(path.read_text())
-        assert "hooks" not in data
+        assert data == {"theme": "dark"}
 
     def test_preserves_agentguard(self, tmp_path):
         path = tmp_path / "hooks.json"
@@ -8952,3 +8954,190 @@ class TestGuardOwnedBackups:
         assert sorted(p for p in tmp_path.rglob("*") if p.is_file()) == original_files
         # Guard's managed_dir stays while other hooks remain (see _strip_guard_from_codex_requirements).
         assert path.read_text(encoding="utf-8").startswith(_CODEX_ADMIN_POLICY)
+
+
+# ===================================================================
+# Uninstall leaves no Guard scaffolding behind
+# ===================================================================
+
+# client: (config file name, Guard command, user hook entry, event)
+_LEFTOVER_JSON_CASES = {
+    "claude": ("settings.json", AGENT_SCAN_CMD, _USER_GROUPED_HOOK, "PreToolUse"),
+    "cursor": ("hooks.json", CURSOR_AGENT_SCAN_CMD, {"command": "echo user-hook"}, "preToolUse"),
+    "codex": ("hooks.json", CODEX_AGENT_SCAN_CMD, _USER_GROUPED_HOOK, "PreToolUse"),
+}
+_LEFTOVER_JSON_CLIENTS = list(_LEFTOVER_JSON_CASES)
+
+
+def _guard_entry(client: str) -> dict:
+    command = _LEFTOVER_JSON_CASES[client][1]
+    return _cursor_entry(command) if client == "cursor" else _claude_group(command)
+
+
+class TestUninstallRemovesEmptyHooksDir:
+    def _install_scripts(self, config: Path) -> Path:
+        guard_module._copy_hook_script(guard_module._forwarder_script_path(config))
+        guard_module._copy_hook_script(guard_module._discover_script_path(config))
+        return guard_module._hooks_dir(config)
+
+    def test_removes_hooks_dir_left_empty(self, tmp_path):
+        config = tmp_path / "settings.json"
+        hooks_dir = self._install_scripts(config)
+
+        with patch(f"{_G}.rich") as mock_rich:
+            guard_module._remove_hook_script("claude", config)
+
+        assert not hooks_dir.exists()
+        printed = " ".join(str(c.args[0]) for c in mock_rich.print.call_args_list)
+        assert f"Removed empty directory {hooks_dir}" in printed
+
+    def test_keeps_hooks_dir_with_other_files(self, tmp_path):
+        config = tmp_path / "settings.json"
+        hooks_dir = self._install_scripts(config)
+        user_script = hooks_dir / "my-hook.sh"
+        user_script.write_bytes(b"#!/bin/sh\necho mine\n")
+
+        guard_module._remove_hook_script("claude", config)
+
+        assert sorted(hooks_dir.iterdir()) == [user_script]
+        assert user_script.read_bytes() == b"#!/bin/sh\necho mine\n"
+
+    def test_keeps_hooks_dir_with_other_subdirectory(self, tmp_path):
+        config = tmp_path / "settings.json"
+        hooks_dir = self._install_scripts(config)
+        (hooks_dir / "user").mkdir()
+
+        guard_module._remove_hook_script("claude", config)
+
+        assert sorted(hooks_dir.iterdir()) == [hooks_dir / "user"]
+
+
+class TestUninstallRemovesGuardOnlyJsonConfig:
+    @pytest.mark.parametrize("client", _LEFTOVER_JSON_CLIENTS)
+    def test_file_with_only_guard_hooks_is_deleted(self, tmp_path, client):
+        name, _, _, event = _LEFTOVER_JSON_CASES[client]
+        path = tmp_path / name
+        _write(path, {**({"version": 1} if client == "cursor" else {}), "hooks": {event: [_guard_entry(client)]}})
+
+        with patch(f"{_G}.rich") as mock_rich:
+            _uninstall_test_client(client, path)
+
+        assert not path.exists()
+        printed = " ".join(str(c.args[0]) for c in mock_rich.print.call_args_list)
+        assert "Removed 1 Agent Guard hook(s)" in printed
+        assert f"Removed {path}" in printed
+
+    @pytest.mark.parametrize("client", _LEFTOVER_JSON_CLIENTS)
+    def test_file_with_other_keys_is_kept(self, tmp_path, client):
+        name, _, _, event = _LEFTOVER_JSON_CASES[client]
+        path = tmp_path / name
+        _write(path, {"theme": "dark", "hooks": {event: [_guard_entry(client)]}})
+
+        _uninstall_test_client(client, path)
+
+        expected = {"theme": "dark", "hooks": {}} if client == "cursor" else {"theme": "dark"}
+        assert json.loads(path.read_text()) == expected
+
+    @pytest.mark.parametrize("client", _LEFTOVER_JSON_CLIENTS)
+    def test_file_with_other_hooks_is_kept(self, tmp_path, client):
+        name, _, user_hook, event = _LEFTOVER_JSON_CASES[client]
+        path = tmp_path / name
+        base = {"version": 1} if client == "cursor" else {}
+        _write(path, {**base, "hooks": {event: [user_hook, _guard_entry(client)]}})
+
+        _uninstall_test_client(client, path)
+
+        assert json.loads(path.read_text()) == {**base, "hooks": {event: [user_hook]}}
+
+    @pytest.mark.parametrize("scope_dir", ["hooks", "policy.d"], ids=["user", "managed"])
+    def test_github_copilot_config_with_only_guard_hooks_is_deleted(self, tmp_path, scope_dir):
+        path = tmp_path / scope_dir / "snyk-agent-guard.json"
+        _write(path, {"version": 1, "hooks": {"Stop": [{"type": "command", "command": COPILOT_AGENT_SCAN_CMD}]}})
+
+        _uninstall_test_client("github-copilot", path)
+
+        assert not path.exists()
+
+    def test_github_copilot_config_with_user_hook_is_kept(self, tmp_path):
+        path = tmp_path / "hooks" / "snyk-agent-guard.json"
+        user_hook = {"type": "command", "bash": "echo user-hook"}
+        guard_hook = {"type": "command", "bash": COPILOT_AGENT_SCAN_CMD}
+        _write(path, {"version": 1, "hooks": {"Stop": [user_hook, guard_hook]}})
+
+        _uninstall_test_client("github-copilot", path)
+
+        assert json.loads(path.read_text()) == {"version": 1, "hooks": {"Stop": [user_hook]}}
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+    def test_symlinked_config_target_is_stripped(self, tmp_path):
+        target = tmp_path / "dotfiles" / "settings.json"
+        _write(target, {"hooks": {"Stop": [_guard_entry("claude")]}})
+        link = tmp_path / "settings.json"
+        link.symlink_to(target)
+
+        _uninstall_test_client("claude", link)
+
+        assert link.is_symlink()
+        assert link.resolve() == target.resolve()
+        assert json.loads(target.read_text()) == {}
+
+
+class TestUninstallLeavesNothingBehind:
+    @pytest.fixture(autouse=True)
+    def _quiet_posix(self, monkeypatch):
+        monkeypatch.delenv("SNYK_TOKEN", raising=False)
+        with (
+            patch(f"{_G}.IS_WINDOWS", False),
+            patch(f"{_G}._send_test_event", return_value=_TEST_EVENT_SENT),
+            patch(f"{_G}.rich"),
+        ):
+            yield
+
+    @staticmethod
+    def _cycle(client: str, path: Path, *, managed: bool = False) -> None:
+        TestReinstallBackupRepro._install(client, path, "machine-1")
+        TestReinstallBackupRepro._install(client, path, "machine-2")
+        assert guard_module._forwarder_script_path(path).exists()
+        guard_module._uninstall_single_client(client, SimpleNamespace(file=str(path)), managed=managed)
+
+    @pytest.mark.parametrize("client", _LEFTOVER_JSON_CLIENTS)
+    def test_cycle_from_no_file_and_no_hooks_dir_leaves_neither(self, tmp_path, client):
+        path = tmp_path / _LEFTOVER_JSON_CASES[client][0]
+
+        self._cycle(client, path)
+
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.parametrize("client", _LEFTOVER_JSON_CLIENTS)
+    def test_cycle_keeps_user_files_in_hooks_dir(self, tmp_path, client):
+        path = tmp_path / _LEFTOVER_JSON_CASES[client][0]
+        user_script = tmp_path / "hooks" / "my-hook.sh"
+        user_script.parent.mkdir()
+        user_script.write_bytes(b"echo mine\n")
+
+        self._cycle(client, path)
+
+        assert sorted(p for p in tmp_path.rglob("*")) == [user_script.parent, user_script]
+        assert user_script.read_bytes() == b"echo mine\n"
+
+    @pytest.mark.parametrize("scope_dir", ["hooks", "policy.d"], ids=["user", "managed"])
+    def test_github_copilot_cycle_leaves_nothing_behind(self, tmp_path, scope_dir):
+        path = tmp_path / scope_dir / "snyk-agent-guard.json"
+
+        self._cycle("github-copilot", path, managed=scope_dir == "policy.d")
+
+        # User scope: the config sits in the hooks dir, which is then empty and removed.
+        # Managed scope: the scripts' policy.d/hooks dir goes; policy.d itself is not Guard's.
+        expected = [path.parent] if scope_dir == "policy.d" else []
+        assert sorted(tmp_path.rglob("*")) == expected
+
+    def test_github_copilot_cycle_keeps_user_files_in_hooks_dir(self, tmp_path):
+        path = tmp_path / "hooks" / "snyk-agent-guard.json"
+        user_file = path.parent / "my-hooks.json"
+        user_file.parent.mkdir()
+        user_file.write_bytes(b'{"version": 1}\n')
+
+        self._cycle("github-copilot", path)
+
+        assert sorted(tmp_path.rglob("*")) == [user_file.parent, user_file]
+        assert user_file.read_bytes() == b'{"version": 1}\n'
