@@ -1680,16 +1680,6 @@ class TestUninstallClaude:
         assert len(data["hooks"]["PreToolUse"]) == 1
         assert data["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == AGENTGUARD_CMD
 
-    def test_backup_created(self, tmp_path):
-        path = tmp_path / "settings.json"
-        original = {"hooks": {"Stop": [_claude_group(AGENT_SCAN_CMD)]}}
-        _write(path, original)
-        _uninstall_test_client("claude", path)
-
-        backup = Path(str(path) + ".backup")
-        assert backup.exists()
-        assert json.loads(backup.read_text()) == original
-
     def test_full_install_then_uninstall(self, tmp_path):
         """Install all events, then uninstall — should leave a clean file."""
         path = tmp_path / "settings.json"
@@ -1868,16 +1858,6 @@ class TestUninstallCursor:
         data = json.loads(path.read_text())
         assert len(data["hooks"]["stop"]) == 1
         assert data["hooks"]["stop"][0]["command"] == CURSOR_AGENTGUARD_CMD
-
-    def test_backup_created(self, tmp_path):
-        path = tmp_path / "hooks.json"
-        original = {"version": 1, "hooks": {"stop": [_cursor_entry(CURSOR_AGENT_SCAN_CMD)]}}
-        _write(path, original)
-        _uninstall_test_client("cursor", path)
-
-        backup = Path(str(path) + ".backup")
-        assert backup.exists()
-        assert json.loads(backup.read_text()) == original
 
     def test_full_install_then_uninstall(self, tmp_path):
         path = tmp_path / "hooks.json"
@@ -2833,16 +2813,6 @@ class TestUninstallCodex:
         assert len(data["hooks"]["PreToolUse"]) == 1
         assert data["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == AGENTGUARD_CMD
 
-    def test_backup_created(self, tmp_path):
-        path = tmp_path / "hooks.json"
-        original = {"hooks": {"Stop": [_claude_group(CODEX_AGENT_SCAN_CMD)]}}
-        _write(path, original)
-        _uninstall_test_client("codex", path)
-
-        backup = Path(str(path) + ".backup")
-        assert backup.exists()
-        assert json.loads(backup.read_text()) == original
-
     def test_full_install_then_uninstall(self, tmp_path):
         path = tmp_path / "hooks.json"
         _write(path, {"unrelated": True})
@@ -3090,19 +3060,6 @@ class TestUninstallHooks:
         _uninstall_test_client(client, tmp_path / filename)
 
         assert f"No {filename} found. Nothing to uninstall." in capsys.readouterr().out
-
-    @pytest.mark.parametrize("client", ["claude", "cursor", "codex"])
-    def test_overwrites_existing_backup(self, tmp_path, client):
-        event, entry = self._event_and_entry(client, CODEX_AGENT_SCAN_CMD)
-        path = tmp_path / ("settings.json" if client == "claude" else "hooks.json")
-        original = {"hooks": {event: [entry]}, "current": True}
-        _write(path, original)
-        backup = Path(f"{path}.backup")
-        backup.write_text("stale backup")
-
-        _uninstall_test_client(client, path)
-
-        assert json.loads(backup.read_text()) == original
 
     @pytest.mark.parametrize("client", ["claude", "cursor", "codex"])
     def test_no_backup_when_nothing_matched(self, tmp_path, client):

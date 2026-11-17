@@ -1110,7 +1110,6 @@ def _uninstall_codex_managed(path: Path) -> None:
     if not events:
         rich.print("[dim]No Agent Guard hooks found.[/dim]")
         return
-    _backup_file(path)
     path.unlink()
     rich.print(f"[green]✓[/green]  Removed {len(events)} Agent Guard hook(s) (deleted [dim]{path}[/dim])")
 
@@ -1212,7 +1211,6 @@ def _uninstall_hooks(
         rich.print("[dim]No Agent Guard hooks found.[/dim]")
         return
 
-    _backup_file(path)
     if filtered or not prune_empty_hooks:
         data["hooks"] = filtered
     else:

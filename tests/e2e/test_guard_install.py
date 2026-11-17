@@ -351,7 +351,8 @@ class TestGuardUninstallE2E:
         seeded: dict = {"hooks": {event: [user_hook]}}
         if client in {"cursor", "github-copilot"}:
             seeded = {"version": 1, **seeded}
-        config_file.write_text(json.dumps(seeded))
+        seeded_text = json.dumps(seeded)
+        config_file.write_text(seeded_text)
 
         _install(agent_scan_cmd, agent_scan_command, client, config_file, fake_hook_server)
         assert "snyk-agent-guard" in config_file.read_text()
@@ -361,7 +362,8 @@ class TestGuardUninstallE2E:
         assert "snyk-agent-guard" not in content
         assert json.loads(content)["hooks"] == {event: [user_hook]}
         _assert_scripts_removed(config_file)
-        assert Path(f"{config_file}.backup").is_file()
+        # Install's backup of the seeded user config survives uninstall.
+        assert Path(f"{config_file}.backup").read_text() == seeded_text
         assert "was not revoked" in result.stdout
         assert _FakeHookServer.deletes == []
 
