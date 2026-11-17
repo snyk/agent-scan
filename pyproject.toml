@@ -1,6 +1,6 @@
 [project]
 name = "snyk-agent-scan"
-version = "0.6.11"
+version = "0.7.0"
 description = "Agent supply chain security scanner."
 readme = "README.md"
 license = {text = "Apache-2.0"}
