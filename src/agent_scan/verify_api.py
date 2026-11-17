@@ -89,6 +89,8 @@ def _force_analysis_api_version(analysis_url: str) -> str:
 
 RETRYABLE_TRANSPORT_EXCEPTIONS = (
     TimeoutError,
+    # A separate class before Python 3.11; aiohttp raises it on request timeouts.
+    asyncio.TimeoutError,
     aiohttp.ClientConnectionError,
     aiohttp.ClientPayloadError,
 )

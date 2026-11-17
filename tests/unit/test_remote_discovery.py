@@ -326,6 +326,42 @@ async def test_timeout_stops_a_slow_op() -> None:
 
 
 @pytest.mark.asyncio
+async def test_request_timeout_is_retried() -> None:
+    import asyncio
+    from unittest.mock import patch
+
+    from aiohttp import web
+    from aiohttp.test_utils import TestServer
+
+    from agent_scan.remote_discovery import client
+
+    calls = 0
+
+    async def handle(request):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            await asyncio.sleep(1)
+        return web.json_response({"session_id": "s1", "round": 1, "ops": [], "found": _EMPTY_FOUND, "done": True})
+
+    app = web.Application()
+    app.router.add_post("/{tail:.*}", handle)
+    server = TestServer(app)
+    await server.start_server()
+    try:
+        with (
+            patch.object(client, "REQUEST_TIMEOUT_S", 0.2),
+            patch.object(client, "_retry_delay", return_value=0),
+            patch("agent_scan.remote_discovery.client.get_readable_home_directories", return_value=_HOMES),
+        ):
+            result = await client.run_remote_discovery(str(server.make_url("/")).rstrip("/"))
+    finally:
+        await server.close()
+    assert calls == 2
+    assert result.retries == 1
+
+
+@pytest.mark.asyncio
 async def test_step_retry_resends_identical_body() -> None:
     server, bodies = await _serve({_STEPS: [502, 503]})
     try:
