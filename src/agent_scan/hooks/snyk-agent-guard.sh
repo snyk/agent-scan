@@ -81,6 +81,14 @@ json_escape() {
   s="${s//$'\t'/\\t}"
   s="${s//$'\r'/\\r}"
   s="${s//$'\n'/\\n}"
+  # JSON strings cannot contain any literal C0 control character. NUL cannot occur in an environment value.
+  local code char escaped
+  for (( code=1; code<32; code++ )); do
+    printf -v char '\\%03o' "$code"
+    printf -v char '%b' "$char"
+    printf -v escaped '\\u%04x' "$code"
+    s="${s//$char/$escaped}"
+  done
   printf '%s' "$s"
 }
 
@@ -196,12 +204,17 @@ hook_main() {
   encoded_body="base64:$(printf '%s' "$payload" | base64 | tr -d '\n')"
 
   # Build X-User header
-  local hostname username x_user
+  local hostname username x_user machine_serial
   hostname="$(get_hostname)"
   username="$(get_username)"
+  machine_serial=null
+  if [[ -n "${MACHINE_SERIAL:-}" ]]; then
+    machine_serial="$(json_quote "$MACHINE_SERIAL")"
+  fi
 
-  x_user="$(printf '{%s:%s,%s:%s,%s:%s,%s:%s}' \
+  x_user="$(printf '{%s:%s,%s:%s,%s:%s,%s:%s,%s:%s}' \
     "\"hostname\"" "$(json_quote "$hostname")" \
+    "\"machine_serial\"" "$machine_serial" \
     "\"username\"" "$(json_quote "$username")" \
     "\"identifier\"" "$(json_quote "$MACHINE_ID")" \
     "\"cli_version\"" "$(json_quote "$cli_version")")"

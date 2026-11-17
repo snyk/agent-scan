@@ -286,7 +286,7 @@ class TestExtractEnvFromCmd:
             "main",
             False,
             "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' TENANT_ID='tenant' "
-            "MACHINE_ID='machine' bash '/x/snyk-agent-guard.sh' --client claude-code",
+            "MACHINE_ID='machine' MACHINE_SERIAL='' bash '/x/snyk-agent-guard.sh' --client claude-code",
         ),
         (
             "main",
@@ -297,7 +297,7 @@ class TestExtractEnvFromCmd:
         (
             "discover",
             False,
-            "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' MACHINE_ID='machine' "
+            "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' MACHINE_ID='machine' MACHINE_SERIAL='' "
             "AGENT_SCAN_COMMAND='/usr/local/bin/snyk-agent-scan' bash '/x/snyk-agent-guard-discover.sh' "
             "--client 'claude-code' --scope servers",
         ),
@@ -328,6 +328,7 @@ def test_build_hook_command_preserves_exact_output(variant, is_windows, expected
                 "claude-code",
                 tenant_id="tenant",
                 machine_id="machine",
+                machine_serial="",
             )
         else:
             command = guard_module._build_discover_hook_command(
@@ -340,15 +341,34 @@ def test_build_hook_command_preserves_exact_output(variant, is_windows, expected
                 ),
                 tenant_id="tenant",
                 machine_id="machine",
+                machine_serial="",
             )
 
     assert command == expected
 
 
 class TestBuildHookCommand:
+    @pytest.mark.parametrize("windows", [False, True])
+    @pytest.mark.parametrize("discovery", [False, True])
+    @pytest.mark.parametrize("serial", ["", "C02'XYZ123"])
+    def test_persists_serial_for_later_hook_processes(self, monkeypatch, windows, discovery, serial):
+        monkeypatch.setenv("MACHINE_SERIAL", "ambient-serial")
+        monkeypatch.setattr(guard_module, "IS_WINDOWS", windows)
+        build = guard_module._build_discover_hook_command if discovery else _build_hook_command
+        kwargs = {"agent_scan_command": "/bin/agent-scan"} if discovery else {}
+        command = build("pk", "https://api.snyk.io", Path("/x/hook"), "claude-code", machine_serial=serial, **kwargs)
+        assert "ambient-serial" not in command
+        if serial:
+            expected = "-MachineSerial 'C02''XYZ123'" if windows else "MACHINE_SERIAL='C02'\"'\"'XYZ123'"
+            assert expected in command
+        elif windows:
+            assert "-MachineSerial" not in command
+        else:
+            assert "MACHINE_SERIAL=''" in command
+
     @pytest.mark.skipif(sys.platform == "win32", reason="bash command format")
     def test_without_tenant_bash(self):
-        cmd = _build_hook_command("pk", "https://api.snyk.io", Path("/x/hook.sh"), "claude-code")
+        cmd = _build_hook_command("pk", "https://api.snyk.io", Path("/x/hook.sh"), "claude-code", machine_serial="")
         assert "PUSH_KEY='pk'" in cmd
         assert "REMOTE_HOOKS_BASE_URL='https://api.snyk.io'" in cmd
         assert "TENANT_ID" not in cmd
@@ -357,32 +377,38 @@ class TestBuildHookCommand:
 
     @pytest.mark.skipif(sys.platform == "win32", reason="bash command format")
     def test_with_tenant_bash(self):
-        cmd = _build_hook_command("pk", "https://api.snyk.io", Path("/x/hook.sh"), "cursor", tenant_id="tid")
+        cmd = _build_hook_command(
+            "pk", "https://api.snyk.io", Path("/x/hook.sh"), "cursor", tenant_id="tid", machine_serial=""
+        )
         assert "TENANT_ID='tid'" in cmd
 
     @pytest.mark.skipif(sys.platform == "win32", reason="bash command format")
     def test_with_machine_id_bash(self):
-        cmd = _build_hook_command("pk", "https://api.snyk.io", Path("/x/hook.sh"), "cursor", machine_id="machine-42")
+        cmd = _build_hook_command(
+            "pk", "https://api.snyk.io", Path("/x/hook.sh"), "cursor", machine_id="machine-42", machine_serial=""
+        )
         assert "MACHINE_ID='machine-42'" in cmd
 
     @pytest.mark.skipif(sys.platform == "win32", reason="bash command format")
     def test_without_machine_id_bash(self):
-        cmd = _build_hook_command("pk", "https://api.snyk.io", Path("/x/hook.sh"), "cursor")
+        cmd = _build_hook_command("pk", "https://api.snyk.io", Path("/x/hook.sh"), "cursor", machine_serial="")
         assert "MACHINE_ID" not in cmd
 
     def test_with_machine_id_powershell(self):
         cmd = _build_hook_command_powershell(
-            "pk", "https://api.snyk.io", Path("C:/x/hook.ps1"), "codex", machine_id="machine-42"
+            "pk", "https://api.snyk.io", Path("C:/x/hook.ps1"), "codex", machine_id="machine-42", machine_serial=""
         )
         assert "-MachineId 'machine-42'" in cmd
 
     def test_without_machine_id_powershell(self):
-        cmd = _build_hook_command_powershell("pk", "https://api.snyk.io", Path("C:/x/hook.ps1"), "codex")
+        cmd = _build_hook_command_powershell(
+            "pk", "https://api.snyk.io", Path("C:/x/hook.ps1"), "codex", machine_serial=""
+        )
         assert "-MachineId" not in cmd
 
     def test_machine_id_powershell_escapes_single_quotes(self):
         cmd = _build_hook_command_powershell(
-            "pk", "https://api.snyk.io", Path("C:/x/hook.ps1"), "codex", machine_id="O'Brien-laptop"
+            "pk", "https://api.snyk.io", Path("C:/x/hook.ps1"), "codex", machine_id="O'Brien-laptop", machine_serial=""
         )
         assert "-MachineId 'O''Brien-laptop'" in cmd
 
@@ -393,6 +419,7 @@ class TestBuildHookCommand:
             "https://example.com/O'Brien",
             script_path,
             "codex",
+            machine_serial="",
         )
 
         expected_path = str(script_path).replace("'", "''")
@@ -402,7 +429,7 @@ class TestBuildHookCommand:
 
     @pytest.mark.skipif(sys.platform != "win32", reason="powershell command format")
     def test_without_tenant_powershell(self):
-        cmd = _build_hook_command("pk", "https://api.snyk.io", Path("/x/hook.ps1"), "claude-code")
+        cmd = _build_hook_command("pk", "https://api.snyk.io", Path("/x/hook.ps1"), "claude-code", machine_serial="")
         assert "-PushKey 'pk'" in cmd
         assert "-RemoteUrl 'https://api.snyk.io'" in cmd
         assert "powershell -File" in cmd
@@ -410,12 +437,17 @@ class TestBuildHookCommand:
 
     @pytest.mark.skipif(sys.platform != "win32", reason="powershell command format")
     def test_without_tenant_powershell_no_tenant_id(self):
-        cmd = _build_hook_command("pk", "https://api.snyk.io", Path("/x/hook.ps1"), "claude-code")
+        cmd = _build_hook_command("pk", "https://api.snyk.io", Path("/x/hook.ps1"), "claude-code", machine_serial="")
         assert "TENANT_ID" not in cmd
 
     def test_roundtrip_extract(self):
         cmd = _build_hook_command(
-            "my-key", "https://example.com", Path("/x/snyk-agent-guard.sh"), "claude-code", tenant_id="t-1"
+            "my-key",
+            "https://example.com",
+            Path("/x/snyk-agent-guard.sh"),
+            "claude-code",
+            tenant_id="t-1",
+            machine_serial="",
         )
         assert _extract_env_from_cmd(cmd, "PUSH_KEY") == "my-key"
         assert _extract_env_from_cmd(cmd, "REMOTE_HOOKS_BASE_URL") == "https://example.com"
@@ -423,7 +455,7 @@ class TestBuildHookCommand:
 
     def test_roundtrip_extract_powershell(self):
         cmd = _build_hook_command_powershell(
-            "my-key", "https://example.com", Path("C:/x/hook.ps1"), "claude-code", tenant_id="t-1"
+            "my-key", "https://example.com", Path("C:/x/hook.ps1"), "claude-code", tenant_id="t-1", machine_serial=""
         )
         assert "-TenantId 't-1'" in cmd
         info = _parse_command_info(cmd, ["Stop"])
@@ -432,7 +464,9 @@ class TestBuildHookCommand:
         assert info["tenant_id"] == "t-1"
 
     def test_without_tenant_powershell_omits_param(self):
-        cmd = _build_hook_command_powershell("pk", "https://api.snyk.io", Path("C:/x/hook.ps1"), "codex")
+        cmd = _build_hook_command_powershell(
+            "pk", "https://api.snyk.io", Path("C:/x/hook.ps1"), "codex", machine_serial=""
+        )
         assert "-TenantId" not in cmd
 
 
@@ -522,6 +556,7 @@ class TestBuildDiscoverHookCommand:
                 agent_scan_command="/opt/Snyk's bin/snyk-agent-scan",
                 tenant_id="tenant",
                 machine_id="machine",
+                machine_serial="",
             )
 
         assert "PUSH_KEY='pk'" in command
@@ -543,6 +578,7 @@ class TestBuildDiscoverHookCommand:
                 agent_scan_command=r"C:\Program Files\Snyk\snyk-agent-scan.exe",
                 tenant_id="ignored",
                 machine_id="machine's-id",
+                machine_serial="",
             )
 
         assert command == (
@@ -559,6 +595,7 @@ class TestBuildDiscoverHookCommand:
                 Path(r"C:\Users\O'Brien\discover.ps1"),
                 "claude-code",
                 agent_scan_command=r"C:\Users\O'Brien\snyk-agent-scan.exe",
+                machine_serial="",
             )
 
         assert r"-File 'C:\Users\O''Brien\discover.ps1'" in command
@@ -580,6 +617,7 @@ class TestBuildDiscoverHookCommand:
                 script,
                 "claude-code",
                 agent_scan_command="cd /repo; uv run -m src.agent_scan.cli",
+                machine_serial="",
             )
 
         assert expected in command
@@ -594,9 +632,13 @@ class TestHookInvocationRenderers:
             push_key="pk'raw",
             url="https://example.test/hook's",
             machine_id="machine'raw",
+            machine_serial="serial'raw",
         )
 
-        with patch.dict(os.environ, {"EXISTING": "value"}, clear=True), patch(f"{_G}.IS_WINDOWS", False):
+        with (
+            patch.dict(os.environ, {"EXISTING": "value", "MACHINE_SERIAL": "inherited-serial"}, clear=True),
+            patch(f"{_G}.IS_WINDOWS", False),
+        ):
             argv, env = guard_module._render_argv(invocation)
 
         # str(Path) follows the host flavour, so compare against it rather than a hardcoded separator
@@ -606,6 +648,7 @@ class TestHookInvocationRenderers:
             "PUSH_KEY": "pk'raw",
             "REMOTE_HOOKS_BASE_URL": "https://example.test/hook's",
             "MACHINE_ID": "machine'raw",
+            "MACHINE_SERIAL": "serial'raw",
         }
 
     def test_render_argv_windows_returns_unquoted_argv_without_environment(self):
@@ -615,6 +658,7 @@ class TestHookInvocationRenderers:
             push_key="pk'raw",
             url="https://example.test/hook's",
             machine_id="machine'raw",
+            machine_serial="serial'raw",
         )
 
         with patch(f"{_G}.IS_WINDOWS", True):
@@ -632,6 +676,8 @@ class TestHookInvocationRenderers:
             "https://example.test/hook's",
             "-MachineId",
             "machine'raw",
+            "-MachineSerial",
+            "serial'raw",
         ]
         assert env is None
 
@@ -650,7 +696,10 @@ class TestHookInvocationRenderers:
             quote_client=True,
         )
 
-        with patch.dict(os.environ, {"EXISTING": "value"}, clear=True), patch(f"{_G}.IS_WINDOWS", False):
+        with (
+            patch.dict(os.environ, {"EXISTING": "value", "MACHINE_SERIAL": "inherited-serial"}, clear=True),
+            patch(f"{_G}.IS_WINDOWS", False),
+        ):
             argv, env = guard_module._render_argv(invocation)
 
         assert argv == [
@@ -663,6 +712,7 @@ class TestHookInvocationRenderers:
         ]
         assert env == {
             "EXISTING": "value",
+            "MACHINE_SERIAL": "",
             "PUSH_KEY": "pk",
             "REMOTE_HOOKS_BASE_URL": "https://api.snyk.io",
             "TENANT_ID": "tenant",
@@ -704,7 +754,7 @@ class TestHookInvocationRenderers:
         ]
         assert env is None
 
-    def test_render_posix_command_skips_empty_optional_fields(self):
+    def test_render_posix_command_preserves_empty_serial(self):
         invocation = guard_module._HookInvocation(
             script_path=Path("/hooks/snyk-agent-guard.sh"),
             hook_client="claude-code",
@@ -715,7 +765,7 @@ class TestHookInvocationRenderers:
         command = guard_module._render_posix_command(invocation)
 
         assert command == (
-            "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' "
+            "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' MACHINE_SERIAL='' "
             "bash '/hooks/snyk-agent-guard.sh' --client claude-code"
         )
 
@@ -3187,6 +3237,7 @@ class TestCodexManagedRequirementsToml:
                 "tid-1",
                 "snyk-token",
                 "machine-42",
+                machine_serial="",
             )
 
         assert (tmp_path / "hooks" / "snyk-agent-guard.sh").exists()
@@ -3220,6 +3271,7 @@ class TestCodexManagedRequirementsToml:
                 "tid-1",
                 "snyk-token",
                 "machine-42",
+                machine_serial="",
             )
 
         assert not discover_script.exists()
@@ -3672,24 +3724,40 @@ class TestBashHookScript:
         assert result.returncode == 0
         assert json.loads(result.stdout) == {"ok": True}
 
-    def test_machine_id_sets_x_user_identifier(self, hook_server):
+    @pytest.mark.parametrize("serial", ["", 'C02"XYZ\\123', "control-\x01\b\f\x1f"])
+    @pytest.mark.parametrize("direct", [False, True], ids=["saved-command", "install-test"])
+    def test_machine_id_sets_x_user_identifier(self, hook_server, serial, monkeypatch, direct):
+        monkeypatch.setenv("MACHINE_SERIAL", "ambient-serial")
         script = _get_script_path("snyk-agent-guard.sh")
-        result = subprocess.run(
-            ["bash", str(script), "--client", "claude-code"],
-            input='{"hook_event_name":"test","session_id":"s1"}',
-            capture_output=True,
-            text=True,
-            timeout=10,
-            env={
-                "PATH": "/usr/bin:/bin:/usr/local/bin",
-                "PUSH_KEY": "test-pk",
-                "REMOTE_HOOKS_BASE_URL": hook_server,
-                "MACHINE_ID": "machine-42",
-            },
-        )
-        assert result.returncode == 0, result.stderr
+        payload = '{"hook_event_name":"test","session_id":"s1"}'
+        if direct:
+            ok, detail = guard_module._invoke_hook_script(
+                script,
+                "claude-code",
+                "test-pk",
+                hook_server,
+                payload,
+                machine_id="machine-42",
+                machine_serial=serial,
+            )
+            assert ok, detail
+        else:
+            command = _build_hook_command(
+                "test-pk", hook_server, script, "claude-code", machine_id="machine-42", machine_serial=serial
+            )
+            result = subprocess.run(
+                ["bash", "-c", command],
+                input=payload,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                env={**os.environ, "MACHINE_SERIAL": "ambient-serial"},
+            )
+            assert result.returncode == 0, result.stderr
         x_user = json.loads(_HookHandler.last_request["headers"]["X-User"])
         assert x_user["identifier"] == "machine-42"
+        assert x_user["hostname"]
+        assert x_user["machine_serial"] == (serial or None)
 
     def test_stamped_script_reports_its_cli_version(self, tmp_path, hook_server):
         script = _stamped_script(tmp_path, "snyk-agent-guard.sh")
@@ -3906,6 +3974,9 @@ class TestPowerShellDiscoveryHookScript:
         helper = tmp_path / "record.py"
         helper.write_text(
             "import os, sys\n"
+            "if os.environ.get('SERIAL_MARKER'):\n"
+            "    with open(os.environ['SERIAL_MARKER'], 'w') as fh:\n"
+            "        fh.write(os.environ.get('MACHINE_SERIAL') or '')\n"
             "with open(os.environ['MARKER'], 'w') as fh:\n"
             "    fh.write(' '.join(sys.argv[1:]) + '\\n')\n"
             "    fh.write(sys.stdin.read())\n"
@@ -3942,6 +4013,25 @@ class TestPowerShellDiscoveryHookScript:
         recorded = marker.read_text().splitlines()
         assert recorded[0] == "guard discover --client claude-code --scope servers"
         assert json.loads("\n".join(recorded[1:])) == json.loads(payload)
+
+    @pytest.mark.parametrize("serial", [None, "", "C02XYZ123"])
+    def test_serial_parameter_replaces_inherited_serial(self, tmp_path, serial):
+        script = _get_script_path("snyk-agent-guard-discover.ps1")
+        marker = tmp_path / "invoked"
+        serial_marker = tmp_path / "serial"
+        stub = self._recording_stub(tmp_path, marker)
+        args = ["-AgentScanCommand", str(stub), "-MachineId", "machine-42"]
+        if serial is not None:
+            args.extend(["-MachineSerial", serial])
+        env = {
+            **os.environ,
+            "MARKER": str(marker),
+            "SERIAL_MARKER": str(serial_marker),
+            "MACHINE_SERIAL": "inherited-serial",
+        }
+        result = self._run(script, args, env)
+        assert result.returncode == 0, result.stderr
+        assert serial_marker.read_text() == (serial or "")
 
     def test_nonzero_discovery_exit_is_swallowed(self, tmp_path):
         script = _get_script_path("snyk-agent-guard-discover.ps1")
@@ -4080,7 +4170,9 @@ class TestPowerShellHookScript:
         assert result.returncode == 0, result.stderr
         assert "/hidden/agent-monitor/hooks/cursor" in _HookHandler.last_request["path"]
 
-    def test_machine_id_sets_x_user_identifier(self, hook_server):
+    @pytest.mark.parametrize("serial", [None, "", "C02XYZ123", "control-\x01\b\f\x1f"])
+    def test_machine_id_sets_x_user_identifier(self, hook_server, serial, monkeypatch):
+        monkeypatch.setenv("MACHINE_SERIAL", "ignored-env-serial")
         script = _get_script_path("snyk-agent-guard.ps1")
         result = subprocess.run(
             [
@@ -4095,6 +4187,7 @@ class TestPowerShellHookScript:
                 hook_server,
                 "-MachineId",
                 "machine-42",
+                *(["-MachineSerial", serial] if serial is not None else []),
             ],
             input='{"hook_event_name":"test","session_id":"s1"}',
             capture_output=True,
@@ -4104,6 +4197,7 @@ class TestPowerShellHookScript:
         assert result.returncode == 0, result.stderr
         x_user = json.loads(_HookHandler.last_request["headers"]["X-User"])
         assert x_user["identifier"] == "machine-42"
+        assert x_user["machine_serial"] == (serial or None)
 
     def test_stamped_script_reports_its_cli_version(self, tmp_path, hook_server):
         script = _stamped_script(tmp_path, "snyk-agent-guard.ps1")
@@ -4328,6 +4422,7 @@ class TestCursorStylePowerShellInvocation:
             script,
             "claude-code",
             machine_id="machine-42",
+            machine_serial="",
         )
         payload = '{"hook_event_name":"test","session_id":"cursor-test"}'
         result = subprocess.run(
@@ -4364,6 +4459,7 @@ class TestCursorStyleBashInvocation:
             script,
             "cursor",
             machine_id="machine-42",
+            machine_serial="",
         )
         payload = '{"hook_event_name":"test","conversation_id":"cursor-test"}'
         result = subprocess.run(
@@ -4525,7 +4621,7 @@ class TestRunInstallCallsEnsureGuardEnabled:
         mock_install.assert_called_once()
         call_args = mock_install.call_args
         assert "test" not in (call_args.kwargs or {})
-        assert len(call_args.args) == 11, "args.test must not be forwarded to _install_hooks"
+        assert len(call_args.args) == 12, "args.test must not be forwarded to _install_hooks"
 
     @patch("agent_scan.guard._install_hooks")
     @patch("agent_scan.guard.fetch_guard_enabled", return_value=True)
@@ -4656,6 +4752,7 @@ class TestInstallHooksOrchestration:
         minted=False,
         config_exists=False,
         machine_id="",
+        machine_serial="",
     ):
         config = tmp_path / "config.json"
         if config_exists:
@@ -4672,6 +4769,7 @@ class TestInstallHooksOrchestration:
             "tid-1",
             "snyk-tok",
             machine_id,
+            machine_serial=machine_serial,
         )
         return config
 
@@ -4703,6 +4801,7 @@ class TestInstallHooksOrchestration:
             "agent_scan_command": "/usr/local/bin/snyk-agent-scan",
             "tenant_id": "tid-1",
             "machine_id": "machine-42",
+            "machine_serial": "",
             "hook_client": "claude-code",
         }
         assert ctx["prep_claude"].call_args.kwargs["discover_command"] == "discover-cmd"
@@ -4815,6 +4914,7 @@ class TestInstallHooksOrchestration:
             "tid-1",
             "snyk-tok",
             "",
+            machine_serial="",
         )
         assert result is None
 
@@ -4920,6 +5020,7 @@ class TestInstallHooksOrchestration:
             discover_current_checksum=_DISCOVER_CURRENT_CHECKSUM,
             discover_new_checksum=_DISCOVER_NEW_CHECKSUM,
             machine_id="",
+            machine_serial="",
         )
 
     def test_test_event_receives_empty_diff(self, ctx, tmp_path):
@@ -4940,6 +5041,7 @@ class TestInstallHooksOrchestration:
             discover_current_checksum=_DISCOVER_CURRENT_CHECKSUM,
             discover_new_checksum=_DISCOVER_NEW_CHECKSUM,
             machine_id="",
+            machine_serial="",
         )
 
     def test_test_event_not_first_install(self, ctx, tmp_path):
@@ -4959,6 +5061,7 @@ class TestInstallHooksOrchestration:
             discover_current_checksum=_DISCOVER_CURRENT_CHECKSUM,
             discover_new_checksum=_DISCOVER_NEW_CHECKSUM,
             machine_id="",
+            machine_serial="",
         )
 
     def test_test_event_push_key_changed(self, ctx, tmp_path):
@@ -4979,6 +5082,7 @@ class TestInstallHooksOrchestration:
             discover_current_checksum=_DISCOVER_CURRENT_CHECKSUM,
             discover_new_checksum=_DISCOVER_NEW_CHECKSUM,
             machine_id="",
+            machine_serial="",
         )
 
     def test_test_event_push_key_unchanged(self, ctx, tmp_path):
@@ -4999,6 +5103,7 @@ class TestInstallHooksOrchestration:
             discover_current_checksum=_DISCOVER_CURRENT_CHECKSUM,
             discover_new_checksum=_DISCOVER_NEW_CHECKSUM,
             machine_id="",
+            machine_serial="",
         )
 
     # ---------------------------------------------------------------
@@ -5235,6 +5340,7 @@ class TestSendTestEventHooksScript:
                 Path("/fake/script.sh"),
                 machine_id="machine-42",
                 **kwargs,
+                machine_serial="",
             )
         return captured["payload"]
 
@@ -5535,6 +5641,7 @@ class TestInvokeHookScript:
                 "https://api.snyk.io",
                 "{}",
                 machine_id="machine-42",
+                machine_serial="",
             )
 
         assert result == (True, "")
@@ -5553,6 +5660,7 @@ class TestInvokeHookScript:
                 "https://api.snyk.io",
                 "{}",
                 machine_id="chosen-machine",
+                machine_serial="",
             )
 
         assert result == (True, "")
@@ -5561,7 +5669,7 @@ class TestInvokeHookScript:
     def test_empty_machine_id_is_rejected(self):
         with pytest.raises(ValueError, match="machine ID"):
             guard_module._invoke_hook_script(
-                Path("/hook.sh"), "cursor", "pk", "https://api.snyk.io", "{}", machine_id="  "
+                Path("/hook.sh"), "cursor", "pk", "https://api.snyk.io", "{}", machine_id="  ", machine_serial=""
             )
 
     def test_windows_invocation_machine_id_shape(self):
@@ -5574,6 +5682,7 @@ class TestInvokeHookScript:
                 "https://api.snyk.io",
                 "{}",
                 machine_id="machine-42",
+                machine_serial="",
             )
 
         assert result == (True, "")
@@ -5596,7 +5705,7 @@ class TestInvokeHookScript:
         completed = subprocess.CompletedProcess([], 7, stdout="", stderr="bad request\n")
         with patch(f"{_G}.IS_WINDOWS", False), patch("subprocess.run", return_value=completed):
             result = guard_module._invoke_hook_script(
-                Path("/hook.sh"), "cursor", "pk", "url", "{}", machine_id="machine-42"
+                Path("/hook.sh"), "cursor", "pk", "url", "{}", machine_id="machine-42", machine_serial=""
             )
         assert result == (False, "bad request")
 
@@ -5613,6 +5722,7 @@ class TestInvokeHookScriptSuccessPayload:
                 "{}",
                 machine_id="machine-42",
                 require_success_payload=require,
+                machine_serial="",
             )
 
     def test_success_true_payload_is_ok(self):
@@ -5676,7 +5786,9 @@ class TestSendTestEventRetry:
             patch(f"{_G}.time.monotonic", side_effect=lambda: now[0]),
             patch(f"{_G}.rich"),
         ):
-            result = _send_test_event("pk", "https://api.snyk.io", "claude-code", Path("/s.sh"), machine_id="m")
+            result = _send_test_event(
+                "pk", "https://api.snyk.io", "claude-code", Path("/s.sh"), machine_id="m", machine_serial=""
+            )
         return result, invoke, sleep
 
     @pytest.mark.parametrize(
@@ -5740,7 +5852,9 @@ class TestSendTestEventRetry:
             patch(f"{_G}.time.monotonic", side_effect=lambda: now[0]),
             patch(f"{_G}.rich"),
         ):
-            result = _send_test_event("pk", "https://api.snyk.io", "claude-code", Path("/s.sh"), machine_id="m")
+            result = _send_test_event(
+                "pk", "https://api.snyk.io", "claude-code", Path("/s.sh"), machine_id="m", machine_serial=""
+            )
 
         assert result.status == "unconfirmed"
         assert result.error == "timeout"
@@ -5765,7 +5879,9 @@ class TestSendTestEventRetry:
             patch(f"{_G}.time.monotonic", side_effect=lambda: now[0]),
             patch(f"{_G}.rich"),
         ):
-            result = _send_test_event("pk", "https://api.snyk.io", "claude-code", Path("/s.sh"), machine_id="m")
+            result = _send_test_event(
+                "pk", "https://api.snyk.io", "claude-code", Path("/s.sh"), machine_id="m", machine_serial=""
+            )
 
         assert result.status == "sent"
         assert invoke.call_count == 1
@@ -5789,7 +5905,7 @@ class TestUnconfirmedTestEventInstall:
     def test_report_sends_attributes(self):
         with patch(f"{_G}.send_hook_event", return_value=(True, "")) as send:
             guard_module._report_test_event_unconfirmed(
-                "pk", "https://api.snyk.io", "claude-code", "m", _TEST_EVENT_UNCONFIRMED
+                "pk", "https://api.snyk.io", "claude-code", "m", _TEST_EVENT_UNCONFIRMED, machine_serial=""
             )
         payload = json.loads(send.call_args.args[3])
         assert payload["hook_event_name"] == "hooksConfiguredTestEventUnconfirmed"
@@ -5808,6 +5924,7 @@ class TestSendTestEventSuccessPayload:
                 "claude-code",
                 Path("/fake/script.sh"),
                 machine_id="machine-42",
+                machine_serial="",
             )
 
     def test_http_200_with_empty_body_fails(self):
@@ -5942,7 +6059,12 @@ class TestSendServersDiscoveredEvent:
             patch(f"{_G}.rich") if patch_rich else contextlib.nullcontext(),
         ):
             ok = guard_module._send_servers_discovered_event(
-                "pk-test", "https://api.snyk.io", hook_client, machine_id, discovery_scope=discovery_scope
+                "pk-test",
+                "https://api.snyk.io",
+                hook_client,
+                machine_id,
+                discovery_scope=discovery_scope,
+                machine_serial="",
             )
         return ok, captured
 
@@ -5993,6 +6115,7 @@ class TestSendServersDiscoveredEvent:
                 "machine-42",
                 event_name="sessionStartServerDiscovery",
                 session_marker="session-start-server-discovery",
+                machine_serial="",
             )
 
         assert ok is True
@@ -6013,7 +6136,7 @@ class TestSendServersDiscoveredEvent:
             patch(f"{_G}.rich"),
         ):
             ok = guard_module._send_servers_discovered_event(
-                "pk-test", "https://api.snyk.io", "claude-code", "machine-42"
+                "pk-test", "https://api.snyk.io", "claude-code", "machine-42", machine_serial=""
             )
 
         assert ok is True
@@ -6026,7 +6149,7 @@ class TestSendServersDiscoveredEvent:
             patch(f"{_G}.send_hook_event", return_value=(False, "HTTP 500")),
             patch(f"{_G}.rich") as rich_mock,
         ):
-            result = guard_module._send_servers_discovered_event("pk", "url", "cursor", "")
+            result = guard_module._send_servers_discovered_event("pk", "url", "cursor", "", machine_serial="")
         assert result is False
         assert "HTTP 500" in rich_mock.print.call_args.args[0]
 
@@ -6036,7 +6159,7 @@ class TestSendServersDiscoveredEvent:
             patch(f"{_G}.send_hook_event") as send,
             patch(f"{_G}.rich") as rich_mock,
         ):
-            result = guard_module._send_servers_discovered_event("pk", "url", "cursor", "")
+            result = guard_module._send_servers_discovered_event("pk", "url", "cursor", "", machine_serial="")
         assert result is False
         send.assert_not_called()
         assert "discovery failed" in rich_mock.print.call_args.args[0]
@@ -6056,7 +6179,7 @@ class TestSendServersDiscoveredEvent:
             patch(f"{_G}.rich") as rich_mock,
         ):
             started = test_time.monotonic()
-            result = guard_module._send_servers_discovered_event("pk", "url", "cursor", "")
+            result = guard_module._send_servers_discovered_event("pk", "url", "cursor", "", machine_serial="")
             elapsed = test_time.monotonic() - started
 
         assert result is False
@@ -6533,6 +6656,24 @@ def _fake_homes(tmp_path, installed_clients, *, users=("tester",)):
 
 
 class TestRunInstallSendsServersDiscovered:
+    @pytest.mark.parametrize("serial,expected", [(None, ""), ("   ", ""), (" C02XYZ123 ", "C02XYZ123")])
+    def test_serial_is_captured_once_before_install_and_discovery(self, tmp_path, monkeypatch, serial, expected):
+        monkeypatch.setenv("PUSH_KEY", "headless-pk")
+        monkeypatch.delenv("MACHINE_SERIAL", raising=False)
+        if serial is not None:
+            monkeypatch.setenv("MACHINE_SERIAL", serial)
+
+        def install(*args, **kwargs):
+            assert args[11] == expected
+            monkeypatch.setenv("MACHINE_SERIAL", "changed-during-install")
+
+        with (
+            patch(f"{_G}._install_hooks", side_effect=install),
+            patch(f"{_G}._send_servers_discovered_event", return_value=True) as send,
+        ):
+            _run_install(self._args(tmp_path))
+        assert send.call_args.kwargs["machine_serial"] == expected
+
     @staticmethod
     def _args(tmp_path, *, client="claude", file_override=True, managed=False, machine_id="machine-42"):
         return SimpleNamespace(
@@ -6555,7 +6696,7 @@ class TestRunInstallSendsServersDiscovered:
         ):
             _run_install(self._args(tmp_path, machine_id="machine-42"))
 
-        assert install.call_args.args[-1] == "machine-42"
+        assert install.call_args.args[10] == "machine-42"
         send.assert_called_once_with(
             "headless-pk",
             "https://api.snyk.io",
@@ -6563,6 +6704,7 @@ class TestRunInstallSendsServersDiscovered:
             "machine-42",
             discovery_scope=DiscoveryScope.SERVERS,
             retry_policy=guard_module.INSTALL_RETRY_POLICY,
+            machine_serial="",
         )
 
     def test_install_does_not_request_skills_discovery(self, tmp_path, monkeypatch):
@@ -6605,7 +6747,7 @@ class TestRunInstallSendsServersDiscovered:
         scripts = [Path(f"/installed/{client}/hook.sh") for client in ALL_CLIENTS]
         order = []
 
-        def install(*args):
+        def install(*args, **kwargs):
             order.append(f"install:{args[0]}")
             return scripts[len(order) - 1]
 
@@ -6699,7 +6841,7 @@ class TestRunInstallSendsServersDiscovered:
         ):
             _run_install(self._args(tmp_path, machine_id=arg_machine_id))
 
-        assert install.call_args.args[-1] == expected
+        assert install.call_args.args[10] == expected
         assert send.call_args.args[-1] == expected
 
     @pytest.mark.parametrize("arg_machine_id, env_machine_id", [(None, None), ("   ", "   ")])
@@ -6719,7 +6861,7 @@ class TestRunInstallSendsServersDiscovered:
         ):
             _run_install(self._args(tmp_path, machine_id=arg_machine_id))
 
-        assert install.call_args.args[-1] == "fallback-host"
+        assert install.call_args.args[10] == "fallback-host"
         assert send.call_args.args[-1] == "fallback-host"
         assert any(
             "MACHINE_ID will become mandatory once ADS Installer is updated" in call.args[0]
@@ -7662,3 +7804,24 @@ class TestRunInstallSkipsUninstalledClients:
         assert mock_install.call_count == len(ALL_CLIENTS)
         called_clients = [c.args[0] for c in mock_install.call_args_list]
         assert called_clients == ALL_CLIENTS
+
+
+@pytest.mark.parametrize("serial,expected", [(None, ""), ("   ", ""), (" C02XYZ123 ", "C02XYZ123")])
+def test_discovery_captures_serial_before_running_discovery(monkeypatch, serial, expected):
+    monkeypatch.setenv("PUSH_KEY", "pk")
+    monkeypatch.setenv("MACHINE_ID", "machine")
+    monkeypatch.delenv("MACHINE_SERIAL", raising=False)
+    if serial is not None:
+        monkeypatch.setenv("MACHINE_SERIAL", serial)
+
+    def discover(*args, **kwargs):
+        monkeypatch.setenv("MACHINE_SERIAL", "changed-during-discovery")
+        return []
+
+    with (
+        patch(f"{_G}._read_hook_payload", return_value="{}"),
+        patch(f"{_G}._discover_servers_payload", side_effect=discover),
+        patch(f"{_G}.send_hook_event", return_value=(True, "")) as send,
+    ):
+        assert guard_module._run_discover(SimpleNamespace(client="cursor", url="https://api.snyk.io")) == 0
+    assert send.call_args.kwargs["machine_serial"] == expected

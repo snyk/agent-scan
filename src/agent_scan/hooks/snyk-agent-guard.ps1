@@ -30,7 +30,10 @@ param(
     [string]$TenantId,
 
     [Parameter(Mandatory=$false)]
-    [string]$MachineId
+    [string]$MachineId,
+
+    [Parameter(Mandatory=$false)]
+    [string]$MachineSerial
 )
 
 $ErrorActionPreference = "Stop"
@@ -133,18 +136,14 @@ $body = "base64:$encoded"
 $hostname = try { [System.Net.Dns]::GetHostName() } catch { "unknown" }
 $username = try { [System.Environment]::UserName } catch { "unknown" }
 
-# Minimal JSON escaping
-function JsonEscape($s) {
-    $s = $s -replace '\\', '\\\\'
-    $s = $s -replace '"', '\"'
-    $s = $s -replace "`t", '\t'
-    $s = $s -replace "`r", '\r'
-    $s = $s -replace "`n", '\n'
-    return $s
-}
-
-$xUser = '{{"hostname":"{0}","username":"{1}","identifier":"{2}","cli_version":"{3}"}}' -f `
-    (JsonEscape $hostname), (JsonEscape $username), (JsonEscape $MachineId), (JsonEscape $cliVersion)
+$serial = if ($MachineSerial) { $MachineSerial } else { $null }
+$xUser = @{
+    hostname = $hostname
+    username = $username
+    identifier = $MachineId
+    cli_version = $cliVersion
+    machine_serial = $serial
+} | ConvertTo-Json -Compress
 
 # Identify whether GitHub Copilot invoked this hook (see get_agent_surface in
 # snyk-agent-guard.sh for why the -Client argument cannot answer this: one Copilot hook

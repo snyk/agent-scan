@@ -413,7 +413,10 @@ snyk-agent-scan guard uninstall {claude,cursor,codex,github-copilot,all} [OPTION
 | `TENANT_ID` | Tenant UUID alternative to `--tenant-id` |
 | `SNYK_TOKEN` | Required to mint/revoke push keys and verify that Guard is enabled for the tenant |
 | `MACHINE_ID` | Required non-anonymous machine identifier sent with hook events; alternative to `guard install --machine-id` |
+| `MACHINE_SERIAL` | Optional hardware serial captured by `guard install` for hook and discovery events. Sent as `machine_serial` alongside the hostname; absent or empty values become JSON `null`. The captured value, including an empty value, overrides any later inherited `MACHINE_SERIAL`. Does not change `MACHINE_ID`. |
 | `AGENT_SCAN_COMMAND` | Optional Agent Scan command invoked by the session-start discovery hook, with the hook arguments appended. The hook is installed only when this is set. A value that is not an existing executable file is run as a shell command. |
+
+Pass `MACHINE_SERIAL` again whenever you reinstall or update Guard hooks. Reinstalling without it, or with a blank value, replaces any previously captured serial with JSON `null`; the old value is not preserved.
 
 ## Environment variables
 

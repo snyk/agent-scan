@@ -18,6 +18,9 @@ param(
     [string]$MachineId,
 
     [Parameter(Mandatory=$false)]
+    [string]$MachineSerial,
+
+    [Parameter(Mandatory=$false)]
     [string]$AgentScanCommand,
 
     [Parameter(Mandatory=$false)]
@@ -32,6 +35,7 @@ if ($RemoteUrl) { $env:REMOTE_HOOKS_BASE_URL = $RemoteUrl }
 if (-not $MachineId) { $MachineId = $env:MACHINE_ID }
 if (-not $MachineId) { exit 0 }
 $env:MACHINE_ID = $MachineId
+$env:MACHINE_SERIAL = $MachineSerial
 
 $cmd = if ($AgentScanCommand) { $AgentScanCommand } elseif ($env:AGENT_SCAN_COMMAND) { $env:AGENT_SCAN_COMMAND } else { $null }
 if (-not $cmd) { exit 0 }
