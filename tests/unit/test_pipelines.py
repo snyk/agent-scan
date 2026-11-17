@@ -1,10 +1,22 @@
 from unittest.mock import AsyncMock, patch
 
+import aiohttp
 import pytest
 
-from agent_scan.models import ControlServer, InspectedPath
+from agent_scan.agents import DiscoveryScope
+from agent_scan.models import ClientToInspect, ControlServer, InspectedPath
 from agent_scan.models.api.v20260710 import ScanPathResponse, ScanResponse
-from agent_scan.pipelines import AnalyzeArgs, InspectArgs, PushArgs, inspect_analyze_push_pipeline
+from agent_scan.pipelines import (
+    AnalyzeArgs,
+    InspectArgs,
+    PushArgs,
+    discover_clients,
+    discover_clients_remotely,
+    inspect_analyze_push_pipeline,
+    supports_remote_discovery,
+)
+from agent_scan.remote_discovery.client import RemoteDiscoveryError, RemoteResult
+from agent_scan.verify_api import AgentScanConfig
 
 
 @pytest.mark.asyncio
@@ -173,3 +185,201 @@ async def test_skip_pushing_false_when_push_key_explicitly_empty_string():
         )
 
     assert analyze.await_args.kwargs["skip_pushing"] is False
+
+
+@pytest.mark.asyncio
+async def test_agent_scan_config_passed_to_analyze_machine():
+    config = AgentScanConfig(async_analysis_enabled=True)
+    with (
+        patch("agent_scan.pipelines.inspect_pipeline", new_callable=AsyncMock, return_value=([], [])),
+        patch("agent_scan.pipelines.analyze_machine", new_callable=AsyncMock) as analyze,
+    ):
+        await inspect_analyze_push_pipeline(
+            InspectArgs(timeout=10, tokens=[], paths=[]),
+            AnalyzeArgs(analysis_url="https://test.example/api", agent_scan_config=config),
+            PushArgs(control_servers=[], push_key="k", version="0.6.0"),
+        )
+
+    assert analyze.await_args.kwargs["agent_scan_config"] == config
+
+
+@pytest.mark.parametrize(
+    "kwargs, expected",
+    [({}, True), ({"paths": ["/x/mcp.json"]}, False), ({"target_folders": ["/repo"]}, False)],
+    ids=["machine", "explicit_paths", "target_folders"],
+)
+def test_supports_remote_discovery(kwargs, expected):
+    args = {"timeout": 10, "tokens": [], "paths": [], **kwargs}
+    assert supports_remote_discovery(InspectArgs(**args)) is expected
+
+
+@pytest.mark.asyncio
+async def test_discover_clients_remotely_builds_clients():
+    remote = RemoteResult(
+        found={
+            "clients": [{"name": "cursor", "client_path": "~/.cursor", "username": "alice"}],
+            "mcp_configs": [],
+            "skills_dirs": [],
+        }
+    )
+    with (
+        patch("agent_scan.pipelines.run_remote_discovery", new_callable=AsyncMock, return_value=remote) as run,
+        patch("agent_scan.pipelines.get_readable_home_directories", return_value=[]),
+    ):
+        result = await discover_clients_remotely(
+            InspectArgs(timeout=10, tokens=[], paths=[], discovery_scope=DiscoveryScope.ALL),
+            "https://api.snyk.io",
+            "push-abc",
+            cli_version="1.0",
+            identifier="machine-1",
+            skip_ssl_verify=True,
+        )
+
+    discovered = result.discovered
+    assert discovered is not None and result.failure_reason is None
+    clients, unresolved, usernames = discovered
+    assert [(c.name, c.username) for c in clients] == [("cursor", "alice")]
+    assert unresolved == []
+    assert usernames == ["alice"]
+    assert run.await_args.args == ("https://api.snyk.io",)
+    assert run.await_args.kwargs == {
+        "scope": "all",
+        "push_key": "push-abc",
+        "cli_version": "1.0",
+        "identifier": "machine-1",
+        "all_users": False,
+        "skip_ssl_verify": True,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error, reason",
+    [
+        (RemoteDiscoveryError("503", "http_503"), "http_503"),
+        (RemoteDiscoveryError("rounds", "too_many_rounds"), "too_many_rounds"),
+        (aiohttp.ClientConnectionError("down"), "connection"),
+        (TimeoutError(), "timeout"),
+        (KeyError("found"), "malformed_response"),
+        (RuntimeError("x"), "error"),
+    ],
+    ids=["backend_error", "too_many_rounds", "connection", "timeout", "malformed_response", "other"],
+)
+async def test_discover_clients_remotely_returns_reason_on_failure(error, reason):
+    with patch("agent_scan.pipelines.run_remote_discovery", new_callable=AsyncMock, side_effect=error):
+        result = await discover_clients_remotely(InspectArgs(timeout=10, tokens=[], paths=[]), "https://x", "k")
+    assert (result.discovered, result.failure_reason) == (None, reason)
+
+
+@pytest.mark.asyncio
+async def test_discover_clients_remotely_keeps_partial_result():
+    remote = RemoteResult(partial=True)
+    with (
+        patch("agent_scan.pipelines.run_remote_discovery", new_callable=AsyncMock, return_value=remote),
+        patch("agent_scan.pipelines.get_readable_home_directories", return_value=[]),
+    ):
+        result = await discover_clients_remotely(InspectArgs(timeout=10, tokens=[], paths=[]), "https://x", "k")
+    assert result.partial is True
+    assert result.discovered is not None and result.discovered[:2] == ([], [])
+
+
+@pytest.mark.asyncio
+async def test_scan_metadata_merged_into_scan_context():
+    with (
+        patch("agent_scan.pipelines.inspect_pipeline", new_callable=AsyncMock, return_value=([], [])),
+        patch("agent_scan.pipelines.analyze_machine", new_callable=AsyncMock) as analyze,
+    ):
+        await inspect_analyze_push_pipeline(
+            InspectArgs(timeout=10, tokens=[], paths=[]),
+            AnalyzeArgs(analysis_url="https://x", scan_metadata={"discovery": {"source": "remote"}}),
+            PushArgs(control_servers=[], push_key="k", version="0.6.0"),
+        )
+
+    assert analyze.await_args.kwargs["scan_context"] == {"cli_version": "0.6.0", "discovery": {"source": "remote"}}
+
+
+class _FakeDiscoverer:
+    def __init__(self, result=None, error=None):
+        self.result, self.error, self.scopes = result, error, []
+
+    def discover_local_only(self, scope):
+        self.scopes.append(scope)
+        if self.error:
+            raise self.error
+        return self.result
+
+
+@pytest.mark.asyncio
+async def test_discover_clients_remotely_merges_local_only_sources(tmp_path):
+    remote = RemoteResult(
+        found={
+            "clients": [{"name": "vscode", "client_path": "~/.vscode", "username": "alice"}],
+            "mcp_configs": [],
+            "skills_dirs": [],
+        }
+    )
+    vscode = _FakeDiscoverer(
+        ClientToInspect(name="vscode", client_path="~/.vscode", mcp_configs={"/ext.js": []}, skills_dirs={})
+    )
+    opencode = _FakeDiscoverer(
+        ClientToInspect(name="opencode", client_path="~/.config/opencode", mcp_configs={}, skills_dirs={"/p": []})
+    )
+    empty = _FakeDiscoverer(ClientToInspect(name="cursor", client_path="~/.cursor", mcp_configs={}, skills_dirs={}))
+    broken = _FakeDiscoverer(error=RuntimeError("boom"))
+    with (
+        patch("agent_scan.pipelines.run_remote_discovery", new_callable=AsyncMock, return_value=remote),
+        patch("agent_scan.pipelines.get_readable_home_directories", return_value=[(tmp_path, "alice")]),
+        patch("agent_scan.pipelines.find_discoverers", return_value=[broken, vscode, opencode, empty]) as find,
+    ):
+        result = await discover_clients_remotely(
+            InspectArgs(timeout=10, tokens=[], paths=[], discovery_scope=DiscoveryScope.SERVERS), "https://x", "k"
+        )
+
+    discovered = result.discovered
+    assert discovered is not None
+    clients = {(c.name, c.username): c for c in discovered[0]}
+    assert set(clients) == {("vscode", "alice"), ("opencode", "alice")}
+    assert clients[("vscode", "alice")].mcp_configs == {"/ext.js": []}
+    assert clients[("opencode", "alice")].skills_dirs == {"/p": []}
+    find.assert_called_once_with(tmp_path)
+    assert vscode.scopes == [DiscoveryScope.SERVERS]
+
+
+@pytest.mark.asyncio
+async def test_discover_clients_remotely_skips_local_only_when_backend_fails():
+    with (
+        patch(
+            "agent_scan.pipelines.run_remote_discovery",
+            new_callable=AsyncMock,
+            side_effect=RemoteDiscoveryError("x", "http_500"),
+        ),
+        patch("agent_scan.pipelines.find_discoverers") as find,
+    ):
+        result = await discover_clients_remotely(InspectArgs(timeout=10, tokens=[], paths=[]), "https://x", "k")
+    assert (result.discovered, result.failure_reason) == (None, "http_500")
+    find.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_on_mode_backend_failure_keeps_local_only_sources(tmp_path):
+    vscode = _FakeDiscoverer(
+        ClientToInspect(name="vscode", client_path="~/.vscode", mcp_configs={"/ext.js": []}, skills_dirs={})
+    )
+    with (
+        patch(
+            "agent_scan.pipelines.run_remote_discovery",
+            new_callable=AsyncMock,
+            side_effect=RemoteDiscoveryError("x", "http_503"),
+        ),
+        patch("agent_scan.pipelines.get_readable_home_directories", return_value=[(tmp_path, "alice")]),
+        patch("agent_scan.pipelines.find_discoverers", return_value=[vscode]),
+        patch("agent_scan.pipelines.discover_clients_to_inspect", new_callable=AsyncMock) as local,
+    ):
+        (clients, _, _), metadata = await discover_clients(
+            InspectArgs(timeout=10, tokens=[], paths=[]), "on", "https://x", "k"
+        )
+
+    local.assert_not_awaited()
+    assert [(c.name, c.username, list(c.mcp_configs)) for c in clients] == [("vscode", "alice", ["/ext.js"])]
+    assert metadata["remote_error_reason"] == "http_503"
+    assert metadata["remote"]["mcp_configs"] == 1

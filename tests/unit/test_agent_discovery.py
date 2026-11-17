@@ -11613,3 +11613,123 @@ def test_only_vscode_opts_into_extension_mcp_providers():
     assert VSCodeDiscoverer._extension_mcp_providers_enabled is True
     for fork in (CursorDiscoverer, WindsurfDiscoverer, KiroDiscoverer, AntigravityDiscoverer):
         assert fork._extension_mcp_providers_enabled is False, fork.__name__
+
+
+# --- discover_local_only: sources backend discovery can't read yet ---
+
+
+def test_discover_local_only_is_empty_by_default(tmp_path):
+    from agent_scan.agents import ClaudeCodeDiscoverer
+
+    (tmp_path / ".claude").mkdir()
+    (tmp_path / ".claude.json").write_text('{"mcpServers": {"srv": {"command": "echo"}}}')
+
+    cti = ClaudeCodeDiscoverer(tmp_path).discover_local_only()
+
+    assert cti is not None
+    assert (cti.mcp_configs, cti.skills_dirs) == ({}, {})
+
+
+def test_discover_local_only_none_when_not_installed(tmp_path):
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    assert OpenCodeDiscoverer(tmp_path).discover_local_only() is None
+
+
+def test_vscode_discover_local_only_returns_only_extension_providers(tmp_path):
+    from agent_scan.agents import VSCodeDiscoverer
+
+    _install_extension(
+        tmp_path,
+        "ms-python.vscode-pylance-2026.4.1",
+        _PYLANCE_MANIFEST,
+        'new n$.McpHttpServerDefinition("pylance mcp server",n$.Uri.parse("http://localhost:1/stream"));',
+    )
+    (tmp_path / ".vscode" / "mcp.json").write_text('{"servers": {"user-srv": {"command": "echo"}}}')
+
+    cti = VSCodeDiscoverer(tmp_path).discover_local_only()
+
+    assert cti is not None
+    assert [key.rsplit("/", 1)[-1] for key in cti.mcp_configs] == ["extension.bundle.js"]
+    assert cti.skills_dirs == {}
+
+
+def test_cursor_discover_local_only_is_empty(tmp_path):
+    from agent_scan.agents import CursorDiscoverer
+
+    (tmp_path / ".cursor").mkdir()
+    exts = tmp_path / ".cursor" / "extensions"
+    ext_dir = exts / "ms-python.vscode-pylance-2026.4.1"
+    ext_dir.mkdir(parents=True)
+    (ext_dir / "package.json").write_text(json.dumps(_PYLANCE_MANIFEST))
+    (ext_dir / "dist").mkdir()
+    (ext_dir / "dist" / "extension.bundle.js").write_text(
+        'new n$.McpHttpServerDefinition("pylance mcp server",n$.Uri.parse("http://localhost:1/stream"));'
+    )
+    (exts / "extensions.json").write_text(json.dumps([{"relativeLocation": ext_dir.name}]))
+
+    cti = CursorDiscoverer(tmp_path).discover_local_only()
+
+    assert cti is not None
+    assert cti.mcp_configs == {}
+
+
+def test_opencode_discover_local_only_returns_only_project_history(tmp_path):
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    install = _opencode_install(tmp_path)
+    project = tmp_path / "work" / "repo"
+    project.mkdir(parents=True)
+    _seed_opencode_db(tmp_path / ".local" / "share" / "opencode" / "opencode.db", [project.as_posix()])
+    (install / "opencode.json").write_text(
+        json.dumps(
+            {
+                "mcp": {"global-srv": {"type": "local", "command": ["echo"]}},
+                "skills": {"paths": ["rel-skills", (tmp_path / "abs-skills").as_posix()]},
+            }
+        )
+    )
+    _write_skill(install / "skills", "global-skill")
+    _write_skill(tmp_path / "abs-skills", "abs-skill")
+    (project / "opencode.json").write_text(json.dumps({"mcp": {"proj-srv": {"type": "local", "command": ["echo"]}}}))
+    _write_skill(project / ".opencode" / "skills", "proj-skill")
+    _write_skill(project / "rel-skills", "rel-skill")
+
+    cti = OpenCodeDiscoverer(tmp_path).discover_local_only()
+
+    assert cti is not None
+    assert list(cti.mcp_configs) == [(project / "opencode.json").as_posix()]
+    assert set(cti.skills_dirs) == {
+        (project / ".opencode" / "skills").as_posix(),
+        (project / "rel-skills").as_posix(),
+    }
+
+
+def test_opencode_discover_local_only_keeps_absolute_paths_from_project_configs(tmp_path):
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    _opencode_install(tmp_path)
+    project = tmp_path / "work" / "repo"
+    project.mkdir(parents=True)
+    _seed_opencode_db(tmp_path / ".local" / "share" / "opencode" / "opencode.db", [project.as_posix()])
+    abs_skills = tmp_path / "team" / "abs-skills"
+    (project / "opencode.json").write_text(json.dumps({"skills": {"paths": [abs_skills.as_posix(), "~/home-skills"]}}))
+    _write_skill(abs_skills, "abs-skill")
+    _write_skill(tmp_path / "home-skills", "home-skill")
+
+    cti = OpenCodeDiscoverer(tmp_path).discover_local_only()
+
+    assert cti is not None
+    assert set(cti.skills_dirs) == {abs_skills.as_posix(), (tmp_path / "home-skills").as_posix()}
+
+
+def test_opencode_discover_local_only_without_projects_is_empty(tmp_path):
+    from agent_scan.agents import OpenCodeDiscoverer
+
+    install = _opencode_install(tmp_path)
+    (install / "opencode.json").write_text(json.dumps({"mcp": {"srv": {"type": "local", "command": ["echo"]}}}))
+
+    cti = OpenCodeDiscoverer(tmp_path).discover_local_only()
+
+    assert cti is not None
+    assert (cti.mcp_configs, cti.skills_dirs) == ({}, {})

@@ -267,6 +267,35 @@ def _looks_like_mcp_payload(data: dict) -> bool:
     )
 
 
+def _name(fn: Callable[..., object]) -> str:
+    return getattr(fn, "__name__", repr(fn))
+
+
+def is_own_home(home: Path | None) -> bool:
+    """True when ``home`` is the scanning process's own user's home (see
+    :meth:`AgentDiscoverer._scans_own_home`)."""
+    candidates = {Path.home()}
+    try:
+        import pwd
+
+        candidates.add(Path(pwd.getpwuid(os.getuid()).pw_dir))
+    except (ImportError, AttributeError, KeyError, OSError):
+        pass
+    if home is None:
+        return False
+    if home in candidates:
+        return True
+    try:
+        resolved_home = home.resolve()
+        return any(resolved_home == candidate.resolve() for candidate in candidates)
+    except (OSError, RuntimeError, ValueError):
+        # Fail closed: an unresolvable path is not proof of own-home, and this gate
+        # decides whether *this* process's relocating env vars apply to it. Catching
+        # more than OSError only widens what maps to that same safe answer -- letting
+        # anything else escape here would abort the whole discovery.
+        return False
+
+
 class AgentDiscoverer(ABC):
     """Abstract per-agent discoverer.
 
@@ -319,24 +348,7 @@ class AgentDiscoverer(ABC):
         ``pwd``/``os.getuid`` are POSIX-only; the guarded import skips the extra
         candidate on Windows.
         """
-        candidates = {Path.home()}
-        try:
-            import pwd
-
-            candidates.add(Path(pwd.getpwuid(os.getuid()).pw_dir))
-        except (ImportError, AttributeError, KeyError, OSError):
-            pass
-        if self.home_directory in candidates:
-            return True
-        try:
-            resolved_home = self.home_directory.resolve()
-            return any(resolved_home == candidate.resolve() for candidate in candidates)
-        except (OSError, RuntimeError, ValueError):
-            # Fail closed: an unresolvable path is not proof of own-home, and this gate
-            # decides whether *this* process's relocating env vars apply to it. Catching
-            # more than OSError only widens what maps to that same safe answer -- letting
-            # anything else escape here would abort the whole discovery.
-            return False
+        return is_own_home(self.home_directory)
 
     def __init_subclass__(cls, *, abstract: bool = False, **kwargs: object) -> None:
         """Enforce a non-empty ``name`` on concrete subclasses.
@@ -366,6 +378,28 @@ class AgentDiscoverer(ABC):
 
     def discover(self, scope: DiscoveryScope = DiscoveryScope.ALL) -> ClientToInspect | None:
         """Assemble a ClientToInspect, or None when the agent isn't installed."""
+        return self._assemble(scope, self.discover_mcp_servers, self.discover_skills)
+
+    def discover_local_only(self, scope: DiscoveryScope = DiscoveryScope.ALL) -> ClientToInspect | None:
+        """Like :meth:`discover`, limited to sources backend discovery can't read yet.
+
+        Merged into backend results by the pipeline. Empty unless a subclass overrides
+        :meth:`_local_only_mcp_servers` / :meth:`_local_only_skills`.
+        """
+        return self._assemble(scope, self._local_only_mcp_servers, self._local_only_skills)
+
+    def _local_only_mcp_servers(self) -> McpConfigsResult:
+        return {}
+
+    def _local_only_skills(self) -> SkillsDirsResult:
+        return {}
+
+    def _assemble(
+        self,
+        scope: DiscoveryScope,
+        mcp_source: Callable[[], McpConfigsResult],
+        skills_source: Callable[[], SkillsDirsResult],
+    ) -> ClientToInspect | None:
         client_path = self.client_exists()
         if client_path is None:
             return None
@@ -381,14 +415,14 @@ class AgentDiscoverer(ABC):
         skills_dirs: SkillsDirsResult = {}
         if scope in (DiscoveryScope.SERVERS, DiscoveryScope.ALL):
             try:
-                mcp_configs = self.discover_mcp_servers()
+                mcp_configs = mcp_source()
             except Exception:
-                logger.exception("%s.discover_mcp_servers() raised; keeping skills", type(self).__name__)
+                logger.exception("%s.%s() raised; keeping skills", type(self).__name__, _name(mcp_source))
         if scope in (DiscoveryScope.SKILLS, DiscoveryScope.ALL):
             try:
-                skills_dirs = self.discover_skills()
+                skills_dirs = skills_source()
             except Exception:
-                logger.exception("%s.discover_skills() raised; keeping servers", type(self).__name__)
+                logger.exception("%s.%s() raised; keeping servers", type(self).__name__, _name(skills_source))
         return ClientToInspect(
             name=self.name,
             client_path=client_path,

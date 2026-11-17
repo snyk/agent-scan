@@ -775,7 +775,9 @@ class TestControlServerUploadIntegration:
             patch("builtins.input", side_effect=["tenant-1", "token-1"]),
             patch("agent_scan.pushkeys.mint_push_key", return_value="minted-key"),
             patch("agent_scan.pushkeys.revoke_push_key") as mock_revoke,
-            patch("agent_scan.cli.discover_clients_to_inspect", new_callable=AsyncMock, return_value=([], [], [])),
+            patch(
+                "agent_scan.pipelines.discover_clients_to_inspect", new_callable=AsyncMock, return_value=([], [], [])
+            ),
             patch("agent_scan.cli.collect_consent", return_value=set()),
             patch(
                 "agent_scan.cli.inspect_analyze_push_pipeline", new_callable=AsyncMock, return_value=[mock_result]

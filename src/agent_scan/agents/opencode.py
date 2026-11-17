@@ -210,6 +210,16 @@ class OpenCodeDiscoverer(AgentDiscoverer):
         result.update(self._discover_cached_url_skills())
         return result
 
+    # Backend discovery can't read the SQLite project list yet, so everything rooted at
+    # an opened project runs locally.
+    def _local_only_mcp_servers(self) -> McpConfigsResult:
+        return self._discover_project_mcp_servers()
+
+    def _local_only_skills(self) -> SkillsDirsResult:
+        result = self._discover_project_skills()
+        result.update(self._discover_config_skills_paths(local_only=True))
+        return result
+
     # --- folder resolution ---
 
     def _default_global_config_dir(self) -> Path:
@@ -593,10 +603,7 @@ class OpenCodeDiscoverer(AgentDiscoverer):
         for base in self._global_config_dirs():
             for filename in _CONFIG_FILENAMES:
                 candidates.append(base / filename)
-        for project in self._discovery_paths_with_ancestors():
-            for base in self._project_config_bases(project):
-                for filename in _CONFIG_FILENAMES:
-                    candidates.append(base / filename)
+        candidates.extend(self._project_candidate_config_files())
         managed = self._managed_config_dir()
         if managed is not None:
             for filename in _CONFIG_FILENAMES:
@@ -606,7 +613,16 @@ class OpenCodeDiscoverer(AgentDiscoverer):
             candidates.append(env_path)
         return candidates
 
-    def _discover_config_skills_paths(self) -> SkillsDirsResult:
+    def _project_candidate_config_files(self) -> list[Path]:
+        """Config files under opened projects (found through the SQLite project list)."""
+        return [
+            base / filename
+            for project in self._discovery_paths_with_ancestors()
+            for base in self._project_config_bases(project)
+            for filename in _CONFIG_FILENAMES
+        ]
+
+    def _discover_config_skills_paths(self, *, local_only: bool = False) -> SkillsDirsResult:
         """Scan every ``skills.paths`` entry referenced from any opencode.json.
 
         Per ``packages/core/src/v1/config/skills.ts``:
@@ -625,12 +641,16 @@ class OpenCodeDiscoverer(AgentDiscoverer):
 
         Malformed config files (already reported by MCP discovery) are skipped
         here — we only consume the ``skills.paths`` array on success.
+
+        ``local_only`` keeps what backend discovery can't resolve: every entry from
+        project config files, and the worktree-relative entries from the rest.
         """
         result: SkillsDirsResult = {}
         # opencode's instance dirs (the db ``worktree`` leaves); computed once so
         # the relative-entry resolution below doesn't re-read the SQLite db per
         # candidate config file.
         worktrees = self._all_discovery_folders()
+        project_files = set(self._project_candidate_config_files()) if local_only else set()
         for config_path in self._iter_candidate_config_files():
             data = self._load_json_file(config_path)
             if not isinstance(data, dict):
@@ -644,9 +664,16 @@ class OpenCodeDiscoverer(AgentDiscoverer):
             for entry in paths:
                 if not isinstance(entry, str) or not entry:
                     continue
+                if local_only and config_path not in project_files and not self._is_relative_skills_path_entry(entry):
+                    continue
                 for resolved in self._resolve_skills_path_entry(entry, worktrees):
                     self._record_skills_at(result, resolved)
         return result
+
+    @staticmethod
+    def _is_relative_skills_path_entry(entry: str) -> bool:
+        """True when :meth:`_resolve_skills_path_entry` resolves ``entry`` against worktrees."""
+        return not (entry == "~" or entry.startswith("~/") or Path(entry).is_absolute())
 
     def _resolve_skills_path_entry(self, entry: str, worktrees: list[Path]) -> list[Path]:
         """Expand a single ``skills.paths`` entry the way opencode does.
@@ -660,12 +687,11 @@ class OpenCodeDiscoverer(AgentDiscoverer):
           nothing — matching that opencode would never load it from the config
           dir.
         """
+        if self._is_relative_skills_path_entry(entry):
+            return [worktree / entry for worktree in worktrees]
         if entry == "~" or entry.startswith("~/"):
             return [expand_path(Path(entry), self.home_directory)]
-        candidate = Path(entry)
-        if candidate.is_absolute():
-            return [candidate]
-        return [worktree / candidate for worktree in worktrees]
+        return [Path(entry)]
 
     # --- URL-pulled skills cache (Gap C) ---
 
