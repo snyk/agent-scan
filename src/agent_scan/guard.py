@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import stat
 import sys
@@ -1047,12 +1048,11 @@ def _prepare_codex_managed_config(
 
 def _write_codex_managed_config(content: str, path: Path) -> bool:
     """Write Codex managed TOML to disk. Returns True if file changed."""
-    if path.exists() and path.read_text() == content:
+    if path.exists() and path.read_text(encoding="utf-8") == content:
         return False
     if path.exists():
         _backup_file(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content)
+    _atomic_write_text(path, content)
     rich.print(f"[green]✓[/green]  Written [dim]{path}[/dim]")
     return True
 
@@ -2181,10 +2181,90 @@ def _backup_file(path: Path) -> None:
         rich.print(f"[green]\u2713[/green]  Backed up [dim]{path}[/dim] \u2192 [dim]{backup}[/dim]")
 
 
+def _create_sibling_temp_file(target: Path, mode: int) -> tuple[int, Path]:
+    """Exclusively create a hidden temp file next to ``target``; return (fd, path).
+
+    Unlike ``tempfile.mkstemp`` (always 0600), ``mode`` is passed to ``os.open``
+    so the process umask applies, exactly as for ``open(path, "w")``, without
+    the thread-unsafe ``os.umask`` read-and-restore dance.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0)
+    for _ in range(100):
+        tmp = target.with_name(f".{target.name}.{secrets.token_hex(6)}.tmp")
+        try:
+            return os.open(tmp, flags, mode), tmp
+        except FileExistsError:
+            continue
+    raise FileExistsError(f"Could not create a temporary file next to {target}")
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Replace ``path`` with ``content`` (UTF-8) atomically.
+
+    The content goes to a temp file in the target's directory, is fsynced, and
+    is then moved over the target with ``os.replace``, so a crash, kill or full
+    disk leaves either the old file or the new one, never a truncated one.
+
+    - Symlinks are resolved first: a symlinked config stays a symlink and its
+      target is updated.
+    - Missing parent directories are created.
+    - Newlines are written in text mode (``\\n`` becomes ``os.linesep``), the same
+      as the ``open(path, "w")`` / ``Path.write_text`` calls this replaces.
+    - An existing target keeps its permission bits (POSIX) and, when running
+      as root, its owner and group (best effort). A new file gets the usual
+      umask-based permissions.
+    - Limitation: nothing else carries over, because the target becomes a new
+      file. ACLs, extended attributes (e.g. a hand-set SELinux label) and file
+      flags are lost, the file gets its directory's inherited ACL, and other
+      hard links keep the old content. Copying these differs per OS, so it is
+      documented instead (docs/cli-reference.md, ``guard install``).
+    - On any failure the temp file is removed and the exception re-raised.
+    """
+    target = path.resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        existing: os.stat_result | None = target.stat()
+    except FileNotFoundError:
+        existing = None
+
+    # Start private when replacing an existing file; copymode below restores its bits.
+    fd, tmp = _create_sibling_temp_file(target, 0o600 if existing is not None else 0o666)
+    try:
+        if existing is not None and not IS_WINDOWS:
+            # On Windows chmod only toggles the read-only flag; copying it would
+            # make the temp file impossible to clean up if os.replace fails.
+            shutil.copymode(target, tmp)
+            if hasattr(os, "geteuid") and os.geteuid() == 0:
+                with contextlib.suppress(OSError):
+                    os.chown(tmp, existing.st_uid, existing.st_gid)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            fd = -1  # now owned (and closed) by f
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, target)
+    except BaseException:
+        if fd != -1:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+
+    if not IS_WINDOWS:
+        # Persist the rename itself; best effort, not all filesystems allow it.
+        with contextlib.suppress(OSError):
+            dir_fd = os.open(target.parent, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+
+
 def _read_json_or_empty(path: Path) -> dict:
     if not path.exists():
         return {}
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
@@ -2192,20 +2272,16 @@ def _write_json_if_changed(path: Path, data: dict) -> bool:
     """Write JSON to path only if content differs. Backs up before writing. Returns True if written."""
     new_content = json.dumps(data, indent=2) + "\n"
     if path.exists():
-        old_content = path.read_text()
+        old_content = path.read_text(encoding="utf-8")
         if old_content == new_content:
             return False
         _backup_file(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(new_content)
+    _atomic_write_text(path, new_content)
     return True
 
 
 def _write_json(path: Path, data: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
-        f.write("\n")
+    _atomic_write_text(path, json.dumps(data, indent=2) + "\n")
 
 
 def _preserved_note(count: int) -> str:

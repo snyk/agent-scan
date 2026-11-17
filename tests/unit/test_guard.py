@@ -1088,6 +1088,119 @@ class TestWriteConfig:
         write_managed.assert_called_once_with("toml-content", path)
 
 
+class TestAtomicConfigWrites:
+    """Config writers replace files atomically instead of truncating them in place."""
+
+    @pytest.mark.parametrize(
+        "write",
+        [
+            lambda path: guard_module._write_json(path, {"hooks": {}}),
+            lambda path: guard_module._write_json_if_changed(path, {"hooks": {}}),
+            lambda path: _write_codex_managed_config("[hooks]\n", path),
+        ],
+        ids=["write_json", "write_json_if_changed", "codex_managed"],
+    )
+    def test_creates_new_file_and_parent_directory(self, tmp_path, write):
+        path = tmp_path / "missing" / "nested" / "config"
+
+        write(path)
+
+        assert path.is_file()
+        assert path.read_text(encoding="utf-8") in ('{\n  "hooks": {}\n}\n', "[hooks]\n")
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+    def test_new_file_gets_umask_based_permissions(self, tmp_path):
+        path = tmp_path / "settings.json"
+        old_umask = os.umask(0o027)
+        try:
+            guard_module._write_json(path, {"hooks": {}})
+        finally:
+            os.umask(old_umask)
+
+        assert stat.S_IMODE(path.stat().st_mode) == 0o640
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+    @pytest.mark.parametrize(
+        "write",
+        [
+            lambda path: guard_module._write_json(path, {"hooks": {}}),
+            lambda path: guard_module._write_json_if_changed(path, {"hooks": {}}),
+            lambda path: _write_codex_managed_config("[hooks]\n", path),
+        ],
+        ids=["write_json", "write_json_if_changed", "codex_managed"],
+    )
+    def test_overwrite_preserves_existing_mode(self, tmp_path, write):
+        path = tmp_path / "settings.json"
+        path.write_text('{"old": true}\n', encoding="utf-8")
+        path.chmod(0o600)
+
+        write(path)
+
+        assert path.read_text(encoding="utf-8") != '{"old": true}\n'
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+    def test_symlinked_config_stays_symlink_and_target_is_updated(self, tmp_path):
+        dotfiles = tmp_path / "dotfiles"
+        dotfiles.mkdir()
+        real = dotfiles / "settings.json"
+        real.write_text('{"old": true}\n', encoding="utf-8")
+        link_dir = tmp_path / ".claude"
+        link_dir.mkdir()
+        link = link_dir / "settings.json"
+        link.symlink_to(real)
+
+        assert guard_module._write_json_if_changed(link, {"hooks": {}}) is True
+
+        assert link.is_symlink()
+        assert link.resolve() == real.resolve()
+        assert json.loads(real.read_text(encoding="utf-8")) == {"hooks": {}}
+
+    @pytest.mark.parametrize(
+        "write",
+        [
+            lambda path: guard_module._write_json(path, {"hooks": {}}),
+            lambda path: guard_module._write_json_if_changed(path, {"hooks": {}}),
+            lambda path: _write_codex_managed_config("[hooks]\n", path),
+        ],
+        ids=["write_json", "write_json_if_changed", "codex_managed"],
+    )
+    def test_failed_replace_leaves_original_intact(self, tmp_path, write):
+        path = tmp_path / "settings.json"
+        original = b'{\n  "keep": "me"\n}\n'
+        path.write_bytes(original)
+
+        with (
+            patch(f"{_G}.os.replace", side_effect=OSError("No space left on device")),
+            pytest.raises(OSError, match="No space left"),
+        ):
+            write(path)
+
+        assert path.read_bytes() == original
+
+    def test_failure_while_writing_content_leaves_original_intact(self, tmp_path):
+        path = tmp_path / "settings.json"
+        original = b'{"keep": "me"}\n'
+        path.write_bytes(original)
+
+        with (
+            patch(f"{_G}.os.fsync", side_effect=KeyboardInterrupt),
+            pytest.raises(KeyboardInterrupt),
+        ):
+            guard_module._write_json(path, {"hooks": {}})
+
+        assert path.read_bytes() == original
+
+    def test_non_ascii_content_round_trips_as_utf8(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        content = "# caf\u00e9 \u2713\n[hooks]\n"
+
+        assert _write_codex_managed_config(content, path) is True
+        assert _write_codex_managed_config(content, path) is False
+
+        assert path.read_bytes().decode("utf-8").replace("\r\n", "\n") == content
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX discovery script")
 class TestDiscoveryHookScriptFiles:
     def test_copy_writes_executable_discovery_script_next_to_forwarder(self, tmp_path):
