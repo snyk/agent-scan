@@ -181,6 +181,9 @@ def run_guard(args) -> int:
     except PermissionError as e:
         rich.print(f"[bold red]Error:[/bold red] Permission denied: {e}")
         return 1
+    except CodexRequirementsError as e:
+        rich.print(f"[bold red]Error:[/bold red] {e}")
+        return 1
 
 
 # ---------------------------------------------------------------------------
@@ -620,6 +623,9 @@ def _install_hooks(
     machine_serial: str,
 ) -> None:
     """Post-mint install steps.  Extracted so _run_install can revoke on failure."""
+    if client == "codex" and _is_codex_requirements_toml(config_path):
+        # Check the edit before any hook script is written.
+        _preflight_codex_requirements(config_path)
     existing_info = _detect_existing_install(client, config_path)
     old_push_key = existing_info.get("auth_value", "") if existing_info else ""
     push_key_changed = bool(old_push_key) and old_push_key != push_key
@@ -945,43 +951,463 @@ def _codex_managed_dirs(config_path: Path) -> tuple[str, str]:
     return managed_dir, windows_managed_dir
 
 
+class CodexRequirementsError(ValueError):
+    """requirements.toml can't be edited safely. The file is left untouched."""
+
+
+def _codex_guard_hook_blocks(command: str, *, discover_command: str | None = None) -> list[str]:
+    """Guard's ``[[hooks.<Event>]]`` groups, one newline-terminated block each."""
+    blocks = [
+        f'[[hooks.{event}]]\n[[hooks.{event}.hooks]]\ntype = "command"\ncommand = {toml_escape(command)}\n'
+        for event in CODEX_HOOK_EVENTS
+    ]
+    if discover_command:
+        blocks.append(
+            "[[hooks.SessionStart]]\n"
+            "[[hooks.SessionStart.hooks]]\n"
+            'type = "command"\n'
+            f"command = {toml_escape(discover_command)}\n"
+            "async = true\n"
+        )
+    return blocks
+
+
+def _codex_hooks_dir_lines(keys_and_values: Iterable[tuple[str, str]]) -> str:
+    return "".join(f"{key} = {toml_escape(value)}\n" for key, value in keys_and_values)
+
+
 def _render_codex_requirements_toml(
     command: str,
     config_path: Path,
     *,
     discover_command: str | None = None,
 ) -> str:
-    """Generate the requirements.toml content for managed Codex hooks."""
+    """Generate the requirements.toml content for managed Codex hooks (used when no file exists yet)."""
     managed_dir, windows_managed_dir = _codex_managed_dirs(config_path)
-    lines = [
-        "[features]",
-        "hooks = true",
-        "",
-        "[hooks]",
-        f"managed_dir = {toml_escape(managed_dir)}",
-        f"windows_managed_dir = {toml_escape(windows_managed_dir)}",
-        "",
+    chunks = [
+        "[features]\nhooks = true\n",
+        "[hooks]\n"
+        + _codex_hooks_dir_lines([("managed_dir", managed_dir), ("windows_managed_dir", windows_managed_dir)]),
+        *_codex_guard_hook_blocks(command, discover_command=discover_command),
     ]
-    for event in CODEX_HOOK_EVENTS:
-        lines.append(f"[[hooks.{event}]]")
-        lines.append(f"[[hooks.{event}.hooks]]")
-        lines.append('type = "command"')
-        lines.append(f"command = {toml_escape(command)}")
-        lines.append("")
-    if discover_command:
-        lines.append("[[hooks.SessionStart]]")
-        lines.append("[[hooks.SessionStart.hooks]]")
-        lines.append('type = "command"')
-        lines.append(f"command = {toml_escape(discover_command)}")
-        lines.append("async = true")
-        lines.append("")
-    content = "\n".join(lines).rstrip("\n") + "\n"
+    content = "\n".join(chunks)
     if tomllib is not None:  # pragma: no branch - available on supported installs
         try:
             tomllib.loads(content)
         except ValueError as exc:
             raise ValueError("Generated requirements.toml is invalid") from exc
     return content
+
+
+# --- In-place editing of requirements.toml ----------------------------------
+#
+# requirements.toml is the admin's system-wide Codex policy file, so Guard edits
+# it in place: lines it does not own are kept byte for byte (comments, blank
+# lines, key order, quoting, line endings). There is no TOML round-trip library
+# in our dependencies, so the edit is line based: the file is cut into sections
+# at table headers, and only these forms are recognised:
+#
+# - ``[[hooks.<Event>]]`` groups followed by ``[[hooks.<Event>.hooks]]`` entries.
+#   An entry is Guard's when its ``command`` matches _is_agent_scan_command.
+#   A group whose entries are all Guard's is removed whole; from a mixed group
+#   only Guard's entries are removed.
+# - ``managed_dir`` / ``windows_managed_dir`` lines under a ``[hooks]`` header.
+# - a ``hooks`` line under a ``[features]`` header.
+#
+# Anything else (inline tables/arrays, quoted keys, dotted keys) is left alone.
+# Every edit is checked against tomllib: the old file must parse, and the new
+# file must parse to exactly the old data plus/minus Guard's entries. If the
+# line model got the layout wrong, the edit is refused instead of written.
+
+_GUARD_DIR_KEYS = ("managed_dir", "windows_managed_dir")
+_TOML_HEADER_RE = re.compile(r"^\s*(\[\[?)\s*([^\[\]]+?)\s*(\]\]?)\s*(?:#.*)?$")
+_TOML_BARE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+class _TomlHeader(NamedTuple):
+    line: int
+    is_array: bool
+    # Dotted path of bare keys, or None when the header uses quoted keys.
+    path: tuple[str, ...] | None
+
+
+def _split_toml_lines(text: str) -> list[str]:
+    """Split on LF only (TOML's newline), keeping each line's ending (``\\n`` or ``\\r\\n``)."""
+    parts = text.split("\n")
+    lines = [part + "\n" for part in parts[:-1]]
+    if parts[-1]:
+        lines.append(parts[-1])
+    return lines
+
+
+def _toml_headers(lines: list[str]) -> list[_TomlHeader]:
+    headers = []
+    for index, line in enumerate(lines):
+        m = _TOML_HEADER_RE.match(line)
+        if not m or len(m.group(1)) != len(m.group(3)):
+            continue
+        parts = tuple(part.strip() for part in m.group(2).split("."))
+        path = parts if all(_TOML_BARE_KEY_RE.match(part) for part in parts) else None
+        headers.append(_TomlHeader(index, len(m.group(1)) == 2, path))
+    return headers
+
+
+def _is_toml_content_line(line: str) -> bool:
+    stripped = line.strip()
+    return bool(stripped) and not stripped.startswith("#")
+
+
+def _last_toml_content_line(lines: list[str], start: int, end: int) -> int:
+    """Index of the last key/value line in ``lines[start:end]``, or ``start`` (the header)."""
+    for index in range(end - 1, start, -1):
+        if _is_toml_content_line(lines[index]):
+            return index
+    return start
+
+
+def _find_toml_table(lines: list[str], path: tuple[str, ...]) -> tuple[int, int] | None:
+    """(header line, section end) of the standard table ``[path]``, if it has a header."""
+    headers = _toml_headers(lines)
+    for n, header in enumerate(headers):
+        if not header.is_array and header.path == path:
+            end = headers[n + 1].line if n + 1 < len(headers) else len(lines)
+            return header.line, end
+    return None
+
+
+def _find_toml_key_line(lines: list[str], start: int, end: int, key: str) -> int | None:
+    key_re = re.compile(rf"^\s*{re.escape(key)}\s*=")
+    for index in range(start + 1, end):
+        if key_re.match(lines[index]):
+            return index
+    return None
+
+
+def _toml_key_line_value(line: str, key: str) -> object:
+    """Value of a single-line ``key = value`` (any quoting, unescaped), or None."""
+    try:
+        return tomllib.loads(line.strip()).get(key)
+    except ValueError:
+        return None
+
+
+def _delete_toml_lines(lines: list[str], start: int, end: int) -> None:
+    """Delete ``lines[start:end + 1]`` with one adjacent blank separator.
+
+    Guard appends each block after a blank line, so dropping the blank line in
+    front of a removed block (when the block is followed by a blank line or the
+    end of the file) undoes an install exactly.
+    """
+    after = end + 1
+    next_blank_or_eof = after >= len(lines) or not lines[after].strip()
+    if start > 0 and not lines[start - 1].strip() and next_blank_or_eof:
+        start -= 1
+    elif start == 0 and after < len(lines) and not lines[after].strip():
+        end += 1
+    del lines[start : end + 1]
+
+
+def _is_guard_hook_body(body: list[str]) -> bool:
+    try:
+        entry = tomllib.loads("".join(body))
+    except ValueError:
+        return False
+    command = entry.get("command")
+    return isinstance(command, str) and _is_agent_scan_command(command)
+
+
+def _remove_guard_hook_groups(lines: list[str]) -> list[tuple]:
+    """Delete Guard's hook groups/entries from ``lines`` in place.
+
+    Returns what was removed, as ``("group", event, group_index)`` and
+    ``("entry", event, group_index, entry_index)`` records, indexed the way
+    tomllib sees the arrays, so the edit can be checked against the parsed data.
+    """
+    headers = _toml_headers(lines)
+    spans: list[tuple[int, int]] = []
+    removals: list[tuple] = []
+    group_counts: dict[str, int] = {}
+    n = 0
+    while n < len(headers):
+        header = headers[n]
+        path = header.path
+        if not (header.is_array and path is not None and len(path) == 2 and path[0] == "hooks"):
+            n += 1
+            continue
+        event = path[1]
+        group_index = group_counts.get(event, 0)
+        group_counts[event] = group_index + 1
+        entries: list[int] = []
+        unknown_layout = False
+        m = n + 1
+        while m < len(headers):
+            sub = headers[m]
+            if sub.path is None or len(sub.path) <= 2 or sub.path[:2] != ("hooks", event):
+                break
+            if sub.is_array and sub.path == ("hooks", event, "hooks"):
+                entries.append(m)
+            else:
+                unknown_layout = True
+            m += 1
+        group_end = headers[m].line if m < len(headers) else len(lines)
+        n = m
+        if unknown_layout or not entries:
+            continue
+
+        def _entry_span(k: int) -> tuple[int, int]:
+            start = headers[k].line
+            end = headers[k + 1].line if k + 1 < len(headers) else len(lines)
+            return start, end
+
+        is_guard = [_is_guard_hook_body(lines[s + 1 : e]) for s, e in map(_entry_span, entries)]
+        if all(is_guard):
+            spans.append((header.line, _last_toml_content_line(lines, header.line, group_end)))
+            removals.append(("group", event, group_index))
+            continue
+        for entry_index, (k, guard) in enumerate(zip(entries, is_guard, strict=True)):
+            if guard:
+                start, end = _entry_span(k)
+                spans.append((start, _last_toml_content_line(lines, start, end)))
+                removals.append(("entry", event, group_index, entry_index))
+    for start, end in sorted(spans, reverse=True):
+        _delete_toml_lines(lines, start, end)
+    return removals
+
+
+def _load_codex_requirements(text: str) -> dict:
+    if tomllib is None:  # pragma: no cover - tomli is a dependency on Python 3.10
+        raise CodexRequirementsError("cannot check TOML on this Python (tomllib/tomli missing); not modifying it")
+    try:
+        data = tomllib.loads(text)
+    except ValueError as exc:
+        raise CodexRequirementsError(
+            f"not valid TOML ({exc}); Agent Guard will not modify it. Fix the file and run the command again."
+        ) from exc
+    for table in ("features", "hooks"):
+        if not isinstance(data.get(table, {}), dict):
+            raise CodexRequirementsError(f"'{table}' is not a table; Agent Guard will not modify the file")
+    return data
+
+
+def _apply_guard_removals(data: dict, removals: list[tuple]) -> dict:
+    """The parsed data with the recorded Guard groups/entries removed."""
+    result = copy.deepcopy(data)
+    dropped_groups = {(r[1], r[2]) for r in removals if r[0] == "group"}
+    dropped_entries = {(r[1], r[2], r[3]) for r in removals if r[0] == "entry"}
+    try:
+        hooks = result.get("hooks", {})
+        for event in {r[1] for r in removals}:
+            kept = []
+            for group_index, group in enumerate(hooks[event]):
+                if (event, group_index) in dropped_groups:
+                    continue
+                if any((event, group_index, i) in dropped_entries for i in range(len(group.get("hooks", [])))):
+                    group["hooks"] = [
+                        entry
+                        for i, entry in enumerate(group["hooks"])
+                        if (event, group_index, i) not in dropped_entries
+                    ]
+                kept.append(group)
+            hooks[event] = kept
+    except (AttributeError, KeyError, TypeError) as exc:
+        raise CodexRequirementsError("layout not understood; Agent Guard will not modify it") from exc
+    if _contains_guard_command(result.get("hooks")):
+        # A Guard hook in a layout the line editor skips: re-install would duplicate it
+        # and uninstall would leave it behind.
+        raise CodexRequirementsError(
+            "Agent Guard hooks found in a layout Agent Guard cannot edit; remove them manually"
+        )
+    return result
+
+
+def _contains_guard_command(value: object) -> bool:
+    if isinstance(value, str):
+        return _is_agent_scan_command(value)
+    if isinstance(value, dict):
+        return any(_contains_guard_command(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_guard_command(item) for item in value)
+    return False
+
+
+def _prune_empty(value: object) -> object:
+    """Drop empty tables/arrays, which a removed header may or may not leave behind."""
+    if isinstance(value, dict):
+        pruned = {key: _prune_empty(item) for key, item in value.items()}
+        return {key: item for key, item in pruned.items() if item != {} and item != []}
+    if isinstance(value, list):
+        return [_prune_empty(item) for item in value]
+    return value
+
+
+def _check_codex_requirements_edit(new_text: str, expected: dict) -> None:
+    """Refuse the edit unless ``new_text`` parses to exactly ``expected``."""
+    try:
+        actual = tomllib.loads(new_text)
+    except ValueError as exc:
+        raise CodexRequirementsError(
+            f"layout not supported (the edit would produce invalid TOML: {exc}); "
+            "Agent Guard will not modify it. Edit the file manually."
+        ) from exc
+    if _prune_empty(actual) != _prune_empty(expected):
+        raise CodexRequirementsError(
+            "layout not supported (the edit would change entries Agent Guard does not own); "
+            "Agent Guard will not modify it. Edit the file manually."
+        )
+
+
+def _strip_guard_from_codex_requirements(text: str, config_path: Path = CODEX_MANAGED_HOOKS_PATH) -> str:
+    """Return requirements.toml ``text`` with every Agent Guard entry removed.
+
+    Pure (no I/O). Removes Guard's hook groups/entries, then, if it removed any,
+    ``managed_dir`` / ``windows_managed_dir`` under ``[hooks]`` when they equal the
+    values Guard writes for ``config_path`` and no other hooks remain, then a ``[hooks]``
+    header left with nothing under it. Everything else is kept byte for byte.
+
+    ``[features] hooks = true`` is kept: the admin may have set it before Guard
+    did, and Guard cannot tell. Leaving it on is harmless with no hooks.
+
+    Raises CodexRequirementsError if ``text`` is not valid TOML or the edit
+    cannot be verified; the caller must then leave the file untouched.
+    """
+    data = _load_codex_requirements(text)
+    lines = _split_toml_lines(text)
+    removals = _remove_guard_hook_groups(lines)
+    expected = _apply_guard_removals(data, removals)
+
+    hooks = expected.get("hooks")
+    other_hooks = isinstance(hooks, dict) and any(
+        key not in _GUARD_DIR_KEYS and value not in ({}, []) for key, value in hooks.items()
+    )
+    # Only together with Guard's hooks: a file without them never had Guard's dirs added.
+    if removals and isinstance(hooks, dict) and not other_hooks:
+        table = _find_toml_table(lines, ("hooks",))
+        if table is not None:
+            header, end = table
+            removed_any = False
+            for key, guard_value in zip(_GUARD_DIR_KEYS, _codex_managed_dirs(config_path), strict=True):
+                index = _find_toml_key_line(lines, header, end, key)
+                if index is not None and _toml_key_line_value(lines[index], key) == guard_value == hooks.get(key):
+                    del lines[index]
+                    end -= 1
+                    del hooks[key]
+                    removed_any = True
+            if removed_any and not any(line.strip() for line in lines[header + 1 : end]):
+                _delete_toml_lines(lines, header, header)
+
+    new_text = "".join(lines)
+    if new_text != text:
+        _check_codex_requirements_edit(new_text, expected)
+    return new_text
+
+
+def _merge_guard_into_codex_requirements(
+    text: str,
+    command: str,
+    config_path: Path,
+    *,
+    discover_command: str | None = None,
+) -> tuple[str, list[str]]:
+    """Return (``text`` with Guard's entries merged in, warnings). Pure (no I/O).
+
+    Existing Guard hooks are removed and Guard's blocks appended at the end, in
+    the same shape as _render_codex_requirements_toml. ``[features] hooks`` is
+    set to true and Guard's ``managed_dir`` / ``windows_managed_dir`` are added
+    when missing. Nothing else changes.
+
+    If the file already sets ``managed_dir`` or ``windows_managed_dir``, both are
+    left exactly as they are (none added, none changed), even when they differ
+    from Guard's: Codex only uses it to label where managed
+    hooks come from (hook IDs and messages), not to find or run them, and
+    Guard's hook commands use absolute script paths. Codex allows a single
+    value per platform across all requirement sources, so Guard has no
+    reason to replace the admin's value.
+
+    Raises CodexRequirementsError, before anything is written, if ``text`` is
+    not valid TOML or if the edit cannot be verified.
+    """
+    data = _load_codex_requirements(text)
+    features: dict = data.get("features", {})
+    hooks_data: dict = data.get("hooks", {})
+    guard_dirs = dict(zip(_GUARD_DIR_KEYS, _codex_managed_dirs(config_path), strict=True))
+
+    lines = _split_toml_lines(text)
+    newline = "\r\n" if lines and lines[0].endswith("\r\n") else "\n"
+    expected = _apply_guard_removals(data, _remove_guard_hook_groups(lines))
+    if lines and not lines[-1].endswith("\n"):
+        lines[-1] += newline
+    warnings: list[str] = []
+    appended: list[str] = []
+
+    if features.get("hooks") is not True:
+        table = _find_toml_table(lines, ("features",))
+        index = _find_toml_key_line(lines, *table, "hooks") if table is not None else None
+        if "hooks" in features:
+            warnings.append(
+                f"[features] hooks was {features['hooks']!r}; setting it to true, which Codex needs "
+                "to run Agent Guard's managed hooks. Uninstall leaves it set to true."
+            )
+        if index is not None:
+            line = lines[index]
+            indent = line[: len(line) - len(line.lstrip())]
+            ending = "\r\n" if line.endswith("\r\n") else "\n"
+            lines[index] = f"{indent}hooks = true{ending}"
+        elif table is not None:
+            position = _last_toml_content_line(lines, *table) + 1
+            lines.insert(position, f"hooks = true{newline}")
+        else:
+            appended.append("[features]\nhooks = true\n")
+        expected.setdefault("features", {})["hooks"] = True
+
+    # Guard adds its directory keys only to a file that sets neither; an admin's
+    # value for either platform means the admin owns this setting.
+    has_dirs = any(key in hooks_data for key in _GUARD_DIR_KEYS)
+    missing_dirs = [] if has_dirs else list(guard_dirs.items())
+    if missing_dirs:
+        table = _find_toml_table(lines, ("hooks",))
+        if table is not None:
+            position = _last_toml_content_line(lines, *table) + 1
+            lines[position:position] = _split_toml_lines(_codex_hooks_dir_lines(missing_dirs).replace("\n", newline))
+        else:
+            appended.append("[hooks]\n" + _codex_hooks_dir_lines(missing_dirs))
+        expected.setdefault("hooks", {}).update(missing_dirs)
+
+    blocks = _codex_guard_hook_blocks(command, discover_command=discover_command)
+    for block in blocks:
+        for event, groups in tomllib.loads(block)["hooks"].items():
+            expected.setdefault("hooks", {}).setdefault(event, []).extend(groups)
+    appended.extend(blocks)
+
+    base = "".join(lines)
+    tail = "\n".join(appended)
+    if base:
+        tail = "\n" + tail
+    new_text = base + tail.replace("\n", newline)
+    _check_codex_requirements_edit(new_text, expected)
+    return new_text, warnings
+
+
+def _read_codex_requirements_text(path: Path) -> str:
+    """Read requirements.toml with its line endings exactly as on disk.
+
+    It is written back with ``newline=""`` (no translation), so untouched lines keep
+    their bytes on every platform, including LF-only or mixed files on Windows.
+    """
+    try:
+        return path.read_bytes().decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise CodexRequirementsError(f"{path}: not valid UTF-8; Agent Guard will not modify it") from exc
+
+
+def _preflight_codex_requirements(path: Path) -> None:
+    """Fail before any file is written if Guard cannot merge into an existing requirements.toml."""
+    if not path.exists():
+        return
+    text = _read_codex_requirements_text(path)
+    try:
+        _merge_guard_into_codex_requirements(text, "", path)
+    except CodexRequirementsError as exc:
+        raise CodexRequirementsError(f"{path}: {exc}") from exc
 
 
 def _prepare_codex_managed_config(
@@ -994,26 +1420,32 @@ def _prepare_codex_managed_config(
 
     Returns (new_content, hooks_diff).
 
-    Unlike the JSON clients, this rewrites requirements.toml wholesale: the
-    content is rendered from scratch, so any hooks, features or tables we do
-    not own are dropped on write. They are also absent from the returned diff,
-    because _parse_codex_requirements_toml only reports commands that match
-    _is_agent_scan_command. _write_codex_managed_config backs the old file up
-    first, so the discarded entries stay recoverable on disk.
-    """
-    new_content = _render_codex_requirements_toml(
-        command,
-        path,
-        discover_command=discover_command,
-    )
+    A missing file is rendered from scratch. An existing file is edited in
+    place (see _merge_guard_into_codex_requirements): admin policy, comments,
+    other tables and non-Guard hooks are kept byte for byte, so the content is
+    unchanged when Guard is already installed with the same commands. The diff
+    only covers Guard commands, because _parse_codex_requirements_toml only
+    reports commands that match _is_agent_scan_command.
 
+    Raises CodexRequirementsError if the existing file is not valid TOML or
+    cannot be edited safely.
+    """
     old_events: list[str] = []
     old_guard_command: str | None = None
     old_discover_command: str | None = None
     if path.exists():
-        old_text = path.read_text()
-        with contextlib.suppress(UnicodeDecodeError, ValueError):
-            old_events, old_guard_command, old_discover_command = _parse_codex_requirements_toml(old_text)
+        old_text = _read_codex_requirements_text(path)
+        try:
+            new_content, warnings = _merge_guard_into_codex_requirements(
+                old_text, command, path, discover_command=discover_command
+            )
+        except CodexRequirementsError as exc:
+            raise CodexRequirementsError(f"{path}: {exc}") from exc
+        for warning in warnings:
+            rich.print(f"[yellow]Warning:[/yellow] {path}: {warning}")
+        old_events, old_guard_command, old_discover_command = _parse_codex_requirements_toml(old_text)
+    else:
+        new_content = _render_codex_requirements_toml(command, path, discover_command=discover_command)
 
     old_event_set = set(old_events)
     new_event_set = set(CODEX_HOOK_EVENTS)
@@ -1048,11 +1480,11 @@ def _prepare_codex_managed_config(
 
 def _write_codex_managed_config(content: str, path: Path) -> bool:
     """Write Codex managed TOML to disk. Returns True if file changed."""
-    if path.exists() and path.read_text(encoding="utf-8") == content:
+    if path.exists() and _read_codex_requirements_text(path) == content:
         return False
     if path.exists():
         _backup_file(path)
-    _atomic_write_text(path, content)
+    _atomic_write_text(path, content, newline="")
     rich.print(f"[green]✓[/green]  Written [dim]{path}[/dim]")
     return True
 
@@ -1105,13 +1537,24 @@ def _uninstall_codex_managed(path: Path) -> None:
     if not path.exists():
         rich.print("[dim]No requirements.toml found. Nothing to uninstall.[/dim]")
         return
-    text = path.read_text()
-    events, _, _ = _parse_codex_requirements_toml(text)
-    if not events:
+    text = _read_codex_requirements_text(path)
+    # Any line, so hooks written with another TOML string form are found too.
+    if not any(_is_agent_scan_command(line) for line in text.splitlines()):
         rich.print("[dim]No Agent Guard hooks found.[/dim]")
         return
-    path.unlink()
-    rich.print(f"[green]✓[/green]  Removed {len(events)} Agent Guard hook(s) (deleted [dim]{path}[/dim])")
+    events, _, _ = _parse_codex_requirements_toml(text)
+    try:
+        new_text = _strip_guard_from_codex_requirements(text, path)
+    except CodexRequirementsError as exc:
+        raise CodexRequirementsError(f"{path}: {exc}") from exc
+    if new_text == text:
+        raise CodexRequirementsError(
+            f"{path}: Agent Guard hooks found in a layout Agent Guard cannot edit; remove them manually."
+        )
+    # Edited in place and never deleted: the file is the admin's Codex policy, not ours.
+    _atomic_write_text(path, new_text, newline="")
+    removed = f"{len(events)} Agent Guard hook(s)" if events else "Agent Guard hooks"
+    rich.print(f"[green]✓[/green]  Removed {removed} from [dim]{path}[/dim]")
 
 
 # ---------------------------------------------------------------------------
@@ -2196,7 +2639,7 @@ def _create_sibling_temp_file(target: Path, mode: int) -> tuple[int, Path]:
     raise FileExistsError(f"Could not create a temporary file next to {target}")
 
 
-def _atomic_write_text(path: Path, content: str) -> None:
+def _atomic_write_text(path: Path, content: str, *, newline: str | None = None) -> None:
     """Replace ``path`` with ``content`` (UTF-8) atomically.
 
     The content goes to a temp file in the target's directory, is fsynced, and
@@ -2208,6 +2651,7 @@ def _atomic_write_text(path: Path, content: str) -> None:
     - Missing parent directories are created.
     - Newlines are written in text mode (``\\n`` becomes ``os.linesep``), the same
       as the ``open(path, "w")`` / ``Path.write_text`` calls this replaces.
+      ``newline=""`` writes ``content`` as is.
     - An existing target keeps its permission bits (POSIX) and, when running
       as root, its owner and group (best effort). A new file gets the usual
       umask-based permissions.
@@ -2235,7 +2679,7 @@ def _atomic_write_text(path: Path, content: str) -> None:
             if hasattr(os, "geteuid") and os.geteuid() == 0:
                 with contextlib.suppress(OSError):
                     os.chown(tmp, existing.st_uid, existing.st_gid)
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
+        with os.fdopen(fd, "w", encoding="utf-8", newline=newline) as f:
             fd = -1  # now owned (and closed) by f
             f.write(content)
             f.flush()

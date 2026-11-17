@@ -39,6 +39,7 @@ from agent_scan.guard import (
     CURSOR_HOOK_EVENTS,
     CURSOR_HOOKS_PATH,
     CURSOR_MANAGED_HOOKS_PATH,
+    CodexRequirementsError,
     _build_hook_command,
     _build_hook_command_powershell,
     _compact_events,
@@ -71,6 +72,7 @@ from agent_scan.guard import (
     _run_uninstall,
     _send_test_event,
     _shell_quote,
+    _strip_guard_from_codex_requirements,
     _uninstall_filter_for,
     _uninstall_hooks,
     _write_client_config,
@@ -80,6 +82,7 @@ from agent_scan.guard import (
 from agent_scan.models import ClientToInspect, InspectedPath, InspectedServer, RemoteServer, StdioServer
 from agent_scan.models.errors import CouldNotParseMCPConfig, FileNotFoundConfig
 from agent_scan.pushkeys import GuardEnabledAccessDeniedError
+from agent_scan.utils import toml_escape
 
 
 @pytest.fixture(autouse=True)
@@ -3496,15 +3499,6 @@ class TestCodexManagedRequirementsToml:
         assert info is not None
         assert info["auth_value"] == "pk-codex"
 
-    def test_uninstall_removes_file(self, tmp_path):
-        install, uninstall, _, _ = self._import_managed_helpers()
-        path = tmp_path / "requirements.toml"
-        script = tmp_path / "hooks" / "snyk-agent-guard.sh"
-        install(CODEX_AGENT_SCAN_CMD, path, script)
-        assert path.exists()
-        uninstall(path)
-        assert not path.exists()
-
     def test_uninstall_missing_file_is_noop(self, tmp_path):
         _, uninstall, _, _ = self._import_managed_helpers()
         uninstall(tmp_path / "requirements.toml")  # should not raise
@@ -3536,12 +3530,440 @@ class TestCodexManagedRequirementsToml:
 
         assert parsed_discover == discover_command
 
-    def test_prepare_survives_unparseable_existing_toml(self, tmp_path):
+    def test_prepare_refuses_unparseable_existing_toml(self, tmp_path):
         path = tmp_path / "requirements.toml"
         path.write_text('command = "C:\\Users\\bad"\n')
-        content, diff = _prepare_codex_managed_config(CODEX_AGENT_SCAN_CMD, path)
-        assert "[features]" in content
-        assert diff["removed"]
+        before = path.read_bytes()
+        with pytest.raises(CodexRequirementsError, match="not valid TOML"):
+            _prepare_codex_managed_config(CODEX_AGENT_SCAN_CMD, path)
+        assert path.read_bytes() == before
+
+
+# ===================================================================
+# Codex managed: requirements.toml is edited in place
+# ===================================================================
+
+_CODEX_ADMIN_POLICY = """\
+# Managed by IT. Do not edit by hand.
+allowed_approval_policies = ["never", "on-request"]  # keep in sync with MDM
+
+[features]
+hooks = true
+
+[sandbox]
+mode = 'read-only'
+
+[[hooks.PreToolUse]]
+matcher = "^Bash$"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "python3 /etc/codex/hooks/policy.py"
+"""
+
+
+def _codex_managed_install(path: Path, command: str = CODEX_AGENT_SCAN_CMD, *, discover_command=None) -> bool:
+    content, _ = _prepare_codex_managed_config(command, path, discover_command=discover_command)
+    return _write_codex_managed_config(content, path)
+
+
+def _codex_dirs_toml(path: Path) -> str:
+    managed_dir, windows_managed_dir = guard_module._codex_managed_dirs(path)
+    return f"managed_dir = {toml_escape(managed_dir)}\nwindows_managed_dir = {toml_escape(windows_managed_dir)}\n"
+
+
+def _codex_guard_free(text: str) -> str:
+    """``text`` without the lines Guard writes for its hooks."""
+    data = guard_module.tomllib.loads(text)
+    for groups in data.get("hooks", {}).values():
+        if isinstance(groups, list):
+            for group in groups:
+                for entry in group.get("hooks", []):
+                    assert not _is_agent_scan_command(entry.get("command", "")), text
+    return text
+
+
+class TestCodexRequirementsInPlace:
+    @pytest.fixture(autouse=True)
+    def _posix_paths(self):
+        with patch(f"{_G}.IS_WINDOWS", False), patch(f"{_G}.rich"):
+            yield
+
+    def test_install_keeps_admin_content_byte_for_byte(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text(_CODEX_ADMIN_POLICY, encoding="utf-8")
+
+        assert _codex_managed_install(path, discover_command=CODEX_DISCOVER_CMD)
+
+        text = path.read_text(encoding="utf-8")
+        assert text.startswith(_CODEX_ADMIN_POLICY)
+        appended = text[len(_CODEX_ADMIN_POLICY) :]
+        assert appended.startswith("\n[hooks]\n" + _codex_dirs_toml(path) + "\n")
+        for event in CODEX_HOOK_EVENTS:
+            assert f"[[hooks.{event}]]\n[[hooks.{event}.hooks]]\n" in appended
+        assert appended.endswith(f"command = {toml_escape(CODEX_DISCOVER_CMD)}\nasync = true\n")
+        info = _detect_codex_install(path)
+        assert info is not None and info["auth_value"] == "pk-codex"
+
+    def test_install_into_missing_file_matches_render(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        _codex_managed_install(path, discover_command=CODEX_DISCOVER_CMD)
+        expected = guard_module._render_codex_requirements_toml(
+            CODEX_AGENT_SCAN_CMD, path, discover_command=CODEX_DISCOVER_CMD
+        )
+        assert path.read_text(encoding="utf-8") == expected
+
+    def test_install_into_empty_file_matches_render(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text("", encoding="utf-8")
+        _codex_managed_install(path)
+        assert path.read_text(encoding="utf-8") == guard_module._render_codex_requirements_toml(
+            CODEX_AGENT_SCAN_CMD, path
+        )
+
+    def test_install_twice_does_not_rewrite(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text(_CODEX_ADMIN_POLICY, encoding="utf-8")
+        _codex_managed_install(path, discover_command=CODEX_DISCOVER_CMD)
+        Path(f"{path}.backup").unlink()
+        installed = path.read_bytes()
+
+        content, diff = _prepare_codex_managed_config(CODEX_AGENT_SCAN_CMD, path, discover_command=CODEX_DISCOVER_CMD)
+        with patch(f"{_G}._atomic_write_text") as write:
+            assert _write_codex_managed_config(content, path) is False
+
+        write.assert_not_called()
+        assert diff == {"added": {}, "modified": {}, "removed": {}}
+        assert path.read_bytes() == installed
+        assert not Path(f"{path}.backup").exists()
+
+    def test_reinstall_with_new_push_key_changes_only_guard_command_lines(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text(_CODEX_ADMIN_POLICY, encoding="utf-8")
+        _codex_managed_install(path, discover_command=CODEX_DISCOVER_CMD)
+        before = path.read_text(encoding="utf-8").split("\n")
+
+        new_cmd = CODEX_AGENT_SCAN_CMD.replace("pk-codex", "pk-rotated")
+        new_discover = CODEX_DISCOVER_CMD.replace("pk-discover", "pk-rotated")
+        assert _codex_managed_install(path, new_cmd, discover_command=new_discover)
+        after = path.read_text(encoding="utf-8").split("\n")
+
+        assert len(after) == len(before)
+        changed = [(old, new) for old, new in zip(before, after, strict=True) if old != new]
+        assert changed
+        for old, new in changed:
+            assert old.startswith("command = ") and "PUSH_KEY=" in old
+            assert new in (f"command = {toml_escape(new_cmd)}", f"command = {toml_escape(new_discover)}")
+
+    def test_install_then_uninstall_restores_original_bytes(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        original = '# policy\nallowed_approval_policies = ["never"]\n\n[features]\nhooks = true  # pinned\n\n[sandbox]\nmode = "x"\n'
+        path.write_text(original, encoding="utf-8")
+        before = path.read_bytes()
+
+        _codex_managed_install(path, discover_command=CODEX_DISCOVER_CMD)
+        guard_module._uninstall_codex_managed(path)
+
+        assert path.read_bytes() == before
+
+    def test_uninstall_keeps_non_guard_content(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text(_CODEX_ADMIN_POLICY, encoding="utf-8")
+        _codex_managed_install(path, discover_command=CODEX_DISCOVER_CMD)
+
+        guard_module._uninstall_codex_managed(path)
+
+        assert path.exists()
+        text = _codex_guard_free(path.read_text(encoding="utf-8"))
+        # A non-Guard hook remains and may live in the managed dir, so the dirs stay.
+        assert text == _CODEX_ADMIN_POLICY + "\n[hooks]\n" + _codex_dirs_toml(path)
+        assert _detect_codex_install(path) is None
+
+    def test_install_adds_hooks_flag_to_existing_features_table(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text("[features]\nother = 1\n\n# trailing comment\n", encoding="utf-8")
+        _codex_managed_install(path)
+        text = path.read_text(encoding="utf-8")
+        assert text.startswith("[features]\nother = 1\nhooks = true\n\n# trailing comment\n\n[hooks]\n")
+
+    def test_install_turns_disabled_hooks_flag_on_and_warns(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text("[features]\n  hooks = false # off\n", encoding="utf-8")
+        with patch(f"{_G}.rich") as rich:
+            _codex_managed_install(path)
+        assert path.read_text(encoding="utf-8").startswith("[features]\n  hooks = true\n\n[hooks]\n")
+        assert any("hooks was False" in str(c.args[0]) for c in rich.print.call_args_list if c.args)
+
+    def test_install_appends_features_table_when_missing(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text('allowed_approval_policies = ["never"]', encoding="utf-8")  # no final newline
+        _codex_managed_install(path)
+        text = path.read_text(encoding="utf-8")
+        assert text.startswith(
+            'allowed_approval_policies = ["never"]\n\n[features]\nhooks = true\n\n[hooks]\n' + _codex_dirs_toml(path)
+        )
+
+    def test_install_adds_dirs_to_existing_hooks_table(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text("[features]\nhooks = true\n\n[hooks]\n# managed below\n\n[other]\nx = 1\n", encoding="utf-8")
+        _codex_managed_install(path)
+        text = path.read_text(encoding="utf-8")
+        assert text.startswith("[features]\nhooks = true\n\n[hooks]\n" + _codex_dirs_toml(path) + "# managed below\n")
+        assert "[other]\nx = 1\n\n[[hooks.PreToolUse]]\n" in text
+
+    def test_install_keeps_existing_identical_managed_dir_written_as_literal(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        managed_dir, _ = guard_module._codex_managed_dirs(path)
+        path.write_text(f"[hooks]\nmanaged_dir = '{managed_dir}'\n", encoding="utf-8")
+        _codex_managed_install(path)
+        text = path.read_text(encoding="utf-8")
+        assert text.count("managed_dir =") == 1  # only the admin's literal line
+        assert f"[hooks]\nmanaged_dir = '{managed_dir}'\n\n" in text
+
+    def test_install_keeps_admins_managed_dir(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text('[hooks]\nmanaged_dir = "/opt/enterprise/hooks"\n', encoding="utf-8")
+        _codex_managed_install(path)
+        text = path.read_text(encoding="utf-8")
+        assert text.startswith('[hooks]\nmanaged_dir = "/opt/enterprise/hooks"\n\n')
+        assert guard_module.tomllib.loads(text)["hooks"]["managed_dir"] == "/opt/enterprise/hooks"
+        assert guard_module._parse_codex_requirements_toml(text)[0]  # Guard hooks installed
+
+    def test_install_then_uninstall_with_admins_managed_dir_restores_original_bytes(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        original = (
+            '[features]\nhooks = true\n\n[hooks]\nmanaged_dir = "/opt/enterprise/hooks"\n\n'
+            '[[hooks.SessionStart]]\n[[hooks.SessionStart.hooks]]\ntype = "command"\ncommand = "/opt/enterprise/hooks/audit.sh"\n'
+        )
+        path.write_text(original, encoding="utf-8")
+        _codex_managed_install(path, discover_command=CODEX_DISCOVER_CMD)
+        guard_module._uninstall_codex_managed(path)
+        assert path.read_text(encoding="utf-8") == original
+
+    def test_install_keeps_other_platform_dir_without_adding_its_own(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text("[hooks]\nwindows_managed_dir = 'D:\\hooks'\n", encoding="utf-8")
+        _codex_managed_install(path)
+        text = path.read_text(encoding="utf-8")
+        assert text.startswith("[hooks]\nwindows_managed_dir = 'D:\\hooks'\n\n[features]\nhooks = true\n\n[[hooks.")
+        assert text.count("managed_dir =") == 1
+
+    def test_windows_install_keeps_admins_windows_managed_dir(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text("[hooks]\nwindows_managed_dir = 'D:\\hooks'\n", encoding="utf-8")
+        with patch(f"{_G}.IS_WINDOWS", True):
+            _codex_managed_install(path)
+        text = path.read_text(encoding="utf-8")
+        assert text.startswith("[hooks]\nwindows_managed_dir = 'D:\\hooks'\n")
+        assert guard_module.tomllib.loads(text)["hooks"]["windows_managed_dir"] == "D:\\hooks"
+
+    def test_install_invalid_toml_fails_and_leaves_file(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text("[features\nhooks = true\n", encoding="utf-8")
+        before = path.read_bytes()
+        with pytest.raises(CodexRequirementsError, match="not valid TOML"):
+            _prepare_codex_managed_config(CODEX_AGENT_SCAN_CMD, path)
+        assert path.read_bytes() == before
+
+    def test_install_refuses_layout_it_cannot_append_to(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text('[hooks]\nPreToolUse = [{ hooks = [{ type = "command", command = "x" }] }]\n', encoding="utf-8")
+        before = path.read_bytes()
+        with pytest.raises(CodexRequirementsError, match="layout not supported"):
+            _prepare_codex_managed_config(CODEX_AGENT_SCAN_CMD, path)
+        assert path.read_bytes() == before
+
+    @pytest.mark.parametrize(
+        "layout",
+        [
+            '[[hooks.Stop]]\nhooks = [{{ type = "command", command = {command} }}]\n',
+            '[[hooks.Stop]]\n[hooks.Stop.extra]\nnote = "x"\n[[hooks.Stop.hooks]]\ntype = "command"\ncommand = {command}\n',
+        ],
+        ids=["inline-entries", "extra-nested-table"],
+    )
+    def test_guard_hook_in_layout_it_cannot_edit_is_refused(self, tmp_path, layout):
+        path = tmp_path / "requirements.toml"
+        path.write_text(
+            _CODEX_ADMIN_POLICY + "\n" + layout.format(command=json.dumps(CODEX_AGENT_SCAN_CMD)), encoding="utf-8"
+        )
+        before = path.read_bytes()
+        for edit in (
+            lambda: _prepare_codex_managed_config(CODEX_AGENT_SCAN_CMD, path),
+            lambda: _strip_guard_from_codex_requirements(path.read_text(encoding="utf-8"), path),
+        ):
+            with pytest.raises(CodexRequirementsError, match="layout Agent Guard cannot edit"):
+                edit()
+        assert path.read_bytes() == before
+
+    def test_uninstall_invalid_toml_fails_and_leaves_file(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text(
+            guard_module._render_codex_requirements_toml(CODEX_AGENT_SCAN_CMD, path) + "[broken\n", encoding="utf-8"
+        )
+        before = path.read_bytes()
+        with pytest.raises(CodexRequirementsError, match="not valid TOML"):
+            guard_module._uninstall_codex_managed(path)
+        assert path.read_bytes() == before
+
+    def test_run_guard_reports_requirements_error(self):
+        with (
+            patch(f"{_G}._run_uninstall", side_effect=CodexRequirementsError("/etc/codex/requirements.toml: boom")),
+            patch(f"{_G}.rich") as rich,
+        ):
+            assert guard_module.run_guard(SimpleNamespace(guard_command="uninstall")) == 1
+        assert "boom" in rich.print.call_args.args[0]
+
+    def test_uninstall_removes_only_guard_entry_from_mixed_group(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        mixed = (
+            "[[hooks.PreToolUse]]\n"
+            'matcher = "^Bash$"\n'
+            "\n"
+            "[[hooks.PreToolUse.hooks]]\n"
+            'type = "command"\n'
+            'command = "python3 /etc/codex/hooks/policy.py"\n'
+            "\n"
+            "[[hooks.PreToolUse.hooks]]\n"
+            'type = "command"\n'
+            f"command = {toml_escape(CODEX_AGENT_SCAN_CMD)}\n"
+            "\n"
+            "[sandbox]\n"
+            'mode = "x"\n'
+        )
+        path.write_text(mixed, encoding="utf-8")
+
+        guard_module._uninstall_codex_managed(path)
+
+        assert path.read_text(encoding="utf-8") == (
+            "[[hooks.PreToolUse]]\n"
+            'matcher = "^Bash$"\n'
+            "\n"
+            "[[hooks.PreToolUse.hooks]]\n"
+            'type = "command"\n'
+            'command = "python3 /etc/codex/hooks/policy.py"\n'
+            "\n"
+            "[sandbox]\n"
+            'mode = "x"\n'
+        )
+
+    @pytest.mark.parametrize(
+        "original",
+        [
+            b"# policy\r\n[features]\r\nhooks = true\r\n\r\n[sandbox]\r\nmode = 'x'\r\n",
+            b"# policy\n[features]\nhooks = true\n\n[sandbox]\nmode = 'x'\n",
+            b"# policy\r\n[features]\nhooks = true\r\n\n[sandbox]\nmode = 'x'\r\n",
+        ],
+        ids=["crlf", "lf", "mixed"],
+    )
+    def test_line_endings_survive_install_and_uninstall(self, tmp_path, original):
+        # On every platform, including LF-only and mixed files on Windows.
+        path = tmp_path / "requirements.toml"
+        path.write_bytes(original)
+
+        _codex_managed_install(path)
+        assert path.read_bytes().startswith(original)
+
+        guard_module._uninstall_codex_managed(path)
+        assert path.read_bytes() == original
+
+    def test_crlf_file_gets_crlf_guard_blocks(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_bytes(b"# policy\r\n[features]\r\nhooks = true\r\n")
+
+        _codex_managed_install(path)
+
+        installed = path.read_bytes()
+        assert installed.count(b"\n") == installed.count(b"\r\n")
+
+    def test_uninstall_removes_guard_hook_written_as_literal_string(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        command = CODEX_AGENT_SCAN_CMD.replace("'", "")
+        path.write_text(
+            _CODEX_ADMIN_POLICY + f"\n[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = 'command'\ncommand = '{command}'\n",
+            encoding="utf-8",
+        )
+
+        guard_module._uninstall_codex_managed(path)
+
+        assert path.read_text(encoding="utf-8") == _CODEX_ADMIN_POLICY
+
+
+class TestStripGuardFromCodexRequirements:
+    PATH = Path("/etc/codex/requirements.toml")
+
+    @pytest.fixture(autouse=True)
+    def _posix(self):
+        with patch(f"{_G}.IS_WINDOWS", False):
+            yield
+
+    def _render(self, **kwargs) -> str:
+        return guard_module._render_codex_requirements_toml(CODEX_AGENT_SCAN_CMD, self.PATH, **kwargs)
+
+    def test_rendered_guard_file_keeps_only_features_flag(self):
+        text = self._render(discover_command=CODEX_DISCOVER_CMD)
+        assert _strip_guard_from_codex_requirements(text, self.PATH) == "[features]\nhooks = true\n"
+
+    def test_default_path_is_codex_managed_path(self):
+        text = guard_module._render_codex_requirements_toml(CODEX_AGENT_SCAN_CMD, CODEX_MANAGED_HOOKS_PATH)
+        assert _strip_guard_from_codex_requirements(text) == "[features]\nhooks = true\n"
+
+    def test_dirs_kept_when_other_hooks_remain(self):
+        text = self._render() + '\n[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = "command"\ncommand = "/bin/true"\n'
+        stripped = _strip_guard_from_codex_requirements(text, self.PATH)
+        assert stripped == (
+            "[features]\nhooks = true\n\n[hooks]\n"
+            + _codex_dirs_toml(self.PATH)
+            + '\n[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = "command"\ncommand = "/bin/true"\n'
+        )
+
+    def _guard_group(self) -> str:
+        return (
+            f'\n[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = "command"\ncommand = {toml_escape(CODEX_AGENT_SCAN_CMD)}\n'
+        )
+
+    def test_dirs_kept_when_value_differs(self):
+        text = '[hooks]\nmanaged_dir = "/opt/other"\nwindows_managed_dir = "C:\\\\ProgramData\\\\OpenAI\\\\Codex\\\\hooks"\n'
+        text += self._guard_group()
+        assert _strip_guard_from_codex_requirements(text, self.PATH) == '[hooks]\nmanaged_dir = "/opt/other"\n'
+
+    def test_windows_dir_compared_unescaped_in_any_quoting(self):
+        literal = (
+            "[hooks]\nmanaged_dir = '/etc/codex/hooks'\nwindows_managed_dir = 'C:\\ProgramData\\OpenAI\\Codex\\hooks'\n"
+        ) + self._guard_group()
+        assert _strip_guard_from_codex_requirements(literal, self.PATH) == ""
+
+    def test_admins_dirs_equal_to_guards_kept_without_guard_hooks(self):
+        text = "[hooks]\n" + _codex_dirs_toml(self.PATH)
+        assert _strip_guard_from_codex_requirements(text, self.PATH) == text
+
+    def test_hooks_header_with_comment_is_kept(self):
+        text = "[hooks]\n# keep me\n" + _codex_dirs_toml(self.PATH) + self._guard_group()
+        assert _strip_guard_from_codex_requirements(text, self.PATH) == "[hooks]\n# keep me\n"
+
+    def test_guard_group_between_admin_tables(self):
+        guard = (
+            f'[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = "command"\ncommand = {toml_escape(CODEX_AGENT_SCAN_CMD)}\n'
+        )
+        text = f"[a]\nx = 1\n\n{guard}\n# about b\n[b]\ny = 2\n"
+        assert _strip_guard_from_codex_requirements(text, self.PATH) == "[a]\nx = 1\n\n# about b\n[b]\ny = 2\n"
+
+    def test_guard_group_with_literal_command_string(self):
+        guard_literal = f"[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = 'command'\ncommand = '{CODEX_AGENT_SCAN_CMD.replace(chr(39), '')}'\n"
+        assert _is_agent_scan_command(CODEX_AGENT_SCAN_CMD.replace("'", ""))
+        assert _strip_guard_from_codex_requirements("x = 1\n\n" + guard_literal, self.PATH) == "x = 1\n"
+
+    def test_invalid_toml_raises(self):
+        with pytest.raises(CodexRequirementsError, match="not valid TOML"):
+            _strip_guard_from_codex_requirements("[hooks\n", self.PATH)
+
+    def test_header_lookalike_inside_multiline_string_is_refused_not_corrupted(self):
+        tricky = (
+            'note = """\n[[hooks.Stop]]\n"""\n\n'
+            f'[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = "command"\ncommand = {toml_escape(CODEX_AGENT_SCAN_CMD)}\n'
+        )
+        # The line model miscounts the groups here; the edit is refused.
+        with pytest.raises(CodexRequirementsError, match="layout"):
+            _strip_guard_from_codex_requirements(tricky, self.PATH)
 
 
 # ===================================================================
@@ -4844,6 +5266,7 @@ class TestInstallHooksOrchestration:
             "prep_codex": (f"{_G}._prepare_codex_config", (_PREPARED, _DIFF_REMOVED, 0)),
             "prep_codex_managed": (f"{_G}._prepare_codex_managed_config", ("toml-content", _DIFF_REMOVED)),
             "is_toml": (f"{_G}._is_codex_requirements_toml", False),
+            "preflight_codex_managed": (f"{_G}._preflight_codex_requirements", None),
             "detect_existing": (f"{_G}._detect_existing_install", None),
             "test_event": (f"{_G}._send_test_event", _TEST_EVENT_SENT),
             "write": (f"{_G}._write_config", True),
@@ -5082,6 +5505,7 @@ class TestInstallHooksOrchestration:
     def test_codex_managed_routes_to_toml_functions(self, ctx, tmp_path):
         ctx["is_toml"].return_value = True
         self._call(tmp_path, client="codex", hook_client="codex", config_exists=True)
+        ctx["preflight_codex_managed"].assert_called_once()
         ctx["prep_codex_managed"].assert_called_once()
         ctx["write_codex_managed"].assert_called_once()
         ctx["prep_codex"].assert_not_called()
