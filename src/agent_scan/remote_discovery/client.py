@@ -29,13 +29,24 @@ RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
 # Per request; the backend's own session deadline is 600 s.
 REQUEST_TIMEOUT_S = 60
 MAX_RETRY_DELAY_S = 10.0
+# New sessions started after the backend lost one, e.g. when the machine slept past its TTL.
+MAX_RESTARTS = 1
 
 
 class RemoteDiscoveryError(Exception):
-    def __init__(self, message: str, reason: str) -> None:
+    def __init__(self, message: str, reason: str, status: int | None = None) -> None:
         super().__init__(message)
         # Bounded label for scan metadata, e.g. ``http_503``.
         self.reason = reason
+        self.status = status
+
+
+class _SessionLost(Exception):
+    """A step got 404: the backend no longer has the session."""
+
+    def __init__(self, error: RemoteDiscoveryError) -> None:
+        super().__init__(str(error))
+        self.error = error
 
 
 @dataclass
@@ -51,10 +62,17 @@ class RemoteResult:
     duration_s: float = 0.0
     bytes_sent: int = 0
     retries: int = 0
+    restarts: int = 0
 
     def add(self, found: dict[str, list[dict[str, Any]]]) -> None:
         for name in self.found:
             self.found[name].extend(found.get(name, []))
+
+    def reset_session(self) -> None:
+        """Drop what the lost session returned; request counters keep counting."""
+        fresh = RemoteResult()
+        self.session_id, self.found, self.supported_agents = "", fresh.found, []
+        self.partial, self.rounds = False, 0
 
 
 async def _post(
@@ -83,6 +101,7 @@ async def _post(
                     raise RemoteDiscoveryError(
                         f"{url} returned {response.status}: {(await response.text())[:300]}",
                         f"http_{response.status}",
+                        response.status,
                     )
                 retry_after = _retry_after(response.headers.get("Retry-After"))
         except RETRYABLE_TRANSPORT_EXCEPTIONS:
@@ -169,20 +188,47 @@ async def run_remote_discovery(
     async with aiohttp.ClientSession(
         timeout=timeout, connector=setup_tcp_connector(skip_ssl_verify), trust_env=True
     ) as session:
-        response = await _post(session, base + query, init, headers, result)
-        result.session_id = response["session_id"]
-        result.supported_agents = response.get("supported_agents", [])
-        while True:
-            result.add(response["found"])
-            result.partial = result.partial or response.get("partial", False)
-            if response["done"]:
+        for attempt in range(MAX_RESTARTS + 1):
+            try:
+                await _run_session(session, base, query, init, headers, result, cancel)
                 break
-            if result.rounds >= MAX_ROUNDS:
-                raise RemoteDiscoveryError("too many rounds", "too_many_rounds")
-            ops = response["ops"]
-            step = {"round": response["round"], "results": await _run_ops(ops, cancel)}
-            result.rounds += 1
-            result.ops += len(ops)
-            response = await _post(session, f"{base}/{result.session_id}/steps{query}", step, headers, result)
+            except _SessionLost as lost:
+                if attempt == MAX_RESTARTS:
+                    raise lost.error from None
+                logger.info("Remote discovery session was lost; starting a new one.")
+                result.reset_session()
+                result.restarts += 1
     result.duration_s = time.monotonic() - started
     return result
+
+
+async def _run_session(
+    session: aiohttp.ClientSession,
+    base: str,
+    query: str,
+    init: dict[str, Any],
+    headers: dict[str, str],
+    result: RemoteResult,
+    cancel: threading.Event,
+) -> None:
+    response = await _post(session, base + query, init, headers, result)
+    result.session_id = response["session_id"]
+    result.supported_agents = response.get("supported_agents", [])
+    while True:
+        result.add(response["found"])
+        result.partial = result.partial or response.get("partial", False)
+        if response["done"]:
+            return
+        if result.rounds >= MAX_ROUNDS:
+            raise RemoteDiscoveryError("too many rounds", "too_many_rounds")
+        ops = response["ops"]
+        step = {"round": response["round"], "results": await _run_ops(ops, cancel)}
+        result.rounds += 1
+        result.ops += len(ops)
+        try:
+            response = await _post(session, f"{base}/{result.session_id}/steps{query}", step, headers, result)
+        except RemoteDiscoveryError as error:
+            # Steps only: an init 404 means the route is missing, not the session.
+            if error.status == 404:
+                raise _SessionLost(error) from error
+            raise

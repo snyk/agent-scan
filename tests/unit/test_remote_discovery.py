@@ -193,7 +193,7 @@ def test_stdio_roots_ignored_when_ambiguous_or_escaping(tmp_path: Path, monkeypa
 _EMPTY_FOUND: dict[str, list[dict]] = {"clients": [], "mcp_configs": [], "skills_dirs": []}
 
 
-async def _serve(statuses: dict[str, list[int]]):
+async def _serve(statuses: dict[str, list[int]], init_found: dict[str, list[dict]] | None = None):
     """A discovery backend that answers each path with the given statuses in turn, then 200."""
     from aiohttp import web
     from aiohttp.test_utils import TestServer
@@ -211,7 +211,8 @@ async def _serve(statuses: dict[str, list[int]]):
             return web.Response(status=queue.pop(0), text="busy")
         if request.path.endswith("/sessions"):
             ops = [{"op_id": "1", "kind": "env", "names": []}]
-            return web.json_response({"session_id": "s1", "round": 1, "ops": ops, "found": _EMPTY_FOUND, "done": False})
+            found = init_found or _EMPTY_FOUND
+            return web.json_response({"session_id": "s1", "round": 1, "ops": ops, "found": found, "done": False})
         return web.json_response({"session_id": "s1", "round": 2, "ops": [], "found": _EMPTY_FOUND, "done": True})
 
     app = web.Application()
@@ -393,6 +394,50 @@ async def test_client_errors_not_retried(status) -> None:
     from agent_scan.remote_discovery.client import RemoteDiscoveryError
 
     server, bodies = await _serve({_SESSIONS: [status]})
+    try:
+        with pytest.raises(RemoteDiscoveryError) as exc:
+            await _discover(server)
+    finally:
+        await server.close()
+    assert exc.value.reason == f"http_{status}"
+    assert len(bodies[_SESSIONS]) == 1
+
+
+@pytest.mark.asyncio
+async def test_lost_session_restarts_from_init() -> None:
+    client = {"name": "cursor"}
+    server, bodies = await _serve({_STEPS: [404]}, init_found={**_EMPTY_FOUND, "clients": [client]})
+    try:
+        result, _sleep = await _discover(server)
+    finally:
+        await server.close()
+    assert len(bodies[_SESSIONS]) == 2
+    assert len(bodies[_STEPS]) == 2
+    assert result.restarts == 1
+    assert result.found["clients"] == [client]
+    assert (result.session_id, result.rounds, result.partial) == ("s1", 1, False)
+
+
+@pytest.mark.asyncio
+async def test_lost_session_restarts_only_once() -> None:
+    from agent_scan.remote_discovery.client import MAX_RESTARTS, RemoteDiscoveryError
+
+    server, bodies = await _serve({_STEPS: [404] * (MAX_RESTARTS + 1)})
+    try:
+        with pytest.raises(RemoteDiscoveryError) as exc:
+            await _discover(server)
+    finally:
+        await server.close()
+    assert exc.value.reason == "http_404"
+    assert len(bodies[_SESSIONS]) == MAX_RESTARTS + 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 409, 410, 413])
+async def test_other_step_errors_do_not_restart(status) -> None:
+    from agent_scan.remote_discovery.client import RemoteDiscoveryError
+
+    server, bodies = await _serve({_STEPS: [status]})
     try:
         with pytest.raises(RemoteDiscoveryError) as exc:
             await _discover(server)
