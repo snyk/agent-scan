@@ -9,6 +9,7 @@ Only the CLI under test runs elevated (``sudo -n`` on POSIX, an already-elevated
 pytest itself stays an ordinary user so the virtualenv is not polluted with root-owned files.
 """
 
+import contextlib
 import json
 import os
 import subprocess
@@ -96,6 +97,15 @@ def _remove(path: Path) -> None:
         subprocess.run([*_SUDO, "rm", "-f", str(path)], check=True, capture_output=True)
 
 
+def _remove_dir_if_empty(path: Path) -> None:
+    """Remove ``path`` if it is an empty directory; leave it otherwise."""
+    if IS_WINDOWS:
+        with contextlib.suppress(OSError):
+            path.rmdir()
+    else:
+        subprocess.run([*_SUDO, "rmdir", str(path)], capture_output=True)
+
+
 def _write_privileged(path: Path, text: str) -> None:
     if IS_WINDOWS:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -118,10 +128,12 @@ def _managed_sandbox():
     for client in ALL_CLIENTS:
         for path in _managed_artifacts(client):
             _remove(path)
+        _remove_dir_if_empty(_scripts_dir(MANAGED_PATHS[client]))
     yield
     for client in ALL_CLIENTS:
         for path in _managed_artifacts(client):
             _remove(path)
+        _remove_dir_if_empty(_scripts_dir(MANAGED_PATHS[client]))
 
 
 def _run_managed(
@@ -253,6 +265,21 @@ class TestManagedUninstallE2E:
         # Nothing existed before install, so there is no backup; uninstall never writes one.
         assert not _guard_backup(config).exists()
         assert not _legacy_backup(config).exists()
+
+    @pytest.mark.parametrize("client", ALL_CLIENTS)
+    def test_uninstall_removes_hooks_dir_install_created(
+        self, agent_scan_cmd, agent_scan_command, fake_hook_server, client
+    ):
+        # Relies on a clean e2e machine: the hooks dir must not exist before install.
+        scripts_dir = _scripts_dir(MANAGED_PATHS[client])
+        assert not scripts_dir.exists(), f"{scripts_dir} already exists; run on a clean machine"
+        _install(agent_scan_cmd, agent_scan_command, client, fake_hook_server)
+        assert scripts_dir.is_dir()
+
+        _uninstall(agent_scan_cmd, client)
+
+        # Removing Guard's scripts left the hooks dir empty, so uninstall removes it.
+        assert not scripts_dir.exists()
 
     @pytest.mark.parametrize(("client", "config_name", "user_hook", "event"), JSON_CASES)
     def test_uninstall_preserves_user_hooks(
