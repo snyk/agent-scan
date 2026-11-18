@@ -429,6 +429,7 @@ Pass `MACHINE_SERIAL` again whenever you reinstall or update Guard hooks. Reinst
 | `AGENT_SCAN_ENVIRONMENT` | Analysis and upload | Environment label sent as `X-Environment` (default: `production`). Also accepts the older `MCP_SCAN_ENVIRONMENT` name. |
 | `AGENT_SCAN_CI_HOSTNAME` | Upload | When `AGENT_SCAN_ENVIRONMENT=ci`, use this hostname instead of the machine node name. |
 | `PUSH_KEY` | `guard install` | Pre-provisioned push key for hook installation. |
+| `MACHINE_SERIAL` | `scan`, Agent Guard | Optional machine serial sent alongside hostname. Leading/trailing whitespace is removed; absent or blank values become JSON `null`. Does not change the machine identifier. |
 | `TENANT_ID` | `guard install` | Tenant UUID for hook installation. |
 | `HOOK_VERSION` | Agent Guard hooks | Override the hook/API line version built into Guard artifacts. |
 

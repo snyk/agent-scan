@@ -559,6 +559,7 @@ async def analyze_machine(
     # for analysis server we never push personal information
     user_info = ScanUserInfo(
         hostname=get_hostname(),
+        machine_serial=os.getenv("MACHINE_SERIAL", "").strip() or None,
         username=scanned_usernames if scanned_usernames else [get_username()],
         identifier=identifier,
         ip_address=None,
