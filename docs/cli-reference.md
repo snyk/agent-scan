@@ -112,6 +112,24 @@ The URL version must match the request and response models used by the installed
 
 If both a new flag and its soon-to-be-deprecated equivalent are given, the new flag wins. Using `--control-server-H` for the `x-client-id` trick, or `--control-identifier` on a single `--control-server` block, emits a one-time deprecation warning pointing at `--push-key` / `--machine-id`.
 
+### Machine identity (`scan` only)
+
+The ADS installer passes these in the scheduled scan's config file (`token_command`, `tenant_id` and `base_url`) for user-mode installs of an enrolled machine, instead of a push key.
+
+| Flag | Type | Default | Description |
+| --- | --- | --- | --- |
+| `--token-command PATH` | string | - | Command that prints a machine access token on stdout when run as `<PATH> token --base-url <URL>`, with the `--base-url` below. |
+| `--tenant-id ID` | string | - | Snyk tenant ID the token is for. |
+| `--base-url URL` | string | - | Snyk API base URL that hosts the tenant routes, for example `https://api.snyk.io`. |
+
+The installer decides the auth type up front, so the three flags go together:
+
+- **All three set (machine mode):** the scan runs the token command at the start, and again right before the asynchronous analysis submit so a long scan does not send an expired token, and calls the tenant routes on `--base-url` with `Authorization: Bearer <token>` and no push key: the Agent Scan config (`/hidden/tenants/{tenant_id}/agent-scan/config`), asynchronous analysis (`.../agent-scan/async/analysis`) and backend-driven discovery (`.../coding-agent-discovery/sessions`), at version `2024-10-15`. If the token command fails (non-zero exit, timeout, no single token on stdout) or the tenant config cannot be read, the scan fails with an error and exit code 1. It never falls back to the push key.
+- **None set (push-key mode):** the scan behaves exactly as without these flags.
+- **Only some set:** a configuration error; the scan exits with code 2 before scanning.
+
+Synchronous analysis (the tenant config turns asynchronous analysis off, or `--show-analysis-results` / `--ci` asks for results) has no tenant route. In machine mode the scan fails with an error and exit code 1 right after reading the tenant config, before scanning, and never uses the push key. A machine-mode scan is unattended, like a push-key scan, so it never prompts for consent. The token is never logged or put on a command line. `evo` ignores these flags.
+
 ### Control server (enterprise upload, on deprecation path)
 
 Upload analyzed results to one or more control servers, typically Snyk Evo. This upload mechanism is on a deprecation path and will be replaced.
@@ -298,6 +316,11 @@ files:
 # Push key and machine identifier (v0.6 and later)
 push_key: <push-key>
 machine_id: user@example.com
+
+# Machine identity, as the ADS installer writes it (see "Machine identity" above)
+token_command: /path/to/ads-installer
+tenant_id: <tenant-id>
+base_url: https://api.snyk.io
 
 # Legacy control-server block (superseded by push_key/machine_id above)
 control_servers:

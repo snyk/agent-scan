@@ -15,6 +15,7 @@ from typing import Any
 import aiohttp
 
 from agent_scan.agents.base import is_own_home
+from agent_scan.machine_auth import TENANT_API_VERSION, MachineAuth
 from agent_scan.remote_discovery.executor import run_op, to_wire
 from agent_scan.utils import get_readable_home_directories
 from agent_scan.verify_api import RETRYABLE_TRANSPORT_EXCEPTIONS, setup_tcp_connector
@@ -165,11 +166,22 @@ async def run_remote_discovery(
     identifier: str | None = None,
     all_users: bool = False,
     skip_ssl_verify: bool = False,
+    machine_auth: MachineAuth | None = None,
 ) -> RemoteResult:
+    """Run one discovery session.
+
+    With ``machine_auth`` the session runs on the tenant routes of its Snyk API
+    with the machine token, and ``backend_url`` and ``push_key`` are unused.
+    """
     started = time.monotonic()
-    base = backend_url.rstrip("/") + "/hidden/coding-agent-discovery/sessions"
-    query = f"?version={DISCOVERY_API_VERSION}"
-    headers = {"X-Push-Key": push_key} if push_key else {}
+    if machine_auth is not None:
+        base = machine_auth.tenant_path("/coding-agent-discovery/sessions")
+        query = f"?version={TENANT_API_VERSION}"
+        headers = machine_auth.headers
+    else:
+        base = backend_url.rstrip("/") + "/hidden/coding-agent-discovery/sessions"
+        query = f"?version={DISCOVERY_API_VERSION}"
+        headers = {"X-Push-Key": push_key} if push_key else {}
     home_list = homes(all_users)
     if not home_list:
         # The backend rejects an empty homes list, and local discovery finds nothing either.

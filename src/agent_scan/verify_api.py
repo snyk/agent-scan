@@ -16,6 +16,7 @@ from mcp.types import Prompt, Resource, ResourceTemplate, Tool
 from pydantic import BaseModel, ValidationError, field_validator
 from rich.markup import escape
 
+from agent_scan.machine_auth import SYNC_ANALYSIS_ERROR, MachineAuth, MachineAuthError
 from agent_scan.models.api.common import ScanUserInfo
 from agent_scan.models.api.v20260710 import (
     McpEntitySummary,
@@ -72,6 +73,9 @@ _SYNC_ANALYSIS_PATH = "/hidden/mcp-scan/analysis-machine"
 _ASYNC_ANALYSIS_PATH = "/hidden/agent-scan/async/analysis"
 _AGENT_SCAN_CONFIG_PATH = "/hidden/agent-scan/config"
 _ANALYSIS_API_VERSION = "2026-07-10"
+# The same routes under /hidden/tenants/{tenant_id}, for machine auth.
+_TENANT_ASYNC_ANALYSIS_PATH = "/agent-scan/async/analysis"
+_TENANT_AGENT_SCAN_CONFIG_PATH = "/agent-scan/config"
 
 
 def _force_analysis_api_version(analysis_url: str) -> str:
@@ -151,35 +155,52 @@ def discovery_base_url(analysis_url: str) -> str:
 
 async def fetch_agent_scan_config(
     analysis_url: str,
-    push_key: str,
+    push_key: str | None,
     trace_configs: list | None = None,
     skip_ssl_verify: bool = False,
     max_retries: int = 2,
+    machine_auth: MachineAuth | None = None,
 ) -> AgentScanConfig:
-    """Fetch the push-key tenant's runtime config.
+    """Fetch the tenant's runtime config.
 
-    Returns the all-off default on any error, non-2xx, or after exhausting retries, so
-    callers fall back to legacy discovery and synchronous analysis. Transient failures
-    (5xx, connection issues, timeouts) are retried with exponential backoff; 4xx are not.
+    With ``machine_auth`` it reads the tenant route with the machine token,
+    otherwise the push-key route on the analysis server.
+
+    With the push key it returns the all-off default on any error, non-2xx, or after
+    exhausting retries, so callers fall back to legacy discovery and synchronous analysis.
+    With ``machine_auth`` those failures raise MachineAuthError instead: the defaults would
+    send the scan to synchronous analysis with the push key, and machine mode never falls
+    back to it. Transient failures (5xx, connection issues, timeouts) are retried with
+    exponential backoff; 4xx are not.
     """
-    config_url = agent_scan_config_url(analysis_url)
+
+    def unavailable(reason: str) -> AgentScanConfig:
+        if machine_auth is not None:
+            raise MachineAuthError(f"Could not read the Agent Scan config from the tenant route ({reason}).")
+        logger.warning("%s; using defaults.", reason)
+        return AgentScanConfig()
+
+    if machine_auth is not None:
+        config_url = machine_auth.tenant_url(_TENANT_AGENT_SCAN_CONFIG_PATH)
+        auth_headers = machine_auth.headers
+    else:
+        config_url = agent_scan_config_url(analysis_url)
+        auth_headers = {"X-Push-Key": push_key or ""}
     for attempt in range(max_retries):
         try:
             async with backend_client_session(trace_configs, skip_ssl_verify) as session:
                 async with session.get(
                     config_url,
-                    headers={"X-Push-Key": push_key},
+                    headers=auth_headers,
                     timeout=aiohttp.ClientTimeout(total=_CONFIG_REQUEST_TIMEOUT),
                 ) as response:
                     if response.status == 200:
                         try:
                             return AgentScanConfig.model_validate(await response.json())
                         except (ValueError, ValidationError) as e:
-                            logger.warning("Agent Scan config response is invalid (%s); using defaults.", e)
-                            return AgentScanConfig()
+                            return unavailable(f"Agent Scan config response is invalid ({e})")
                     if response.status < 500:
-                        logger.warning("Agent Scan config request returned %s; using defaults.", response.status)
-                        return AgentScanConfig()
+                        return unavailable(f"Agent Scan config request returned {response.status}")
                     logger.warning(
                         "Agent Scan config request returned %s (attempt %d/%d).",
                         response.status,
@@ -190,14 +211,12 @@ async def fetch_agent_scan_config(
             logger.warning("Agent Scan config request failed (attempt %d/%d): %s", attempt + 1, max_retries, e)
         except aiohttp.ClientError as e:
             # Non-transient transport error (e.g. malformed URL): retrying will not help.
-            logger.warning("Agent Scan config request failed (%s); using defaults.", e)
-            return AgentScanConfig()
+            return unavailable(f"Agent Scan config request failed ({e})")
 
         if attempt < max_retries - 1:
             await asyncio.sleep(2**attempt)  # 1s, 2s, ...
 
-    logger.warning("Agent Scan config request failed after %d attempt(s); using defaults.", max_retries)
-    return AgentScanConfig()
+    return unavailable(f"Agent Scan config request failed after {max_retries} attempt(s)")
 
 
 async def _response_detail(response: aiohttp.ClientResponse) -> str | None:
@@ -218,6 +237,7 @@ async def _submit_async_analysis(
     trace_configs: list | None,
     skip_ssl_verify: bool,
     max_retries: int = 3,
+    unauthorized_text: str = "Unauthorized. Please check your push key.",
 ) -> tuple[bool, str | None, Exception | None]:
     """Stream the gzipped payload to the async accept endpoint.
 
@@ -253,7 +273,7 @@ async def _submit_async_analysis(
                         logger.info("Scan accepted for asynchronous analysis.")
                         return True, None, None
                     if response.status == 401:
-                        error_text = "Unauthorized. Please check your push key."
+                        error_text = unauthorized_text
                         logger.error(error_text)
                         return False, error_text, None
                     if response.status == 413:
@@ -535,6 +555,7 @@ async def analyze_machine(
     scanned_usernames: list[str] | None = None,
     show_analysis_results: bool = False,
     agent_scan_config: AgentScanConfig | None = None,
+    machine_auth: MachineAuth | None = None,
 ) -> ScanResponse:
     """
     Analyze the scan paths with the analysis server.
@@ -552,6 +573,10 @@ async def analyze_machine(
         show_analysis_results: Force synchronous analysis so results are returned instead of
             submitting asynchronously (push-key tenants default to async)
         agent_scan_config: Config already fetched for this push key; fetched here when omitted
+        machine_auth: Machine token for the tenant routes. It replaces the push key for the
+            config and async analysis, and the token is refreshed before the async submit.
+            Synchronous analysis (the tenant config disables async, or results are shown) has
+            no tenant route, so machine mode always fails it
     """
     analysis_url = _force_analysis_api_version(analysis_url)
     logger.debug(f"Analyzing scan path with URL: {analysis_url}")
@@ -584,28 +609,55 @@ async def analyze_machine(
         headers["X-Push"] = "skip"
 
     snyk_token = os.getenv("SNYK_TOKEN")
+    if (push_key or machine_auth) and not show_analysis_results:
+        # Enterprise MDM mode: the tenant config picks async or sync analysis.
+        if agent_scan_config is None:
+            agent_scan_config = await fetch_agent_scan_config(
+                analysis_url, push_key, trace_configs, skip_ssl_verify, machine_auth=machine_auth
+            )
+        if agent_scan_config.async_analysis_enabled:
+            if machine_auth is not None:
+                # The token from the start of the scan may have expired by now.
+                machine_auth = await asyncio.to_thread(machine_auth.refresh)
+                async_url = machine_auth.tenant_url(_TENANT_ASYNC_ANALYSIS_PATH)
+                async_headers = {**headers, **machine_auth.headers}
+                unauthorized_text = "Unauthorized. Please check the machine credential of this installation."
+            else:
+                async_url = analysis_url.replace(_SYNC_ANALYSIS_PATH, _ASYNC_ANALYSIS_PATH)
+                async_headers = {**headers, "X-Push-Key": push_key or ""}
+                unauthorized_text = "Unauthorized. Please check your push key."
+            success, error_text, exc = await _submit_async_analysis(
+                async_url,
+                payload,
+                async_headers,
+                identifier,
+                trace_configs,
+                skip_ssl_verify,
+                max_retries,
+                unauthorized_text=unauthorized_text,
+            )
+            if success:
+                _warn_async_results_not_shown()
+                _print_scan_sent_success(user_info)
+                return _accepted_async_response(payload)
+            error_text = error_text or "Could not reach analysis server."
+            if raise_on_error:
+                raise RuntimeError(error_text)
+            return _analysis_error_response(payload, error_text, exc)
+
+    if machine_auth is not None:
+        # Synchronous analysis has no tenant route. Machine mode never uses the push key,
+        # SNYK_TOKEN or the Snyk CLI proxy instead. run_scan stops before this; direct
+        # callers get an error response.
+        error_text = SYNC_ANALYSIS_ERROR
+        if raise_on_error:
+            raise RuntimeError(error_text)
+        return _analysis_error_response(payload, error_text)
+
     if push_key:
         # Enterprise MDM mode with push key
         # The analysis_url in this case has authentication through push_key (not on api-gateway)
         headers["X-Push-Key"] = push_key
-        if not show_analysis_results:
-            if agent_scan_config is None:
-                agent_scan_config = await fetch_agent_scan_config(
-                    analysis_url, push_key, trace_configs, skip_ssl_verify
-                )
-            if agent_scan_config.async_analysis_enabled:
-                async_url = analysis_url.replace(_SYNC_ANALYSIS_PATH, _ASYNC_ANALYSIS_PATH)
-                success, error_text, exc = await _submit_async_analysis(
-                    async_url, payload, headers, identifier, trace_configs, skip_ssl_verify, max_retries
-                )
-                if success:
-                    _warn_async_results_not_shown()
-                    _print_scan_sent_success(user_info)
-                    return _accepted_async_response(payload)
-                error_text = error_text or "Could not reach analysis server."
-                if raise_on_error:
-                    raise RuntimeError(error_text)
-                return _analysis_error_response(payload, error_text, exc)
     elif snyk_token:
         # CLI mode with SNYK_TOKEN environment variable for authentication
         analysis_url = analysis_url.replace(

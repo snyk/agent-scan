@@ -3,6 +3,7 @@ complete-replacement semantics for block/list arguments."""
 
 import argparse
 import sys
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -245,6 +246,65 @@ class TestApplyConfigFileScalars:
         parser, args = _parse(argv)
         apply_config_file(parser, args, argv)
         assert args.server_timeout == 42
+
+    def test_machine_auth_keys_fill_their_flags(self, tmp_path):
+        # The keys the ADS installer writes into scan-agent-config.yaml.
+        path = _write_yaml(
+            tmp_path,
+            "push_key: pk\ntoken_command: /opt/ads/installer\ntenant_id: tenant-1\nbase_url: https://api.snyk.io\n",
+        )
+        argv = ["scan", "--config-file", path]
+        parser, args = _parse(argv)
+        apply_config_file(parser, args, argv)
+        assert (args.token_command, args.tenant_id, args.base_url) == (
+            "/opt/ads/installer",
+            "tenant-1",
+            "https://api.snyk.io",
+        )
+        assert args.push_key == "pk"
+
+    def test_machine_auth_flags_default_to_none(self):
+        _parser, args = _parse(["scan"])
+        assert (args.token_command, args.tenant_id, args.base_url) == (None, None, None)
+
+
+class TestMachineAuthExits:
+    """main() stops a machine-mode scan instead of using the push key."""
+
+    @staticmethod
+    def _main(monkeypatch, argv):
+        monkeypatch.setattr(sys, "argv", ["agent-scan", *argv])
+        with pytest.raises(SystemExit) as excinfo:
+            cli.main()
+        return excinfo.value.code
+
+    def test_partial_values_are_a_usage_error(self, monkeypatch, capsys):
+        run = AsyncMock()
+        monkeypatch.setattr(cli, "print_scan_inspect", run)
+        code = self._main(monkeypatch, ["scan", "--push-key", "pk", "--token-command", "/opt/ads/installer"])
+        assert code == cli.CLI_USAGE_ERROR_EXIT_CODE
+        run.assert_not_called()
+        assert "missing: --tenant-id, --base-url" in capsys.readouterr().err
+
+    def test_token_command_failure_exits_1(self, monkeypatch, capsys):
+        from agent_scan.machine_auth import MachineAuthError
+
+        monkeypatch.setattr(
+            cli, "print_scan_inspect", AsyncMock(side_effect=MachineAuthError("The token command exited with 3."))
+        )
+        argv = [
+            "scan",
+            "--push-key",
+            "pk",
+            "--token-command",
+            "/x",
+            "--tenant-id",
+            "t",
+            "--base-url",
+            "https://api.snyk.io",
+        ]
+        assert self._main(monkeypatch, argv) == 1
+        assert "Machine identity: The token command exited with 3." in capsys.readouterr().err
 
     def test_unknown_key_is_ignored(self, tmp_path, capsys):
         path = _write_yaml(tmp_path, "not_a_real_flag: 1\nserver_timeout: 15\n")
