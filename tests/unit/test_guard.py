@@ -39,6 +39,7 @@ from agent_scan.guard import (
     CURSOR_HOOK_EVENTS,
     CURSOR_HOOKS_PATH,
     CURSOR_MANAGED_HOOKS_PATH,
+    CodexRequirementsError,
     _build_hook_command,
     _build_hook_command_powershell,
     _compact_events,
@@ -71,7 +72,7 @@ from agent_scan.guard import (
     _run_uninstall,
     _send_test_event,
     _shell_quote,
-    _uninstall_filter_for,
+    _strip_guard_from_codex_requirements,
     _uninstall_hooks,
     _write_client_config,
     _write_codex_managed_config,
@@ -80,6 +81,7 @@ from agent_scan.guard import (
 from agent_scan.models import ClientToInspect, InspectedPath, InspectedServer, RemoteServer, StdioServer
 from agent_scan.models.errors import CouldNotParseMCPConfig, FileNotFoundConfig
 from agent_scan.pushkeys import GuardEnabledAccessDeniedError
+from agent_scan.utils import toml_escape
 
 
 @pytest.fixture(autouse=True)
@@ -125,14 +127,19 @@ def _write(path: Path, data) -> None:
     path.write_text(json.dumps(data, indent=2) + "\n")
 
 
+def _guard_backup(path: Path) -> Path:
+    """Where install backs up ``path`` (Guard's own name, unlike a plain ``.backup``)."""
+    return Path(f"{path}.snyk-agent-guard.backup")
+
+
 def _setup_claude_hooks(cmd: str, path: Path) -> None:
     settings, _, preserved = _prepare_claude_config(cmd, path)
-    _write_config(settings, path, preserved)
+    _write_config(settings, path, preserved, client="claude")
 
 
 def _setup_cursor_hooks(cmd: str, path: Path) -> None:
     data, _, preserved = _prepare_cursor_config(cmd, path)
-    _write_config(data, path, preserved)
+    _write_config(data, path, preserved, client="cursor")
 
 
 def _flat_hook_command_strings(path: Path) -> list[str]:
@@ -153,12 +160,12 @@ def _flat_hook_command_strings(path: Path) -> list[str]:
 
 def _setup_copilot_hooks(cmd: str, path: Path) -> None:
     data, _, preserved = _prepare_copilot_config(cmd, path)
-    _write_config(data, path, preserved)
+    _write_config(data, path, preserved, client="github-copilot")
 
 
 def _setup_codex_hooks(cmd: str, path: Path) -> None:
     data, _, preserved = _prepare_codex_config(cmd, path)
-    _write_config(data, path, preserved)
+    _write_config(data, path, preserved, client="codex")
 
 
 def _setup_codex_managed_hooks(cmd: str, path: Path) -> None:
@@ -167,11 +174,7 @@ def _setup_codex_managed_hooks(cmd: str, path: Path) -> None:
 
 
 def _uninstall_test_client(client: str, path: Path) -> None:
-    _uninstall_hooks(
-        path,
-        filter_hooks=_uninstall_filter_for(client),
-        prune_empty_hooks=client != "cursor",
-    )
+    _uninstall_hooks(path, client=client)
 
 
 def _detect_test_client(client: str, path: Path) -> dict | None:
@@ -825,7 +828,7 @@ class TestPrepareClaudeDiscoveryHook:
             path,
             discover_command=self.discover_command,
         )
-        _write_config(settings, path, preserved)
+        _write_config(settings, path, preserved, client="claude")
 
         _, diff, _ = _prepare_claude_config(
             AGENT_SCAN_CMD,
@@ -866,7 +869,7 @@ class TestPrepareCursorDiscoveryHook:
             path,
             discover_command=self.discover_command,
         )
-        _write_config(data, path, preserved)
+        _write_config(data, path, preserved, client="cursor")
 
         _, diff, _ = _prepare_cursor_config(
             AGENT_SCAN_CMD,
@@ -878,12 +881,13 @@ class TestPrepareCursorDiscoveryHook:
 
     def test_uninstall_removes_discovery_entry(self, tmp_path):
         path = tmp_path / "hooks.json"
+        _write(path, {"version": 1, "user": True})
         data, _, preserved = _prepare_cursor_config(
             AGENT_SCAN_CMD,
             path,
             discover_command=self.discover_command,
         )
-        _write_config(data, path, preserved)
+        _write_config(data, path, preserved, client="cursor")
 
         _uninstall_test_client("cursor", path)
 
@@ -939,7 +943,7 @@ class TestPrepareGitHubCopilotDiscoveryHook:
             path,
             discover_command=self.discover_command,
         )
-        _write_config(data, path, preserved)
+        _write_config(data, path, preserved, client="github-copilot")
 
         _, diff, _ = _prepare_copilot_config(
             COPILOT_AGENT_SCAN_CMD,
@@ -951,12 +955,13 @@ class TestPrepareGitHubCopilotDiscoveryHook:
 
     def test_uninstall_removes_discovery_entry(self, tmp_path):
         path = tmp_path / "snyk-agent-guard.json"
+        _write(path, {"version": 1, "user": True})
         data, _, preserved = _prepare_copilot_config(
             COPILOT_AGENT_SCAN_CMD,
             path,
             discover_command=self.discover_command,
         )
-        _write_config(data, path, preserved)
+        _write_config(data, path, preserved, client="github-copilot")
         # Asserted before as well as after: the entry is written under the platform's
         # script key, so a check that never sees that key would pass on an install that
         # was left in place.
@@ -999,7 +1004,7 @@ class TestPrepareCodexDiscoveryHook:
             path,
             discover_command=self.discover_command,
         )
-        _write_config(data, path, preserved)
+        _write_config(data, path, preserved, client="codex")
 
         _, diff, _ = _prepare_codex_config(
             AGENT_SCAN_CMD,
@@ -1011,16 +1016,17 @@ class TestPrepareCodexDiscoveryHook:
 
     def test_uninstall_removes_discovery_entry(self, tmp_path):
         path = tmp_path / "hooks.json"
+        _write(path, {"user": True})
         data, _, preserved = _prepare_codex_config(
             AGENT_SCAN_CMD,
             path,
             discover_command=self.discover_command,
         )
-        _write_config(data, path, preserved)
+        _write_config(data, path, preserved, client="codex")
 
         _uninstall_test_client("codex", path)
 
-        assert "hooks" not in json.loads(path.read_text())
+        assert json.loads(path.read_text()) == {"user": True}
 
 
 class TestWriteConfig:
@@ -1031,24 +1037,24 @@ class TestWriteConfig:
     def test_returns_false_and_prints_nothing_when_content_unchanged(self, tmp_path, capsys):
         path = tmp_path / "hooks.json"
         config = {"hooks": {}}
-        assert _write_config(config, path, 0) is True
+        assert _write_config(config, path, 0, client="cursor") is True
         capsys.readouterr()
 
-        assert _write_config(config, path, 0) is False
+        assert _write_config(config, path, 0, client="cursor") is False
 
         assert capsys.readouterr().out == ""
-        assert not Path(f"{path}.backup").exists()
+        assert not _guard_backup(path).exists()
 
     def test_returns_true_and_backs_up_when_content_changed(self, tmp_path, capsys):
         path = tmp_path / "hooks.json"
         original = {"version": 1}
         updated = {"version": 1, "hooks": {}}
-        assert _write_config(original, path, 0) is True
+        assert _write_config(original, path, 0, client="cursor") is True
         capsys.readouterr()
 
-        assert _write_config(updated, path, 0) is True
+        assert _write_config(updated, path, 0, client="cursor") is True
 
-        backup = Path(f"{path}.backup")
+        backup = _guard_backup(path)
         assert json.loads(backup.read_text()) == original
         assert json.loads(path.read_text()) == updated
         output = capsys.readouterr().out
@@ -1058,19 +1064,19 @@ class TestWriteConfig:
     def test_creates_parent_directory_when_missing(self, tmp_path):
         path = tmp_path / "missing" / "nested" / "hooks.json"
 
-        assert _write_config({"hooks": {}}, path, 0) is True
+        assert _write_config({"hooks": {}}, path, 0, client="cursor") is True
 
         assert json.loads(path.read_text()) == {"hooks": {}}
 
     def test_preserved_note_omitted_when_zero(self, tmp_path, capsys):
-        _write_config({"hooks": {}}, tmp_path / "hooks.json", 0)
+        _write_config({"hooks": {}}, tmp_path / "hooks.json", 0, client="cursor")
 
         output = capsys.readouterr().out
         assert "Written" in output
         assert "other hook(s) preserved" not in output
 
     def test_preserved_note_included_when_nonzero(self, tmp_path, capsys):
-        _write_config({"hooks": {}}, tmp_path / "hooks.json", 2)
+        _write_config({"hooks": {}}, tmp_path / "hooks.json", 2, client="cursor")
 
         # rich soft-wraps the line at the terminal width, so collapse whitespace first
         assert "(2 other hook(s) preserved)" in " ".join(capsys.readouterr().out.split())
@@ -1086,6 +1092,187 @@ class TestWriteConfig:
         assert result is True
         write.assert_not_called()
         write_managed.assert_called_once_with("toml-content", path)
+
+
+class TestAtomicConfigWrites:
+    """Config writers replace files atomically instead of truncating them in place."""
+
+    @pytest.mark.parametrize(
+        "write",
+        [
+            lambda path: guard_module._write_json(path, {"hooks": {}}),
+            lambda path: guard_module._write_json_if_changed(path, {"hooks": {}}, client="claude"),
+            lambda path: _write_codex_managed_config("[hooks]\n", path),
+        ],
+        ids=["write_json", "write_json_if_changed", "codex_managed"],
+    )
+    def test_creates_new_file_and_parent_directory(self, tmp_path, write):
+        path = tmp_path / "missing" / "nested" / "config"
+
+        write(path)
+
+        assert path.is_file()
+        assert path.read_text(encoding="utf-8") in ('{\n  "hooks": {}\n}\n', "[hooks]\n")
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+    def test_new_file_gets_umask_based_permissions(self, tmp_path):
+        path = tmp_path / "settings.json"
+        old_umask = os.umask(0o027)
+        try:
+            guard_module._write_json(path, {"hooks": {}})
+        finally:
+            os.umask(old_umask)
+
+        assert stat.S_IMODE(path.stat().st_mode) == 0o640
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+    @pytest.mark.parametrize(
+        "write",
+        [
+            lambda path: guard_module._write_json(path, {"hooks": {}}),
+            lambda path: guard_module._write_json_if_changed(path, {"hooks": {}}, client="claude"),
+            lambda path: _write_codex_managed_config("[hooks]\n", path),
+        ],
+        ids=["write_json", "write_json_if_changed", "codex_managed"],
+    )
+    def test_overwrite_preserves_existing_mode(self, tmp_path, write):
+        path = tmp_path / "settings.json"
+        path.write_text('{"old": true}\n', encoding="utf-8")
+        path.chmod(0o600)
+
+        write(path)
+
+        assert path.read_text(encoding="utf-8") != '{"old": true}\n'
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+    def test_symlinked_config_stays_symlink_and_target_is_updated(self, tmp_path):
+        dotfiles = tmp_path / "dotfiles"
+        dotfiles.mkdir()
+        real = dotfiles / "settings.json"
+        real.write_text('{"old": true}\n', encoding="utf-8")
+        link_dir = tmp_path / ".claude"
+        link_dir.mkdir()
+        link = link_dir / "settings.json"
+        link.symlink_to(real)
+
+        assert guard_module._write_json_if_changed(link, {"hooks": {}}, client="claude") is True
+
+        assert link.is_symlink()
+        assert link.resolve() == real.resolve()
+        assert json.loads(real.read_text(encoding="utf-8")) == {"hooks": {}}
+
+    @pytest.mark.parametrize(
+        "write",
+        [
+            lambda path: guard_module._write_json(path, {"hooks": {}}),
+            lambda path: guard_module._write_json_if_changed(path, {"hooks": {}}, client="claude"),
+            lambda path: _write_codex_managed_config("[hooks]\n", path),
+        ],
+        ids=["write_json", "write_json_if_changed", "codex_managed"],
+    )
+    def test_failed_replace_leaves_original_intact(self, tmp_path, write):
+        path = tmp_path / "settings.json"
+        original = b'{\n  "keep": "me"\n}\n'
+        path.write_bytes(original)
+
+        with (
+            patch(f"{_G}.os.replace", side_effect=OSError("No space left on device")),
+            pytest.raises(OSError, match="No space left"),
+        ):
+            write(path)
+
+        assert path.read_bytes() == original
+
+    def test_failure_while_writing_content_leaves_original_intact(self, tmp_path):
+        path = tmp_path / "settings.json"
+        original = b'{"keep": "me"}\n'
+        path.write_bytes(original)
+
+        with (
+            patch(f"{_G}.os.fsync", side_effect=KeyboardInterrupt),
+            pytest.raises(KeyboardInterrupt),
+        ):
+            guard_module._write_json(path, {"hooks": {}})
+
+        assert path.read_bytes() == original
+
+    def test_non_ascii_content_round_trips_as_utf8(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        content = "# caf\u00e9 \u2713\n[hooks]\n"
+
+        assert _write_codex_managed_config(content, path) is True
+        assert _write_codex_managed_config(content, path) is False
+
+        assert path.read_bytes().decode("utf-8").replace("\r\n", "\n") == content
+
+
+def _prepare_user_json_config(client: str, path: Path) -> tuple[dict, int]:
+    """Prepare a user-level JSON install for *client*: (new_config, preserved)."""
+    prepare, command = {
+        "claude": (_prepare_claude_config, AGENT_SCAN_CMD),
+        "cursor": (_prepare_cursor_config, CURSOR_AGENT_SCAN_CMD),
+        "codex": (_prepare_codex_config, CODEX_AGENT_SCAN_CMD),
+    }[client]
+    config, _, preserved = prepare(command, path)
+    return config, preserved
+
+
+_NON_ASCII_USER_VALUES = {
+    "theme": "caf\u00e9 \u2615",
+    "\u540d\u524d": "\u30c6\u30b9\u30c8",
+    "emoji": "\U0001f600",
+}
+
+
+class TestNonAsciiConfigRoundTrip:
+    """Rewritten configs keep the user's non-ASCII text literal, not as \\u escapes."""
+
+    @staticmethod
+    def _read_text(path: Path) -> str:
+        return path.read_bytes().decode("utf-8")
+
+    def _assert_user_values_literal(self, path: Path) -> None:
+        text = self._read_text(path)
+        assert "\\u" not in text
+        for key, value in _NON_ASCII_USER_VALUES.items():
+            assert key in text
+            assert value in text
+        data = json.loads(text)
+        for key, value in _NON_ASCII_USER_VALUES.items():
+            assert data[key] == value
+
+    @pytest.mark.parametrize("client", ["claude", "cursor", "codex"])
+    def test_install_then_uninstall_keeps_non_ascii_literal(self, tmp_path, client):
+        path = tmp_path / "config.json"
+        path.write_bytes((json.dumps(_NON_ASCII_USER_VALUES, indent=2, ensure_ascii=False) + "\n").encode("utf-8"))
+
+        config, preserved = _prepare_user_json_config(client, path)
+        assert _write_config(config, path, preserved, client=client) is True
+        self._assert_user_values_literal(path)
+
+        # Re-installing compares against the literal text on disk, so it is a no-op.
+        config, preserved = _prepare_user_json_config(client, path)
+        assert _write_config(config, path, preserved, client=client) is False
+
+        _uninstall_test_client(client, path)
+        self._assert_user_values_literal(path)
+        assert not json.loads(self._read_text(path)).get("hooks")
+
+    @pytest.mark.parametrize("client", ["claude", "cursor", "codex"])
+    def test_lone_surrogate_stays_escaped_and_does_not_crash(self, tmp_path, client):
+        # A lone surrogate cannot be encoded as UTF-8, so it must be written back
+        # as an escape; the rest of the file still keeps its literal characters.
+        path = tmp_path / "config.json"
+        path.write_bytes('{\n  "note": "\\ud800 caf\u00e9"\n}\n'.encode())
+
+        config, preserved = _prepare_user_json_config(client, path)
+        _write_config(config, path, preserved, client=client)
+        _uninstall_test_client(client, path)
+
+        text = self._read_text(path)
+        assert '"note": "\\ud800 caf\u00e9"' in text
+        assert json.loads(text)["note"] == "\ud800 caf\u00e9"
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX discovery script")
@@ -1350,7 +1537,7 @@ class TestDiscoveryHookScriptFiles:
             config,
             discover_command=discover_command,
         )
-        _write_config(settings, config, preserved)
+        _write_config(settings, config, preserved, client="claude")
         main_script = guard_module._forwarder_script_path(config)
         discover_script = guard_module._discover_script_path(config)
         guard_module._copy_hook_script(main_script)
@@ -1358,9 +1545,11 @@ class TestDiscoveryHookScriptFiles:
 
         _run_uninstall(SimpleNamespace(client="claude", file=str(config), managed=False))
 
-        assert "hooks" not in json.loads(config.read_text())
+        # Install created the file and the hooks directory; uninstall leaves neither.
+        assert not config.exists()
         assert not main_script.exists()
         assert not discover_script.exists()
+        assert list(tmp_path.iterdir()) == []
 
 
 class TestWindowsDiscoveryHookScriptFiles:
@@ -1470,15 +1659,16 @@ class TestUninstallClaude:
         _write(
             path,
             {
+                "theme": "dark",
                 "hooks": {
                     "PreToolUse": [_claude_group(AGENT_SCAN_CMD, "*")],
-                }
+                },
             },
         )
         _uninstall_test_client("claude", path)
 
         data = json.loads(path.read_text())
-        assert "hooks" not in data
+        assert data == {"theme": "dark"}
 
     def test_preserves_agentguard(self, tmp_path):
         path = tmp_path / "settings.json"
@@ -1498,16 +1688,6 @@ class TestUninstallClaude:
         data = json.loads(path.read_text())
         assert len(data["hooks"]["PreToolUse"]) == 1
         assert data["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == AGENTGUARD_CMD
-
-    def test_backup_created(self, tmp_path):
-        path = tmp_path / "settings.json"
-        original = {"hooks": {"Stop": [_claude_group(AGENT_SCAN_CMD)]}}
-        _write(path, original)
-        _uninstall_test_client("claude", path)
-
-        backup = Path(str(path) + ".backup")
-        assert backup.exists()
-        assert json.loads(backup.read_text()) == original
 
     def test_full_install_then_uninstall(self, tmp_path):
         """Install all events, then uninstall — should leave a clean file."""
@@ -1662,11 +1842,11 @@ class TestUninstallCursor:
 
     def test_leaves_empty_hooks_when_all_removed(self, tmp_path):
         path = tmp_path / "hooks.json"
-        _write(path, {"version": 1, "hooks": {"stop": [_cursor_entry(CURSOR_AGENT_SCAN_CMD)]}})
+        _write(path, {"version": 1, "theme": "dark", "hooks": {"stop": [_cursor_entry(CURSOR_AGENT_SCAN_CMD)]}})
         _uninstall_test_client("cursor", path)
 
         data = json.loads(path.read_text())
-        assert data["hooks"] == {}
+        assert data == {"version": 1, "theme": "dark", "hooks": {}}
 
     def test_preserves_agentguard(self, tmp_path):
         path = tmp_path / "hooks.json"
@@ -1688,24 +1868,12 @@ class TestUninstallCursor:
         assert len(data["hooks"]["stop"]) == 1
         assert data["hooks"]["stop"][0]["command"] == CURSOR_AGENTGUARD_CMD
 
-    def test_backup_created(self, tmp_path):
-        path = tmp_path / "hooks.json"
-        original = {"version": 1, "hooks": {"stop": [_cursor_entry(CURSOR_AGENT_SCAN_CMD)]}}
-        _write(path, original)
-        _uninstall_test_client("cursor", path)
-
-        backup = Path(str(path) + ".backup")
-        assert backup.exists()
-        assert json.loads(backup.read_text()) == original
-
-    def test_full_install_then_uninstall(self, tmp_path):
+    def test_full_install_then_uninstall_removes_file_install_created(self, tmp_path):
         path = tmp_path / "hooks.json"
         _setup_cursor_hooks(CURSOR_AGENT_SCAN_CMD, path)
         _uninstall_test_client("cursor", path)
 
-        data = json.loads(path.read_text())
-        assert data["hooks"] == {}
-        assert data["version"] == 1
+        assert not path.exists()
 
 
 # ===================================================================
@@ -1853,12 +2021,12 @@ class TestUninstallGitHubCopilot:
         assert len(data["hooks"]["Stop"]) == 1
         assert data["hooks"]["Stop"][0]["command"] == COPILOT_AGENTGUARD_CMD
 
-    def test_full_install_then_uninstall(self, tmp_path):
+    def test_full_install_then_uninstall_removes_file_install_created(self, tmp_path):
         path = tmp_path / "snyk-agent-guard.json"
         _setup_copilot_hooks(COPILOT_AGENT_SCAN_CMD, path)
         _uninstall_test_client("github-copilot", path)
 
-        assert "hooks" not in json.loads(path.read_text())
+        assert not path.exists()
 
     @pytest.mark.parametrize("key", ["bash", "powershell", "command"])
     def test_removes_agent_scan_hooks_under_any_script_key(self, tmp_path, key):
@@ -2214,8 +2382,7 @@ class TestManagedInstallClaude:
         _setup_claude_hooks(AGENT_SCAN_CMD, path)
         _uninstall_test_client("claude", path)
 
-        data = json.loads(path.read_text())
-        assert "hooks" not in data
+        assert not path.exists()
 
 
 class TestManagedInstallCursor:
@@ -2242,8 +2409,7 @@ class TestManagedInstallCursor:
         _setup_cursor_hooks(CURSOR_AGENT_SCAN_CMD, path)
         _uninstall_test_client("cursor", path)
 
-        data = json.loads(path.read_text())
-        assert data["hooks"] == {}
+        assert not path.exists()
 
 
 # ===================================================================
@@ -2627,11 +2793,11 @@ class TestUninstallCodex:
 
     def test_removes_hooks_key_when_empty(self, tmp_path):
         path = tmp_path / "hooks.json"
-        _write(path, {"hooks": {"PreToolUse": [_claude_group(CODEX_AGENT_SCAN_CMD)]}})
+        _write(path, {"theme": "dark", "hooks": {"PreToolUse": [_claude_group(CODEX_AGENT_SCAN_CMD)]}})
         _uninstall_test_client("codex", path)
 
         data = json.loads(path.read_text())
-        assert "hooks" not in data
+        assert data == {"theme": "dark"}
 
     def test_preserves_agentguard(self, tmp_path):
         path = tmp_path / "hooks.json"
@@ -2651,16 +2817,6 @@ class TestUninstallCodex:
         data = json.loads(path.read_text())
         assert len(data["hooks"]["PreToolUse"]) == 1
         assert data["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == AGENTGUARD_CMD
-
-    def test_backup_created(self, tmp_path):
-        path = tmp_path / "hooks.json"
-        original = {"hooks": {"Stop": [_claude_group(CODEX_AGENT_SCAN_CMD)]}}
-        _write(path, original)
-        _uninstall_test_client("codex", path)
-
-        backup = Path(str(path) + ".backup")
-        assert backup.exists()
-        assert json.loads(backup.read_text()) == original
 
     def test_full_install_then_uninstall(self, tmp_path):
         path = tmp_path / "hooks.json"
@@ -2887,7 +3043,7 @@ class TestUninstallHooks:
             "codex": _prepare_codex_config,
         }[client]
         config, _, preserved = prepare(CODEX_AGENT_SCAN_CMD, path, discover_command=CODEX_DISCOVER_CMD)
-        _write_config(config, path, preserved)
+        _write_config(config, path, preserved, client=client)
         capsys.readouterr()
 
         _uninstall_test_client(client, path)
@@ -2909,19 +3065,6 @@ class TestUninstallHooks:
         _uninstall_test_client(client, tmp_path / filename)
 
         assert f"No {filename} found. Nothing to uninstall." in capsys.readouterr().out
-
-    @pytest.mark.parametrize("client", ["claude", "cursor", "codex"])
-    def test_overwrites_existing_backup(self, tmp_path, client):
-        event, entry = self._event_and_entry(client, CODEX_AGENT_SCAN_CMD)
-        path = tmp_path / ("settings.json" if client == "claude" else "hooks.json")
-        original = {"hooks": {event: [entry]}, "current": True}
-        _write(path, original)
-        backup = Path(f"{path}.backup")
-        backup.write_text("stale backup")
-
-        _uninstall_test_client(client, path)
-
-        assert json.loads(backup.read_text()) == original
 
     @pytest.mark.parametrize("client", ["claude", "cursor", "codex"])
     def test_no_backup_when_nothing_matched(self, tmp_path, client):
@@ -3358,15 +3501,6 @@ class TestCodexManagedRequirementsToml:
         assert info is not None
         assert info["auth_value"] == "pk-codex"
 
-    def test_uninstall_removes_file(self, tmp_path):
-        install, uninstall, _, _ = self._import_managed_helpers()
-        path = tmp_path / "requirements.toml"
-        script = tmp_path / "hooks" / "snyk-agent-guard.sh"
-        install(CODEX_AGENT_SCAN_CMD, path, script)
-        assert path.exists()
-        uninstall(path)
-        assert not path.exists()
-
     def test_uninstall_missing_file_is_noop(self, tmp_path):
         _, uninstall, _, _ = self._import_managed_helpers()
         uninstall(tmp_path / "requirements.toml")  # should not raise
@@ -3398,12 +3532,440 @@ class TestCodexManagedRequirementsToml:
 
         assert parsed_discover == discover_command
 
-    def test_prepare_survives_unparseable_existing_toml(self, tmp_path):
+    def test_prepare_refuses_unparseable_existing_toml(self, tmp_path):
         path = tmp_path / "requirements.toml"
         path.write_text('command = "C:\\Users\\bad"\n')
-        content, diff = _prepare_codex_managed_config(CODEX_AGENT_SCAN_CMD, path)
-        assert "[features]" in content
-        assert diff["removed"]
+        before = path.read_bytes()
+        with pytest.raises(CodexRequirementsError, match="not valid TOML"):
+            _prepare_codex_managed_config(CODEX_AGENT_SCAN_CMD, path)
+        assert path.read_bytes() == before
+
+
+# ===================================================================
+# Codex managed: requirements.toml is edited in place
+# ===================================================================
+
+_CODEX_ADMIN_POLICY = """\
+# Managed by IT. Do not edit by hand.
+allowed_approval_policies = ["never", "on-request"]  # keep in sync with MDM
+
+[features]
+hooks = true
+
+[sandbox]
+mode = 'read-only'
+
+[[hooks.PreToolUse]]
+matcher = "^Bash$"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "python3 /etc/codex/hooks/policy.py"
+"""
+
+
+def _codex_managed_install(path: Path, command: str = CODEX_AGENT_SCAN_CMD, *, discover_command=None) -> bool:
+    content, _ = _prepare_codex_managed_config(command, path, discover_command=discover_command)
+    return _write_codex_managed_config(content, path)
+
+
+def _codex_dirs_toml(path: Path) -> str:
+    managed_dir, windows_managed_dir = guard_module._codex_managed_dirs(path)
+    return f"managed_dir = {toml_escape(managed_dir)}\nwindows_managed_dir = {toml_escape(windows_managed_dir)}\n"
+
+
+def _codex_guard_free(text: str) -> str:
+    """``text`` without the lines Guard writes for its hooks."""
+    data = guard_module.tomllib.loads(text)
+    for groups in data.get("hooks", {}).values():
+        if isinstance(groups, list):
+            for group in groups:
+                for entry in group.get("hooks", []):
+                    assert not _is_agent_scan_command(entry.get("command", "")), text
+    return text
+
+
+class TestCodexRequirementsInPlace:
+    @pytest.fixture(autouse=True)
+    def _posix_paths(self):
+        with patch(f"{_G}.IS_WINDOWS", False), patch(f"{_G}.rich"):
+            yield
+
+    def test_install_keeps_admin_content_byte_for_byte(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text(_CODEX_ADMIN_POLICY, encoding="utf-8")
+
+        assert _codex_managed_install(path, discover_command=CODEX_DISCOVER_CMD)
+
+        text = path.read_text(encoding="utf-8")
+        assert text.startswith(_CODEX_ADMIN_POLICY)
+        appended = text[len(_CODEX_ADMIN_POLICY) :]
+        assert appended.startswith("\n[hooks]\n" + _codex_dirs_toml(path) + "\n")
+        for event in CODEX_HOOK_EVENTS:
+            assert f"[[hooks.{event}]]\n[[hooks.{event}.hooks]]\n" in appended
+        assert appended.endswith(f"command = {toml_escape(CODEX_DISCOVER_CMD)}\nasync = true\n")
+        info = _detect_codex_install(path)
+        assert info is not None and info["auth_value"] == "pk-codex"
+
+    def test_install_into_missing_file_matches_render(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        _codex_managed_install(path, discover_command=CODEX_DISCOVER_CMD)
+        expected = guard_module._render_codex_requirements_toml(
+            CODEX_AGENT_SCAN_CMD, path, discover_command=CODEX_DISCOVER_CMD
+        )
+        assert path.read_text(encoding="utf-8") == expected
+
+    def test_install_into_empty_file_matches_render(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text("", encoding="utf-8")
+        _codex_managed_install(path)
+        assert path.read_text(encoding="utf-8") == guard_module._render_codex_requirements_toml(
+            CODEX_AGENT_SCAN_CMD, path
+        )
+
+    def test_install_twice_does_not_rewrite(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text(_CODEX_ADMIN_POLICY, encoding="utf-8")
+        _codex_managed_install(path, discover_command=CODEX_DISCOVER_CMD)
+        _guard_backup(path).unlink()
+        installed = path.read_bytes()
+
+        content, diff = _prepare_codex_managed_config(CODEX_AGENT_SCAN_CMD, path, discover_command=CODEX_DISCOVER_CMD)
+        with patch(f"{_G}._atomic_write_text") as write:
+            assert _write_codex_managed_config(content, path) is False
+
+        write.assert_not_called()
+        assert diff == {"added": {}, "modified": {}, "removed": {}}
+        assert path.read_bytes() == installed
+        assert not _guard_backup(path).exists()
+
+    def test_reinstall_with_new_push_key_changes_only_guard_command_lines(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text(_CODEX_ADMIN_POLICY, encoding="utf-8")
+        _codex_managed_install(path, discover_command=CODEX_DISCOVER_CMD)
+        before = path.read_text(encoding="utf-8").split("\n")
+
+        new_cmd = CODEX_AGENT_SCAN_CMD.replace("pk-codex", "pk-rotated")
+        new_discover = CODEX_DISCOVER_CMD.replace("pk-discover", "pk-rotated")
+        assert _codex_managed_install(path, new_cmd, discover_command=new_discover)
+        after = path.read_text(encoding="utf-8").split("\n")
+
+        assert len(after) == len(before)
+        changed = [(old, new) for old, new in zip(before, after, strict=True) if old != new]
+        assert changed
+        for old, new in changed:
+            assert old.startswith("command = ") and "PUSH_KEY=" in old
+            assert new in (f"command = {toml_escape(new_cmd)}", f"command = {toml_escape(new_discover)}")
+
+    def test_install_then_uninstall_restores_original_bytes(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        original = '# policy\nallowed_approval_policies = ["never"]\n\n[features]\nhooks = true  # pinned\n\n[sandbox]\nmode = "x"\n'
+        path.write_text(original, encoding="utf-8")
+        before = path.read_bytes()
+
+        _codex_managed_install(path, discover_command=CODEX_DISCOVER_CMD)
+        guard_module._uninstall_codex_managed(path)
+
+        assert path.read_bytes() == before
+
+    def test_uninstall_keeps_non_guard_content(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text(_CODEX_ADMIN_POLICY, encoding="utf-8")
+        _codex_managed_install(path, discover_command=CODEX_DISCOVER_CMD)
+
+        guard_module._uninstall_codex_managed(path)
+
+        assert path.exists()
+        text = _codex_guard_free(path.read_text(encoding="utf-8"))
+        # A non-Guard hook remains and may live in the managed dir, so the dirs stay.
+        assert text == _CODEX_ADMIN_POLICY + "\n[hooks]\n" + _codex_dirs_toml(path)
+        assert _detect_codex_install(path) is None
+
+    def test_install_adds_hooks_flag_to_existing_features_table(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text("[features]\nother = 1\n\n# trailing comment\n", encoding="utf-8")
+        _codex_managed_install(path)
+        text = path.read_text(encoding="utf-8")
+        assert text.startswith("[features]\nother = 1\nhooks = true\n\n# trailing comment\n\n[hooks]\n")
+
+    def test_install_turns_disabled_hooks_flag_on_and_warns(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text("[features]\n  hooks = false # off\n", encoding="utf-8")
+        with patch(f"{_G}.rich") as rich:
+            _codex_managed_install(path)
+        assert path.read_text(encoding="utf-8").startswith("[features]\n  hooks = true\n\n[hooks]\n")
+        assert any("hooks was False" in str(c.args[0]) for c in rich.print.call_args_list if c.args)
+
+    def test_install_appends_features_table_when_missing(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text('allowed_approval_policies = ["never"]', encoding="utf-8")  # no final newline
+        _codex_managed_install(path)
+        text = path.read_text(encoding="utf-8")
+        assert text.startswith(
+            'allowed_approval_policies = ["never"]\n\n[features]\nhooks = true\n\n[hooks]\n' + _codex_dirs_toml(path)
+        )
+
+    def test_install_adds_dirs_to_existing_hooks_table(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text("[features]\nhooks = true\n\n[hooks]\n# managed below\n\n[other]\nx = 1\n", encoding="utf-8")
+        _codex_managed_install(path)
+        text = path.read_text(encoding="utf-8")
+        assert text.startswith("[features]\nhooks = true\n\n[hooks]\n" + _codex_dirs_toml(path) + "# managed below\n")
+        assert "[other]\nx = 1\n\n[[hooks.PreToolUse]]\n" in text
+
+    def test_install_keeps_existing_identical_managed_dir_written_as_literal(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        managed_dir, _ = guard_module._codex_managed_dirs(path)
+        path.write_text(f"[hooks]\nmanaged_dir = '{managed_dir}'\n", encoding="utf-8")
+        _codex_managed_install(path)
+        text = path.read_text(encoding="utf-8")
+        assert text.count("managed_dir =") == 1  # only the admin's literal line
+        assert f"[hooks]\nmanaged_dir = '{managed_dir}'\n\n" in text
+
+    def test_install_keeps_admins_managed_dir(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text('[hooks]\nmanaged_dir = "/opt/enterprise/hooks"\n', encoding="utf-8")
+        _codex_managed_install(path)
+        text = path.read_text(encoding="utf-8")
+        assert text.startswith('[hooks]\nmanaged_dir = "/opt/enterprise/hooks"\n\n')
+        assert guard_module.tomllib.loads(text)["hooks"]["managed_dir"] == "/opt/enterprise/hooks"
+        assert guard_module._parse_codex_requirements_toml(text)[0]  # Guard hooks installed
+
+    def test_install_then_uninstall_with_admins_managed_dir_restores_original_bytes(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        original = (
+            '[features]\nhooks = true\n\n[hooks]\nmanaged_dir = "/opt/enterprise/hooks"\n\n'
+            '[[hooks.SessionStart]]\n[[hooks.SessionStart.hooks]]\ntype = "command"\ncommand = "/opt/enterprise/hooks/audit.sh"\n'
+        )
+        path.write_text(original, encoding="utf-8")
+        _codex_managed_install(path, discover_command=CODEX_DISCOVER_CMD)
+        guard_module._uninstall_codex_managed(path)
+        assert path.read_text(encoding="utf-8") == original
+
+    def test_install_keeps_other_platform_dir_without_adding_its_own(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text("[hooks]\nwindows_managed_dir = 'D:\\hooks'\n", encoding="utf-8")
+        _codex_managed_install(path)
+        text = path.read_text(encoding="utf-8")
+        assert text.startswith("[hooks]\nwindows_managed_dir = 'D:\\hooks'\n\n[features]\nhooks = true\n\n[[hooks.")
+        assert text.count("managed_dir =") == 1
+
+    def test_windows_install_keeps_admins_windows_managed_dir(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text("[hooks]\nwindows_managed_dir = 'D:\\hooks'\n", encoding="utf-8")
+        with patch(f"{_G}.IS_WINDOWS", True):
+            _codex_managed_install(path)
+        text = path.read_text(encoding="utf-8")
+        assert text.startswith("[hooks]\nwindows_managed_dir = 'D:\\hooks'\n")
+        assert guard_module.tomllib.loads(text)["hooks"]["windows_managed_dir"] == "D:\\hooks"
+
+    def test_install_invalid_toml_fails_and_leaves_file(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text("[features\nhooks = true\n", encoding="utf-8")
+        before = path.read_bytes()
+        with pytest.raises(CodexRequirementsError, match="not valid TOML"):
+            _prepare_codex_managed_config(CODEX_AGENT_SCAN_CMD, path)
+        assert path.read_bytes() == before
+
+    def test_install_refuses_layout_it_cannot_append_to(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text('[hooks]\nPreToolUse = [{ hooks = [{ type = "command", command = "x" }] }]\n', encoding="utf-8")
+        before = path.read_bytes()
+        with pytest.raises(CodexRequirementsError, match="layout not supported"):
+            _prepare_codex_managed_config(CODEX_AGENT_SCAN_CMD, path)
+        assert path.read_bytes() == before
+
+    @pytest.mark.parametrize(
+        "layout",
+        [
+            '[[hooks.Stop]]\nhooks = [{{ type = "command", command = {command} }}]\n',
+            '[[hooks.Stop]]\n[hooks.Stop.extra]\nnote = "x"\n[[hooks.Stop.hooks]]\ntype = "command"\ncommand = {command}\n',
+        ],
+        ids=["inline-entries", "extra-nested-table"],
+    )
+    def test_guard_hook_in_layout_it_cannot_edit_is_refused(self, tmp_path, layout):
+        path = tmp_path / "requirements.toml"
+        path.write_text(
+            _CODEX_ADMIN_POLICY + "\n" + layout.format(command=json.dumps(CODEX_AGENT_SCAN_CMD)), encoding="utf-8"
+        )
+        before = path.read_bytes()
+        for edit in (
+            lambda: _prepare_codex_managed_config(CODEX_AGENT_SCAN_CMD, path),
+            lambda: _strip_guard_from_codex_requirements(path.read_text(encoding="utf-8"), path),
+        ):
+            with pytest.raises(CodexRequirementsError, match="layout Agent Guard cannot edit"):
+                edit()
+        assert path.read_bytes() == before
+
+    def test_uninstall_invalid_toml_fails_and_leaves_file(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text(
+            guard_module._render_codex_requirements_toml(CODEX_AGENT_SCAN_CMD, path) + "[broken\n", encoding="utf-8"
+        )
+        before = path.read_bytes()
+        with pytest.raises(CodexRequirementsError, match="not valid TOML"):
+            guard_module._uninstall_codex_managed(path)
+        assert path.read_bytes() == before
+
+    def test_run_guard_reports_requirements_error(self):
+        with (
+            patch(f"{_G}._run_uninstall", side_effect=CodexRequirementsError("/etc/codex/requirements.toml: boom")),
+            patch(f"{_G}.rich") as rich,
+        ):
+            assert guard_module.run_guard(SimpleNamespace(guard_command="uninstall")) == 1
+        assert "boom" in rich.print.call_args.args[0]
+
+    def test_uninstall_removes_only_guard_entry_from_mixed_group(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        mixed = (
+            "[[hooks.PreToolUse]]\n"
+            'matcher = "^Bash$"\n'
+            "\n"
+            "[[hooks.PreToolUse.hooks]]\n"
+            'type = "command"\n'
+            'command = "python3 /etc/codex/hooks/policy.py"\n'
+            "\n"
+            "[[hooks.PreToolUse.hooks]]\n"
+            'type = "command"\n'
+            f"command = {toml_escape(CODEX_AGENT_SCAN_CMD)}\n"
+            "\n"
+            "[sandbox]\n"
+            'mode = "x"\n'
+        )
+        path.write_text(mixed, encoding="utf-8")
+
+        guard_module._uninstall_codex_managed(path)
+
+        assert path.read_text(encoding="utf-8") == (
+            "[[hooks.PreToolUse]]\n"
+            'matcher = "^Bash$"\n'
+            "\n"
+            "[[hooks.PreToolUse.hooks]]\n"
+            'type = "command"\n'
+            'command = "python3 /etc/codex/hooks/policy.py"\n'
+            "\n"
+            "[sandbox]\n"
+            'mode = "x"\n'
+        )
+
+    @pytest.mark.parametrize(
+        "original",
+        [
+            b"# policy\r\n[features]\r\nhooks = true\r\n\r\n[sandbox]\r\nmode = 'x'\r\n",
+            b"# policy\n[features]\nhooks = true\n\n[sandbox]\nmode = 'x'\n",
+            b"# policy\r\n[features]\nhooks = true\r\n\n[sandbox]\nmode = 'x'\r\n",
+        ],
+        ids=["crlf", "lf", "mixed"],
+    )
+    def test_line_endings_survive_install_and_uninstall(self, tmp_path, original):
+        # On every platform, including LF-only and mixed files on Windows.
+        path = tmp_path / "requirements.toml"
+        path.write_bytes(original)
+
+        _codex_managed_install(path)
+        assert path.read_bytes().startswith(original)
+
+        guard_module._uninstall_codex_managed(path)
+        assert path.read_bytes() == original
+
+    def test_crlf_file_gets_crlf_guard_blocks(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_bytes(b"# policy\r\n[features]\r\nhooks = true\r\n")
+
+        _codex_managed_install(path)
+
+        installed = path.read_bytes()
+        assert installed.count(b"\n") == installed.count(b"\r\n")
+
+    def test_uninstall_removes_guard_hook_written_as_literal_string(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        command = CODEX_AGENT_SCAN_CMD.replace("'", "")
+        path.write_text(
+            _CODEX_ADMIN_POLICY + f"\n[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = 'command'\ncommand = '{command}'\n",
+            encoding="utf-8",
+        )
+
+        guard_module._uninstall_codex_managed(path)
+
+        assert path.read_text(encoding="utf-8") == _CODEX_ADMIN_POLICY
+
+
+class TestStripGuardFromCodexRequirements:
+    PATH = Path("/etc/codex/requirements.toml")
+
+    @pytest.fixture(autouse=True)
+    def _posix(self):
+        with patch(f"{_G}.IS_WINDOWS", False):
+            yield
+
+    def _render(self, **kwargs) -> str:
+        return guard_module._render_codex_requirements_toml(CODEX_AGENT_SCAN_CMD, self.PATH, **kwargs)
+
+    def test_rendered_guard_file_keeps_only_features_flag(self):
+        text = self._render(discover_command=CODEX_DISCOVER_CMD)
+        assert _strip_guard_from_codex_requirements(text, self.PATH) == "[features]\nhooks = true\n"
+
+    def test_default_path_is_codex_managed_path(self):
+        text = guard_module._render_codex_requirements_toml(CODEX_AGENT_SCAN_CMD, CODEX_MANAGED_HOOKS_PATH)
+        assert _strip_guard_from_codex_requirements(text) == "[features]\nhooks = true\n"
+
+    def test_dirs_kept_when_other_hooks_remain(self):
+        text = self._render() + '\n[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = "command"\ncommand = "/bin/true"\n'
+        stripped = _strip_guard_from_codex_requirements(text, self.PATH)
+        assert stripped == (
+            "[features]\nhooks = true\n\n[hooks]\n"
+            + _codex_dirs_toml(self.PATH)
+            + '\n[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = "command"\ncommand = "/bin/true"\n'
+        )
+
+    def _guard_group(self) -> str:
+        return (
+            f'\n[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = "command"\ncommand = {toml_escape(CODEX_AGENT_SCAN_CMD)}\n'
+        )
+
+    def test_dirs_kept_when_value_differs(self):
+        text = '[hooks]\nmanaged_dir = "/opt/other"\nwindows_managed_dir = "C:\\\\ProgramData\\\\OpenAI\\\\Codex\\\\hooks"\n'
+        text += self._guard_group()
+        assert _strip_guard_from_codex_requirements(text, self.PATH) == '[hooks]\nmanaged_dir = "/opt/other"\n'
+
+    def test_windows_dir_compared_unescaped_in_any_quoting(self):
+        literal = (
+            "[hooks]\nmanaged_dir = '/etc/codex/hooks'\nwindows_managed_dir = 'C:\\ProgramData\\OpenAI\\Codex\\hooks'\n"
+        ) + self._guard_group()
+        assert _strip_guard_from_codex_requirements(literal, self.PATH) == ""
+
+    def test_admins_dirs_equal_to_guards_kept_without_guard_hooks(self):
+        text = "[hooks]\n" + _codex_dirs_toml(self.PATH)
+        assert _strip_guard_from_codex_requirements(text, self.PATH) == text
+
+    def test_hooks_header_with_comment_is_kept(self):
+        text = "[hooks]\n# keep me\n" + _codex_dirs_toml(self.PATH) + self._guard_group()
+        assert _strip_guard_from_codex_requirements(text, self.PATH) == "[hooks]\n# keep me\n"
+
+    def test_guard_group_between_admin_tables(self):
+        guard = (
+            f'[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = "command"\ncommand = {toml_escape(CODEX_AGENT_SCAN_CMD)}\n'
+        )
+        text = f"[a]\nx = 1\n\n{guard}\n# about b\n[b]\ny = 2\n"
+        assert _strip_guard_from_codex_requirements(text, self.PATH) == "[a]\nx = 1\n\n# about b\n[b]\ny = 2\n"
+
+    def test_guard_group_with_literal_command_string(self):
+        guard_literal = f"[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = 'command'\ncommand = '{CODEX_AGENT_SCAN_CMD.replace(chr(39), '')}'\n"
+        assert _is_agent_scan_command(CODEX_AGENT_SCAN_CMD.replace("'", ""))
+        assert _strip_guard_from_codex_requirements("x = 1\n\n" + guard_literal, self.PATH) == "x = 1\n"
+
+    def test_invalid_toml_raises(self):
+        with pytest.raises(CodexRequirementsError, match="not valid TOML"):
+            _strip_guard_from_codex_requirements("[hooks\n", self.PATH)
+
+    def test_header_lookalike_inside_multiline_string_is_refused_not_corrupted(self):
+        tricky = (
+            'note = """\n[[hooks.Stop]]\n"""\n\n'
+            f'[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = "command"\ncommand = {toml_escape(CODEX_AGENT_SCAN_CMD)}\n'
+        )
+        # The line model miscounts the groups here; the edit is refused.
+        with pytest.raises(CodexRequirementsError, match="layout"):
+            _strip_guard_from_codex_requirements(tricky, self.PATH)
 
 
 # ===================================================================
@@ -4706,6 +5268,7 @@ class TestInstallHooksOrchestration:
             "prep_codex": (f"{_G}._prepare_codex_config", (_PREPARED, _DIFF_REMOVED, 0)),
             "prep_codex_managed": (f"{_G}._prepare_codex_managed_config", ("toml-content", _DIFF_REMOVED)),
             "is_toml": (f"{_G}._is_codex_requirements_toml", False),
+            "preflight_codex_managed": (f"{_G}._preflight_codex_requirements", None),
             "detect_existing": (f"{_G}._detect_existing_install", None),
             "test_event": (f"{_G}._send_test_event", _TEST_EVENT_SENT),
             "write": (f"{_G}._write_config", True),
@@ -4878,7 +5441,7 @@ class TestInstallHooksOrchestration:
         discover_script.parent.mkdir(parents=True)
         discover_script.write_text("stale\n")
 
-        def assert_stale_script_still_exists(*_args):
+        def assert_stale_script_still_exists(*_args, **_kwargs):
             assert discover_script.exists()
             return True
 
@@ -4944,6 +5507,7 @@ class TestInstallHooksOrchestration:
     def test_codex_managed_routes_to_toml_functions(self, ctx, tmp_path):
         ctx["is_toml"].return_value = True
         self._call(tmp_path, client="codex", hook_client="codex", config_exists=True)
+        ctx["preflight_codex_managed"].assert_called_once()
         ctx["prep_codex_managed"].assert_called_once()
         ctx["write_codex_managed"].assert_called_once()
         ctx["prep_codex"].assert_not_called()
@@ -5249,19 +5813,19 @@ class TestInstallHooksOrchestration:
         prepared = {"hooks": {"PreToolUse": [{"test": True}]}}
         ctx["prep_claude"].return_value = (prepared, _DIFF_REMOVED, 2)
         config = self._call(tmp_path, config_exists=True)
-        ctx["write"].assert_called_once_with(prepared, config, 2)
+        ctx["write"].assert_called_once_with(prepared, config, 2, client="claude")
 
     def test_write_receives_prepared_cursor_config(self, ctx, tmp_path):
         prepared = {"version": 1, "hooks": {"stop": [{"command": "x"}]}}
         ctx["prep_cursor"].return_value = (prepared, _DIFF_REMOVED, 1)
         config = self._call(tmp_path, client="cursor", hook_client="cursor", config_exists=True)
-        ctx["write"].assert_called_once_with(prepared, config, 1)
+        ctx["write"].assert_called_once_with(prepared, config, 1, client="cursor")
 
     def test_write_receives_prepared_codex_config(self, ctx, tmp_path):
         prepared = {"hooks": {"Stop": [{"hooks": []}]}}
         ctx["prep_codex"].return_value = (prepared, _DIFF_REMOVED, 3)
         config = self._call(tmp_path, client="codex", hook_client="codex", config_exists=True)
-        ctx["write"].assert_called_once_with(prepared, config, 3)
+        ctx["write"].assert_called_once_with(prepared, config, 3, client="codex")
 
     def test_write_receives_prepared_codex_managed_content(self, ctx, tmp_path):
         ctx["is_toml"].return_value = True
@@ -7825,3 +8389,755 @@ def test_discovery_captures_serial_before_running_discovery(monkeypatch, serial,
     ):
         assert guard_module._run_discover(SimpleNamespace(client="cursor", url="https://api.snyk.io")) == 0
     assert send.call_args.kwargs["machine_serial"] == expected
+
+
+# ===================================================================
+# Install backup never keeps Agent Guard config
+# ===================================================================
+
+_USER_GROUPED_HOOK = {"matcher": "", "hooks": [{"type": "command", "command": "echo user-hook"}]}
+
+# client: (config path relative to tmp_path, prepare, guard command, user config)
+_BACKUP_JSON_CASES = {
+    "claude": (
+        "settings.json",
+        _prepare_claude_config,
+        AGENT_SCAN_CMD,
+        {"theme": "café", "hooks": {"PreToolUse": [_USER_GROUPED_HOOK]}},
+    ),
+    "cursor": (
+        "hooks.json",
+        _prepare_cursor_config,
+        CURSOR_AGENT_SCAN_CMD,
+        {"version": 1, "hooks": {"preToolUse": [{"command": "echo user-hook"}]}, "theme": "dark"},
+    ),
+    "codex": (
+        "hooks.json",
+        _prepare_codex_config,
+        CODEX_AGENT_SCAN_CMD,
+        {"hooks": {"PreToolUse": [_USER_GROUPED_HOOK]}, "theme": "dark"},
+    ),
+    "github-copilot": (
+        "hooks/snyk-agent-guard.json",
+        _prepare_copilot_config,
+        COPILOT_AGENT_SCAN_CMD,
+        {"version": 1, "hooks": {"PreToolUse": [{"type": "command", "bash": "echo user-hook"}]}, "theme": "dark"},
+    ),
+}
+_BACKUP_JSON_CLIENTS = list(_BACKUP_JSON_CASES)
+
+
+def _with_push_key(command: str, push_key: str) -> str:
+    return re.sub(r"PUSH_KEY='[^']*'", f"PUSH_KEY='{push_key}'", command)
+
+
+class TestStripGuardFromJsonConfig:
+    @pytest.mark.parametrize("client", _BACKUP_JSON_CLIENTS)
+    def test_removes_guard_hooks_and_keeps_user_content(self, tmp_path, client):
+        name, prepare, command, user_config = _BACKUP_JSON_CASES[client]
+        path = tmp_path / name
+        _write(path, user_config)
+        installed, _, _ = prepare(command, path)
+
+        assert guard_module._strip_guard_from_json_config(installed, client) == user_config
+
+    @pytest.mark.parametrize(("client", "expected"), [("claude", {"a": 1}), ("cursor", {"a": 1, "hooks": {}})])
+    def test_last_hook_removed_drops_hooks_except_for_cursor(self, client, expected):
+        entry = _claude_group(AGENT_SCAN_CMD) if client == "claude" else _cursor_entry(CURSOR_AGENT_SCAN_CMD)
+        assert guard_module._strip_guard_from_json_config({"a": 1, "hooks": {"Stop": [entry]}}, client) == expected
+
+
+class TestInstallBackupWithoutGuard:
+    """A re-install may overwrite the backup, but the backup never holds Agent Guard config."""
+
+    @staticmethod
+    def _install(client: str, path: Path, push_key: str = "pk-first") -> bool:
+        _, prepare, command, _ = _BACKUP_JSON_CASES[client]
+        config, _, preserved = prepare(_with_push_key(command, push_key), path)
+        return _write_client_config(client, path, config, None, preserved)
+
+    @staticmethod
+    def _seed(client: str, tmp_path: Path) -> Path:
+        name, _, _, user_config = _BACKUP_JSON_CASES[client]
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Unusual formatting: a byte copy is the only way to reproduce it.
+        path.write_bytes(json.dumps(user_config, indent=4, ensure_ascii=False).encode("utf-8"))
+        return path
+
+    @pytest.mark.parametrize("client", _BACKUP_JSON_CLIENTS)
+    def test_first_install_backup_is_byte_copy(self, tmp_path, client):
+        path = self._seed(client, tmp_path)
+        original = path.read_bytes()
+
+        assert self._install(client, path)
+
+        assert _guard_backup(path).read_bytes() == original
+        assert "PUSH_KEY" in path.read_text(encoding="utf-8")
+
+    @pytest.mark.parametrize("client", _BACKUP_JSON_CLIENTS)
+    def test_reinstall_backup_holds_what_uninstall_would_leave(self, tmp_path, client):
+        path = self._seed(client, tmp_path)
+        user_config = _BACKUP_JSON_CASES[client][3]
+        self._install(client, path, "pk-first")
+        previous = path.read_text(encoding="utf-8")
+
+        assert self._install(client, path, "pk-second")
+
+        backup_text = _guard_backup(path).read_text(encoding="utf-8")
+        assert json.loads(backup_text) == user_config
+        assert "pk-second" in path.read_text(encoding="utf-8")
+        # Invariant: the backup is exactly what uninstall leaves in the previous file.
+        uninstalled = tmp_path / "uninstalled" / path.name
+        uninstalled.parent.mkdir()
+        uninstalled.write_text(previous, encoding="utf-8")
+        _uninstall_test_client(client, uninstalled)
+        assert json.loads(backup_text) == json.loads(uninstalled.read_text(encoding="utf-8"))
+        assert backup_text == guard_module._dump_config_json(
+            guard_module._strip_guard_from_json_config(json.loads(previous), client)
+        )
+
+    @pytest.mark.parametrize("client", _BACKUP_JSON_CLIENTS)
+    def test_reinstall_over_guard_only_file_backs_up_guard_free_config(self, tmp_path, client):
+        path = tmp_path / _BACKUP_JSON_CASES[client][0]
+        self._install(client, path, "pk-first")
+
+        assert self._install(client, path, "pk-second")
+
+        backup = json.loads(_guard_backup(path).read_text(encoding="utf-8"))
+        assert backup == guard_module._strip_guard_from_json_config(backup, client)
+        assert not backup.get("hooks")
+
+    @pytest.mark.parametrize("client", _BACKUP_JSON_CLIENTS)
+    def test_identical_reinstall_writes_nothing(self, tmp_path, client):
+        path = self._seed(client, tmp_path)
+        self._install(client, path)
+        backup = _guard_backup(path)
+        backup_bytes = backup.read_bytes()
+        live_bytes = path.read_bytes()
+
+        with patch(f"{_G}._backup_file") as backup_file, patch(f"{_G}._atomic_write_text") as write:
+            assert self._install(client, path) is False
+
+        backup_file.assert_not_called()
+        write.assert_not_called()
+        assert backup.read_bytes() == backup_bytes
+        assert path.read_bytes() == live_bytes
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+    @pytest.mark.parametrize("existing_backup_mode", [None, 0o644])
+    @pytest.mark.parametrize("client", _BACKUP_JSON_CLIENTS)
+    def test_backup_mode_matches_private_live_file(self, tmp_path, client, existing_backup_mode):
+        path = self._seed(client, tmp_path)
+        path.chmod(0o600)
+        self._install(client, path, "pk-first")
+        backup = _guard_backup(path)
+        assert stat.S_IMODE(backup.stat().st_mode) == 0o600
+        if existing_backup_mode is None:
+            backup.unlink()
+        else:
+            backup.chmod(existing_backup_mode)
+
+        old_umask = os.umask(0o022)
+        try:
+            assert self._install(client, path, "pk-second")
+        finally:
+            os.umask(old_umask)
+
+        assert stat.S_IMODE(backup.stat().st_mode) == 0o600
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+_CODEX_POLICY_WITHOUT_HOOKS = """\
+# Managed by IT.
+allowed_approval_policies = ["never"]
+
+[sandbox]
+mode = 'read-only'
+"""
+
+
+class TestCodexRequirementsInstallBackup:
+    @pytest.fixture(autouse=True)
+    def _posix_paths(self):
+        with patch(f"{_G}.IS_WINDOWS", False):
+            yield
+
+    @staticmethod
+    def _install(path: Path, push_key: str = "pk-first") -> bool:
+        return _codex_managed_install(
+            path,
+            _with_push_key(CODEX_AGENT_SCAN_CMD, push_key),
+            discover_command=_with_push_key(CODEX_DISCOVER_CMD, push_key),
+        )
+
+    @pytest.mark.parametrize(
+        "policy", [_CODEX_ADMIN_POLICY, _CODEX_POLICY_WITHOUT_HOOKS], ids=["with-hooks", "without-hooks"]
+    )
+    def test_first_install_backup_is_byte_copy(self, tmp_path, policy):
+        path = tmp_path / "requirements.toml"
+        path.write_bytes(policy.replace("\n", "\r\n").encode("utf-8"))
+        original = path.read_bytes()
+
+        with patch(f"{_G}.rich"):
+            assert self._install(path)
+
+        assert _guard_backup(path).read_bytes() == original
+
+    def test_first_install_backup_keeps_admins_dirs_equal_to_guards(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text(_CODEX_POLICY_WITHOUT_HOOKS + "\n[hooks]\n" + _codex_dirs_toml(path), encoding="utf-8")
+        original = path.read_bytes()
+
+        with patch(f"{_G}.rich"):
+            assert self._install(path)
+
+        assert _guard_backup(path).read_bytes() == original
+
+    @pytest.mark.parametrize(
+        "policy", [_CODEX_ADMIN_POLICY, _CODEX_POLICY_WITHOUT_HOOKS], ids=["with-hooks", "without-hooks"]
+    )
+    def test_reinstall_backup_is_stripped_previous_text(self, tmp_path, policy):
+        # A --file path: Guard's managed_dir is derived from it, so passing the
+        # real path is what lets the strip remove it.
+        path = tmp_path / "custom" / "requirements.toml"
+        path.parent.mkdir()
+        path.write_text(policy, encoding="utf-8", newline="")  # LF on Windows too
+        with patch(f"{_G}.rich"):
+            self._install(path, "pk-first")
+            previous = guard_module._read_codex_requirements_text(path)
+
+            assert self._install(path, "pk-second")
+
+        backup_text = _guard_backup(path).read_text(encoding="utf-8")
+        assert backup_text == _strip_guard_from_codex_requirements(previous, path)
+        assert backup_text.startswith(policy)
+        if policy == _CODEX_POLICY_WITHOUT_HOOKS:
+            # Only Guard's [features] flag is left behind (see _strip_guard_from_codex_requirements).
+            assert backup_text == policy + "\n[features]\nhooks = true\n"
+        assert "pk-second" in path.read_text(encoding="utf-8")
+
+    def test_identical_reinstall_writes_nothing(self, tmp_path):
+        path = tmp_path / "requirements.toml"
+        path.write_text(_CODEX_ADMIN_POLICY, encoding="utf-8")
+        with patch(f"{_G}.rich"):
+            self._install(path)
+        backup = _guard_backup(path)
+        backup_bytes = backup.read_bytes()
+
+        with patch(f"{_G}._backup_file") as backup_file, patch(f"{_G}._atomic_write_text") as write:
+            assert self._install(path) is False
+
+        backup_file.assert_not_called()
+        write.assert_not_called()
+        assert backup.read_bytes() == backup_bytes
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX permission bits")
+    @pytest.mark.parametrize("existing_backup_mode", [None, 0o644])
+    def test_backup_mode_matches_private_live_file(self, tmp_path, existing_backup_mode):
+        path = tmp_path / "requirements.toml"
+        path.write_text(_CODEX_ADMIN_POLICY, encoding="utf-8")
+        path.chmod(0o600)
+        backup = _guard_backup(path)
+        with patch(f"{_G}.rich"):
+            self._install(path, "pk-first")
+            if existing_backup_mode is None:
+                backup.unlink()
+            else:
+                backup.chmod(existing_backup_mode)
+            old_umask = os.umask(0o022)
+            try:
+                assert self._install(path, "pk-second")
+            finally:
+                os.umask(old_umask)
+
+        assert stat.S_IMODE(backup.stat().st_mode) == 0o600
+
+
+class TestReinstallBackupRepro:
+    """ADS-1612: install, re-install with another MACHINE_ID, then uninstall."""
+
+    @staticmethod
+    def _install(client: str, path: Path, machine_id: str) -> None:
+        hook_client = {"claude": "claude-code"}.get(client, client)
+        _install_hooks(
+            client,
+            hook_client,
+            "pk-test",
+            "https://api.snyk.io",
+            path,
+            "user",
+            client,
+            False,
+            "tid-1",
+            "snyk-token",
+            machine_id,
+            "",
+        )
+
+    @pytest.mark.parametrize("client", _BACKUP_JSON_CLIENTS)
+    def test_reinstall_with_new_machine_id_then_uninstall(self, tmp_path, monkeypatch, client):
+        monkeypatch.delenv("SNYK_TOKEN", raising=False)
+        name, _, _, user_config = _BACKUP_JSON_CASES[client]
+        path = tmp_path / name
+        _write(path, user_config)
+        user_bytes = path.read_bytes()
+
+        with (
+            patch(f"{_G}.IS_WINDOWS", False),
+            patch(f"{_G}._send_test_event", return_value=_TEST_EVENT_SENT),
+            patch(f"{_G}.rich"),
+        ):
+            self._install(client, path, "machine-1")
+            assert _guard_backup(path).read_bytes() == user_bytes
+            self._install(client, path, "machine-2")
+            assert "MACHINE_ID='machine-2'" in path.read_text(encoding="utf-8")
+            assert json.loads(_guard_backup(path).read_text(encoding="utf-8")) == user_config
+            guard_module._uninstall_single_client(client, SimpleNamespace(file=str(path)), managed=False)
+
+        assert not _guard_backup(path).exists()
+        assert json.loads(path.read_text(encoding="utf-8")) == user_config
+
+    def test_codex_requirements_reinstall_with_new_machine_id_then_uninstall(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("SNYK_TOKEN", raising=False)
+        path = tmp_path / "requirements.toml"
+        path.write_text(_CODEX_ADMIN_POLICY, encoding="utf-8")
+
+        with (
+            patch(f"{_G}.IS_WINDOWS", False),
+            patch(f"{_G}._send_test_event", return_value=_TEST_EVENT_SENT),
+            patch(f"{_G}.rich"),
+        ):
+            self._install("codex", path, "machine-1")
+            self._install("codex", path, "machine-2")
+            assert "MACHINE_ID='machine-2'" in path.read_text(encoding="utf-8")
+            backup_text = _guard_backup(path).read_text(encoding="utf-8")
+            assert backup_text.startswith(_CODEX_ADMIN_POLICY)
+            guard_module._uninstall_single_client("codex", SimpleNamespace(file=str(path)), managed=True)
+
+        assert not _guard_backup(path).exists()
+        assert path.read_text(encoding="utf-8").startswith(_CODEX_ADMIN_POLICY)
+
+
+# ===================================================================
+# Install backups have Guard's own name; uninstall removes only Guard's backups
+# ===================================================================
+
+_FOREIGN_BACKUP = b'{"written by": "another tool"}\r\n'
+_CODEX_TOML_CASE = "codex-requirements"
+_BACKUP_ALL_CASES = [*_BACKUP_JSON_CLIENTS, _CODEX_TOML_CASE]
+
+
+def _legacy_guard_backup_text(client: str, path: Path) -> str:
+    """What an older Guard version left in ``<path>.backup``: a copy of the file with Guard's hooks."""
+    if client == _CODEX_TOML_CASE:
+        return guard_module._render_codex_requirements_toml(CODEX_AGENT_SCAN_CMD, path)
+    _, prepare, command, user_config = _BACKUP_JSON_CASES[client]
+    scratch = path.parent / "legacy-scratch" / path.name
+    _write(scratch, user_config)
+    config, _, _ = prepare(command, scratch)
+    shutil.rmtree(scratch.parent)
+    return guard_module._dump_config_json(config)
+
+
+class TestGuardOwnedBackups:
+    @pytest.fixture(autouse=True)
+    def _quiet_posix(self):
+        with patch(f"{_G}.IS_WINDOWS", False), patch(f"{_G}.rich"):
+            yield
+
+    @staticmethod
+    def _seed(case: str, tmp_path: Path) -> Path:
+        if case == _CODEX_TOML_CASE:
+            path = tmp_path / "requirements.toml"
+            path.write_text(_CODEX_ADMIN_POLICY, encoding="utf-8")
+            return path
+        return TestInstallBackupWithoutGuard._seed(case, tmp_path)
+
+    @staticmethod
+    def _install(case: str, path: Path, push_key: str = "pk-first") -> None:
+        if case == _CODEX_TOML_CASE:
+            content, _ = _prepare_codex_managed_config(_with_push_key(CODEX_AGENT_SCAN_CMD, push_key), path)
+            _write_client_config("codex", path, None, content, 0)
+        else:
+            TestInstallBackupWithoutGuard._install(case, path, push_key)
+
+    @staticmethod
+    def _uninstall(case: str, path: Path) -> None:
+        if case == _CODEX_TOML_CASE:
+            guard_module._uninstall_codex_managed(path)
+        else:
+            _uninstall_test_client(case, path)
+
+    @pytest.mark.parametrize("case", _BACKUP_ALL_CASES)
+    def test_install_writes_the_guard_named_backup(self, tmp_path, case):
+        path = self._seed(case, tmp_path)
+        original = path.read_bytes()
+
+        self._install(case, path)
+
+        assert _guard_backup(path).read_bytes() == original
+        assert guard_module._guard_backup_path(path) == _guard_backup(path)
+
+    @pytest.mark.parametrize("case", _BACKUP_ALL_CASES)
+    def test_foreign_plain_backup_survives_install_reinstall_and_uninstall(self, tmp_path, case):
+        path = self._seed(case, tmp_path)
+        foreign = Path(f"{path}.backup")
+        foreign.write_bytes(_FOREIGN_BACKUP)
+
+        self._install(case, path, "pk-first")
+        self._install(case, path, "pk-second")
+        assert foreign.read_bytes() == _FOREIGN_BACKUP
+        self._uninstall(case, path)
+
+        assert foreign.read_bytes() == _FOREIGN_BACKUP
+
+    @pytest.mark.parametrize("case", _BACKUP_ALL_CASES)
+    def test_uninstall_removes_guard_backup(self, tmp_path, case):
+        path = self._seed(case, tmp_path)
+        self._install(case, path)
+        assert _guard_backup(path).exists()
+
+        with patch(f"{_G}.rich") as mock_rich:
+            self._uninstall(case, path)
+
+        assert not _guard_backup(path).exists()
+        assert not _is_agent_scan_command(path.read_text(encoding="utf-8"))
+        printed = " ".join(str(c.args[0]) for c in mock_rich.print.call_args_list)
+        assert f"[dim]Removed Agent Guard backup {_guard_backup(path)}[/dim]" in printed
+
+    @pytest.mark.parametrize("case", _BACKUP_ALL_CASES)
+    def test_uninstall_finishes_and_warns_when_backup_cannot_be_deleted(self, tmp_path, case):
+        path = self._seed(case, tmp_path)
+        self._install(case, path)
+        backup = _guard_backup(path)
+        real_unlink = Path.unlink
+
+        def unlink(self, *args, **kwargs):
+            if self == backup:
+                raise PermissionError("denied")
+            return real_unlink(self, *args, **kwargs)
+
+        with patch.object(Path, "unlink", unlink), patch(f"{_G}.rich") as mock_rich:
+            self._uninstall(case, path)
+
+        assert not _is_agent_scan_command(path.read_text(encoding="utf-8"))
+        printed = " ".join(str(c.args[0]) for c in mock_rich.print.call_args_list)
+        assert f"Could not remove {backup} (denied); delete it manually." in printed
+
+    @pytest.mark.parametrize("case", _BACKUP_ALL_CASES)
+    def test_uninstall_without_guard_hooks_removes_leftover_guard_backup(self, tmp_path, case):
+        path = self._seed(case, tmp_path)
+        before = path.read_bytes()
+        _guard_backup(path).write_bytes(before)
+
+        self._uninstall(case, path)
+
+        assert not _guard_backup(path).exists()
+        assert path.read_bytes() == before
+
+    @pytest.mark.parametrize("case", _BACKUP_ALL_CASES)
+    def test_uninstall_with_missing_config_removes_leftover_guard_backup(self, tmp_path, case):
+        path = self._seed(case, tmp_path)
+        _guard_backup(path).write_bytes(path.read_bytes())
+        path.unlink()
+
+        self._uninstall(case, path)
+
+        assert not _guard_backup(path).exists()
+
+    @pytest.mark.parametrize("case", _BACKUP_ALL_CASES)
+    def test_legacy_backup_with_guard_command_removed_on_install(self, tmp_path, case):
+        path = self._seed(case, tmp_path)
+        legacy = Path(f"{path}.backup")
+        legacy.write_text(_legacy_guard_backup_text(case, path), encoding="utf-8")
+        assert "PUSH_KEY" in legacy.read_text(encoding="utf-8")
+
+        with patch(f"{_G}.rich") as mock_rich:
+            self._install(case, path)
+
+        assert not legacy.exists()
+        printed = " ".join(str(c.args[0]) for c in mock_rich.print.call_args_list)
+        assert f"Removed old Agent Guard backup {legacy}" in printed
+
+    @pytest.mark.parametrize("case", _BACKUP_ALL_CASES)
+    def test_legacy_backup_with_guard_command_removed_on_up_to_date_install(self, tmp_path, case):
+        path = self._seed(case, tmp_path)
+        self._install(case, path)
+        legacy = Path(f"{path}.backup")
+        legacy.write_text(_legacy_guard_backup_text(case, path), encoding="utf-8")
+
+        self._install(case, path)
+
+        assert not legacy.exists()
+
+    @pytest.mark.parametrize("case", _BACKUP_ALL_CASES)
+    def test_legacy_backup_with_guard_command_removed_on_uninstall(self, tmp_path, case):
+        path = self._seed(case, tmp_path)
+        self._install(case, path)
+        legacy = Path(f"{path}.backup")
+        legacy.write_text(_legacy_guard_backup_text(case, path), encoding="utf-8")
+
+        self._uninstall(case, path)
+
+        assert not legacy.exists()
+        assert not _guard_backup(path).exists()
+
+    def test_legacy_backup_with_powershell_command_removed(self, tmp_path):
+        path = tmp_path / "settings.json"
+        _write(path, {"theme": "dark"})
+        command = guard_module._build_hook_command_powershell(
+            "pk-legacy",
+            "https://api.snyk.io",
+            Path(r"C:\Users\me\.claude\hooks\snyk-agent-guard.ps1"),
+            "claude-code",
+            machine_serial="",
+        )
+        legacy = Path(f"{path}.backup")
+        _write(legacy, {"hooks": {"Stop": [_claude_group(command)]}})
+
+        _uninstall_test_client("claude", path)
+
+        assert not legacy.exists()
+
+    @pytest.mark.parametrize("case", _BACKUP_ALL_CASES)
+    @pytest.mark.parametrize(
+        "content",
+        [
+            _FOREIGN_BACKUP,
+            # Mentions Guard but holds no Guard hook command (no PUSH_KEY).
+            b'{"note": "uninstalled snyk-agent-guard last week"}\n',
+            # Holds the command but is not UTF-8: cannot be checked, so it stays.
+            b"\xff\xfe PUSH_KEY='pk' bash '/h/snyk-agent-guard.sh'\n",
+        ],
+        ids=["foreign", "mentions-guard", "not-utf8"],
+    )
+    def test_legacy_backup_without_readable_guard_command_kept(self, tmp_path, case, content):
+        path = self._seed(case, tmp_path)
+        legacy = Path(f"{path}.backup")
+        legacy.write_bytes(content)
+
+        self._install(case, path)
+        assert legacy.read_bytes() == content
+        self._uninstall(case, path)
+
+        assert legacy.read_bytes() == content
+
+    @pytest.mark.parametrize("client", _BACKUP_JSON_CLIENTS)
+    def test_install_uninstall_cycle_leaves_only_the_original_files(self, tmp_path, monkeypatch, client):
+        monkeypatch.delenv("SNYK_TOKEN", raising=False)
+        path = TestInstallBackupWithoutGuard._seed(client, tmp_path)
+        original_bytes = path.read_bytes()
+        original_files = sorted(p for p in tmp_path.rglob("*") if p.is_file())
+
+        with patch(f"{_G}._send_test_event", return_value=_TEST_EVENT_SENT):
+            TestReinstallBackupRepro._install(client, path, "machine-1")
+            TestReinstallBackupRepro._install(client, path, "machine-2")
+            assert _guard_backup(path).exists()
+            guard_module._uninstall_single_client(client, SimpleNamespace(file=str(path)), managed=False)
+
+        assert sorted(p for p in tmp_path.rglob("*") if p.is_file()) == original_files
+        assert json.loads(path.read_bytes()) == json.loads(original_bytes)
+
+    def test_codex_requirements_install_uninstall_cycle_leaves_only_the_original_files(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("SNYK_TOKEN", raising=False)
+        path = tmp_path / "requirements.toml"
+        path.write_text(_CODEX_ADMIN_POLICY, encoding="utf-8")
+        original_files = sorted(p for p in tmp_path.rglob("*") if p.is_file())
+
+        with patch(f"{_G}._send_test_event", return_value=_TEST_EVENT_SENT):
+            TestReinstallBackupRepro._install("codex", path, "machine-1")
+            TestReinstallBackupRepro._install("codex", path, "machine-2")
+            assert _guard_backup(path).exists()
+            guard_module._uninstall_single_client("codex", SimpleNamespace(file=str(path)), managed=True)
+
+        assert sorted(p for p in tmp_path.rglob("*") if p.is_file()) == original_files
+        # Guard's managed_dir stays while other hooks remain (see _strip_guard_from_codex_requirements).
+        assert path.read_text(encoding="utf-8").startswith(_CODEX_ADMIN_POLICY)
+
+
+# ===================================================================
+# Uninstall leaves no Guard scaffolding behind
+# ===================================================================
+
+# client: (config file name, Guard command, user hook entry, event)
+_LEFTOVER_JSON_CASES = {
+    "claude": ("settings.json", AGENT_SCAN_CMD, _USER_GROUPED_HOOK, "PreToolUse"),
+    "cursor": ("hooks.json", CURSOR_AGENT_SCAN_CMD, {"command": "echo user-hook"}, "preToolUse"),
+    "codex": ("hooks.json", CODEX_AGENT_SCAN_CMD, _USER_GROUPED_HOOK, "PreToolUse"),
+}
+_LEFTOVER_JSON_CLIENTS = list(_LEFTOVER_JSON_CASES)
+
+
+def _guard_entry(client: str) -> dict:
+    command = _LEFTOVER_JSON_CASES[client][1]
+    return _cursor_entry(command) if client == "cursor" else _claude_group(command)
+
+
+class TestUninstallRemovesEmptyHooksDir:
+    def _install_scripts(self, config: Path) -> Path:
+        guard_module._copy_hook_script(guard_module._forwarder_script_path(config))
+        guard_module._copy_hook_script(guard_module._discover_script_path(config))
+        return guard_module._hooks_dir(config)
+
+    def test_removes_hooks_dir_left_empty(self, tmp_path):
+        config = tmp_path / "settings.json"
+        hooks_dir = self._install_scripts(config)
+
+        with patch(f"{_G}.rich") as mock_rich:
+            guard_module._remove_hook_script("claude", config)
+
+        assert not hooks_dir.exists()
+        printed = " ".join(str(c.args[0]) for c in mock_rich.print.call_args_list)
+        assert f"Removed empty directory {hooks_dir}" in printed
+
+    def test_keeps_hooks_dir_with_other_files(self, tmp_path):
+        config = tmp_path / "settings.json"
+        hooks_dir = self._install_scripts(config)
+        user_script = hooks_dir / "my-hook.sh"
+        user_script.write_bytes(b"#!/bin/sh\necho mine\n")
+
+        guard_module._remove_hook_script("claude", config)
+
+        assert sorted(hooks_dir.iterdir()) == [user_script]
+        assert user_script.read_bytes() == b"#!/bin/sh\necho mine\n"
+
+    def test_keeps_hooks_dir_with_other_subdirectory(self, tmp_path):
+        config = tmp_path / "settings.json"
+        hooks_dir = self._install_scripts(config)
+        (hooks_dir / "user").mkdir()
+
+        guard_module._remove_hook_script("claude", config)
+
+        assert sorted(hooks_dir.iterdir()) == [hooks_dir / "user"]
+
+
+class TestUninstallRemovesGuardOnlyJsonConfig:
+    @pytest.mark.parametrize("client", _LEFTOVER_JSON_CLIENTS)
+    def test_file_with_only_guard_hooks_is_deleted(self, tmp_path, client):
+        name, _, _, event = _LEFTOVER_JSON_CASES[client]
+        path = tmp_path / name
+        _write(path, {**({"version": 1} if client == "cursor" else {}), "hooks": {event: [_guard_entry(client)]}})
+
+        with patch(f"{_G}.rich") as mock_rich:
+            _uninstall_test_client(client, path)
+
+        assert not path.exists()
+        printed = " ".join(str(c.args[0]) for c in mock_rich.print.call_args_list)
+        assert "Removed 1 Agent Guard hook(s)" in printed
+        assert f"Removed {path}" in printed
+
+    @pytest.mark.parametrize("client", _LEFTOVER_JSON_CLIENTS)
+    def test_file_with_other_keys_is_kept(self, tmp_path, client):
+        name, _, _, event = _LEFTOVER_JSON_CASES[client]
+        path = tmp_path / name
+        _write(path, {"theme": "dark", "hooks": {event: [_guard_entry(client)]}})
+
+        _uninstall_test_client(client, path)
+
+        expected = {"theme": "dark", "hooks": {}} if client == "cursor" else {"theme": "dark"}
+        assert json.loads(path.read_text()) == expected
+
+    @pytest.mark.parametrize("client", _LEFTOVER_JSON_CLIENTS)
+    def test_file_with_other_hooks_is_kept(self, tmp_path, client):
+        name, _, user_hook, event = _LEFTOVER_JSON_CASES[client]
+        path = tmp_path / name
+        base = {"version": 1} if client == "cursor" else {}
+        _write(path, {**base, "hooks": {event: [user_hook, _guard_entry(client)]}})
+
+        _uninstall_test_client(client, path)
+
+        assert json.loads(path.read_text()) == {**base, "hooks": {event: [user_hook]}}
+
+    @pytest.mark.parametrize("scope_dir", ["hooks", "policy.d"], ids=["user", "managed"])
+    def test_github_copilot_config_with_only_guard_hooks_is_deleted(self, tmp_path, scope_dir):
+        path = tmp_path / scope_dir / "snyk-agent-guard.json"
+        _write(path, {"version": 1, "hooks": {"Stop": [{"type": "command", "command": COPILOT_AGENT_SCAN_CMD}]}})
+
+        _uninstall_test_client("github-copilot", path)
+
+        assert not path.exists()
+
+    def test_github_copilot_config_with_user_hook_is_kept(self, tmp_path):
+        path = tmp_path / "hooks" / "snyk-agent-guard.json"
+        user_hook = {"type": "command", "bash": "echo user-hook"}
+        guard_hook = {"type": "command", "bash": COPILOT_AGENT_SCAN_CMD}
+        _write(path, {"version": 1, "hooks": {"Stop": [user_hook, guard_hook]}})
+
+        _uninstall_test_client("github-copilot", path)
+
+        assert json.loads(path.read_text()) == {"version": 1, "hooks": {"Stop": [user_hook]}}
+
+    @pytest.mark.skipif(sys.platform == "win32", reason="symlinks need privileges on Windows")
+    def test_symlinked_config_target_is_stripped(self, tmp_path):
+        target = tmp_path / "dotfiles" / "settings.json"
+        _write(target, {"hooks": {"Stop": [_guard_entry("claude")]}})
+        link = tmp_path / "settings.json"
+        link.symlink_to(target)
+
+        _uninstall_test_client("claude", link)
+
+        assert link.is_symlink()
+        assert link.resolve() == target.resolve()
+        assert json.loads(target.read_text()) == {}
+
+
+class TestUninstallLeavesNothingBehind:
+    @pytest.fixture(autouse=True)
+    def _quiet_posix(self, monkeypatch):
+        monkeypatch.delenv("SNYK_TOKEN", raising=False)
+        with (
+            patch(f"{_G}.IS_WINDOWS", False),
+            patch(f"{_G}._send_test_event", return_value=_TEST_EVENT_SENT),
+            patch(f"{_G}.rich"),
+        ):
+            yield
+
+    @staticmethod
+    def _cycle(client: str, path: Path, *, managed: bool = False) -> None:
+        TestReinstallBackupRepro._install(client, path, "machine-1")
+        TestReinstallBackupRepro._install(client, path, "machine-2")
+        assert guard_module._forwarder_script_path(path).exists()
+        guard_module._uninstall_single_client(client, SimpleNamespace(file=str(path)), managed=managed)
+
+    @pytest.mark.parametrize("client", _LEFTOVER_JSON_CLIENTS)
+    def test_cycle_from_no_file_and_no_hooks_dir_leaves_neither(self, tmp_path, client):
+        path = tmp_path / _LEFTOVER_JSON_CASES[client][0]
+
+        self._cycle(client, path)
+
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.parametrize("client", _LEFTOVER_JSON_CLIENTS)
+    def test_cycle_keeps_user_files_in_hooks_dir(self, tmp_path, client):
+        path = tmp_path / _LEFTOVER_JSON_CASES[client][0]
+        user_script = tmp_path / "hooks" / "my-hook.sh"
+        user_script.parent.mkdir()
+        user_script.write_bytes(b"echo mine\n")
+
+        self._cycle(client, path)
+
+        assert sorted(p for p in tmp_path.rglob("*")) == [user_script.parent, user_script]
+        assert user_script.read_bytes() == b"echo mine\n"
+
+    @pytest.mark.parametrize("scope_dir", ["hooks", "policy.d"], ids=["user", "managed"])
+    def test_github_copilot_cycle_leaves_nothing_behind(self, tmp_path, scope_dir):
+        path = tmp_path / scope_dir / "snyk-agent-guard.json"
+
+        self._cycle("github-copilot", path, managed=scope_dir == "policy.d")
+
+        # User scope: the config sits in the hooks dir, which is then empty and removed.
+        # Managed scope: the scripts' policy.d/hooks dir goes; policy.d itself is not Guard's.
+        expected = [path.parent] if scope_dir == "policy.d" else []
+        assert sorted(tmp_path.rglob("*")) == expected
+
+    def test_github_copilot_cycle_keeps_user_files_in_hooks_dir(self, tmp_path):
+        path = tmp_path / "hooks" / "snyk-agent-guard.json"
+        user_file = path.parent / "my-hooks.json"
+        user_file.parent.mkdir()
+        user_file.write_bytes(b'{"version": 1}\n')
+
+        self._cycle("github-copilot", path)
+
+        assert sorted(tmp_path.rglob("*")) == [user_file.parent, user_file]
+        assert user_file.read_bytes() == b'{"version": 1}\n'

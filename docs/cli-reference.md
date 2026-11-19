@@ -368,6 +368,13 @@ or HTTP failure, they fail open: exit 0 with one line on stderr. On Claude Code 
 your network and configuration and try again."); Cursor and GitHub Copilot, whose hook output has no such field,
 receive nothing on stdout.
 
+Install and uninstall replace a client configuration file by writing a new file and moving it over the old one, so an
+agent never reads a half-written file. The new file keeps the old file's permission bits and, when the command runs as
+root, its owner and group; a symlinked configuration stays a symlink and its target is updated. Nothing else carries
+over: ACLs, extended attributes (such as a SELinux label set by hand) and file flags are lost, the new file gets its
+directory's inherited ACL, and other hard links to the old file keep the old content. If you set any of these on a
+configuration file, set them again after installing or uninstalling.
+
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |
 | `--url URL` | string | `https://api.snyk.io` | Remote hook base URL for the Snyk API environment. |
@@ -399,6 +406,9 @@ folder(s) from the selected client's hook payload, discovers MCP servers locally
 ```bash
 snyk-agent-scan guard uninstall {claude,cursor,codex,github-copilot,all} [OPTIONS]
 ```
+
+Uninstall replaces configuration files the same way install does; see `guard install` for which file properties are
+kept.
 
 | Flag | Type | Default | Description |
 | --- | --- | --- | --- |

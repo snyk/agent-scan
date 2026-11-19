@@ -1,57 +1,13 @@
 """E2E test for guard install — ensures the bundled hook scripts are accessible."""
 
-import base64
 import json
 import os
 import subprocess
-import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import ClassVar
 
 import pytest
 
-
-class _FakeHookServer(BaseHTTPRequestHandler):
-    """Accepts any POST and returns 200 — enough for the test-event handshake."""
-
-    requests: ClassVar[list[dict]] = []
-    deletes: ClassVar[list[dict]] = []
-
-    def do_DELETE(self):
-        _FakeHookServer.deletes.append({"method": "DELETE", "path": self.path, "headers": dict(self.headers)})
-        self.send_response(204)
-        self.end_headers()
-
-    def do_POST(self):
-        length = int(self.headers.get("Content-Length", 0))
-        body = self.rfile.read(length).decode()
-        _FakeHookServer.requests.append(
-            {
-                "body": json.loads(base64.b64decode(body.removeprefix("base64:"))),
-                "headers": dict(self.headers),
-            }
-        )
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(b'{"success":true}')
-
-    def log_message(self, format, *args):
-        pass
-
-
-@pytest.fixture()
-def fake_hook_server():
-    server = HTTPServer(("127.0.0.1", 0), _FakeHookServer)
-    port = server.server_address[1]
-    t = threading.Thread(target=server.serve_forever, daemon=True)
-    t.start()
-    _FakeHookServer.requests = []
-    _FakeHookServer.deletes = []
-    yield f"http://127.0.0.1:{port}"
-    server.shutdown()
-
+from tests.e2e.conftest import _FakeHookServer
 
 _FORWARDER_SCRIPT = "snyk-agent-guard.ps1" if os.name == "nt" else "snyk-agent-guard.sh"
 _DISCOVER_SCRIPT = "snyk-agent-guard-discover.ps1" if os.name == "nt" else "snyk-agent-guard-discover.sh"
@@ -96,7 +52,9 @@ def _scripts_dir(config_file: Path) -> Path:
     return config_file.parent if config_file.parent.name == "hooks" else config_file.parent / "hooks"
 
 
-def _install(agent_scan_cmd, agent_scan_command, client: str, config_file: Path, url: str) -> None:
+def _install(
+    agent_scan_cmd, agent_scan_command, client: str, config_file: Path, url: str, machine_id: str = "e2e-machine-id"
+) -> None:
     result = _run_cli(
         agent_scan_cmd,
         "guard",
@@ -107,7 +65,7 @@ def _install(agent_scan_cmd, agent_scan_command, client: str, config_file: Path,
         "--url",
         url,
         "--machine-id",
-        "e2e-machine-id",
+        machine_id,
         env=_guard_env(PUSH_KEY="test-pk-e2e", AGENT_SCAN_COMMAND=str(agent_scan_command)),
     )
     assert result.returncode == 0, f"guard install failed:\n{_describe(result)}"
@@ -351,17 +309,21 @@ class TestGuardUninstallE2E:
         seeded: dict = {"hooks": {event: [user_hook]}}
         if client in {"cursor", "github-copilot"}:
             seeded = {"version": 1, **seeded}
-        config_file.write_text(json.dumps(seeded))
+        seeded_text = json.dumps(seeded)
+        config_file.write_text(seeded_text)
 
         _install(agent_scan_cmd, agent_scan_command, client, config_file, fake_hook_server)
         assert "snyk-agent-guard" in config_file.read_text()
+        # Install backed up the seeded user config under Guard's own backup name.
+        assert Path(f"{config_file}.snyk-agent-guard.backup").read_text() == seeded_text
 
         result = _uninstall(agent_scan_cmd, client, config_file)
         content = config_file.read_text()
         assert "snyk-agent-guard" not in content
         assert json.loads(content)["hooks"] == {event: [user_hook]}
         _assert_scripts_removed(config_file)
-        assert Path(f"{config_file}.backup").is_file()
+        # Uninstall removes Guard's backup once the file is Guard-free.
+        assert not Path(f"{config_file}.snyk-agent-guard.backup").exists()
         assert "was not revoked" in result.stdout
         assert _FakeHookServer.deletes == []
 
@@ -372,6 +334,29 @@ class TestGuardUninstallE2E:
 
     @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
     @pytest.mark.parametrize(("client", "config_name", "user_hook", "event"), CLIENT_CASES)
+    def test_reinstall_with_new_machine_id_backs_up_user_config(
+        self, agent_scan_cmd, agent_scan_command, tmp_path, fake_hook_server, client, config_name, user_hook, event
+    ):
+        config_file = tmp_path / config_name
+        config_file.parent.mkdir(parents=True, exist_ok=True)
+        seeded: dict = {"hooks": {event: [user_hook]}}
+        if client in {"cursor", "github-copilot"}:
+            seeded = {"version": 1, **seeded}
+        config_file.write_text(json.dumps(seeded))
+
+        _install(agent_scan_cmd, agent_scan_command, client, config_file, fake_hook_server, "machine-1")
+        # The re-install rewrites Guard's previous config; the backup is that config minus Guard.
+        _install(agent_scan_cmd, agent_scan_command, client, config_file, fake_hook_server, "machine-2")
+        assert "machine-2" in config_file.read_text()
+        backup = Path(f"{config_file}.snyk-agent-guard.backup")
+        assert json.loads(backup.read_text()) == seeded
+
+        _uninstall(agent_scan_cmd, client, config_file)
+        assert json.loads(config_file.read_text()) == seeded
+        assert not backup.exists()
+
+    @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
+    @pytest.mark.parametrize(("client", "config_name", "user_hook", "event"), CLIENT_CASES)
     def test_uninstall_clean_config(
         self, agent_scan_cmd, agent_scan_command, tmp_path, fake_hook_server, client, config_name, user_hook, event
     ):
@@ -379,13 +364,10 @@ class TestGuardUninstallE2E:
         _install(agent_scan_cmd, agent_scan_command, client, config_file, fake_hook_server)
 
         _uninstall(agent_scan_cmd, client, config_file)
-        data = json.loads(config_file.read_text())
-        if client == "cursor":
-            # Cursor keeps an empty hooks object; the other clients drop the key entirely.
-            assert data["hooks"] == {}
-        else:
-            assert "hooks" not in data
         _assert_scripts_removed(config_file)
+        # Install created the file and the hooks dir (Copilot's config lives inside it);
+        # nothing else was in them, so both are gone.
+        assert list(tmp_path.iterdir()) == []
 
     @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
     @pytest.mark.parametrize(("client", "config_name", "user_hook", "event"), CLIENT_CASES)
