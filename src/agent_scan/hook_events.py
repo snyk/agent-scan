@@ -8,7 +8,7 @@ import json
 import os
 import re
 import time
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 import aiohttp
 
@@ -16,6 +16,9 @@ from agent_scan.hook_version import HOOK_VERSION
 from agent_scan.utils import get_hostname, get_username
 from agent_scan.verify_api import RETRYABLE_TRANSPORT_EXCEPTIONS, backend_client_session
 from agent_scan.version import version_info
+
+if TYPE_CHECKING:
+    from agent_scan.machine_auth import MachineAuth
 
 
 class HookClient(NamedTuple):
@@ -204,8 +207,13 @@ def send_hook_event(
     max_retries: int = 1,
     retry_policy: RetryPolicy | None = None,
     machine_serial: str,
+    machine_auth: MachineAuth | None = None,
 ) -> tuple[bool, str]:
     """POST a hook event using the same wire contract as the hook scripts.
+
+    With ``machine_auth`` (machine identity) the event goes to the tenant route on its base URL
+    with its bearer token and no push key, as the hook scripts do; ``base_url`` and ``push_key``
+    are then unused.
 
     ``max_retries`` defaults to a single attempt: session-start discovery runs inside
     the agent's hook budget, so waiting out a backoff there would cost more than the
@@ -231,16 +239,20 @@ def send_hook_event(
     )
     encoded_payload = base64.b64encode(payload.encode()).decode()
     body = f"base64:{encoded_payload}".encode()
-    if not base_url.lower().startswith(("http://", "https://")):
-        # Match curl's handling in the hook scripts: a URL without a scheme defaults to HTTP.
-        base_url = f"http://{base_url}"
-    url = f"{base_url.rstrip('/')}{client.endpoint}?version={HOOK_VERSION}"
     headers = {
         "User-Agent": f"snyk/agent-scan Agent Scan v{version_info}",
         "X-User": x_user,
         "Content-Type": "text/plain",
-        "X-Client-Id": push_key,
     }
+    if machine_auth is not None:
+        url = machine_auth.tenant_url(client.endpoint.removeprefix("/hidden"))
+        headers.update(machine_auth.headers)
+    else:
+        if not base_url.lower().startswith(("http://", "https://")):
+            # Match curl's handling in the hook scripts: a URL without a scheme defaults to HTTP.
+            base_url = f"http://{base_url}"
+        url = f"{base_url.rstrip('/')}{client.endpoint}?version={HOOK_VERSION}"
+        headers["X-Client-Id"] = push_key
     surface = agent_surface(hook_client)
     if surface:
         headers[AGENT_SURFACE_HEADER] = surface

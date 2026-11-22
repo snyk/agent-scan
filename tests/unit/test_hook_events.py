@@ -87,6 +87,33 @@ def test_sends_existing_hook_wire_contract(client, serial, monkeypatch):
     }
 
 
+@pytest.mark.parametrize("client", ["claude-code", "cursor", "codex", "github-copilot"])
+def test_machine_auth_posts_to_the_tenant_route_with_a_bearer_token(client):
+    from agent_scan.machine_auth import MachineAuth
+
+    session = _FakeSession()
+    payload = '{"hook_event_name":"hooksConfiguredServerDiscovery"}'
+    auth = MachineAuth(base_url="https://api.eu.snyk.io/", tenant_id="tenant-1", access_token="machine-token")
+
+    with _patch_session(session):
+        result = send_hook_event(
+            "https://ignored.example", client, "push-key", payload, "machine-1", machine_serial="", machine_auth=auth
+        )
+
+    assert result == (True, "")
+    post = session.posts[0]
+    assert post["url"] == (
+        f"https://api.eu.snyk.io/hidden/tenants/tenant-1/agent-monitor/hooks/{client}?version=2024-10-15"
+    )
+    headers = post["headers"]
+    assert headers["Authorization"] == "Bearer machine-token"
+    assert "X-Client-Id" not in headers
+    # Everything else is the push-key wire contract.
+    assert headers["Content-Type"] == "text/plain"
+    assert json.loads(headers["X-User"])["identifier"] == "machine-1"
+    assert base64.b64decode(post["data"].decode().removeprefix("base64:")).decode() == payload
+
+
 @pytest.mark.parametrize(
     ("env", "expected_surface"),
     [

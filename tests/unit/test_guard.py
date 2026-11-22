@@ -13,6 +13,7 @@ import stat
 import subprocess
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
@@ -5366,6 +5367,7 @@ class TestInstallHooksOrchestration:
             "machine_id": "machine-42",
             "machine_serial": "",
             "hook_client": "claude-code",
+            "machine_identity": None,
         }
         assert ctx["prep_claude"].call_args.kwargs["discover_command"] == "discover-cmd"
 
@@ -5585,6 +5587,7 @@ class TestInstallHooksOrchestration:
             discover_new_checksum=_DISCOVER_NEW_CHECKSUM,
             machine_id="",
             machine_serial="",
+            machine_identity=None,
         )
 
     def test_test_event_receives_empty_diff(self, ctx, tmp_path):
@@ -5606,6 +5609,7 @@ class TestInstallHooksOrchestration:
             discover_new_checksum=_DISCOVER_NEW_CHECKSUM,
             machine_id="",
             machine_serial="",
+            machine_identity=None,
         )
 
     def test_test_event_not_first_install(self, ctx, tmp_path):
@@ -5626,6 +5630,7 @@ class TestInstallHooksOrchestration:
             discover_new_checksum=_DISCOVER_NEW_CHECKSUM,
             machine_id="",
             machine_serial="",
+            machine_identity=None,
         )
 
     def test_test_event_push_key_changed(self, ctx, tmp_path):
@@ -5647,6 +5652,7 @@ class TestInstallHooksOrchestration:
             discover_new_checksum=_DISCOVER_NEW_CHECKSUM,
             machine_id="",
             machine_serial="",
+            machine_identity=None,
         )
 
     def test_test_event_push_key_unchanged(self, ctx, tmp_path):
@@ -5668,6 +5674,7 @@ class TestInstallHooksOrchestration:
             discover_new_checksum=_DISCOVER_NEW_CHECKSUM,
             machine_id="",
             machine_serial="",
+            machine_identity=None,
         )
 
     # ---------------------------------------------------------------
@@ -7269,6 +7276,7 @@ class TestRunInstallSendsServersDiscovered:
             discovery_scope=DiscoveryScope.SERVERS,
             retry_policy=guard_module.INSTALL_RETRY_POLICY,
             machine_serial="",
+            machine_auth=None,
         )
 
     def test_install_does_not_request_skills_discovery(self, tmp_path, monkeypatch):
@@ -9141,3 +9149,747 @@ class TestUninstallLeavesNothingBehind:
 
         assert sorted(tmp_path.rglob("*")) == [user_file.parent, user_file]
         assert user_file.read_bytes() == b'{"version": 1}\n'
+
+
+# ===================================================================
+# Machine identity (ADS_TOKEN_COMMAND, ADS_BASE_URL, TENANT_ID)
+# ===================================================================
+
+
+_IDENTITY = guard_module._MachineIdentity(
+    token_command="/Users/me/.local/bin/ads-installer", tenant_id="tenant", base_url="https://api.eu.snyk.io"
+)
+
+
+def _fake_token_command(tmp_path: Path, body: str = "echo machine-token-123") -> Path:
+    """A stand-in for the installer's `<command> token --base-url <url>`; records each run's arguments."""
+    command = tmp_path / "ads-installer"
+    command.write_text(
+        "#!/bin/bash\n"
+        f'echo "$*" >> {_shell_quote(str(tmp_path / "token-runs"))}\n'
+        '[ "$1" = token ] && [ "$2" = --base-url ] || exit 2\n'
+        f"{body}\n"
+    )
+    command.chmod(0o755)
+    return command
+
+
+class TestMachineIdentityCommands:
+    @pytest.mark.parametrize(
+        "variant,is_windows,expected",
+        [
+            (
+                "main",
+                False,
+                "PUSH_KEY='' PUSHKEY='' "
+                "ADS_TOKEN_COMMAND='/Users/me/.local/bin/ads-installer' ADS_BASE_URL='https://api.eu.snyk.io' "
+                "TENANT_ID='tenant' MACHINE_ID='machine' MACHINE_SERIAL='' "
+                "bash '/x/snyk-agent-guard.sh' --client claude-code",
+            ),
+            (
+                "main",
+                True,
+                "powershell -File 'C:\\hooks\\snyk-agent-guard.ps1' -Client claude-code "
+                "-TokenCommand '/Users/me/.local/bin/ads-installer' -AdsBaseUrl 'https://api.eu.snyk.io' "
+                "-TenantId 'tenant' -MachineId 'machine'",
+            ),
+            (
+                "discover",
+                False,
+                "PUSH_KEY='' PUSHKEY='' "
+                "ADS_TOKEN_COMMAND='/Users/me/.local/bin/ads-installer' ADS_BASE_URL='https://api.eu.snyk.io' "
+                "TENANT_ID='tenant' MACHINE_ID='machine' MACHINE_SERIAL='' "
+                "AGENT_SCAN_COMMAND='/usr/local/bin/snyk-agent-scan' "
+                "bash '/x/snyk-agent-guard-discover.sh' --client 'claude-code' --scope servers",
+            ),
+            (
+                "discover",
+                True,
+                "powershell -File 'C:\\hooks\\snyk-agent-guard-discover.ps1' -Client claude-code "
+                "-TokenCommand '/Users/me/.local/bin/ads-installer' -AdsBaseUrl 'https://api.eu.snyk.io' "
+                "-TenantId 'tenant' -MachineId 'machine' "
+                "-AgentScanCommand 'C:\\Program Files\\Snyk\\snyk-agent-scan.exe' -Scope servers",
+            ),
+        ],
+    )
+    def test_commands_carry_the_identity_and_no_push_key(self, variant, is_windows, expected):
+        script_path = Path(
+            (r"C:\hooks\snyk-agent-guard.ps1" if variant == "main" else r"C:\hooks\snyk-agent-guard-discover.ps1")
+            if is_windows
+            else f"/x/snyk-agent-guard{'-discover' if variant == 'discover' else ''}.sh"
+        )
+        with patch(f"{_G}.IS_WINDOWS", is_windows):
+            if variant == "main":
+                command = _build_hook_command(
+                    "",
+                    "https://api.snyk.io",
+                    script_path,
+                    "claude-code",
+                    tenant_id="tenant",
+                    machine_id="machine",
+                    machine_serial="",
+                    machine_identity=_IDENTITY,
+                )
+            else:
+                command = guard_module._build_discover_hook_command(
+                    "",
+                    "https://api.snyk.io",
+                    script_path,
+                    "claude-code",
+                    agent_scan_command=(
+                        r"C:\Program Files\Snyk\snyk-agent-scan.exe" if is_windows else "/usr/local/bin/snyk-agent-scan"
+                    ),
+                    tenant_id="tenant",
+                    machine_id="machine",
+                    machine_serial="",
+                    machine_identity=_IDENTITY,
+                )
+
+        assert command == expected
+        # No push key value: POSIX commands only clear PUSH_KEY/PUSHKEY, since a push key wins.
+        assert "PushKey" not in command
+        assert "PUSH_KEY" not in command.replace("PUSH_KEY='' PUSHKEY='' ", "")
+        assert _is_agent_scan_command(command)
+        info = _parse_command_info(command, ["Stop"])
+        assert info["auth_type"] == "machine"
+        assert info["auth_value"] == ""
+        assert info["tenant_id"] == "tenant"
+        assert info["host"] == "api.eu.snyk.io"
+
+    @pytest.mark.parametrize(
+        "script, builder",
+        [("snyk-agent-guard.ps1", "main"), ("snyk-agent-guard-discover.ps1", "discover")],
+    )
+    def test_powershell_scripts_declare_every_rendered_parameter(self, script, builder):
+        """A parameter the script does not declare makes PowerShell refuse to run the hook."""
+        with patch(f"{_G}.IS_WINDOWS", True):
+            if builder == "main":
+                command = _build_hook_command(
+                    "", "u", Path(script), "codex", machine_id="m", machine_serial="s", machine_identity=_IDENTITY
+                )
+            else:
+                command = guard_module._build_discover_hook_command(
+                    "",
+                    "u",
+                    Path(script),
+                    "codex",
+                    agent_scan_command="a",
+                    machine_id="m",
+                    machine_serial="s",
+                    machine_identity=_IDENTITY,
+                )
+        rendered = set(re.findall(r" -([A-Z][A-Za-z]+)\b", command))
+        declared = set(re.findall(r"\[string\]\$([A-Za-z]+)", _get_script_path(script).read_text()))
+        assert rendered - {"File"} <= declared
+
+    def test_render_argv_posix_drops_the_installer_push_key(self):
+        invocation = guard_module._HookInvocation(
+            script_path=Path("/hooks/snyk-agent-guard.sh"),
+            hook_client="cursor",
+            push_key="",
+            url="https://api.snyk.io",
+            machine_id="machine",
+            machine_identity=_IDENTITY,
+        )
+        installer_env = {"PUSH_KEY": "pk", "PUSHKEY": "pk", "REMOTE_HOOKS_BASE_URL": "https://x", "HOME": "/h"}
+        with patch.dict(os.environ, installer_env, clear=True), patch(f"{_G}.IS_WINDOWS", False):
+            argv, env = guard_module._render_argv(invocation)
+
+        assert argv == ["bash", "/hooks/snyk-agent-guard.sh", "--client", "cursor"]
+        assert env == {
+            "HOME": "/h",
+            "ADS_TOKEN_COMMAND": "/Users/me/.local/bin/ads-installer",
+            "ADS_BASE_URL": "https://api.eu.snyk.io",
+            "TENANT_ID": "tenant",
+            "MACHINE_SERIAL": "",
+            "MACHINE_ID": "machine",
+        }
+
+    def test_render_argv_windows_carries_the_identity(self):
+        invocation = guard_module._HookInvocation(
+            script_path=Path(r"C:\hooks\snyk-agent-guard.ps1"),
+            hook_client="codex",
+            push_key="",
+            url="https://api.snyk.io",
+            machine_id="machine",
+            machine_identity=_IDENTITY,
+        )
+        with patch(f"{_G}.IS_WINDOWS", True):
+            argv, env = guard_module._render_argv(invocation)
+
+        assert argv[5:] == [
+            "-TokenCommand",
+            "/Users/me/.local/bin/ads-installer",
+            "-AdsBaseUrl",
+            "https://api.eu.snyk.io",
+            "-TenantId",
+            "tenant",
+            "-MachineId",
+            "machine",
+        ]
+        assert env is None
+
+    def test_status_shows_machine_identity(self, tmp_path):
+        path = tmp_path / "settings.json"
+        with patch(f"{_G}.IS_WINDOWS", False):
+            command = _build_hook_command(
+                "",
+                "u",
+                Path("/x/snyk-agent-guard.sh"),
+                "claude-code",
+                machine_id="m",
+                machine_serial="",
+                machine_identity=_IDENTITY,
+            )
+        _setup_claude_hooks(command, path)
+        info = _detect_claude_install(path)
+        assert info is not None and info["auth_type"] == "machine"
+        with patch(f"{_G}.rich") as mock_rich:
+            _print_client_status("Claude Code", path, info)
+        printed = " ".join(str(c) for c in mock_rich.print.call_args_list)
+        assert "Machine identity" in printed
+        assert "Push Key" not in printed
+
+    def test_uninstall_removes_machine_hooks_without_revoking(self, tmp_path, monkeypatch):
+        path = tmp_path / "settings.json"
+        with patch(f"{_G}.IS_WINDOWS", False):
+            command = _build_hook_command(
+                "",
+                "u",
+                Path("/x/snyk-agent-guard.sh"),
+                "claude-code",
+                machine_id="m",
+                machine_serial="",
+                machine_identity=_IDENTITY,
+            )
+        _setup_claude_hooks(command, path)
+        _write(path, {**json.loads(path.read_text()), "other": 1})
+        monkeypatch.setenv("SNYK_TOKEN", "snyk-tok")
+        with patch(f"{_G}.revoke_push_key") as revoke:
+            _run_uninstall(SimpleNamespace(client="claude", file=str(path), managed=False))
+        revoke.assert_not_called()
+        assert json.loads(path.read_text()) == {"other": 1}
+
+
+class TestMachineIdentityFromEnv:
+    @pytest.fixture(autouse=True)
+    def _clean_env(self, monkeypatch):
+        for name in ("ADS_TOKEN_COMMAND", "ADS_BASE_URL"):
+            monkeypatch.delenv(name, raising=False)
+
+    def test_all_three_values_make_machine_mode(self, monkeypatch):
+        monkeypatch.setenv("ADS_TOKEN_COMMAND", " /bin/ads-installer ")
+        monkeypatch.setenv("ADS_BASE_URL", "https://api.snyk.io")
+        assert guard_module._machine_identity_from_env(" tenant ") == guard_module._MachineIdentity(
+            token_command="/bin/ads-installer", tenant_id="tenant", base_url="https://api.snyk.io"
+        )
+
+    @pytest.mark.parametrize("tenant", ["", "tenant"])
+    def test_neither_installer_value_is_push_key_mode(self, tenant):
+        """TENANT_ID alone belongs to the push-key flow."""
+        assert guard_module._machine_identity_from_env(tenant) is None
+
+    @pytest.mark.parametrize(
+        "env, tenant, missing",
+        [
+            ({"ADS_TOKEN_COMMAND": "/bin/ads"}, "tenant", "ADS_BASE_URL"),
+            ({"ADS_BASE_URL": "https://api.snyk.io"}, "tenant", "ADS_TOKEN_COMMAND"),
+            ({"ADS_TOKEN_COMMAND": "/bin/ads", "ADS_BASE_URL": "https://api.snyk.io"}, "  ", "TENANT_ID"),
+        ],
+        ids=["no_base_url", "no_token_command", "no_tenant"],
+    )
+    def test_some_values_are_a_configuration_error(self, monkeypatch, env, tenant, missing):
+        for name, value in env.items():
+            monkeypatch.setenv(name, value)
+        with pytest.raises(guard_module.MachineAuthError, match=f"missing: {missing}"):
+            guard_module._machine_identity_from_env(tenant)
+
+    def test_fetch_machine_auth_passes_the_base_url(self):
+        with patch(f"{_G}.fetch_access_token", return_value="tok") as fetch:
+            auth = guard_module._fetch_machine_auth(_IDENTITY)
+        fetch.assert_called_once_with("/Users/me/.local/bin/ads-installer", "https://api.eu.snyk.io")
+        assert auth.tenant_url("/agent-monitor/hooks/cursor") == (
+            "https://api.eu.snyk.io/hidden/tenants/tenant/agent-monitor/hooks/cursor?version=2024-10-15"
+        )
+
+
+class TestRunInstallMachineIdentity:
+    @pytest.fixture(autouse=True)
+    def _env(self, monkeypatch):
+        monkeypatch.setenv("PUSH_KEY", "installer-pk")  # the installer passes it for older Guard versions
+        monkeypatch.setenv("ADS_TOKEN_COMMAND", "/bin/ads-installer")
+        monkeypatch.setenv("ADS_BASE_URL", "https://api.eu.snyk.io")
+        monkeypatch.delenv("MACHINE_SERIAL", raising=False)
+
+    @staticmethod
+    def _args(tmp_path, *, managed=False, tenant_id="tid-1"):
+        return SimpleNamespace(
+            client="claude",
+            url="https://api.snyk.io",
+            tenant_id=tenant_id,
+            file=str(tmp_path / "config.json"),
+            managed=managed,
+            machine_id="machine-42",
+        )
+
+    def test_checks_the_token_before_install_and_hands_the_identity_on(self, tmp_path):
+        with (
+            patch(f"{_G}.fetch_access_token", return_value="tok") as fetch,
+            patch(f"{_G}.mint_push_key") as mint,
+            patch(f"{_G}._install_hooks") as install,
+            patch(f"{_G}._send_servers_discovered_event", return_value=True) as send,
+        ):
+            _run_install(self._args(tmp_path))
+
+        assert fetch.call_args_list[0] == mock_call("/bin/ads-installer", "https://api.eu.snyk.io")
+        mint.assert_not_called()
+        assert install.call_args.args[2] == ""  # never the installer's push key
+        assert install.call_args.kwargs["machine_identity"] == guard_module._MachineIdentity(
+            token_command="/bin/ads-installer", tenant_id="tid-1", base_url="https://api.eu.snyk.io"
+        )
+        assert "machine_auth" not in install.call_args.kwargs
+        assert send.call_args.args[0] == ""
+        auth = send.call_args.kwargs["machine_auth"]
+        assert (auth.tenant_id, auth.base_url, auth.access_token) == ("tid-1", "https://api.eu.snyk.io", "tok")
+        # Once as the install-time check, once more for the discovery event sent after every client.
+        assert fetch.call_count == 2
+
+    def test_discovery_event_is_skipped_when_the_late_token_fetch_fails(self, tmp_path):
+        with (
+            patch(
+                f"{_G}.fetch_access_token",
+                side_effect=["tok", guard_module.MachineAuthError("The token command exited with 1.")],
+            ),
+            patch(f"{_G}._install_hooks"),
+            patch(f"{_G}._send_servers_discovered_event") as send,
+            patch(f"{_G}.rich"),
+        ):
+            _run_install(self._args(tmp_path))
+        send.assert_not_called()
+
+    @pytest.mark.parametrize("base_url", ['https://api.snyk.io/"x', "https://api.snyk.io\\", "https://api .snyk.io"])
+    def test_base_url_that_needs_quoting_fails_the_install(self, tmp_path, monkeypatch, base_url):
+        monkeypatch.setenv("ADS_BASE_URL", base_url)
+        with (
+            patch(f"{_G}.fetch_access_token") as fetch,
+            patch(f"{_G}._install_hooks") as install,
+            patch(f"{_G}.rich"),
+            pytest.raises(SystemExit) as excinfo,
+        ):
+            _run_install(self._args(tmp_path))
+        assert excinfo.value.code == 1
+        fetch.assert_not_called()
+        install.assert_not_called()
+
+    def test_failed_token_check_fails_the_install_without_the_push_key(self, tmp_path):
+        with (
+            patch(
+                f"{_G}.fetch_access_token",
+                side_effect=guard_module.MachineAuthError("The token command exited with 1."),
+            ),
+            patch(f"{_G}._install_hooks") as install,
+            patch(f"{_G}._send_servers_discovered_event") as send,
+            patch(f"{_G}.rich") as mock_rich,
+            pytest.raises(SystemExit) as excinfo,
+        ):
+            _run_install(self._args(tmp_path))
+
+        assert excinfo.value.code == 1
+        install.assert_not_called()
+        send.assert_not_called()
+        printed = " ".join(str(c) for c in mock_rich.print.call_args_list)
+        assert "Machine identity check failed: The token command exited with 1." in printed
+        assert not (tmp_path / "config.json").exists()
+
+    def test_managed_install_with_machine_values_fails(self, tmp_path):
+        with (
+            patch(f"{_G}.fetch_access_token") as fetch,
+            patch(f"{_G}._install_hooks") as install,
+            patch(f"{_G}.rich") as mock_rich,
+            pytest.raises(SystemExit) as excinfo,
+        ):
+            _run_install(self._args(tmp_path, managed=True))
+
+        assert excinfo.value.code == 1
+        fetch.assert_not_called()
+        install.assert_not_called()
+        assert "Managed installs use a push key" in str(mock_rich.print.call_args_list)
+
+    @pytest.mark.parametrize("unset", ["ADS_BASE_URL", "tenant"])
+    def test_partial_values_fail_the_install(self, tmp_path, monkeypatch, unset):
+        if unset == "tenant":
+            monkeypatch.delenv("TENANT_ID", raising=False)
+        else:
+            monkeypatch.delenv(unset)
+        args = self._args(tmp_path, tenant_id="" if unset == "tenant" else "tid-1")
+        args.guard_command = "install"
+        with (
+            patch(f"{_G}.fetch_access_token") as fetch,
+            patch(f"{_G}._install_hooks") as install,
+            patch(f"{_G}.rich") as mock_rich,
+        ):
+            assert guard_module.run_guard(args) == 1
+
+        fetch.assert_not_called()
+        install.assert_not_called()
+        assert "missing:" in str(mock_rich.print.call_args_list)
+
+    def test_tenant_id_that_needs_escaping_fails_the_install(self, tmp_path):
+        with (
+            patch(f"{_G}.fetch_access_token") as fetch,
+            patch(f"{_G}.rich"),
+            pytest.raises(SystemExit),
+        ):
+            _run_install(self._args(tmp_path, tenant_id="../other"))
+        fetch.assert_not_called()
+
+
+@pytest.mark.skipif(IS_WINDOWS, reason="bash forwarder")
+class TestBashHookScriptMachineIdentity:
+    """Integration: the real .sh script in machine identity mode against a local HTTP server."""
+
+    @pytest.fixture(autouse=True)
+    def _skip_no_bash(self):
+        if not shutil.which("bash"):
+            pytest.skip("bash not available")
+
+    @staticmethod
+    def _recording_curl(tmp_path: Path) -> tuple[Path, Path]:
+        """A curl on PATH that records its argv, then runs the real one."""
+        real = shutil.which("curl")
+        assert real
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        log = tmp_path / "curl-argv"
+        wrapper = bin_dir / "curl"
+        wrapper.write_text(f'#!/bin/bash\nprintf "%s\\n" "$@" >> {_shell_quote(str(log))}\nexec {real} "$@"\n')
+        wrapper.chmod(0o755)
+        return bin_dir, log
+
+    def _run(self, server, tmp_path, script=None, client="claude-code", **env_overrides):
+        env = {
+            "PATH": "/usr/bin:/bin:/usr/local/bin",
+            # The installed command clears PUSH_KEY and PUSHKEY, since a push key wins.
+            "PUSH_KEY": "",
+            "PUSHKEY": "",
+            "REMOTE_HOOKS_BASE_URL": server,
+            "MACHINE_ID": "machine-42",
+            "TENANT_ID": "tenant-1",
+            "ADS_BASE_URL": server + "/",
+        }
+        if "ADS_TOKEN_COMMAND" not in env_overrides:
+            env["ADS_TOKEN_COMMAND"] = str(_fake_token_command(tmp_path))
+        env.update(env_overrides)
+        env = {k: v for k, v in env.items() if v is not None}
+        return subprocess.run(
+            ["bash", str(script or _get_script_path("snyk-agent-guard.sh")), "--client", client],
+            input='{"hook_event_name":"PreToolUse","session_id":"s1"}',
+            capture_output=True,
+            text=True,
+            timeout=20,
+            env=env,
+        )
+
+    @pytest.mark.parametrize("client", ["claude-code", "cursor", "codex", "github-copilot"])
+    def test_sends_to_the_tenant_route_with_a_bearer_token(self, hook_server, tmp_path, client):
+        bin_dir, curl_log = self._recording_curl(tmp_path)
+        result = self._run(hook_server, tmp_path, client=client, PATH=f"{bin_dir}:/usr/bin:/bin:/usr/local/bin")
+
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == {"ok": True}
+        req = _HookHandler.last_request
+        assert req["path"] == f"/hidden/tenants/tenant-1/agent-monitor/hooks/{client}?version=2024-10-15"
+        assert req["headers"]["Authorization"] == "Bearer machine-token-123"
+        assert "X-Client-Id" not in req["headers"]
+        assert json.loads(req["headers"]["X-User"])["identifier"] == "machine-42"
+        assert req["body"].startswith("base64:")
+        base_url = hook_server + "/"
+        assert (tmp_path / "token-runs").read_text() == f"token --base-url {base_url}\n"
+        # The token reaches curl through a config pipe, never its argv, and is never printed.
+        argv = curl_log.read_text()
+        assert "machine-token-123" not in argv
+        assert "stray-pk" not in argv
+        assert "machine-token-123" not in result.stderr + result.stdout
+
+    @pytest.mark.parametrize("ambient", [{"ADS_BASE_URL": "https://api.snyk.io"}, {}])
+    def test_push_key_wins_over_ambient_machine_values(self, hook_server, tmp_path, ambient):
+        """ADS_* in the agent's environment cannot change a push-key hook, partial or complete."""
+        env = {"PUSH_KEY": "pk-1234", **ambient}
+        result = self._run(hook_server, tmp_path, **env)
+        assert result.returncode == 0, result.stderr
+        req = _HookHandler.last_request
+        assert req["path"] == "/hidden/agent-monitor/hooks/claude-code?version=2025-11-11"
+        assert req["headers"]["X-Client-Id"] == "pk-1234"
+        assert "Authorization" not in req["headers"]
+        assert not (tmp_path / "token-runs").exists()
+
+    def test_token_written_in_pieces_is_one_token(self, hook_server, tmp_path):
+        token_command = _fake_token_command(tmp_path, "printf machine-; sleep 0.2; printf 'token-123\\n'")
+        result = self._run(hook_server, tmp_path, ADS_TOKEN_COMMAND=str(token_command))
+        assert result.returncode == 0, result.stderr
+        assert _HookHandler.last_request["headers"]["Authorization"] == "Bearer machine-token-123"
+
+    def test_runs_without_push_key_or_remote_url(self, hook_server, tmp_path):
+        result = self._run(hook_server, tmp_path, PUSH_KEY=None, REMOTE_HOOKS_BASE_URL=None)
+        assert result.returncode == 0, result.stderr
+        assert _HookHandler.last_request["headers"]["Authorization"] == "Bearer machine-token-123"
+
+    def test_runs_the_token_command_on_every_invocation(self, hook_server, tmp_path):
+        self._run(hook_server, tmp_path)
+        self._run(hook_server, tmp_path)
+        assert len((tmp_path / "token-runs").read_text().splitlines()) == 2
+
+    @pytest.mark.parametrize(
+        "body, reason",
+        [
+            ("echo partial-token; exit 3", "token command failed (exit 3)"),
+            ("echo 'two words'", "no single access token"),
+            ("echo one; echo two", "no single access token"),
+            ("printf ''", "no single access token"),
+            ("echo 'quote\"d'", "no single access token"),
+        ],
+    )
+    def test_failed_token_command_fails_open_without_the_push_key(self, hook_server, tmp_path, body, reason):
+        _fake_token_command(tmp_path, body)
+        result = self._run(hook_server, tmp_path, ADS_TOKEN_COMMAND=str(tmp_path / "ads-installer"))
+
+        assert result.returncode == 0, result.stderr
+        assert _HookHandler.last_request is None  # no request at all, so never the push key
+        assert json.loads(result.stdout) == {"systemMessage": FAIL_OPEN_MESSAGE}
+        assert len(result.stderr.strip().splitlines()) == 1
+        assert reason in result.stderr
+        assert "failing open" in result.stderr
+        assert "partial-token" not in result.stderr
+
+    def test_missing_token_command_fails_open(self, hook_server, tmp_path):
+        result = self._run(hook_server, tmp_path, client="cursor", ADS_TOKEN_COMMAND=str(tmp_path / "missing"))
+
+        assert result.returncode == 0, result.stderr
+        assert _HookHandler.last_request is None
+        assert result.stdout == ""  # Cursor gets nothing on stdout
+        assert "token command failed" in result.stderr
+
+    def test_hung_token_command_fails_open_within_the_budget(self, hook_server, tmp_path):
+        script = _forwarder_with_budget(tmp_path, "snyk-agent-guard.sh", 1)
+        # A child still holding stdout must not hold the hook either.
+        _fake_token_command(tmp_path, "sleep 30 & sleep 30")
+
+        started = time.monotonic()
+        result = self._run(hook_server, tmp_path, script=script, ADS_TOKEN_COMMAND=str(tmp_path / "ads-installer"))
+
+        assert time.monotonic() - started < 10
+        assert result.returncode == 0, result.stderr
+        assert _HookHandler.last_request is None
+        assert "token command did not finish in time" in result.stderr
+
+    @pytest.mark.parametrize("missing", ["ADS_TOKEN_COMMAND", "TENANT_ID", "ADS_BASE_URL"])
+    def test_partial_machine_identity_is_a_usage_error(self, hook_server, tmp_path, missing):
+        result = self._run(hook_server, tmp_path, **{missing: None})
+
+        assert result.returncode == 1
+        assert _HookHandler.last_request is None
+        assert f"{missing} environment variable is not set" in result.stderr
+        assert not (tmp_path / "token-runs").exists()
+
+    def test_tenant_id_that_needs_escaping_is_a_usage_error(self, hook_server, tmp_path):
+        result = self._run(hook_server, tmp_path, TENANT_ID="../other")
+
+        assert result.returncode == 1
+        assert "not a valid tenant id" in result.stderr
+        assert not (tmp_path / "token-runs").exists()
+
+    def test_http_error_on_the_tenant_route_fails_open(self, error_hook_server, tmp_path):
+        result = self._run(error_hook_server, tmp_path)
+
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == {"systemMessage": FAIL_OPEN_MESSAGE}
+        assert "HTTP 500" in result.stderr
+
+    @pytest.mark.parametrize("direct", [False, True], ids=["saved-command", "install-test"])
+    def test_installed_command_and_install_test_event_use_the_token(self, hook_server, tmp_path, direct, monkeypatch):
+        monkeypatch.setenv("PUSH_KEY", "installer-pk")
+        script = _get_script_path("snyk-agent-guard.sh")
+        identity = guard_module._MachineIdentity(
+            token_command=str(_fake_token_command(tmp_path)), tenant_id="tenant-1", base_url=hook_server
+        )
+        payload = '{"hook_event_name":"test","session_id":"s1"}'
+        with patch(f"{_G}.IS_WINDOWS", False):
+            if direct:
+                ok, detail = guard_module._invoke_hook_script(
+                    script,
+                    "cursor",
+                    "",
+                    "https://unused",
+                    payload,
+                    machine_id="machine-42",
+                    machine_serial="",
+                    machine_identity=identity,
+                )
+                assert ok, detail
+            else:
+                command = _build_hook_command(
+                    "",
+                    "https://unused",
+                    script,
+                    "cursor",
+                    machine_id="machine-42",
+                    machine_serial="",
+                    machine_identity=identity,
+                )
+                result = subprocess.run(
+                    ["bash", "-c", command], input=payload, capture_output=True, text=True, timeout=10
+                )
+                assert result.returncode == 0, result.stderr
+        req = _HookHandler.last_request
+        assert req["path"] == "/hidden/tenants/tenant-1/agent-monitor/hooks/cursor?version=2024-10-15"
+        assert req["headers"]["Authorization"] == "Bearer machine-token-123"
+        assert "X-Client-Id" not in req["headers"]
+
+
+@pytest.mark.skipif(IS_WINDOWS, reason="bash forwarder")
+class TestInstallSwitchesAuthModes:
+    """Re-running guard install in the other mode replaces the hooks; nothing is duplicated."""
+
+    @pytest.fixture(autouse=True)
+    def _env(self, monkeypatch, tmp_path):
+        if not shutil.which("bash"):
+            pytest.skip("bash not available")
+        for name in ("ADS_TOKEN_COMMAND", "ADS_BASE_URL", "PUSH_KEY", "MACHINE_SERIAL", "TENANT_ID"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("AGENT_SCAN_COMMAND", "/usr/local/bin/snyk-agent-scan")
+
+    def _install(self, tmp_path, server, *, machine: bool, monkeypatch):
+        if machine:
+            monkeypatch.setenv("ADS_TOKEN_COMMAND", str(_fake_token_command(tmp_path)))
+            monkeypatch.setenv("ADS_BASE_URL", server)
+            monkeypatch.setenv("PUSH_KEY", "installer-pk")
+        else:
+            monkeypatch.delenv("ADS_TOKEN_COMMAND", raising=False)
+            monkeypatch.delenv("ADS_BASE_URL", raising=False)
+            monkeypatch.setenv("PUSH_KEY", "pk-1234")
+        args = SimpleNamespace(
+            client="claude",
+            url=server,
+            tenant_id="tenant-1",
+            file=str(tmp_path / "settings.json"),
+            managed=False,
+            machine_id="machine-42",
+        )
+        with (
+            patch(f"{_G}.IS_WINDOWS", False),
+            patch(f"{_G}._send_servers_discovered_event", return_value=True),
+            patch(f"{_G}._has_success_payload", return_value=True),
+        ):
+            _run_install(args)
+        return _HookHandler.last_request
+
+    def _commands(self, tmp_path) -> list[str]:
+        hooks = json.loads((tmp_path / "settings.json").read_text())["hooks"]
+        return [h["command"] for groups in hooks.values() for g in groups for h in g["hooks"]]
+
+    def test_push_key_to_machine_and_back(self, tmp_path, hook_server, monkeypatch):
+        self._install(tmp_path, hook_server, machine=False, monkeypatch=monkeypatch)
+        push_commands = self._commands(tmp_path)
+        assert all("PUSH_KEY='pk-1234'" in c for c in push_commands)
+
+        test_event = self._install(tmp_path, hook_server, machine=True, monkeypatch=monkeypatch)
+        assert test_event["path"] == "/hidden/tenants/tenant-1/agent-monitor/hooks/claude-code?version=2024-10-15"
+        assert test_event["headers"]["Authorization"] == "Bearer machine-token-123"
+        assert "X-Client-Id" not in test_event["headers"]
+        machine_commands = self._commands(tmp_path)
+        assert len(machine_commands) == len(push_commands)
+        assert all(c.startswith("PUSH_KEY='' PUSHKEY='' ADS_TOKEN_COMMAND=") for c in machine_commands)
+        assert not any("pk-1234" in c or "installer-pk" in c for c in machine_commands)
+
+        self._install(tmp_path, hook_server, machine=False, monkeypatch=monkeypatch)
+        assert self._commands(tmp_path) == push_commands
+
+    def test_rejected_tenant_route_test_event_fails_the_install(self, tmp_path, hook_server, monkeypatch):
+        """The test server answers without "success": true, as agent-monitor does for a rejected credential."""
+        monkeypatch.setenv("ADS_TOKEN_COMMAND", str(_fake_token_command(tmp_path)))
+        monkeypatch.setenv("ADS_BASE_URL", hook_server)
+        args = SimpleNamespace(
+            client="claude",
+            url=hook_server,
+            tenant_id="tenant-1",
+            file=str(tmp_path / "settings.json"),
+            managed=False,
+            machine_id="machine-42",
+        )
+        with (
+            patch(f"{_G}.IS_WINDOWS", False),
+            patch(f"{_G}._send_servers_discovered_event", return_value=True),
+            pytest.raises(SystemExit) as excinfo,
+        ):
+            _run_install(args)
+        assert excinfo.value.code == 1
+        assert not (tmp_path / "settings.json").exists()
+        assert _HookHandler.last_request["headers"]["Authorization"] == "Bearer machine-token-123"
+
+
+class TestRunDiscoverMachineIdentity:
+    @pytest.fixture(autouse=True)
+    def _env(self, monkeypatch):
+        monkeypatch.setenv("MACHINE_ID", "machine-42")
+        monkeypatch.setenv("PUSH_KEY", "")  # the machine identity hook command clears it
+        monkeypatch.setenv("ADS_TOKEN_COMMAND", "/bin/ads-installer")
+        monkeypatch.setenv("TENANT_ID", "tenant-1")
+        monkeypatch.setenv("ADS_BASE_URL", "https://api.eu.snyk.io")
+
+    @staticmethod
+    def _args():
+        return SimpleNamespace(guard_command="discover", url=None, client="claude-code", scope="servers")
+
+    def test_token_authenticates_the_event_and_the_push_key_is_never_sent(self):
+        with (
+            patch(f"{_G}.fetch_access_token", return_value="tok") as fetch,
+            patch(f"{_G}._discover_servers_payload", return_value=[]),
+            patch(f"{_G}.send_hook_event", return_value=(True, "")) as send,
+            patch(f"{_G}.rich"),
+        ):
+            assert guard_module.run_guard(self._args()) == 0
+
+        fetch.assert_called_once_with("/bin/ads-installer", "https://api.eu.snyk.io")
+        assert send.call_args.args[2] == ""
+        auth = send.call_args.kwargs["machine_auth"]
+        assert (auth.tenant_id, auth.base_url, auth.access_token) == ("tenant-1", "https://api.eu.snyk.io", "tok")
+
+    def test_failed_token_command_sends_nothing(self):
+        with (
+            patch(
+                f"{_G}.fetch_access_token",
+                side_effect=guard_module.MachineAuthError("The token command exited with 1."),
+            ),
+            patch(f"{_G}._discover_servers_payload") as discover,
+            patch(f"{_G}.send_hook_event") as send,
+            patch(f"{_G}.rich"),
+        ):
+            assert guard_module.run_guard(self._args()) == 1
+        discover.assert_not_called()
+        send.assert_not_called()
+
+    def test_push_key_wins_over_ambient_machine_values(self, monkeypatch):
+        """A push-key hook's discovery keeps the push key when ADS_* leak in from the agent's environment."""
+        monkeypatch.setenv("PUSH_KEY", "pk-1234")
+        monkeypatch.delenv("TENANT_ID")
+        with (
+            patch(f"{_G}.fetch_access_token") as fetch,
+            patch(f"{_G}._discover_servers_payload", return_value=[]),
+            patch(f"{_G}.send_hook_event", return_value=(True, "")) as send,
+            patch(f"{_G}.rich"),
+        ):
+            assert guard_module.run_guard(self._args()) == 0
+        fetch.assert_not_called()
+        assert send.call_args.args[2] == "pk-1234"
+        assert send.call_args.kwargs["machine_auth"] is None
+
+    def test_partial_values_are_an_error(self, monkeypatch):
+        monkeypatch.delenv("ADS_BASE_URL")
+        with (
+            patch(f"{_G}.fetch_access_token") as fetch,
+            patch(f"{_G}.send_hook_event") as send,
+            patch(f"{_G}.rich"),
+        ):
+            assert guard_module.run_guard(self._args()) == 1
+        fetch.assert_not_called()
+        send.assert_not_called()

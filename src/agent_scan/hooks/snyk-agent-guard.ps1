@@ -4,8 +4,21 @@
 #
 # Usage:
 #   powershell -File snyk-agent-guard.ps1 -Client claude-code -PushKey '...' -RemoteUrl 'https://...'
+#   powershell -File snyk-agent-guard.ps1 -Client cursor -TokenCommand '...' -AdsBaseUrl 'https://...' -TenantId '...'
 #
 # Reads a JSON payload from stdin and POSTs it (base64-encoded) to the Agent Guard endpoint.
+#
+# Two auth modes, chosen by guard install and never mixed (see snyk-agent-guard.sh): the push key
+# (-PushKey, -RemoteUrl), or machine identity (-TokenCommand, -AdsBaseUrl and -TenantId, or
+# ADS_TOKEN_COMMAND, ADS_BASE_URL and TENANT_ID). With machine identity every run calls
+# `<token command> token --base-url <base url>` and POSTs to the tenant route with the token as a
+# bearer token. A push key wins: parameters are looked at before env vars, and at each level a push
+# key before machine identity, so ADS_* in the agent's environment cannot change a hook installed
+# with -PushKey, and a PUSH_KEY there cannot change one installed with -TokenCommand. Machine
+# identity applies when it is chosen that way; a missing value is then a usage error. A token
+# command that fails, times out or prints anything other than one token fails open like an
+# unreachable API; there is no fallback to the push key. The token is never logged and never put
+# on a command line.
 #
 # The request is bounded by $TIMEOUT_SECONDS below. Transport and HTTP failures, that timeout
 # included, fail open: exit 0, one line on stderr, and on stdout a systemMessage JSON object
@@ -33,7 +46,13 @@ param(
     [string]$MachineId,
 
     [Parameter(Mandatory=$false)]
-    [string]$MachineSerial
+    [string]$MachineSerial,
+
+    [Parameter(Mandatory=$false)]
+    [string]$TokenCommand,
+
+    [Parameter(Mandatory=$false)]
+    [string]$AdsBaseUrl
 )
 
 $ErrorActionPreference = "Stop"
@@ -44,8 +63,12 @@ $AGENT_SCAN_VERSION = "__AGENT_SCAN_VERSION__"
 # Hook API version.
 $VERSION = "2025-11-11"
 
+# API version the gateway publishes the tenant routes at (machine identity).
+$TENANT_VERSION = "2024-10-15"
+
 # Timeout, in seconds, for the whole request (same reasoning as snyk-agent-guard.sh: the
-# agent caps the hook at 65 s and agent-monitor may legitimately take ~50 s to answer).
+# agent caps the hook at 65 s and agent-monitor may legitimately take ~50 s to answer). With
+# machine identity the token command's time comes out of it too.
 $TIMEOUT_SECONDS = 60
 
 # What the user is told when the hook fails open. Embedded in JSON verbatim, so it must stay
@@ -71,21 +94,107 @@ function FailOpen([string]$reason) {
     exit 0
 }
 
+# Runs `<command> token --base-url <base url>` for at most $timeoutSeconds and returns the
+# access token it prints. Throws with a fixed reason when the command cannot start, fails, does
+# not finish in time or prints anything other than one token. The token only ever travels
+# through the child's stdout; its stderr is read and dropped so nothing it prints reaches the
+# agent.
+function Get-AccessToken([string]$command, [string]$baseUrl, [int]$timeoutSeconds) {
+    $process = $null
+    # The base URL goes into a hand-quoted argument string; guard install refuses one that would
+    # need escaping there, and so does this.
+    if ($baseUrl -match '["\\\s]') {
+        throw "ADS_BASE_URL is not a plain URL"
+    }
+    try {
+        $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+        $startInfo.FileName = $command
+        $startInfo.Arguments = 'token --base-url "' + $baseUrl + '"'
+        $startInfo.UseShellExecute = $false
+        $startInfo.CreateNoWindow = $true
+        $startInfo.RedirectStandardInput = $true
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+        try {
+            $process = [System.Diagnostics.Process]::Start($startInfo)
+        } catch {
+            throw "token command could not run"
+        }
+        $process.StandardInput.Close()
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $null = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit($timeoutSeconds * 1000)) {
+            try { $process.Kill() } catch { }
+            throw "token command did not finish in time"
+        }
+        if ($process.ExitCode -ne 0) {
+            throw "token command failed (exit $($process.ExitCode))"
+        }
+        if (-not $stdout.Wait(1000)) {
+            throw "token command output did not finish"
+        }
+        $token = $stdout.Result.Trim()
+        if (-not $token -or $token -match '\s') {
+            throw "token command printed no single access token"
+        }
+        return $token
+    } finally {
+        if ($process) { $process.Dispose() }
+    }
+}
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
-# Parameters take precedence over env vars.
-if (-not $PushKey) { $PushKey = if ($env:PUSH_KEY) { $env:PUSH_KEY } elseif ($env:PUSHKEY) { $env:PUSHKEY } else { $null } }
-if (-not $PushKey) {
-    Write-Error "PUSH_KEY is required (pass -PushKey or set env var)"
-    exit 1
+# Parameters take precedence over env vars, and at each level a push key over machine identity
+# (see the header).
+if ($PushKey) {
+    $machineIdentity = $false
+} elseif ($TokenCommand -or $AdsBaseUrl) {
+    $machineIdentity = $true
+} elseif ($env:PUSH_KEY -or $env:PUSHKEY) {
+    $machineIdentity = $false
+} else {
+    $machineIdentity = [bool]($env:ADS_TOKEN_COMMAND -or $env:ADS_BASE_URL)
+}
+if ($machineIdentity) {
+    if (-not $TokenCommand) { $TokenCommand = $env:ADS_TOKEN_COMMAND }
+    if (-not $AdsBaseUrl) { $AdsBaseUrl = $env:ADS_BASE_URL }
 }
 
-if (-not $RemoteUrl) { $RemoteUrl = $env:REMOTE_HOOKS_BASE_URL }
-if (-not $RemoteUrl) {
-    Write-Error "REMOTE_HOOKS_BASE_URL is required (pass -RemoteUrl or set env var)"
-    exit 1
+if ($machineIdentity) {
+    if (-not $TenantId) { $TenantId = $env:TENANT_ID }
+    $required = "machine identity needs ADS_TOKEN_COMMAND, ADS_BASE_URL and TENANT_ID"
+    if (-not $TokenCommand) {
+        Write-Error "ADS_TOKEN_COMMAND is required (pass -TokenCommand or set env var; $required)"
+        exit 1
+    }
+    if (-not $AdsBaseUrl) {
+        Write-Error "ADS_BASE_URL is required (pass -AdsBaseUrl or set env var; $required)"
+        exit 1
+    }
+    if (-not $TenantId) {
+        Write-Error "TENANT_ID is required (pass -TenantId or set env var; $required)"
+        exit 1
+    }
+    # Tenant ids are UUIDs; one that would need escaping in the URL path is refused.
+    if ($TenantId -notmatch '^[A-Za-z0-9._~-]+$') {
+        Write-Error "TENANT_ID is not a valid tenant id"
+        exit 1
+    }
+} else {
+    if (-not $PushKey) { $PushKey = if ($env:PUSH_KEY) { $env:PUSH_KEY } elseif ($env:PUSHKEY) { $env:PUSHKEY } else { $null } }
+    if (-not $PushKey) {
+        Write-Error "PUSH_KEY is required (pass -PushKey or set env var)"
+        exit 1
+    }
+
+    if (-not $RemoteUrl) { $RemoteUrl = $env:REMOTE_HOOKS_BASE_URL }
+    if (-not $RemoteUrl) {
+        Write-Error "REMOTE_HOOKS_BASE_URL is required (pass -RemoteUrl or set env var)"
+        exit 1
+    }
 }
 
 if (-not $MachineId) { $MachineId = $env:MACHINE_ID }
@@ -117,7 +226,11 @@ if ($cliVersion -eq '__AGENT_SCAN_VERSION__') {
     $cliVersion = "unknown"
 }
 $userAgent = "snyk/snyk-agent-guard.ps1 Agent Scan v$cliVersion"
-$url = "${RemoteUrl}${endpoint}?version=$VERSION"
+if ($machineIdentity) {
+    $url = "$($AdsBaseUrl.TrimEnd('/'))/hidden/tenants/${TenantId}$($endpoint.Substring('/hidden'.Length))?version=$TENANT_VERSION"
+} else {
+    $url = "${RemoteUrl}${endpoint}?version=$VERSION"
+}
 
 # Read payload from stdin as UTF-8 (strips BOM automatically)
 $reader = New-Object System.IO.StreamReader([Console]::OpenStandardInput(), [System.Text.Encoding]::UTF8, $true)
@@ -164,20 +277,38 @@ $agentSurface = if ($Client -ne "github-copilot") {
     ""
 }
 
+# With machine identity the token command runs first, on every invocation, and its time comes
+# out of $TIMEOUT_SECONDS, so the hook as a whole stays within the budget.
+$requestTimeout = $TIMEOUT_SECONDS
+$accessToken = $null
+if ($machineIdentity) {
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    try {
+        $accessToken = Get-AccessToken $TokenCommand $AdsBaseUrl $TIMEOUT_SECONDS
+    } catch {
+        FailOpen "$($_.Exception.Message)"
+    }
+    $requestTimeout = [Math]::Max(1, $TIMEOUT_SECONDS - [int][Math]::Ceiling($stopwatch.Elapsed.TotalSeconds))
+}
+
 # Execute request. Any failure past this point fails open; see FailOpen.
 try {
     $headers = @{
         "User-Agent"   = $userAgent
         "X-User"       = $xUser
         "Content-Type" = "text/plain"
-        "X-Client-Id"  = $PushKey
+    }
+    if ($machineIdentity) {
+        $headers["Authorization"] = "Bearer $accessToken"
+    } else {
+        $headers["X-Client-Id"] = $PushKey
     }
     if ($agentSurface) {
         $headers["X-Agent-Surface"] = $agentSurface
     }
     $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($body)
     $response = Invoke-WebRequest -Uri $url -Method POST -Body $bodyBytes -Headers $headers `
-        -UseBasicParsing -TimeoutSec $TIMEOUT_SECONDS
+        -UseBasicParsing -TimeoutSec $requestTimeout
 } catch {
     $ex = $_.Exception
     $statusCode = 0
@@ -196,7 +327,7 @@ try {
         ($ex -is [System.OperationCanceledException])
     )
     if ($timedOut) {
-        FailOpen "request timed out after ${TIMEOUT_SECONDS}s"
+        FailOpen "request timed out after ${requestTimeout}s"
     }
     FailOpen "request failed: $($ex.Message)"
 }

@@ -448,8 +448,18 @@ kept.
 | `MACHINE_ID` | Required non-anonymous machine identifier sent with hook events; alternative to `guard install --machine-id` |
 | `MACHINE_SERIAL` | Optional hardware serial captured by `guard install` for hook and discovery events. Sent as `machine_serial` alongside the hostname; absent or empty values become JSON `null`. The captured value, including an empty value, overrides any later inherited `MACHINE_SERIAL`. Does not change `MACHINE_ID`. |
 | `AGENT_SCAN_COMMAND` | Optional Agent Scan command invoked by the session-start discovery hook, with the hook arguments appended. The hook is installed only when this is set. A value that is not an existing executable file is run as a shell command. |
+| `ADS_TOKEN_COMMAND` | Machine identity: a command that prints a machine access token on stdout when run as `<command> token --base-url <ADS_BASE_URL>`. Set together with `ADS_BASE_URL` and `TENANT_ID`; see [Guard machine identity](#guard-machine-identity). |
+| `ADS_BASE_URL` | Machine identity: the Snyk API base URL that hosts the tenant routes, for example `https://api.snyk.io`. |
 
 Pass `MACHINE_SERIAL` again whenever you reinstall or update Guard hooks. Reinstalling without it, or with a blank value, replaces any previously captured serial with JSON `null`; the old value is not preserved.
+
+#### Guard machine identity
+
+The ADS installer decides how the hooks authenticate and passes `guard install` either a push key or a machine identity: `ADS_TOKEN_COMMAND`, `ADS_BASE_URL` and `TENANT_ID` (or `--tenant-id`), for user-mode installs on an enrolled machine. Machine identity applies as soon as `ADS_TOKEN_COMMAND` or `ADS_BASE_URL` is set; `TENANT_ID` alone is the push-key flow's tenant.
+
+- **Install:** `guard install` runs `"$ADS_TOKEN_COMMAND" token --base-url "$ADS_BASE_URL"` once as a check. If it fails (non-zero exit, timeout, no single token on stdout), the install fails with an error and exit code 1 and changes nothing. A missing value, a `TENANT_ID` that is not a plain id (letters, digits, `.`, `_`, `~`, `-`), or an `ADS_BASE_URL` with quotes, backslashes or whitespace fails the same way. No push key is minted or used, even when `PUSH_KEY` is also set. The hook commands carry `ADS_TOKEN_COMMAND`, `ADS_BASE_URL`, `TENANT_ID`, `MACHINE_ID` and `MACHINE_SERIAL` (`-TokenCommand`, `-AdsBaseUrl`, `-TenantId`, `-MachineId`, `-MachineSerial` for PowerShell) and no push key or other secret (POSIX commands set `PUSH_KEY` and `PUSHKEY` empty). The test event goes through the tenant route like every later hook event; if it is rejected, the install fails as it does with a push key. `--managed` installs use a push key only and fail when machine identity values are set.
+- **Hook runtime:** on every invocation the hooks, and the events that `guard install` and `guard discover` send themselves, run the token command and send the event to `POST {ADS_BASE_URL}/hidden/tenants/{TENANT_ID}/agent-monitor/hooks/{client}?version=2024-10-15` with `Authorization: Bearer <token>` and no `X-Client-Id`. The token command's time counts toward the 60-second request budget. If it fails, the hook fails open like an unreachable API (exit 0, one stderr line, the `systemMessage` where supported); it never falls back to the push key. The payload and the other headers are the same as with a push key. The token is never logged and never put on a command line. A push key wins over machine identity in the hooks and in `guard discover`: a hook installed with a push key ignores any `ADS_TOKEN_COMMAND` or `ADS_BASE_URL` in the agent's environment, and a machine identity hook ignores any `PUSH_KEY` there.
+- **Switching:** re-running `guard install` in the other mode replaces the installed hooks. Switching from a push key to machine identity does not revoke the old push key, because a machine identity install has no Snyk API token to revoke it with; install warns, and the key stays active until you revoke it in Snyk. `guard status` shows `[Machine identity]` for such hooks, and `guard uninstall` removes them without a push key to revoke.
 
 ## Environment variables
 
@@ -463,7 +473,8 @@ Pass `MACHINE_SERIAL` again whenever you reinstall or update Guard hooks. Reinst
 | `AGENT_SCAN_CI_HOSTNAME` | Upload | When `AGENT_SCAN_ENVIRONMENT=ci`, use this hostname instead of the machine node name. |
 | `PUSH_KEY` | `guard install` | Pre-provisioned push key for hook installation. |
 | `MACHINE_SERIAL` | `scan`, Agent Guard | Optional machine serial sent alongside hostname. Leading/trailing whitespace is removed; absent or blank values become JSON `null`. Does not change the machine identifier. |
-| `TENANT_ID` | `guard install` | Tenant UUID for hook installation. |
+| `TENANT_ID` | `guard install`, Agent Guard hooks | Tenant UUID for hook installation, and the tenant of the machine identity routes. |
+| `ADS_TOKEN_COMMAND`, `ADS_BASE_URL` | `guard install`, Agent Guard hooks | Machine identity for the hooks; see [Guard machine identity](#guard-machine-identity). |
 | `HOOK_VERSION` | Agent Guard hooks | Override the hook/API line version built into Guard artifacts. |
 
 ## Snyk CLI extension flags

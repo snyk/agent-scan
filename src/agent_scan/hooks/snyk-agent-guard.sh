@@ -8,8 +8,24 @@
 #   PUSH_KEY='...' REMOTE_HOOKS_BASE_URL='...' bash snyk-agent-guard.sh --client cursor
 #   PUSH_KEY='...' REMOTE_HOOKS_BASE_URL='...' bash snyk-agent-guard.sh --client codex
 #   PUSH_KEY='...' REMOTE_HOOKS_BASE_URL='...' bash snyk-agent-guard.sh --client github-copilot
+#   PUSH_KEY= PUSHKEY= ADS_TOKEN_COMMAND='...' ADS_BASE_URL='...' TENANT_ID='...' bash snyk-agent-guard.sh --client cursor
 #
 # Reads a JSON payload from stdin and POSTs it (base64-encoded) to the Agent Guard endpoint.
+#
+# Two auth modes, chosen by guard install and never mixed:
+#   push key          PUSH_KEY and REMOTE_HOOKS_BASE_URL: the push-key route with X-Client-Id.
+#   machine identity  ADS_TOKEN_COMMAND, ADS_BASE_URL and TENANT_ID (set by guard install for an
+#                     ADS installer user-mode install on an enrolled machine): every run calls
+#                     `"$ADS_TOKEN_COMMAND" token --base-url "$ADS_BASE_URL"` and POSTs to the
+#                     tenant route on ADS_BASE_URL with the token as a bearer token. The token
+#                     is never logged and never put on a command line.
+# A push key wins: when PUSH_KEY (or PUSHKEY) is set, the hook uses it and ignores ADS_*, so an
+# ADS_TOKEN_COMMAND or ADS_BASE_URL in the agent's environment cannot change a push-key hook.
+# Machine identity applies when no push key is set and ADS_TOKEN_COMMAND or ADS_BASE_URL is; a
+# missing value is then a usage error. guard install's machine identity commands set PUSH_KEY and
+# PUSHKEY empty, so a push key in the agent's environment cannot change them either. A token
+# command that fails, times out or prints anything other than one token fails open like an
+# unreachable API; there is no fallback to the push key.
 #
 # The request is bounded by TIMEOUT_SECONDS below. Transport and HTTP failures, that timeout
 # included, fail open: exit 0, one line on stderr, and on stdout a systemMessage JSON object
@@ -27,7 +43,11 @@ AGENT_SCAN_VERSION="__AGENT_SCAN_VERSION__"
 # Hook API version.
 VERSION="2025-11-11"
 
-# Timeout, in seconds, for the whole request. agent-monitor may legitimately take ~50 s to
+# API version the gateway publishes the tenant routes at (machine identity).
+TENANT_VERSION="2024-10-15"
+
+# Timeout, in seconds, for the whole request; with machine identity the token command's time
+# comes out of it too. agent-monitor may legitimately take ~50 s to
 # answer: it holds a PreToolUse for up to 25 s until the session's discovery arrives, then
 # evaluates within its 25 s policy budget. Every synchronous hook the CLI installs is capped
 # by the agent at 65 s, so 60 s is late enough for a slow verdict and early enough that the
@@ -146,6 +166,64 @@ get_agent_surface() {
   fi
 }
 
+# Usage: fetch_access_token <deadline>
+#
+# Runs `"$ADS_TOKEN_COMMAND" token --base-url "$ADS_BASE_URL"` and sets ACCESS_TOKEN to the token
+# it prints. On failure ACCESS_TOKEN is empty, TOKEN_ERROR holds a fixed reason and the function
+# returns 1. Called directly, not in $(...), so both variables reach the caller.
+#
+# Neither macOS nor every Linux has timeout(1), so the command runs behind a pipe that is read
+# with `read -t` until <deadline> (a value of $SECONDS): a hung command, or a descendant still
+# holding its stdout, cannot hold the hook past it. The command's stderr is discarded, so nothing
+# it prints reaches the agent, and its stdout (the token) is never echoed.
+fetch_access_token() {
+  local deadline=$1
+  local pid_marker="__SNYK_AGENT_GUARD_TOKEN_PID__=" exit_marker="__SNYK_AGENT_GUARD_TOKEN_EXIT__="
+  local remaining line pid="" status="" token="" lines=0
+  ACCESS_TOKEN=""
+  TOKEN_ERROR=""
+  exec 3< <(
+    exec </dev/null 2>/dev/null
+    # The child prints its own PID before it execs the token command, so the marker cannot land
+    # inside the token (bash 3.2 has no BASHPID; exec keeps the PID).
+    "$BASH" -c 'printf "\n%s%d\n" "$1" "$$"; shift; exec "$@"' bash "$pid_marker" \
+      "$ADS_TOKEN_COMMAND" token --base-url "$ADS_BASE_URL" &
+    child=$!
+    child_status=0
+    wait "$child" || child_status=$?
+    printf '\n%s%d\n' "$exit_marker" "$child_status"
+  )
+  while :; do
+    remaining=$(( deadline - SECONDS ))
+    (( remaining > 0 )) || break
+    IFS= read -r -t "$remaining" -u 3 line || break
+    line="${line%$'\r'}"
+    case "$line" in
+      "$pid_marker"*) pid="${line#"$pid_marker"}" ;;
+      "$exit_marker"*) status="${line#"$exit_marker"}"; break ;;
+      "") ;;
+      *) token="$line"; lines=$(( lines + 1 )) ;;
+    esac
+  done
+  exec 3<&-
+  if [[ -z "$status" ]]; then
+    [[ -z "$pid" ]] || kill -TERM "$pid" 2>/dev/null || true
+    TOKEN_ERROR="token command did not finish in time"
+    return 1
+  fi
+  if [[ "$status" != "0" ]]; then
+    TOKEN_ERROR="token command failed (exit ${status})"
+    return 1
+  fi
+  # The token goes into a curl config line in double quotes, so anything that would need
+  # escaping there is refused rather than escaped.
+  if (( lines != 1 )) || [[ "$token" == *[[:space:][:cntrl:]\"\\]* ]]; then
+    TOKEN_ERROR="token command printed no single access token"
+    return 1
+  fi
+  ACCESS_TOKEN="$token"
+}
+
 # ---------------------------------------------------------------------------
 # Main hook logic
 # ---------------------------------------------------------------------------
@@ -162,11 +240,20 @@ hook_main() {
   done
 
   [[ -n "$client" ]] || die "Missing required argument: --client <claude-code|cursor|codex|github-copilot>"
-  [[ -n "${REMOTE_HOOKS_BASE_URL:-}" ]] || die "REMOTE_HOOKS_BASE_URL environment variable is not set"
 
-  local pushkey
-  pushkey="${PUSH_KEY:-${PUSHKEY:-}}"
-  [[ -n "$pushkey" ]] || die "PUSH_KEY environment variable is not set"
+  local machine_identity=0 pushkey="${PUSH_KEY:-${PUSHKEY:-}}"
+  # A push key wins over ADS_* (see the header), so only the push key decides a push-key hook.
+  if [[ -z "$pushkey" && ( -n "${ADS_TOKEN_COMMAND:-}" || -n "${ADS_BASE_URL:-}" ) ]]; then
+    machine_identity=1
+    [[ -n "${ADS_TOKEN_COMMAND:-}" ]] || die "ADS_TOKEN_COMMAND environment variable is not set (machine identity needs ADS_TOKEN_COMMAND, ADS_BASE_URL and TENANT_ID)"
+    [[ -n "${ADS_BASE_URL:-}" ]] || die "ADS_BASE_URL environment variable is not set (machine identity needs ADS_TOKEN_COMMAND, ADS_BASE_URL and TENANT_ID)"
+    [[ -n "${TENANT_ID:-}" ]] || die "TENANT_ID environment variable is not set (machine identity needs ADS_TOKEN_COMMAND, ADS_BASE_URL and TENANT_ID)"
+    # Tenant ids are UUIDs; one that would need escaping in the URL path is refused.
+    [[ "$TENANT_ID" =~ ^[A-Za-z0-9._~-]+$ ]] || die "TENANT_ID is not a valid tenant id"
+  else
+    [[ -n "${REMOTE_HOOKS_BASE_URL:-}" ]] || die "REMOTE_HOOKS_BASE_URL environment variable is not set"
+    [[ -n "$pushkey" ]] || die "PUSH_KEY environment variable is not set"
+  fi
   [[ -n "${MACHINE_ID:-}" ]] || die "MACHINE_ID environment variable is not set"
 
   local cli_version user_agent
@@ -189,7 +276,12 @@ hook_main() {
     *) die "Unknown client: ${client}. Expected claude-code, cursor, codex, or github-copilot." ;;
   esac
 
-  local url="${REMOTE_HOOKS_BASE_URL}${endpoint}?version=${VERSION}"
+  local url
+  if (( machine_identity )); then
+    url="${ADS_BASE_URL%/}/hidden/tenants/${TENANT_ID}${endpoint#/hidden}?version=${TENANT_VERSION}"
+  else
+    url="${REMOTE_HOOKS_BASE_URL}${endpoint}?version=${VERSION}"
+  fi
 
   # Read payload from stdin
   local payload
@@ -226,28 +318,48 @@ hook_main() {
   local agent_surface
   agent_surface="$(get_agent_surface "$client")"
 
+  # With machine identity the token command runs first, on every invocation, and its time
+  # comes out of TIMEOUT_SECONDS, so the hook as a whole stays within the budget.
+  local max_time=$TIMEOUT_SECONDS
+  if (( machine_identity )); then
+    local started=$SECONDS
+    fetch_access_token $(( started + TIMEOUT_SECONDS )) || fail_open "$client" "$TOKEN_ERROR"
+    max_time=$(( TIMEOUT_SECONDS - (SECONDS - started) ))
+    (( max_time >= 1 )) || max_time=1
+  fi
+
   local -a curl_args
   curl_args=(
     -sS
     -X POST
     "$url"
-    --max-time "$TIMEOUT_SECONDS"
+    --max-time "$max_time"
     -H "User-Agent: ${user_agent}"
     -H "X-User: ${x_user}"
     -H "Content-Type: text/plain"
-    -H "X-Client-Id: ${pushkey}"
-    --data-binary @-
   )
+  if (( ! machine_identity )); then
+    curl_args+=(-H "X-Client-Id: ${pushkey}")
+  fi
+  curl_args+=(--data-binary @-)
   if [[ -n "$agent_surface" ]]; then
     curl_args+=(-H "X-Agent-Surface: ${agent_surface}")
   fi
 
   local curl_status=0
-  resp="$(printf '%s' "$encoded_body" | curl "${curl_args[@]}" -w $'\n'"${marker}%{http_code}")" || curl_status=$?
+  if (( machine_identity )); then
+    # The Authorization header comes from a curl config read through a pipe (printf is a
+    # builtin), so the token never appears in curl's argv.
+    resp="$(printf '%s' "$encoded_body" | curl "${curl_args[@]}" \
+      -K <(printf 'header = "Authorization: Bearer %s"\n' "$ACCESS_TOKEN") \
+      -w $'\n'"${marker}%{http_code}")" || curl_status=$?
+  else
+    resp="$(printf '%s' "$encoded_body" | curl "${curl_args[@]}" -w $'\n'"${marker}%{http_code}")" || curl_status=$?
+  fi
   # curl writes the -w marker even for a failed transfer (http code 000) and may have
   # streamed part of a body before the timeout fired, so resp is only read on success.
   if (( curl_status == 28 )); then
-    fail_open "$client" "request timed out after ${TIMEOUT_SECONDS}s"
+    fail_open "$client" "request timed out after ${max_time}s"
   elif (( curl_status != 0 )); then
     fail_open "$client" "request failed (curl exit ${curl_status})"
   fi
