@@ -82,6 +82,9 @@ _TENANT_ID_RE = re.compile(r"^[A-Za-z0-9._~-]+$")
 # The Windows hook passes the base URL to the token command in a hand-quoted argument string, so
 # install refuses one that would need escaping there.
 _BASE_URL_UNSAFE_RE = re.compile(r'["\\\s]')
+# The bash hook puts the token in a double-quoted curl config line and refuses one with quotes,
+# backslashes or control characters, so the Python fetch refuses the same tokens.
+_TOKEN_UNSAFE_RE = re.compile(r'["\\\x00-\x1f\x7f]')
 _PERMISSION_DENIED = "__permission_denied__"
 # Install backs up a config file to ``<file>`` + this suffix. The name is Guard's own
 # (unlike a plain ``<file>.backup``, which other tools also write), so uninstall can
@@ -298,6 +301,11 @@ def _fetch_machine_auth(identity: _MachineIdentity) -> MachineAuth:
     Raises MachineAuthError when the command fails; there is no push-key fallback.
     """
     token = fetch_access_token(identity.token_command, identity.base_url)
+    if _TOKEN_UNSAFE_RE.search(token):
+        raise MachineAuthError(
+            "The token command printed a token with quotes, backslashes or control characters, "
+            "which the hook scripts cannot send."
+        )
     return MachineAuth(base_url=identity.base_url, tenant_id=identity.tenant_id, access_token=token)
 
 

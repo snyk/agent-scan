@@ -9412,6 +9412,14 @@ class TestMachineIdentityFromEnv:
             "https://api.eu.snyk.io/hidden/tenants/tenant/agent-monitor/hooks/cursor?version=2024-10-15"
         )
 
+    @pytest.mark.parametrize("token", ['to"k', "to\\k", "to\x01k", "to\x7fk"])
+    def test_fetch_machine_auth_refuses_a_token_the_hook_scripts_cannot_send(self, token):
+        with (
+            patch(f"{_G}.fetch_access_token", return_value=token),
+            pytest.raises(guard_module.MachineAuthError, match="quotes, backslashes or control characters"),
+        ):
+            guard_module._fetch_machine_auth(_IDENTITY)
+
 
 class TestRunInstallMachineIdentity:
     @pytest.fixture(autouse=True)
