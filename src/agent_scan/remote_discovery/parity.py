@@ -46,6 +46,12 @@ def counts(clients: list[ClientToInspect]) -> dict[str, int]:
     }
 
 
+def home_counts(homes: Sequence[tuple[PurePath, str]]) -> dict[str, int]:
+    """How many homes both sides scanned, and how many are inside WSL."""
+    wsl = sum(1 for home, _user in homes if home.as_posix().lower().startswith(WSL_SHARES))
+    return {"homes_count": len(homes), "wsl_homes_count": wsl}
+
+
 def _values(clients: list[ClientToInspect]) -> tuple[dict[Key, Any], int]:
     """Values by key, plus how many repeated keys were dropped. The first value wins:
     discoverers merge into the first client of a (name, username), so a later repeat

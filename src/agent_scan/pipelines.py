@@ -28,7 +28,7 @@ from agent_scan.models import (
 from agent_scan.redact import redact_inspected_path
 from agent_scan.remote_discovery.builder import build_clients
 from agent_scan.remote_discovery.client import RemoteDiscoveryError, run_remote_discovery
-from agent_scan.remote_discovery.parity import LocalPhaseKeys, client_keys, compare, counts
+from agent_scan.remote_discovery.parity import LocalPhaseKeys, client_keys, compare, counts, home_counts
 from agent_scan.utils import get_readable_home_directories
 from agent_scan.verify_api import AgentScanConfig, RemoteDiscoveryMode, analyze_machine
 from agent_scan.well_known_clients import get_well_known_clients
@@ -308,6 +308,7 @@ async def discover_clients(
         return discovered, metadata
     # Looked up once: on Windows the lookup can time out, and both sides must see the same homes.
     homes = get_readable_home_directories(all_users=inspect_args.all_users)
+    scanned = home_counts(homes)
     run_remote = discover_clients_remotely(
         inspect_args,
         discovery_url,
@@ -326,10 +327,11 @@ async def discover_clients(
             return (local_only, [], usernames), {
                 "mode": "on",
                 "source": "remote",
+                **scanned,
                 "remote": counts(local_only),
                 "remote_error_reason": outcome.failure_reason or "error",
             }
-        metadata = {"mode": "on", "source": "remote", "remote": counts(outcome.discovered[0])}
+        metadata = {"mode": "on", "source": "remote", **scanned, "remote": counts(outcome.discovered[0])}
         if outcome.partial:
             metadata["partial"] = True
         return outcome.discovered, metadata
@@ -340,7 +342,7 @@ async def discover_clients(
     except BaseException:
         run_remote.close()
         raise
-    metadata = {"mode": "shadow", "source": "local", "local": counts(discovered[0])}
+    metadata = {"mode": "shadow", "source": "local", **scanned, "local": counts(discovered[0])}
     try:
         outcome = await asyncio.wait_for(run_remote, SHADOW_TIMEOUT_S)
     except asyncio.TimeoutError:

@@ -7,7 +7,7 @@ import pytest
 from agent_scan.models import ClientToInspect, StdioServer
 from agent_scan.pipelines import InspectArgs, RemoteOutcome, discover_clients
 from agent_scan.remote_discovery import parity
-from agent_scan.remote_discovery.parity import LocalPhaseKeys, compare, counts
+from agent_scan.remote_discovery.parity import LocalPhaseKeys, compare, counts, home_counts
 
 
 def _client(name="cursor", mcp=None, skills=None) -> ClientToInspect:
@@ -23,6 +23,16 @@ def _servers(command="npx"):
 def test_counts():
     clients = [_client(mcp={"/a.json": _servers(), "/b.json": []}, skills={"/s": []})]
     assert counts(clients) == {"clients": 1, "mcp_configs": 2, "mcp_servers": 1, "skills_dirs": 1}
+
+
+def test_home_counts():
+    homes = [
+        (PureWindowsPath(r"C:\Users\alice"), "alice"),
+        (PureWindowsPath(r"\\wsl.localhost\Ubuntu\home\alice"), "alice"),
+        (PureWindowsPath(r"\\WSL$\Debian\home\bob"), "bob"),
+    ]
+    assert home_counts(homes) == {"homes_count": 3, "wsl_homes_count": 2}
+    assert home_counts([]) == {"homes_count": 0, "wsl_homes_count": 0}
 
 
 def test_identical():
