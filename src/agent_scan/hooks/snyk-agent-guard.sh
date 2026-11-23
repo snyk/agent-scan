@@ -4,10 +4,13 @@
 # Supports Claude Code, Cursor, Codex, and GitHub Copilot via the --client argument.
 #
 # Usage:
-#   PUSH_KEY='...' REMOTE_HOOKS_BASE_URL='...' bash snyk-agent-guard.sh --client claude-code
-#   PUSH_KEY='...' REMOTE_HOOKS_BASE_URL='...' bash snyk-agent-guard.sh --client cursor
-#   PUSH_KEY='...' REMOTE_HOOKS_BASE_URL='...' bash snyk-agent-guard.sh --client codex
-#   PUSH_KEY='...' REMOTE_HOOKS_BASE_URL='...' bash snyk-agent-guard.sh --client github-copilot
+#   bash snyk-agent-guard.sh --client claude-code
+#   bash snyk-agent-guard.sh --client cursor
+#   bash snyk-agent-guard.sh --client codex
+#   bash snyk-agent-guard.sh --client github-copilot
+#
+# Configuration is read from snyk-agent-guard.conf next to this script, written by
+# `snyk-agent-scan guard install`.
 #
 # Reads a JSON payload from stdin and POSTs it (base64-encoded) to the Agent Guard endpoint.
 #
@@ -74,6 +77,32 @@ fail_open() {
   exit 0
 }
 
+# Installation configuration, written by `snyk-agent-scan guard install` next to this
+# script.
+CONFIG_FILE="$(dirname "${BASH_SOURCE[0]}")/snyk-agent-guard.conf"
+CFG_PUSH_KEY=""
+CFG_REMOTE_HOOKS_BASE_URL=""
+CFG_MACHINE_ID=""
+CFG_MACHINE_SERIAL=""
+
+load_config() {
+  [[ -f "$CONFIG_FILE" && -r "$CONFIG_FILE" ]] \
+    || die "Configuration file not found: ${CONFIG_FILE} (run 'snyk-agent-scan guard install')"
+  local line key value
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    [[ "$line" == *=* ]] || continue
+    key="${line%%=*}"
+    value="${line#*=}"
+    case "$key" in
+      PUSH_KEY) CFG_PUSH_KEY="$value" ;;
+      REMOTE_HOOKS_BASE_URL) CFG_REMOTE_HOOKS_BASE_URL="$value" ;;
+      MACHINE_ID) CFG_MACHINE_ID="$value" ;;
+      MACHINE_SERIAL) CFG_MACHINE_SERIAL="$value" ;;
+    esac
+  done < "$CONFIG_FILE"
+}
+
 json_escape() {
   local s="${1-}"
   s="${s//\\/\\\\}"
@@ -81,7 +110,7 @@ json_escape() {
   s="${s//$'\t'/\\t}"
   s="${s//$'\r'/\\r}"
   s="${s//$'\n'/\\n}"
-  # JSON strings cannot contain any literal C0 control character. NUL cannot occur in an environment value.
+  # JSON strings cannot contain any literal C0 control character. NUL cannot occur in a shell variable.
   local code char escaped
   for (( code=1; code<32; code++ )); do
     printf -v char '\\%03o' "$code"
@@ -162,12 +191,12 @@ hook_main() {
   done
 
   [[ -n "$client" ]] || die "Missing required argument: --client <claude-code|cursor|codex|github-copilot>"
-  [[ -n "${REMOTE_HOOKS_BASE_URL:-}" ]] || die "REMOTE_HOOKS_BASE_URL environment variable is not set"
 
-  local pushkey
-  pushkey="${PUSH_KEY:-${PUSHKEY:-}}"
-  [[ -n "$pushkey" ]] || die "PUSH_KEY environment variable is not set"
-  [[ -n "${MACHINE_ID:-}" ]] || die "MACHINE_ID environment variable is not set"
+  load_config
+  [[ -n "$CFG_REMOTE_HOOKS_BASE_URL" ]] || die "REMOTE_HOOKS_BASE_URL is not set in ${CONFIG_FILE}"
+  local pushkey="$CFG_PUSH_KEY"
+  [[ -n "$pushkey" ]] || die "PUSH_KEY is not set in ${CONFIG_FILE}"
+  [[ -n "$CFG_MACHINE_ID" ]] || die "MACHINE_ID is not set in ${CONFIG_FILE}"
 
   local cli_version user_agent
   cli_version="$AGENT_SCAN_VERSION"
@@ -189,7 +218,7 @@ hook_main() {
     *) die "Unknown client: ${client}. Expected claude-code, cursor, codex, or github-copilot." ;;
   esac
 
-  local url="${REMOTE_HOOKS_BASE_URL}${endpoint}?version=${VERSION}"
+  local url="${CFG_REMOTE_HOOKS_BASE_URL}${endpoint}?version=${VERSION}"
 
   # Read payload from stdin
   local payload
@@ -208,15 +237,15 @@ hook_main() {
   hostname="$(get_hostname)"
   username="$(get_username)"
   machine_serial=null
-  if [[ -n "${MACHINE_SERIAL:-}" ]]; then
-    machine_serial="$(json_quote "$MACHINE_SERIAL")"
+  if [[ -n "$CFG_MACHINE_SERIAL" ]]; then
+    machine_serial="$(json_quote "$CFG_MACHINE_SERIAL")"
   fi
 
   x_user="$(printf '{%s:%s,%s:%s,%s:%s,%s:%s,%s:%s}' \
     "\"hostname\"" "$(json_quote "$hostname")" \
     "\"machine_serial\"" "$machine_serial" \
     "\"username\"" "$(json_quote "$username")" \
-    "\"identifier\"" "$(json_quote "$MACHINE_ID")" \
+    "\"identifier\"" "$(json_quote "$CFG_MACHINE_ID")" \
     "\"cli_version\"" "$(json_quote "$cli_version")")"
 
   # Execute request
