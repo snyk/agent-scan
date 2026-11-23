@@ -749,9 +749,10 @@ def _install_hooks(
     guard_config = _render_guard_config(config_values)
 
     # The configuration file holds the hook values and is written before the test event,
-    # which runs the installed script against it. If the event is rejected, the previous
-    # file and scripts are put back so hooks that are already installed keep working,
-    # including commands written by an earlier version, which need its scripts.
+    # which runs the installed script against it. If the install fails before the agent
+    # config is written (the test event is rejected, or anything raises), the previous file
+    # and scripts are put back so hooks that are already installed keep working, including
+    # commands written by an earlier version, which need its scripts.
     previous_config = guard_config_path.read_bytes() if guard_config_path.is_file() else None
     # Checksummed like the scripts: agent-monitor compares the current checksum with the
     # new one the previous install reported, so an edit made between installs is caught
@@ -760,56 +761,64 @@ def _install_hooks(
     config_new_checksum = hashlib.sha256(guard_config).hexdigest()
     # The configuration goes first: a script that finds none refuses to run, so the
     # new scripts must never be live before the file they read is in place.
-    guard_config_updated = _write_guard_config(guard_config_path, guard_config, managed=scope == "managed")
-    main_script = _copy_hook_script(forwarder_script_path)
-    discover_script = _copy_hook_script(discover_script_path) if install_discovery else None
+    main_script: _CopiedScript | None = None
+    discover_script: _CopiedScript | None = None
+    try:
+        guard_config_updated = _write_guard_config(guard_config_path, guard_config, managed=scope == "managed")
+        main_script = _copy_hook_script(forwarder_script_path)
+        discover_script = _copy_hook_script(discover_script_path) if install_discovery else None
 
-    dest_path = main_script.path
-    script_updated = main_script.updated or bool(discover_script and discover_script.updated)
-    command = _build_hook_command(dest_path, hook_client)
-    discover_command = _build_discover_hook_command(discover_script_path, hook_client) if install_discovery else None
-    prepared_config, prepared_content, hooks_diff, preserved = _prepare_client_config(
-        client,
-        command,
-        config_path,
-        discover_command=discover_command,
-        config_values=config_values,
-    )
+        dest_path = main_script.path
+        script_updated = main_script.updated or bool(discover_script and discover_script.updated)
+        command = _build_hook_command(dest_path, hook_client)
+        discover_command = (
+            _build_discover_hook_command(discover_script_path, hook_client) if install_discovery else None
+        )
+        prepared_config, prepared_content, hooks_diff, preserved = _prepare_client_config(
+            client,
+            command,
+            config_path,
+            discover_command=discover_command,
+            config_values=config_values,
+        )
 
-    first_install = not main_script.existed
-    config_changed = bool(hooks_diff["added"] or hooks_diff["modified"] or hooks_diff["removed"])
+        first_install = not main_script.existed
+        config_changed = bool(hooks_diff["added"] or hooks_diff["modified"] or hooks_diff["removed"])
 
-    test_event = _send_test_event(
-        hook_client,
-        dest_path,
-        first_install=first_install,
-        config_changed=config_changed,
-        hooks_diff=hooks_diff,
-        push_key_changed=push_key_changed,
-        current_checksum=main_script.current_checksum,
-        new_checksum=main_script.new_checksum,
-        discover_current_checksum=discover_script.current_checksum if discover_script else None,
-        discover_new_checksum=discover_script.new_checksum if discover_script else None,
-        config_current_checksum=config_current_checksum,
-        config_new_checksum=config_new_checksum,
-    )
-    if test_event.status == "rejected":
+        test_event = _send_test_event(
+            hook_client,
+            dest_path,
+            first_install=first_install,
+            config_changed=config_changed,
+            hooks_diff=hooks_diff,
+            push_key_changed=push_key_changed,
+            current_checksum=main_script.current_checksum,
+            new_checksum=main_script.new_checksum,
+            discover_current_checksum=discover_script.current_checksum if discover_script else None,
+            discover_new_checksum=discover_script.new_checksum if discover_script else None,
+            config_current_checksum=config_current_checksum,
+            config_new_checksum=config_new_checksum,
+        )
+        if test_event.status == "rejected":
+            rich.print("[bold red]Aborting install \u2014 test event failed.[/bold red]")
+            raise SystemExit(1)
+        if test_event.status == "unconfirmed":
+            _warn_test_event_unconfirmed(test_event)
+            _report_test_event_unconfirmed(
+                push_key, url, hook_client, machine_id, test_event, machine_serial=machine_serial
+            )
+
+        config_written = _write_client_config(client, config_path, prepared_config, prepared_content, preserved)
+    except BaseException:
+        # Nothing is live until the agent config is written: put back what was there before.
         if previous_config is None:
             guard_config_path.unlink(missing_ok=True)
         else:
             _write_guard_config(guard_config_path, previous_config, managed=scope == "managed")
-        _restore_hook_script(main_script)
-        if discover_script is not None:
-            _restore_hook_script(discover_script)
-        rich.print("[bold red]Aborting install \u2014 test event failed.[/bold red]")
-        raise SystemExit(1)
-    if test_event.status == "unconfirmed":
-        _warn_test_event_unconfirmed(test_event)
-        _report_test_event_unconfirmed(
-            push_key, url, hook_client, machine_id, test_event, machine_serial=machine_serial
-        )
-
-    config_written = _write_client_config(client, config_path, prepared_config, prepared_content, preserved)
+        for script in (main_script, discover_script):
+            if script is not None:
+                _restore_hook_script(script)
+        raise
     if not install_discovery and discover_script_path.exists():
         discover_script_path.unlink()
         rich.print(f"[green]✓[/green]  Removed stale hook script [dim]{discover_script_path}[/dim]")
@@ -1640,7 +1649,7 @@ def _detect_codex_managed_install(path: Path) -> dict | None:
     events, guard_command, _ = _parse_codex_requirements_toml(text)
     if not events or guard_command is None:
         return None
-    return _parse_command_info(events, path)
+    return _parse_command_info(guard_command, events, path)
 
 
 def _uninstall_codex_managed(path: Path) -> None:
@@ -1718,10 +1727,7 @@ def _uninstall_single_client(client: str, args, managed: bool) -> None:
     if info and info.get("auth_value"):
         _try_revoke_push_key(info, label)
     elif info:
-        rich.print(
-            "[dim]   Push key was not revoked: this install predates the guard configuration file, "
-            "so its push key is not available. Run `snyk-agent-scan guard install` first.[/dim]"
-        )
+        rich.print("[dim]   Push key was not revoked: no push key was found for this install.[/dim]")
 
     rich.print()
 
@@ -1932,7 +1938,7 @@ def _detect_install(path: Path, events: list[str], commands: Callable[[dict], It
 
     if not installed_events or found_cmd is None:
         return None
-    return _parse_command_info(installed_events, path)
+    return _parse_command_info(found_cmd, installed_events, path)
 
 
 # ---------------------------------------------------------------------------
@@ -2430,10 +2436,14 @@ def _filter_cursor_hooks(hooks: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def _parse_command_info(events: list[str], config_path: Path) -> dict:
-    """Describe an installed hook: its values come from the guard configuration file, which
-    is what the scripts use."""
-    values = _read_guard_config(_guard_config_path(config_path))
+def _parse_command_info(cmd: str, events: list[str], config_path: Path) -> dict:
+    """Describe an installed hook from the guard configuration file, which is what the scripts
+    use. An install made by an earlier version has none; its values are on the hook command."""
+    guard_config_path = _guard_config_path(config_path)
+    if guard_config_path.is_file():
+        values = _read_guard_config(guard_config_path)
+    else:
+        values = {key: _extract_env_from_cmd(cmd, key) for key in _PS_PARAM_MAP}
     url = values.get("REMOTE_HOOKS_BASE_URL", "")
     push_key = values.get("PUSH_KEY", "")
     host = urlparse(url).netloc if url else "unknown"
@@ -2446,6 +2456,31 @@ def _parse_command_info(events: list[str], config_path: Path) -> dict:
         "url": url or DEFAULT_REMOTE_URL,
         "events": events,
     }
+
+
+_PS_PARAM_MAP = {
+    "PUSH_KEY": "PushKey",
+    "REMOTE_HOOKS_BASE_URL": "RemoteUrl",
+    "TENANT_ID": "TenantId",
+}
+
+
+def _extract_env_from_cmd(cmd: str, key: str) -> str:
+    # Try PowerShell -ParamName 'value' form
+    ps_name = _PS_PARAM_MAP.get(key)
+    if ps_name:
+        m = re.search(rf"-{re.escape(ps_name)}\s+'([^']*)'", cmd)
+        if m:
+            return m.group(1)
+    # Try KEY='...' form
+    m = re.search(rf"(?:^| ){re.escape(key)}='([^']*)'", cmd)
+    if m:
+        return m.group(1)
+    # Try KEY=value (no quotes)
+    m = re.search(rf"(?:^| ){re.escape(key)}=(\S+)", cmd)
+    if m:
+        return m.group(1)
+    return ""
 
 
 # ---------------------------------------------------------------------------

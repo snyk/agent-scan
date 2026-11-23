@@ -54,6 +54,7 @@ from agent_scan.guard import (
     _detect_copilot_install,
     _detect_cursor_install,
     _ensure_guard_enabled_for_tenant,
+    _extract_env_from_cmd,
     _extract_guard_hooks,
     _filter_claude_hooks,
     _filter_cursor_hooks,
@@ -282,6 +283,26 @@ class TestCompactEvents:
 
     def test_nine(self):
         assert _compact_events(list("ABCDEFGHI")) == "(A, B + 7 more)"
+
+
+class TestExtractEnvFromCmd:
+    def test_single_quoted(self):
+        assert _extract_env_from_cmd("PUSH_KEY='abc-123' bash x", "PUSH_KEY") == "abc-123"
+
+    def test_unquoted(self):
+        assert _extract_env_from_cmd("PUSH_KEY=abc123 bash x", "PUSH_KEY") == "abc123"
+
+    def test_missing(self):
+        assert _extract_env_from_cmd("bash x", "PUSH_KEY") == ""
+
+    def test_multiple_keys(self):
+        cmd = "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' bash x"
+        assert _extract_env_from_cmd(cmd, "PUSH_KEY") == "pk"
+        assert _extract_env_from_cmd(cmd, "REMOTE_HOOKS_BASE_URL") == "https://api.snyk.io"
+
+    def test_tenant_id(self):
+        cmd = "PUSH_KEY='pk' TENANT_ID='tid-1' bash x"
+        assert _extract_env_from_cmd(cmd, "TENANT_ID") == "tid-1"
 
 
 @pytest.mark.parametrize(
@@ -1296,7 +1317,7 @@ class TestParseCommandInfo:
     def test_full_config(self, tmp_path):
         path = tmp_path / "settings.json"
         _write_conf(path)
-        info = _parse_command_info(["PreToolUse", "Stop"], path)
+        info = _parse_command_info("bash x --client c", ["PreToolUse", "Stop"], path)
         assert info["host"] == "api.snyk.io"
         assert info["auth_value"] == "pk-1234"
         assert info["tenant_id"] == "tid-1"
@@ -1305,17 +1326,30 @@ class TestParseCommandInfo:
     def test_no_tenant(self, tmp_path):
         path = tmp_path / "settings.json"
         _write_conf(path, tenant="")
-        info = _parse_command_info(["Stop"], path)
+        info = _parse_command_info("bash x --client c", ["Stop"], path)
         assert info["tenant_id"] == ""
 
-    def test_values_on_the_command_are_not_read(self, tmp_path):
-        """A hook command's values are not used; without a configuration file there are none."""
+    def test_the_guard_config_wins_over_values_on_the_command(self, tmp_path):
+        """The scripts use only the configuration file, so its values describe the install."""
         path = tmp_path / "settings.json"
-        _setup_claude_hooks(AGENT_SCAN_CMD, path)
-        info = _detect_claude_install(path)
-        assert info is not None
-        assert info["auth_value"] == ""
-        assert info["host"] == "unknown"
+        _write_conf(path, push_key="pk-from-config")
+        info = _parse_command_info(AGENT_SCAN_CMD.replace("https://api.snyk.io", "https://other.example"), [], path)
+        assert (info["auth_value"], info["host"]) == ("pk-from-config", "api.snyk.io")
+
+    def test_install_by_an_earlier_version_reads_the_command(self, tmp_path):
+        """Without a configuration file, the values are on the hook command, as earlier versions
+        wrote them, so uninstall can still revoke the key and a re-install can tell it changed."""
+        info = _parse_command_info(AGENT_SCAN_CMD, ["PreToolUse"], tmp_path / "settings.json")
+        assert (info["host"], info["auth_value"], info["tenant_id"]) == ("api.snyk.io", "pk-1234", "tid-1")
+
+    def test_earlier_powershell_command(self, tmp_path):
+        cmd = "powershell -File 'C:\\h\\snyk-agent-guard.ps1' -Client cursor -PushKey 'pk' -RemoteUrl 'https://api.snyk.io'"
+        info = _parse_command_info(cmd, [], tmp_path / "hooks.json")
+        assert (info["auth_value"], info["host"]) == ("pk", "api.snyk.io")
+
+    def test_no_values_anywhere(self, tmp_path):
+        info = _parse_command_info("bash x --client c", [], tmp_path / "settings.json")
+        assert (info["auth_value"], info["host"]) == ("", "unknown")
 
 
 # ===================================================================
@@ -9333,21 +9367,66 @@ class TestHookConfigEndToEnd:
         assert events.index("snyk-agent-guard.sh") < events.index("settings.json")
         assert events[-1] == "settings.json"
 
-    def test_uninstall_of_an_install_without_guard_config_says_the_key_was_not_revoked(self, tmp_path, monkeypatch):
+    def test_uninstall_of_an_install_without_guard_config_revokes_the_key_from_its_command(self, tmp_path, monkeypatch):
         config = tmp_path / "settings.json"
         _setup_claude_hooks(AGENT_SCAN_CMD, config)  # values on the command, no guard config file
         monkeypatch.setenv("SNYK_TOKEN", "token")
         args = argparse.Namespace(file=str(config))
 
-        with (
-            patch(f"{_G}.rich") as mock_rich,
-            patch(f"{_G}.revoke_push_key") as revoke,
-        ):
+        with patch(f"{_G}.rich"), patch(f"{_G}.revoke_push_key") as revoke:
+            guard_module._uninstall_single_client("claude", args, managed=False)
+
+        revoke.assert_called_once_with("https://api.snyk.io", "tid-1", "token", "pk-1234")
+
+    def test_uninstall_without_any_push_key_says_the_key_was_not_revoked(self, tmp_path, monkeypatch):
+        config = tmp_path / "settings.json"
+        _setup_claude_hooks("bash '/home/u/.claude/hooks/snyk-agent-guard.sh' --client claude-code", config)
+        monkeypatch.setenv("SNYK_TOKEN", "token")
+        args = argparse.Namespace(file=str(config))
+
+        with patch(f"{_G}.rich") as mock_rich, patch(f"{_G}.revoke_push_key") as revoke:
             guard_module._uninstall_single_client("claude", args, managed=False)
 
         revoke.assert_not_called()
         printed = " ".join(str(c.args[0]) for c in mock_rich.print.call_args_list if c.args)
-        assert "predates the guard configuration file" in printed
+        assert "no push key was found for this install" in printed
+
+    def test_upgrade_from_an_earlier_version_reports_a_rotated_push_key(self, tmp_path, success_hook_server):
+        old_key, new_key = "11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"
+        config = tmp_path / "settings.json"
+        self._install(config, success_hook_server)
+        self._make_v0_7_0_install(config, success_hook_server)
+        config.write_text(config.read_text().replace("PUSH_KEY='pk-1'", f"PUSH_KEY='{old_key}'"))
+        _SuccessHookHandler.requests = []
+
+        self._install(config, success_hook_server, push_key=new_key)
+
+        payload = _hooks_configured_payload(_SuccessHookHandler.requests[0])
+        assert payload["push_key_changed"] is True
+        assert payload["config_changed"] is False
+
+    @pytest.mark.parametrize("failing_step", ["_prepare_client_config", "_write_client_config"])
+    def test_reinstall_that_raises_puts_everything_back(self, tmp_path, success_hook_server, failing_step):
+        """A failure other than a rejected test event, after the guard config file was written,
+        must not leave hooks that are already installed reading the new (revoked) push key."""
+        config = tmp_path / "settings.json"
+        self._install(config, success_hook_server)
+        script = guard_module._forwarder_script_path(config)
+        script.write_text("#!/usr/bin/env bash\n# previous version\n")
+        files = (config, guard_module._guard_config_path(config), script)
+        before = tuple(f.read_bytes() for f in files)
+
+        with patch(f"{_G}.{failing_step}", side_effect=OSError("disk full")), pytest.raises(OSError):
+            self._install(config, success_hook_server, push_key="pk-2")
+
+        assert tuple(f.read_bytes() for f in files) == before
+
+    def test_first_install_that_raises_leaves_nothing_behind(self, tmp_path, success_hook_server):
+        config = tmp_path / "settings.json"
+        with patch(f"{_G}._write_client_config", side_effect=OSError("disk full")), pytest.raises(OSError):
+            self._install(config, success_hook_server)
+        assert not config.exists()
+        assert list((tmp_path / "hooks").iterdir()) == []
 
     # hook_server answers without "success": true, a persistent rejection (an invalid push key),
     # so the install aborts at once. An HTTP 5xx would be retried as an outage and then let
