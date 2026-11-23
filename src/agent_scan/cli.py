@@ -42,6 +42,7 @@ from agent_scan.pipelines import (
     inspect_pipeline,
 )
 from agent_scan.printer import print_inspected_machine, print_scan_response
+from agent_scan.redact import redact_text, redact_urls_and_headers_in_text
 from agent_scan.utils import ensure_unicode_console, get_hostname, get_push_key, parse_headers, suppress_stdout
 from agent_scan.verify_api import AgentScanConfig, discovery_base_url, fetch_agent_scan_config
 from agent_scan.version import version_info
@@ -60,6 +61,15 @@ class MissingIdentifierError(Exception):
     pass
 
 
+class _RedactingLogFilter(logging.Filter):
+    """Sanitize formatted log messages before any handler emits them."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = redact_text(redact_urls_and_headers_in_text(record.getMessage())) or ""
+        record.args = None
+        return True
+
+
 def setup_logging(verbose=False, log_to_stderr=False):
     """Configure logging based on the verbose flag."""
     if verbose:
@@ -75,23 +85,29 @@ def setup_logging(verbose=False, log_to_stderr=False):
         if log_to_stderr:
             # stderr logging
             stderr_console = rich.console.Console(stderr=True)
+            handler = RichHandler(markup=False, rich_tracebacks=True, console=stderr_console)
+            handler.addFilter(_RedactingLogFilter())
             logging.basicConfig(
                 format="%(message)s",
                 datefmt="[%X]",
                 force=True,
                 level=logging.DEBUG,
-                handlers=[RichHandler(markup=False, rich_tracebacks=True, console=stderr_console)],
+                handlers=[handler],
             )
             root_logger.debug("Verbose mode enabled, logging initialized to stderr")
         else:  # stdout logging
+            handler = RichHandler(markup=False, rich_tracebacks=True)
+            handler.addFilter(_RedactingLogFilter())
             logging.basicConfig(
                 format="%(message)s",
                 datefmt="[%X]",
                 force=True,
                 level=logging.DEBUG,
-                handlers=[RichHandler(markup=False, rich_tracebacks=True)],
+                handlers=[handler],
             )
             root_logger.debug("Logging initialized to stdout")
+        for logger_name in ("httpx", "httpcore", "mcp"):
+            logging.getLogger(logger_name).setLevel(logging.WARNING)
         root_logger.debug("Logging initialized")
 
 

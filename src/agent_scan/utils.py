@@ -183,7 +183,7 @@ def parse_headers(headers: list[str] | None) -> dict:
     headers = [header.strip() for header in headers]
     for header in headers:
         if ":" not in header:
-            raise ValueError(f"Invalid header: {header}")
+            raise ValueError("Invalid header format: expected 'Name: Value'")
     return {header.split(":")[0]: header.split(":")[1] for header in headers}
 
 

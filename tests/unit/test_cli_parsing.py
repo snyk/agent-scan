@@ -489,6 +489,15 @@ class TestControlServerHeaderParsing:
         with pytest.raises(ValueError, match="Invalid header"):
             parse_headers(headers)
 
+    def test_parse_headers_invalid_format_does_not_echo_value(self):
+        """Malformed header ValueError must not leak raw secret values."""
+        from agent_scan.utils import parse_headers
+
+        with pytest.raises(ValueError, match="Invalid header") as exc_info:
+            parse_headers(["Bearer FAKE-SECRET-123"])
+
+        assert "FAKE-SECRET-123" not in str(exc_info.value)
+
 
 class TestControlServerUploadIntegration:
     """Integration tests for control server arguments passed to the pipeline."""
