@@ -12,7 +12,7 @@ This module provides functions to redact sensitive data like:
 import functools
 import logging
 import re
-from urllib.parse import parse_qsl, quote_plus, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from detect_secrets.plugins.high_entropy_strings import HighEntropyStringsPlugin
 from detect_secrets.plugins.keyword import KeywordDetector
@@ -732,7 +732,7 @@ def redact_text(text: str | None) -> str | None:
     return "\n".join(_redact_secrets_in_line(line, entropy_plugins) for line in text.split("\n"))
 
 
-_TEXT_URL_RE = re.compile(r"https?://(?:\[[0-9a-fA-F:%._-]+\]|[^\s\"'<>)\]}\\])+", re.IGNORECASE)
+_TEXT_URL_RE = re.compile(r"https?://(?:\[[0-9a-fA-F:%._-]+\]|[^\s\"'<>)\]}\\[])+", re.IGNORECASE)
 _TEXT_HEADER_NAMES = "|".join(re.escape(h) for h in (*sorted(_SENSITIVE_HEADER_NAMES), "proxy-authorization"))
 _QUOTED_AUTH_HEADER_RE = re.compile(rf"(?i)\b((?:{_TEXT_HEADER_NAMES})['\"]?\s*:\s*)(['\"])(?:\\.|(?!\2).)+\2")
 _UNQUOTED_AUTH_HEADER_RE = re.compile(
@@ -741,26 +741,18 @@ _UNQUOTED_AUTH_HEADER_RE = re.compile(
 _BEARER_TOKEN_RE = re.compile(r"(?i)\b(bearer\s+)(['\"]?)(?!['\"\s])[^\s\"',;}\])\\]+\2")
 
 
-def redact_url(url: str) -> str:
-    """Replace every query parameter value in *url* with ``REDACTED``, failing closed on parse errors."""
-    try:
-        parts = urlsplit(url)
-        if not parts.query:
-            return url
-        qs = [
-            urlencode([(k, REDACTED) for k, _ in parse_qsl(s, True)]) if "=" in s else quote_plus(REDACTED)
-            for s in parts.query.split("&")
-            if s
-        ]
-        return urlunsplit((parts.scheme, parts.netloc, parts.path, "&".join(qs), parts.fragment))
-    except Exception:
-        logger.error("Failed to redact URL")
-        return REDACTED
-
-
 def _redact_url_match(match: re.Match[str]) -> str:
-    url = match.group(0).rstrip(".,;:!?")
-    return redact_url(url) + match.group(0)[len(url) :]
+    raw = match.group(0)
+    url = raw.rstrip(".,;:!?")
+    destination, frag_sep, fragment = url.partition("#")
+    base, query_sep, query = destination.partition("?")
+    if not query_sep:
+        return raw
+    redacted_query = "&".join(
+        f"{part.partition('=')[0]}={REDACTED}" if "=" in part else (REDACTED if part else "")
+        for part in query.split("&")
+    )
+    return f"{base}{query_sep}{redacted_query}{frag_sep}{fragment}{raw[len(url) :]}"
 
 
 def redact_urls_and_headers_in_text(text: str | None) -> str | None:
@@ -800,7 +792,16 @@ def redact_server_config(server: StdioServer | RemoteServer) -> StdioServer | Re
         # Redact all headers
         if server.headers:
             server.headers = dict.fromkeys(server.headers, REDACTED)
-        server.url = redact_url(server.url)
+        # Redact all query parameter values in the URL
+        try:
+            parts = urlsplit(server.url)
+            if parts.query:
+                qs = parse_qsl(parts.query)
+                redacted_qs = [(key, REDACTED) for key, _value in qs]
+                new_query = urlencode(redacted_qs)
+                server.url = urlunsplit((parts.scheme, parts.netloc, parts.path, new_query, parts.fragment))
+        except Exception:
+            logger.error("Failed to redact URL: %s", server.url)
 
     return server
 

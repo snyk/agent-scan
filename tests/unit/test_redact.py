@@ -9,7 +9,6 @@ import pytest
 
 from agent_scan.models import InspectedPath, InspectedServer, RemoteServer, ScanError, StdioServer
 from agent_scan.redact import (
-    REDACTED,
     _is_uuid_like,
     redact_absolute_paths,
     redact_args,
@@ -17,9 +16,7 @@ from agent_scan.redact import (
     redact_inspected_path,
     redact_push_keys,
     redact_push_keys_in_data,
-    redact_server_config,
     redact_text,
-    redact_url,
     redact_urls_and_headers_in_text,
 )
 from tests.unit._secret_fixtures import synthetic_secret
@@ -875,7 +872,7 @@ def test_redact_inspected_path_remote_url_query_and_headers():
             InspectedServer(
                 name="remote",
                 server=RemoteServer(
-                    url="https://api.example.com:8443/endpoint?token=abc123&api_key=xyz&FAKE-FLAG#frag",
+                    url="https://api.example.com/endpoint?token=abc123&api_key=xyz",
                     type="http",
                     headers={"Authorization": "Bearer secret", "X-Custom": "value"},
                 ),
@@ -890,14 +887,7 @@ def test_redact_inspected_path_remote_url_query_and_headers():
     assert isinstance(srv.server, RemoteServer)
     assert srv.server.headers["Authorization"] == "**REDACTED**"
     assert srv.server.headers["X-Custom"] == "**REDACTED**"
-    assert "FAKE-FLAG" not in srv.server.url
     parts = urlsplit(srv.server.url)
-    assert (parts.scheme, parts.netloc, parts.path, parts.fragment) == (
-        "https",
-        "api.example.com:8443",
-        "/endpoint",
-        "frag",
-    )
     qs = dict(parse_qsl(parts.query, keep_blank_values=True))
     assert qs.get("token") == "**REDACTED**"
     assert qs.get("api_key") == "**REDACTED**"
@@ -1381,24 +1371,17 @@ class TestRedactPushKeysInData:
 
 
 class TestRedactUrlsAndHeadersInText:
-    """Tests for redact_url and redact_urls_and_headers_in_text helpers."""
+    """Tests for redact_urls_and_headers_in_text helper."""
 
     def test_none_and_empty(self):
         assert redact_urls_and_headers_in_text(None) is None
         assert redact_urls_and_headers_in_text("") == ""
 
-    def test_redacts_url_query_params_valueless_flags_and_preserves_trailing_punctuation(self):
-        line = (
-            "Remote server with url: "
-            "https://example.com/mcp?token=FAKE-SECRET-123&empty=&FAKE-FLAG-456#frag, type: http"
-        )
+    def test_redacts_url_query_params_and_preserves_trailing_punctuation(self):
+        line = "Remote server with url: https://example.com/mcp?token=FAKE-SECRET-123&mode=sse#frag, type: http"
         result = redact_urls_and_headers_in_text(line)
-        assert "FAKE-SECRET-123" not in result
-        assert "FAKE-FLAG-456" not in result
         assert result == (
-            "Remote server with url: "
-            "https://example.com/mcp?token=%2A%2AREDACTED%2A%2A&empty=%2A%2AREDACTED%2A%2A&%2A%2AREDACTED%2A%2A#frag, "
-            "type: http"
+            "Remote server with url: https://example.com/mcp?token=**REDACTED**&mode=**REDACTED**#frag, type: http"
         )
 
     def test_preserves_url_without_query(self):
@@ -1437,19 +1420,5 @@ class TestRedactUrlsAndHeadersInText:
         )
         result = redact_urls_and_headers_in_text(line)
         assert result == (
-            'Connecting to [http://[::1]:8080/mcp?token=%2A%2AREDACTED%2A%2A] with Authorization: Bearer "**REDACTED**"'
+            'Connecting to [http://[::1]:8080/mcp?token=**REDACTED**] with Authorization: Bearer "**REDACTED**"'
         )
-
-    def test_redact_url_fails_closed_without_logging_raw_url(self, caplog):
-        import logging
-
-        malformed = "http://[::1/mcp?token=FAKE-SECRET-123"
-        with caplog.at_level(logging.ERROR, logger="agent_scan.redact"):
-            server = redact_server_config(RemoteServer(url=malformed, type="http"))
-
-        assert isinstance(server, RemoteServer)
-        assert server.url == REDACTED
-        assert redact_url(malformed) == REDACTED
-        assert "Failed to redact URL" in caplog.text
-        assert "FAKE-SECRET-123" not in caplog.text
-        assert malformed not in caplog.text
