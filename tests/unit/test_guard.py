@@ -4385,6 +4385,45 @@ class TestPowerShellDiscoveryHookScript:
         assert recorded[0] == "guard discover --client claude-code --scope servers"
         assert json.loads("\n".join(recorded[1:])) == json.loads(payload)
 
+    def test_command_from_an_earlier_version_runs_the_configured_command(self, tmp_path):
+        """Earlier versions passed the values as parameters. They are accepted, so those commands
+        keep working until `guard install` rewrites them, and ignored."""
+        hooks_dir = tmp_path / "hooks"
+        hooks_dir.mkdir()
+        script = hooks_dir / "snyk-agent-guard-discover.ps1"
+        shutil.copyfile(_get_script_path("snyk-agent-guard-discover.ps1"), script)
+        marker = tmp_path / "invoked"
+        stub = self._recording_stub(tmp_path, marker)
+        (hooks_dir / guard_module.GUARD_CONFIG_NAME).write_text(f"MACHINE_ID=machine-42\nAGENT_SCAN_COMMAND={stub}\n")
+        result = subprocess.run(
+            [
+                self._ps_cmd(),
+                "-File",
+                str(script),
+                "-Client",
+                "claude-code",
+                "-PushKey",
+                "pk-old",
+                "-RemoteUrl",
+                "http://127.0.0.1:9",
+                "-MachineId",
+                "machine-old",
+                "-MachineSerial",
+                "serial-old",
+                "-AgentScanCommand",
+                str(tmp_path / "not-the-configured-command.cmd"),
+                "-Scope",
+                "servers",
+            ],
+            input="{}",
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env={**os.environ, "MARKER": str(marker)},
+        )
+        assert result.returncode == 0, result.stderr
+        assert marker.read_text().splitlines()[0] == "guard discover --client claude-code --scope servers"
+
     @pytest.mark.parametrize("serial", [None, "", "C02XYZ123"])
     def test_serial_parameter_replaces_inherited_serial(self, tmp_path, serial):
         script = _get_script_path("snyk-agent-guard-discover.ps1")
@@ -4483,6 +4522,44 @@ class TestPowerShellHookScript:
     @staticmethod
     def _ps_cmd():
         return "powershell" if shutil.which("powershell") else "pwsh"
+
+    def test_command_from_an_earlier_version_runs_with_the_guard_config_values(self, tmp_path, hook_server):
+        """Earlier versions passed the values as parameters. They are accepted, so those commands
+        keep working until `guard install` rewrites them, and ignored."""
+        script = tmp_path / "snyk-agent-guard.ps1"
+        shutil.copyfile(_get_script_path("snyk-agent-guard.ps1"), script)
+        (tmp_path / guard_module.GUARD_CONFIG_NAME).write_text(
+            f"PUSH_KEY=pk-from-config\nREMOTE_HOOKS_BASE_URL={hook_server}\nMACHINE_ID=machine-42\nMACHINE_SERIAL=C02XYZ123\n"
+        )
+        _HookHandler.last_request = None
+        result = subprocess.run(
+            [
+                self._ps_cmd(),
+                "-File",
+                str(script),
+                "-Client",
+                "claude-code",
+                "-PushKey",
+                "pk-old",
+                "-RemoteUrl",
+                "http://127.0.0.1:9",
+                "-TenantId",
+                "tid-old",
+                "-MachineId",
+                "machine-old",
+                "-MachineSerial",
+                "serial-old",
+            ],
+            input='{"hook_event_name":"test","session_id":"s1"}',
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        assert result.returncode == 0, result.stderr
+        assert _HookHandler.last_request is not None
+        assert _HookHandler.last_request["headers"]["X-Client-Id"] == "pk-from-config"
+        x_user = json.loads(_HookHandler.last_request["headers"]["X-User"])
+        assert (x_user["identifier"], x_user["machine_serial"]) == ("machine-42", "C02XYZ123")
 
     def test_posts_base64_payload(self, hook_server):
         script = _get_script_path("snyk-agent-guard.ps1")
@@ -7527,6 +7604,38 @@ class TestComputeHooksDiff:
         )
         assert ("preToolUse" in result["modified"]) is modified
 
+    @pytest.mark.parametrize(
+        "old_values, serial, modified",
+        [
+            # v0.7.0 wrote MACHINE_SERIAL on every POSIX command, empty included.
+            pytest.param(f"{_LEGACY_POSIX_VALUES}MACHINE_SERIAL='' ", "", False, id="posix-empty"),
+            pytest.param(f"{_LEGACY_POSIX_VALUES}MACHINE_SERIAL='C02XYZ123' ", "C02XYZ123", False, id="posix-matching"),
+            pytest.param(f"{_LEGACY_POSIX_VALUES}MACHINE_SERIAL='C02XYZ123' ", "", True, id="posix-different"),
+            # Only the serial was ever written empty; another empty value is not dropped.
+            pytest.param(f"{_LEGACY_POSIX_VALUES}TENANT_ID='' ", "", True, id="posix-other-empty-value"),
+            pytest.param(
+                f"{_LEGACY_PS_VALUES} -MachineSerial 'C02XYZ123'", "C02XYZ123", False, id="powershell-matching"
+            ),
+            pytest.param(f"{_LEGACY_PS_VALUES} -MachineSerial 'C02XYZ123'", "OTHER", True, id="powershell-different"),
+        ],
+    )
+    def test_legacy_machine_serial_is_ignored_when_it_matches_the_install(self, old_values, serial, modified):
+        if old_values.startswith(" -"):
+            old_cmd, new_cmd = f"{_PS_GUARD_CMD}{old_values}", _PS_GUARD_CMD
+        else:
+            old_cmd, new_cmd = f"{old_values}{_POSIX_GUARD_CMD}", _POSIX_GUARD_CMD
+        result = _compute_hooks_diff(
+            {"preToolUse": [{"command": old_cmd}]},
+            {"preToolUse": [{"command": new_cmd}]},
+            config_values={
+                "REMOTE_HOOKS_BASE_URL": "https://api.snyk.io",
+                "TENANT_ID": "t1",
+                "MACHINE_ID": "m1",
+                "MACHINE_SERIAL": serial,
+            },
+        )
+        assert ("preToolUse" in result["modified"]) is modified
+
     def test_diff_is_deep_copied_from_sources(self):
         extra_cmd = "PUSH_KEY='x' bash '/extra/snyk-agent-guard.sh'"
         new_cmd = "PUSH_KEY='x' bash '/new/snyk-agent-guard.sh'"
@@ -9164,15 +9273,12 @@ class TestHookConfigEndToEnd:
         info = guard_module._detect_existing_install("claude", config)
         assert (info["auth_value"], info["tenant_id"], info["url"]) == ("pk-1", "tid-1", success_hook_server)
 
-    def test_upgrade_from_legacy_commands_reports_no_change(self, tmp_path, success_hook_server):
-        config = tmp_path / "settings.json"
-        self._install(config, success_hook_server)
-        # Turn the install into what an earlier version left behind: values on the
-        # commands, no guard config file, an older script.
+    @staticmethod
+    def _make_v0_7_0_install(config: Path, url: str) -> None:
+        """Turn an install into what v0.7.0 left behind: values on the commands (the serial
+        always, even when empty), no guard config file, older scripts."""
         data = json.loads(config.read_text())
-        prefix = (
-            f"PUSH_KEY='pk-1' REMOTE_HOOKS_BASE_URL='{success_hook_server}' TENANT_ID='tid-1' MACHINE_ID='machine-42' "
-        )
+        prefix = f"PUSH_KEY='pk-1' REMOTE_HOOKS_BASE_URL='{url}' TENANT_ID='tid-1' MACHINE_ID='machine-42' MACHINE_SERIAL='' "
         for groups in data["hooks"].values():
             for group in groups:
                 for hook in group["hooks"]:
@@ -9183,6 +9289,12 @@ class TestHookConfigEndToEnd:
         config.write_text(json.dumps(data))
         guard_module._guard_config_path(config).unlink()
         guard_module._forwarder_script_path(config).write_text("#!/usr/bin/env bash\n# old version\n")
+        guard_module._discover_script_path(config).write_text("#!/usr/bin/env bash\n# old discover version\n")
+
+    def test_upgrade_from_legacy_commands_reports_no_change(self, tmp_path, success_hook_server):
+        config = tmp_path / "settings.json"
+        self._install(config, success_hook_server)
+        self._make_v0_7_0_install(config, success_hook_server)
         _SuccessHookHandler.requests = []
 
         self._install(config, success_hook_server)
@@ -9251,8 +9363,26 @@ class TestHookConfigEndToEnd:
         with pytest.raises(SystemExit):
             self._install(config, hook_server, push_key="pk-2")
 
-        # The installed hooks keep working with the previous values; the script is left updated.
+        # The installed hooks keep working with the previous values and scripts.
         assert (config.read_bytes(), guard_config.read_bytes()) == before
+        assert script.read_text().startswith("#!/usr/bin/env bash\n# previous version\n")
+
+    def test_failed_upgrade_from_an_earlier_version_restores_its_scripts(
+        self, tmp_path, success_hook_server, hook_server
+    ):
+        """The earlier version's commands need its scripts: the new ones refuse to run without
+        a guard config file, which a rejected install must not leave behind."""
+        config = tmp_path / "settings.json"
+        self._install(config, success_hook_server)
+        self._make_v0_7_0_install(config, success_hook_server)
+        scripts = (guard_module._forwarder_script_path(config), guard_module._discover_script_path(config))
+        before = (config.read_bytes(), *(s.read_bytes() for s in scripts))
+
+        with pytest.raises(SystemExit):
+            self._install(config, hook_server, push_key="pk-2")
+
+        assert (config.read_bytes(), *(s.read_bytes() for s in scripts)) == before
+        assert not guard_module._guard_config_path(config).exists()
 
     def test_failed_first_install_leaves_nothing_behind(self, tmp_path, hook_server):
         config = tmp_path / "settings.json"

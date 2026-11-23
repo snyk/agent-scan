@@ -21,7 +21,16 @@
 param(
     [Parameter(Mandatory=$true)]
     [ValidateSet("claude-code","cursor","codex","github-copilot")]
-    [string]$Client
+    [string]$Client,
+
+    # Accepted but never used: hook commands written by earlier versions still pass these,
+    # and must keep working until `guard install` rewrites them. All values come from the
+    # configuration file; the variables are overwritten from it below.
+    [string]$PushKey,
+    [string]$RemoteUrl,
+    [string]$TenantId,
+    [string]$MachineId,
+    [string]$MachineSerial
 )
 
 $ErrorActionPreference = "Stop"
@@ -79,6 +88,7 @@ foreach ($line in Get-Content -LiteralPath $ConfigFile -Encoding UTF8) {
     $parts = $line.Split([char[]]@('='), 2)
     if ($parts.Count -eq 2) { $Config[$parts[0]] = $parts[1] }
 }
+# Always overwritten, even with nothing: a value passed on the command line is never used.
 $PushKey = $Config["PUSH_KEY"]
 $RemoteUrl = $Config["REMOTE_HOOKS_BASE_URL"]
 $MachineId = $Config["MACHINE_ID"]

@@ -16,7 +16,16 @@ param(
 
     [Parameter(Mandatory=$false)]
     [ValidateSet("servers","skills","all")]
-    [string]$Scope = "servers"
+    [string]$Scope = "servers",
+
+    # Accepted but never used: hook commands written by earlier versions still pass these,
+    # and must keep working until `guard install` rewrites them. All values come from the
+    # configuration file.
+    [string]$PushKey,
+    [string]$RemoteUrl,
+    [string]$MachineId,
+    [string]$MachineSerial,
+    [string]$AgentScanCommand
 )
 
 $ErrorActionPreference = "Stop"

@@ -750,9 +750,9 @@ def _install_hooks(
 
     # The configuration file holds the hook values and is written before the test event,
     # which runs the installed script against it. If the event is rejected, the previous
-    # file is put back so hooks that are already installed keep working.
+    # file and scripts are put back so hooks that are already installed keep working,
+    # including commands written by an earlier version, which need its scripts.
     previous_config = guard_config_path.read_bytes() if guard_config_path.is_file() else None
-    discover_script_existed = discover_script_path.exists()
     # Checksummed like the scripts: agent-monitor compares the current checksum with the
     # new one the previous install reported, so an edit made between installs is caught
     # while a value this install legitimately changes (e.g. a rotated push key) is not.
@@ -798,10 +798,9 @@ def _install_hooks(
             guard_config_path.unlink(missing_ok=True)
         else:
             _write_guard_config(guard_config_path, previous_config, managed=scope == "managed")
-        if not main_script.existed:
-            dest_path.unlink(missing_ok=True)
-        if not discover_script_existed:
-            discover_script_path.unlink(missing_ok=True)
+        _restore_hook_script(main_script)
+        if discover_script is not None:
+            _restore_hook_script(discover_script)
         rich.print("[bold red]Aborting install \u2014 test event failed.[/bold red]")
         raise SystemExit(1)
     if test_event.status == "unconfirmed":
@@ -2233,18 +2232,19 @@ def _send_servers_discovered_event(
 # single-quoted PowerShell parameters.
 _POSIX_EMBEDDED_QUOTE = "'\"'\"'"  # how _shell_quote writes a ' inside a single-quoted value
 _LEGACY_POSIX_VALUE_RE = re.compile(
-    r"(PUSH_KEY|REMOTE_HOOKS_BASE_URL|TENANT_ID|MACHINE_ID|AGENT_SCAN_COMMAND)='((?:[^']|"
+    r"(PUSH_KEY|REMOTE_HOOKS_BASE_URL|TENANT_ID|MACHINE_ID|MACHINE_SERIAL|AGENT_SCAN_COMMAND)='((?:[^']|"
     + re.escape(_POSIX_EMBEDDED_QUOTE)
     + r")*)' "
 )
 _LEGACY_POWERSHELL_VALUE_RE = re.compile(
-    r" -(PushKey|RemoteUrl|TenantId|MachineId|AgentScanCommand) '((?:[^']|'')*)'(?= |\Z)"
+    r" -(PushKey|RemoteUrl|TenantId|MachineId|MachineSerial|AgentScanCommand) '((?:[^']|'')*)'(?= |\Z)"
 )
 _LEGACY_POWERSHELL_KEYS = {
     "PushKey": "PUSH_KEY",
     "RemoteUrl": "REMOTE_HOOKS_BASE_URL",
     "TenantId": "TENANT_ID",
     "MachineId": "MACHINE_ID",
+    "MachineSerial": "MACHINE_SERIAL",
     "AgentScanCommand": "AGENT_SCAN_COMMAND",
 }
 _PUSH_KEY_UUID_RE = re.compile(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
@@ -2254,9 +2254,10 @@ def _is_installed_legacy_value(key: str, value: str, config_values: Mapping[str,
     """Whether a value on a legacy hook command is one this install writes anyway.
 
     A push key only has to be a well-formed UUID, since a changed key is reported as
-    ``push_key_changed`` rather than as a hook change.
+    ``push_key_changed`` rather than as a hook change. An empty value matches only for
+    the serial, the one value earlier versions wrote even when empty.
     """
-    if value and value == config_values.get(key):
+    if value == config_values.get(key, "") and (value or key == "MACHINE_SERIAL"):
         return True
     return key == "PUSH_KEY" and _PUSH_KEY_UUID_RE.fullmatch(value) is not None
 
@@ -2645,6 +2646,8 @@ class _CopiedScript(NamedTuple):
     updated: bool
     current_checksum: str | None
     new_checksum: str
+    # The file's content before the copy, for _restore_hook_script; None if there was none.
+    previous: bytes | None = None
 
 
 def _copy_hook_script(dest: Path) -> _CopiedScript:
@@ -2669,7 +2672,15 @@ def _copy_hook_script(dest: Path) -> _CopiedScript:
     if not IS_WINDOWS:
         dest.chmod(dest.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
 
-    return _CopiedScript(dest, current_content is not None, updated, current_checksum, new_checksum)
+    return _CopiedScript(dest, current_content is not None, updated, current_checksum, new_checksum, current_content)
+
+
+def _restore_hook_script(script: _CopiedScript) -> None:
+    """Undo _copy_hook_script: put the previous script back, or remove the one it created."""
+    if not script.existed:
+        script.path.unlink(missing_ok=True)
+    elif script.updated and script.previous is not None:
+        script.path.write_bytes(script.previous)  # the file is kept, and with it its mode
 
 
 def _remove_hook_script(client: str, config_path: Path) -> None:
