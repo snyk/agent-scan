@@ -27,9 +27,10 @@ logger = logging.getLogger(__name__)
 TENANT_API_VERSION = "2024-10-15"
 
 # How long one run of the token command may take before the scan fails. The
-# command prints a cached token, or refreshes it over the network first (the
-# installer bounds that refresh to a minute).
-TOKEN_COMMAND_TIMEOUT_S = 60
+# command prints a cached token, or refreshes it over the network first. The
+# installer bounds that refresh to a minute, so this leaves headroom for process
+# start-up on top of a refresh that uses its full minute.
+TOKEN_COMMAND_TIMEOUT_S = 90
 # Bounds the token command's error output in our own error message.
 _STDERR_EXCERPT_CHARS = 300
 

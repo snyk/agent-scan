@@ -810,6 +810,11 @@ def _effective_identifier(args) -> str | None:
     return next((s.identifier for s in control_servers), None)
 
 
+def _is_unattended_scan(args) -> bool:
+    """True when a push key or a machine identity is set, so the installer runs the scan."""
+    return bool(_effective_push_key(args)) or _is_machine_auth_scan(args)
+
+
 def is_interactive_run(args) -> bool:
     """
     True when the run is a manual, interactive invocation by a human who can
@@ -819,8 +824,7 @@ def is_interactive_run(args) -> bool:
     if command == "inspect":
         return True
     # If the scan is run with a push key or a machine identity (installer-driven), skip consent prompts.
-    has_push_key = bool(_effective_push_key(args))
-    return not (has_push_key or _is_machine_auth_scan(args))
+    return not _is_unattended_scan(args)
 
 
 @dataclass(frozen=True)
@@ -862,7 +866,7 @@ def decide_handshake(args) -> HandshakeDecision:
     # inspect always qualifies.
     # scan / no-subcommand qualifies when there is no push key and no machine identity.
     is_attended_scan = command == "inspect" or (
-        (command is None or command == "scan") and not (bool(_effective_push_key(args)) or _is_machine_auth_scan(args))
+        (command is None or command == "scan") and not _is_unattended_scan(args)
     )
     if is_attended_scan:
         return HandshakeDecision(do_stdio_handshake=True, collect_consent=True)
