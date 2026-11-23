@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import PurePosixPath, PureWindowsPath
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -68,6 +69,68 @@ def test_lists_are_capped(monkeypatch):
     local = [_client(mcp={f"/{i}.json": [] for i in range(5)})]
     result = compare(local, [], ["cursor"], LocalPhaseKeys())
     assert len(result["only_local"]) == 2 and result["only_local_count"] == 5
+
+
+def test_repeated_local_key_keeps_first_value():
+    """A second client with the same (name, username), say from a WSL home, must not
+    overwrite the value discoverers merged into the first."""
+    local = [_client(mcp={"/c.json": _servers()}), _client(mcp={"/c.json": _servers("legacy")})]
+    remote = [_client(mcp={"/c.json": _servers()})]
+    result = compare(local, remote, ["cursor"], LocalPhaseKeys())
+    assert result == {
+        "comparison": "identical",
+        "expected_only_local": 0,
+        "expected_only_remote": 0,
+        "local_repeated_keys": 1,
+    }
+
+
+_WSL_HOMES = [
+    (PureWindowsPath(r"C:\Users\alice"), "alice"),
+    (PureWindowsPath(r"\\wsl.localhost\Ubuntu\home\alice"), "alice"),
+]
+
+
+def test_wsl_linux_keys_match_backend_form():
+    local = [_client(mcp={"/home/alice/proj": [], "/mnt/c/code": [], "C:/Users/alice/.cursor/mcp.json": []})]
+    remote = [
+        _client(
+            mcp={
+                "//wsl.localhost/Ubuntu/home/alice/proj": [],
+                "//wsl.localhost/Ubuntu/mnt/c/code": [],
+                "C:/Users/alice/.cursor/mcp.json": [],
+            }
+        )
+    ]
+    result = compare(local, remote, ["cursor"], LocalPhaseKeys(), _WSL_HOMES)
+    assert result == {"comparison": "identical", "expected_only_local": 0, "expected_only_remote": 0}
+
+
+def test_wsl_key_picks_the_distro_the_backend_reported():
+    homes = [*_WSL_HOMES, (PureWindowsPath(r"\\wsl$\Debian\home\alice"), "alice")]
+    remote = [_client(mcp={"//wsl$/Debian/home/alice/proj": []})]
+    result = compare([_client(mcp={"/home/alice/proj": []})], remote, ["cursor"], LocalPhaseKeys(), homes)
+    assert result["comparison"] == "identical"
+
+
+def test_unmatched_wsl_key_is_listed_in_backend_form():
+    result = compare([_client(mcp={"/home/alice/proj": []})], [], ["cursor"], LocalPhaseKeys(), _WSL_HOMES)
+    assert result["only_local"] == [
+        {"client": "cursor", "kind": "mcp_config", "path": "//wsl.localhost/Ubuntu/home/alice/proj"}
+    ]
+
+
+def test_wsl_table_extra_still_expected():
+    extra = ("cursor", "alice", "mcp_config", "/home/alice/.cursor/extra.json")
+    local = [_client(mcp={extra[3]: []})]
+    result = compare(local, [], ["cursor"], LocalPhaseKeys(well_known={extra}), _WSL_HOMES)
+    assert result == {"comparison": "identical", "expected_only_local": 1, "expected_only_remote": 0}
+
+
+def test_linux_keys_kept_without_wsl_homes():
+    homes = [(PurePosixPath("/home/alice"), "alice")]
+    result = compare([_client(mcp={"/home/alice/proj": []})], [], ["cursor"], LocalPhaseKeys(), homes)
+    assert result["only_local"] == [{"client": "cursor", "kind": "mcp_config", "path": "/home/alice/proj"}]
 
 
 @pytest.mark.asyncio

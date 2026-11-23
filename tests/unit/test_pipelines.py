@@ -16,6 +16,7 @@ from agent_scan.pipelines import (
     supports_remote_discovery,
 )
 from agent_scan.remote_discovery.client import RemoteDiscoveryError, RemoteResult
+from agent_scan.remote_discovery.parity import compare
 from agent_scan.verify_api import AgentScanConfig
 
 
@@ -399,10 +400,12 @@ async def test_shadow_looks_up_homes_once(tmp_path):
         ) as remote,
         patch("agent_scan.pipelines.discover_clients_to_inspect", new=local),
         patch("agent_scan.pipelines.find_discoverers", return_value=[]) as find,
+        patch("agent_scan.pipelines.compare", wraps=compare) as compare_spy,
     ):
         await discover_clients(InspectArgs(timeout=10, tokens=[], paths=[]), "shadow", "https://x", "k")
 
     assert lookup.call_count == 1
+    assert compare_spy.call_args.args[4] == first
     assert local.await_args.kwargs["home_dirs_with_users"] == first
     assert remote.await_args.kwargs["home_dirs_with_users"] == first
     find.assert_called_once_with(tmp_path / "alice")

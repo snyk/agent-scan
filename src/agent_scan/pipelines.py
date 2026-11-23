@@ -351,7 +351,7 @@ async def discover_clients(
         return discovered, {**metadata, "comparison": "failed", "remote_error_reason": reason}
     remote_clients = outcome.discovered[0]
     try:
-        parity = compare(discovered[0], remote_clients, outcome.supported_agents, phase_keys)
+        parity = compare(discovered[0], remote_clients, outcome.supported_agents, phase_keys, homes)
     except Exception:
         logger.exception("Shadow discovery comparison failed.")
         parity = {"comparison": "failed", "remote_error_reason": "compare_error"}
