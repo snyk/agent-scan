@@ -9421,6 +9421,28 @@ class TestHookConfigEndToEnd:
 
         assert tuple(f.read_bytes() for f in files) == before
 
+    def test_failed_script_copy_during_an_upgrade_restores_the_earlier_scripts(self, tmp_path, success_hook_server):
+        """_copy_hook_script fails after writing the new script (here: its chmod), so the install
+        has no record of it; the copy undoes itself, or the earlier version's commands would be
+        left with a script that refuses to run without the removed guard config file."""
+        config = tmp_path / "settings.json"
+        self._install(config, success_hook_server)
+        self._make_v0_7_0_install(config, success_hook_server)
+        forwarder = guard_module._forwarder_script_path(config)
+        before = (config.read_bytes(), forwarder.read_bytes())
+        real_chmod = Path.chmod
+
+        def chmod(self, *args, **kwargs):
+            if self == forwarder:
+                raise PermissionError("chmod refused")
+            return real_chmod(self, *args, **kwargs)
+
+        with patch.object(Path, "chmod", chmod), pytest.raises(PermissionError):
+            self._install(config, success_hook_server, push_key="pk-2")
+
+        assert (config.read_bytes(), forwarder.read_bytes()) == before
+        assert not guard_module._guard_config_path(config).exists()
+
     def test_first_install_that_raises_leaves_nothing_behind(self, tmp_path, success_hook_server):
         config = tmp_path / "settings.json"
         with patch(f"{_G}._write_client_config", side_effect=OSError("disk full")), pytest.raises(OSError):

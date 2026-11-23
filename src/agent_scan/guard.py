@@ -2700,14 +2700,25 @@ def _copy_hook_script(dest: Path) -> _CopiedScript:
     current_content = dest.read_bytes() if dest.exists() else None
     current_checksum = None if current_content is None else hashlib.sha256(current_content).hexdigest()
 
-    updated = current_content != new_content
-    if updated:
-        dest.write_bytes(new_content)
-        rich.print(f"[green]\u2713[/green]  Copied hook script to [dim]{dest}[/dim]")
-    if not IS_WINDOWS:
-        dest.chmod(dest.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
-
-    return _CopiedScript(dest, current_content is not None, updated, current_checksum, new_checksum, current_content)
+    copied = _CopiedScript(
+        dest,
+        current_content is not None,
+        current_content != new_content,
+        current_checksum,
+        new_checksum,
+        current_content,
+    )
+    try:
+        if copied.updated:
+            dest.write_bytes(new_content)
+            rich.print(f"[green]\u2713[/green]  Copied hook script to [dim]{dest}[/dim]")
+        if not IS_WINDOWS:
+            dest.chmod(dest.stat().st_mode | stat.S_IEXEC | stat.S_IXGRP | stat.S_IXOTH)
+    except BaseException:
+        # The caller gets no _CopiedScript to restore from, so undo the copy here.
+        _restore_hook_script(copied)
+        raise
+    return copied
 
 
 def _restore_hook_script(script: _CopiedScript) -> None:
