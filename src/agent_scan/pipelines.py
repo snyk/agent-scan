@@ -73,14 +73,17 @@ class PushArgs(BaseModel):
 async def discover_clients_to_inspect(
     inspect_args: InspectArgs,
     phase_keys: LocalPhaseKeys | None = None,
+    home_dirs_with_users: list[tuple[Path, str]] | None = None,
 ) -> tuple[list[ClientToInspect], list[InspectedPath], list[str]]:
     """
     Discover the clients/configs that would be inspected, without actually
     starting any MCP servers.
 
     ``phase_keys``, if given, collects what each phase found, for shadow comparison.
+    ``home_dirs_with_users``, if given, is used instead of looking the homes up again.
     """
-    home_dirs_with_users = get_readable_home_directories(all_users=inspect_args.all_users)
+    if home_dirs_with_users is None:
+        home_dirs_with_users = get_readable_home_directories(all_users=inspect_args.all_users)
     all_usernames: list[str] = [username for _path, username in home_dirs_with_users]
 
     unresolved_paths: list[InspectedPath] = []
@@ -230,11 +233,14 @@ async def discover_clients_remotely(
     cli_version: str | None = None,
     identifier: str | None = None,
     skip_ssl_verify: bool = False,
+    home_dirs_with_users: list[tuple[Path, str]] | None = None,
 ) -> RemoteOutcome:
     """``discover_clients_to_inspect`` through the coding-agent-discovery service.
 
     A backend failure leaves ``discovered`` None. Never raises.
     """
+    if home_dirs_with_users is None:
+        home_dirs_with_users = get_readable_home_directories(all_users=inspect_args.all_users)
     try:
         remote = await run_remote_discovery(
             discovery_url,
@@ -244,6 +250,7 @@ async def discover_clients_remotely(
             identifier=identifier,
             all_users=inspect_args.all_users,
             skip_ssl_verify=skip_ssl_verify,
+            home_dirs_with_users=home_dirs_with_users,
         )
         clients_to_inspect = build_clients(remote.found)
     except Exception as e:
@@ -261,7 +268,6 @@ async def discover_clients_remotely(
         remote.duration_s,
         remote.partial,
     )
-    home_dirs_with_users = get_readable_home_directories(all_users=inspect_args.all_users)
     _merge_local_only(clients_to_inspect, home_dirs_with_users, inspect_args.discovery_scope)
     all_usernames = [username for _path, username in home_dirs_with_users]
     discovered: DiscoveredClients = (
@@ -300,6 +306,8 @@ async def discover_clients(
         if mode != "off":
             metadata["remote_skipped"] = "not_eligible"
         return discovered, metadata
+    # Looked up once: on Windows the lookup can time out, and both sides must see the same homes.
+    homes = get_readable_home_directories(all_users=inspect_args.all_users)
     run_remote = discover_clients_remotely(
         inspect_args,
         discovery_url,
@@ -307,11 +315,11 @@ async def discover_clients(
         cli_version=cli_version,
         identifier=identifier,
         skip_ssl_verify=skip_ssl_verify,
+        home_dirs_with_users=homes,
     )
     if mode == "on":
         outcome = await run_remote
         if outcome.discovered is None:
-            homes = get_readable_home_directories(all_users=inspect_args.all_users)
             local_only: list[ClientToInspect] = []
             _merge_local_only(local_only, homes, inspect_args.discovery_scope)
             usernames = _scanned_usernames(local_only, inspect_args, [u for _path, u in homes])
@@ -328,7 +336,7 @@ async def discover_clients(
 
     phase_keys = LocalPhaseKeys()
     try:
-        discovered = await discover_clients_to_inspect(inspect_args, phase_keys=phase_keys)
+        discovered = await discover_clients_to_inspect(inspect_args, phase_keys=phase_keys, home_dirs_with_users=homes)
     except BaseException:
         run_remote.close()
         raise

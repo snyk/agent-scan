@@ -249,6 +249,7 @@ async def test_discover_clients_remotely_builds_clients():
         "identifier": "machine-1",
         "all_users": False,
         "skip_ssl_verify": True,
+        "home_dirs_with_users": [],
     }
 
 
@@ -383,3 +384,25 @@ async def test_on_mode_backend_failure_keeps_local_only_sources(tmp_path):
     assert [(c.name, c.username, list(c.mcp_configs)) for c in clients] == [("vscode", "alice", ["/ext.js"])]
     assert metadata["remote_error_reason"] == "http_503"
     assert metadata["remote"]["mcp_configs"] == 1
+
+
+@pytest.mark.asyncio
+async def test_shadow_looks_up_homes_once(tmp_path):
+    """Each Windows lookup can time out on its own, so a second one could see other homes."""
+    first = [(tmp_path / "alice", "alice")]
+    later = [(tmp_path / "wsl", "wsl")]
+    local = AsyncMock(return_value=([], [], ["alice"]))
+    with (
+        patch("agent_scan.pipelines.get_readable_home_directories", side_effect=[first, later, later]) as lookup,
+        patch(
+            "agent_scan.pipelines.run_remote_discovery", new_callable=AsyncMock, return_value=RemoteResult()
+        ) as remote,
+        patch("agent_scan.pipelines.discover_clients_to_inspect", new=local),
+        patch("agent_scan.pipelines.find_discoverers", return_value=[]) as find,
+    ):
+        await discover_clients(InspectArgs(timeout=10, tokens=[], paths=[]), "shadow", "https://x", "k")
+
+    assert lookup.call_count == 1
+    assert local.await_args.kwargs["home_dirs_with_users"] == first
+    assert remote.await_args.kwargs["home_dirs_with_users"] == first
+    find.assert_called_once_with(tmp_path / "alice")
