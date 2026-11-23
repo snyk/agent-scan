@@ -88,8 +88,12 @@ def _read(op: dict[str, Any], cancel: threading.Event | None = None, budget: int
             if len(data) > limit:
                 skipped.append({"path": path, "reason": "too_large", "realpath": _realpath(path)})
                 continue
-        except (OSError, ValueError):
+        except PermissionError:
             skipped.append({"path": path, "reason": "unreadable", "realpath": _realpath(path)})
+            continue
+        except (OSError, ValueError):
+            # Say, a cloud file that can't be downloaded. Needs a backend that knows read_error.
+            skipped.append({"path": path, "reason": "read_error", "realpath": _realpath(path)})
             continue
         if budget is not None:
             budget -= len(data)

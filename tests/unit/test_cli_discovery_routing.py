@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -21,12 +22,15 @@ _REMOTE: _Discovered = (
     ["alice"],
 )
 _LOCAL: _Discovered = ([ClientToInspect(name="local", client_path="/l", mcp_configs={}, skills_dirs={})], [], ["alice"])
+_HOMES = [(Path("/home/alice"), "alice")]
+_SCANNED = {"homes_count": 1, "wsl_homes_count": 0}
 
 
-async def _run(args, config: AgentScanConfig, remote_result: RemoteOutcome | None = None):
+async def _run(args, config: AgentScanConfig, remote_result: RemoteOutcome | None = None, homes=_HOMES):
     remote_result = remote_result or RemoteOutcome(_REMOTE, supported_agents=["remote", "local"])
     with (
         patch("agent_scan.cli.fetch_agent_scan_config", new=AsyncMock(return_value=config)) as fetch,
+        patch("agent_scan.pipelines.get_readable_home_directories", return_value=homes),
         patch("agent_scan.pipelines.discover_clients_remotely", new=AsyncMock(return_value=remote_result)) as remote,
         patch("agent_scan.pipelines.discover_clients_to_inspect", new=AsyncMock(return_value=_LOCAL)) as local,
         patch("agent_scan.pipelines.inspect_pipeline", new=AsyncMock(return_value=([], []))) as inspect,
@@ -62,22 +66,23 @@ async def test_on_uses_remote_only_and_reuses_config():
     local.assert_not_awaited()
     assert _inspected(inspect) == ["remote"]
     assert analyze.await_args.kwargs["agent_scan_config"] == config
-    assert _discovery(analyze) == {"mode": "on", "source": "remote", "remote": _COUNTS}
+    assert _discovery(analyze) == {"mode": "on", "source": "remote", **_SCANNED, "remote": _COUNTS}
 
 
 @pytest.mark.asyncio
 async def test_on_failure_pushes_only_local_only_pieces():
     config = AgentScanConfig(remote_discovery_mode="on")
-    with patch("agent_scan.pipelines.get_readable_home_directories", return_value=[]):
-        _fetch, _remote, local, inspect, analyze = await _run(
-            _push_key_scan_args(), config, remote_result=RemoteOutcome(None, "http_503")
-        )
+    _fetch, _remote, local, inspect, analyze = await _run(
+        _push_key_scan_args(), config, remote_result=RemoteOutcome(None, "http_503"), homes=[]
+    )
 
     local.assert_not_awaited()
     assert _inspected(inspect) == []
     assert _discovery(analyze) == {
         "mode": "on",
         "source": "remote",
+        "homes_count": 0,
+        "wsl_homes_count": 0,
         "remote": {"clients": 0, "mcp_configs": 0, "mcp_servers": 0, "skills_dirs": 0},
         "remote_error_reason": "http_503",
     }
@@ -91,7 +96,7 @@ async def test_on_partial_pushes_what_was_found():
     )
 
     assert _inspected(inspect) == ["remote"]
-    assert _discovery(analyze) == {"mode": "on", "source": "remote", "remote": _COUNTS, "partial": True}
+    assert _discovery(analyze) == {"mode": "on", "source": "remote", **_SCANNED, "remote": _COUNTS, "partial": True}
 
 
 @pytest.mark.asyncio
@@ -141,6 +146,7 @@ async def test_shadow_remote_failure_keeps_local():
     assert _discovery(analyze) == {
         "mode": "shadow",
         "source": "local",
+        **_SCANNED,
         "local": _COUNTS,
         "comparison": "failed",
         "remote_error_reason": "http_503",

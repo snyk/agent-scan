@@ -142,11 +142,14 @@ def wsl_distro(home: Path) -> str | None:
     return share if server.lower() in ("wsl.localhost", "wsl$") and share else None
 
 
-def homes(all_users: bool) -> list[dict[str, Any]]:
+def homes(all_users: bool, home_dirs_with_users: list[tuple[Path, str]] | None = None) -> list[dict[str, Any]]:
     """The homes legacy would scan, in its order. With ``all_users`` on Windows this
-    includes WSL homes (``//wsl.localhost/<distro>/home/<user>``)."""
+    includes WSL homes (``//wsl.localhost/<distro>/home/<user>``). Looked up unless
+    ``home_dirs_with_users`` is given."""
+    if home_dirs_with_users is None:
+        home_dirs_with_users = get_readable_home_directories(all_users=all_users)
     out = []
-    for home, username in get_readable_home_directories(all_users=all_users):
+    for home, username in home_dirs_with_users:
         entry: dict[str, Any] = {"username": username, "home": home.as_posix(), "own": is_own_home(home)}
         distro = wsl_distro(home)
         if distro:
@@ -165,12 +168,13 @@ async def run_remote_discovery(
     identifier: str | None = None,
     all_users: bool = False,
     skip_ssl_verify: bool = False,
+    home_dirs_with_users: list[tuple[Path, str]] | None = None,
 ) -> RemoteResult:
     started = time.monotonic()
     base = backend_url.rstrip("/") + "/hidden/coding-agent-discovery/sessions"
     query = f"?version={DISCOVERY_API_VERSION}"
     headers = {"X-Push-Key": push_key} if push_key else {}
-    home_list = homes(all_users)
+    home_list = homes(all_users, home_dirs_with_users)
     if not home_list:
         # The backend rejects an empty homes list, and local discovery finds nothing either.
         logger.info("Remote discovery skipped: no readable home directories.")
