@@ -81,6 +81,13 @@ def test_verbose_debug_log_redacts_url_query_and_auth_headers(restore_root_logge
     assert "**REDACTED**" in output
 
 
+def test_verbose_debug_log_tolerates_malformed_format_args(restore_root_logger):
+    """Mismatched %-format arguments in a log call must not raise out of _RedactingLogFilter."""
+    setup_logging(verbose=True, log_to_stderr=True)
+
+    logging.getLogger("agent_scan.test_cli_logging").debug("bad format %s %s", "only-one-arg")
+
+
 def test_verbose_logging_suppresses_httpx_httpcore_and_mcp_debug_logs(restore_root_logger, capsys):
     """Third-party HTTP/MCP DEBUG and INFO logs must be suppressed in verbose mode."""
     setup_logging(verbose=True, log_to_stderr=True)

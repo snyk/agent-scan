@@ -1413,3 +1413,12 @@ class TestRedactUrlsAndHeadersInText:
         assert "FAKE-SECRET-456" not in result
         assert "FAKE-SECRET-789" not in result
         assert result.count("**REDACTED**") == 3
+
+    def test_redacts_ipv6_url_query_and_quoted_bearer_token(self):
+        line = (
+            'Connecting to [http://[::1]:8080/mcp?token=FAKE-SECRET-123] with Authorization: Bearer "FAKE-SECRET-456"'
+        )
+        result = redact_urls_and_headers_in_text(line)
+        assert result == (
+            'Connecting to [http://[::1]:8080/mcp?token=**REDACTED**] with Authorization: Bearer "**REDACTED**"'
+        )

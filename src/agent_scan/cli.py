@@ -65,7 +65,11 @@ class _RedactingLogFilter(logging.Filter):
     """Sanitize formatted log messages before any handler emits them."""
 
     def filter(self, record: logging.LogRecord) -> bool:
-        record.msg = redact_text(redact_urls_and_headers_in_text(record.getMessage())) or ""
+        try:
+            message = record.getMessage()
+        except Exception:
+            message = str(record.msg)
+        record.msg = redact_text(redact_urls_and_headers_in_text(message)) or ""
         record.args = None
         return True
 
