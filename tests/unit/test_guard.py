@@ -3866,6 +3866,7 @@ _PS_PARAM_TO_CONFIG_KEY = {
     "-RemoteUrl": "REMOTE_HOOKS_BASE_URL",
     "-TenantId": "TENANT_ID",
     "-MachineId": "MACHINE_ID",
+    "-MachineSerial": "MACHINE_SERIAL",
     "-AgentScanCommand": "AGENT_SCAN_COMMAND",
 }
 
