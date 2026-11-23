@@ -85,7 +85,8 @@ def classify_failure_detail(detail: str) -> FailureKind:
     text = detail.lower()
     if match := re.search(r"\bhttp (\d{3})\b", text):
         return classify_http_status(int(match.group(1)))
-    if "timed out" in text or text.strip() == "timeout":
+    # "token command did not finish in time": a machine identity token refresh that hung, like a request timeout.
+    if "timed out" in text or "did not finish in time" in text or text.strip() == "timeout":
         return FailureKind("timeout", True)
     if match := re.search(r"curl exit (\d+)|curl: \((\d+)\)", text):
         code = int(match.group(1) or match.group(2))

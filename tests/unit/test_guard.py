@@ -6373,6 +6373,8 @@ class TestSendTestEventRetry:
             # Windows PowerShell 5.1 WebException DNS failure
             "response did not confirm success: snyk-agent-guard: request failed: "
             "The remote name could not be resolved: 'api.snyk.io'; failing open",
+            # Machine identity: the token command hung (bash and PowerShell use the same reason)
+            "response did not confirm success: snyk-agent-guard: token command did not finish in time; failing open",
         ],
     )
     def test_transient_failure_is_retried_until_success(self, detail):
@@ -6387,6 +6389,9 @@ class TestSendTestEventRetry:
             "response did not confirm success (push key may be invalid)",
             "response did not confirm success: snyk-agent-guard: HTTP 403; failing open",
             "response did not confirm success: snyk-agent-guard: HTTP 400; failing open",
+            "response did not confirm success: snyk-agent-guard: token command failed (exit 1); failing open",
+            "response did not confirm success: snyk-agent-guard: token command printed no single access token; "
+            "failing open",
             "bad script",
         ],
     )
@@ -6404,6 +6409,15 @@ class TestSendTestEventRetry:
         assert result.attempts == invoke.call_count
         assert 1 < result.attempts < 20
         assert result.elapsed < guard_module.INSTALL_RETRY_POLICY.time_limit
+
+    def test_hung_token_command_ends_unconfirmed_not_rejected(self):
+        detail = (
+            "response did not confirm success: snyk-agent-guard: token command did not finish in time; failing open"
+        )
+        result, invoke, _ = self._run([(False, detail)] * 20)
+        assert result.status == "unconfirmed"
+        assert result.error == "timeout"
+        assert invoke.call_count > 1
 
     def test_limit_counts_attempt_duration_not_just_sleeps(self):
         """Slow attempts eat into the same overall budget as the sleeps between them."""
