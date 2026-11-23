@@ -46,6 +46,11 @@ def get_username() -> str:
 # scan startup from blocking indefinitely.
 _WINDOWS_PROFILE_QUERY_TIMEOUT = 10.0
 
+_PROFILE_LIST_KEY = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList"
+# Local, domain and Entra ID accounts. Skips SYSTEM and service profiles, like
+# Win32_UserProfile's Special flag.
+_USER_SID_PREFIXES = ("S-1-5-21-", "S-1-12-1-")
+
 
 def ensure_unicode_console() -> None:
     """On Windows, reconfigure stdout/stderr to UTF-8 so Unicode (e.g. emoji) prints without UnicodeEncodeError.
@@ -308,49 +313,23 @@ def get_readable_home_directories(all_users: bool = False) -> list[tuple[Path, s
 
     elif system == "Windows":
         try:
-            cmd = [
-                "powershell",
-                "-NoProfile",
-                "-Command",
-                "Get-CimInstance Win32_UserProfile | Where-Object { $_.Special -eq $false } | Select-Object -ExpandProperty LocalPath",
-            ]
-            # Cap the CIM query at 10s. Win32_UserProfile via WMI/CIM can hang
-            # indefinitely when the WMI repository is corrupted, the WinMgmt
-            # service is unresponsive, or a domain controller round-trip
-            # stalls. Without this cap, scan discovery could block before any
-            # network timeout could fire.
-            # On timeout we fall through to WSL enumeration and return an
-            # empty Windows profile set rather than aborting the scan.
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                check=True,
-                timeout=_WINDOWS_PROFILE_QUERY_TIMEOUT,
-            )
+            profile_paths = _windows_profile_paths_from_registry()
+        except OSError as e:
+            logger.warning("Reading Windows profiles from the registry failed (%s); trying Win32_UserProfile.", e)
+            profile_paths = []
+        if not profile_paths:
+            profile_paths = _windows_profile_paths_from_cim()
 
-            for line in result.stdout.splitlines():
-                clean_path = line.strip()
-                if clean_path:
-                    dir_path = Path(clean_path)
-                    if dir_path.is_dir():
-                        # Windows primarily relies on R_OK for basic directory readability
-                        if os.access(dir_path, os.R_OK):
-                            username = dir_path.name
-                            logger.info(f"Found profile at {dir_path} -> Access: GRANTED")
-                            home_dirs[dir_path] = username
-                        else:
-                            logger.info(f"Found profile at {dir_path} -> Access: DENIED")
-
-        except (subprocess.CalledProcessError, FileNotFoundError) as e:
-            logger.error(f"Failed to fetch Windows profiles: {e}")
-        except subprocess.TimeoutExpired as e:
-            logger.warning(
-                "Windows profile query timed out after %ss; reporting no Win32 profiles "
-                "(WSL enumeration still proceeds). Likely cause: WMI/CIM is slow or stuck.",
-                _WINDOWS_PROFILE_QUERY_TIMEOUT,
-            )
-            logger.debug("Win32_UserProfile timeout detail: %s", e)
+        for profile_path in profile_paths:
+            dir_path = Path(profile_path)
+            if dir_path.is_dir():
+                # Windows primarily relies on R_OK for basic directory readability
+                if os.access(dir_path, os.R_OK):
+                    username = dir_path.name
+                    logger.info(f"Found profile at {dir_path} -> Access: GRANTED")
+                    home_dirs[dir_path] = username
+                else:
+                    logger.info(f"Found profile at {dir_path} -> Access: DENIED")
 
         for wsl_home, wsl_user in get_wsl_home_directories():
             if wsl_home in home_dirs:
@@ -361,6 +340,67 @@ def get_readable_home_directories(all_users: bool = False) -> list[tuple[Path, s
         raise NotImplementedError(f"Unsupported OS: {system}")
 
     return list(home_dirs.items())
+
+
+def _windows_profile_paths_from_registry() -> list[str]:
+    """User profile folders from the registry ``ProfileList``. Fast, with no PowerShell
+    or WMI. Raises ``OSError`` if the key can't be read."""
+    if sys.platform != "win32":
+        return []
+    import winreg
+
+    paths: list[str] = []
+    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, _PROFILE_LIST_KEY) as profile_list:
+        for index in range(winreg.QueryInfoKey(profile_list)[0]):
+            sid = winreg.EnumKey(profile_list, index)
+            # A ``.bak`` key is left over from a profile that failed to load.
+            if not sid.startswith(_USER_SID_PREFIXES) or sid.endswith(".bak"):
+                continue
+            try:
+                with winreg.OpenKey(profile_list, sid) as profile:
+                    value, kind = winreg.QueryValueEx(profile, "ProfileImagePath")
+            except OSError:
+                continue
+            if isinstance(value, str) and value:
+                paths.append(winreg.ExpandEnvironmentStrings(value) if kind == winreg.REG_EXPAND_SZ else value)
+    return paths
+
+
+def _windows_profile_paths_from_cim() -> list[str]:
+    """User profile folders from ``Win32_UserProfile``. Slower; empty on failure."""
+    cmd = [
+        "powershell",
+        "-NoProfile",
+        "-Command",
+        "Get-CimInstance Win32_UserProfile | Where-Object { $_.Special -eq $false } | Select-Object -ExpandProperty LocalPath",
+    ]
+    try:
+        # Cap the CIM query at 10s. Win32_UserProfile via WMI/CIM can hang
+        # indefinitely when the WMI repository is corrupted, the WinMgmt
+        # service is unresponsive, or a domain controller round-trip
+        # stalls. Without this cap, scan discovery could block before any
+        # network timeout could fire.
+        # On timeout we fall through to WSL enumeration and return an
+        # empty Windows profile set rather than aborting the scan.
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=_WINDOWS_PROFILE_QUERY_TIMEOUT,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        logger.error(f"Failed to fetch Windows profiles: {e}")
+        return []
+    except subprocess.TimeoutExpired as e:
+        logger.warning(
+            "Windows profile query timed out after %ss; reporting no Win32 profiles "
+            "(WSL enumeration still proceeds). Likely cause: WMI/CIM is slow or stuck.",
+            _WINDOWS_PROFILE_QUERY_TIMEOUT,
+        )
+        logger.debug("Win32_UserProfile timeout detail: %s", e)
+        return []
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
 
 def _list_wsl_distros() -> list[str]:
