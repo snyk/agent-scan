@@ -102,14 +102,19 @@ RETRYABLE_TRANSPORT_EXCEPTIONS = (
 _CONFIG_REQUEST_TIMEOUT = 5
 
 
-def _warn_async_results_not_shown() -> None:
-    """Notify push-key users that async scans return no local results and how to opt into them."""
-    rich.print(
-        "[yellow]Warning: This scan was submitted for asynchronous analysis, so results are processed on the "
-        "Snyk side and will not be shown here. Re-run with --show-analysis-results to run the analysis "
-        "synchronously and display results locally.[/yellow]",
-        file=sys.stderr,
+def _warn_async_results_not_shown(machine_mode: bool = False) -> None:
+    """Notify users that async scans return no local results.
+
+    Push-key users can opt into local results. Machine mode has no synchronous route,
+    so the hint to re-run with --show-analysis-results is left out there.
+    """
+    message = (
+        "Warning: This scan was submitted for asynchronous analysis, so results are processed on the "
+        "Snyk side and will not be shown here."
     )
+    if not machine_mode:
+        message += " Re-run with --show-analysis-results to run the analysis synchronously and display results locally."
+    rich.print(f"[yellow]{message}[/yellow]", file=sys.stderr)
 
 
 def _print_scan_sent_success(user_info: ScanUserInfo) -> None:
@@ -637,7 +642,7 @@ async def analyze_machine(
                 unauthorized_text=unauthorized_text,
             )
             if success:
-                _warn_async_results_not_shown()
+                _warn_async_results_not_shown(machine_mode=machine_auth is not None)
                 _print_scan_sent_success(user_info)
                 return _accepted_async_response(payload)
             error_text = error_text or "Could not reach analysis server."

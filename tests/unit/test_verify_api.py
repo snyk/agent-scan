@@ -1769,6 +1769,34 @@ class TestAnalyzeMachineAsyncRouting:
         assert mock_submit.await_args.args[2]["Authorization"] == "Bearer fresh-token"
 
     @pytest.mark.asyncio
+    async def test_machine_auth_async_warning_omits_show_results_hint(self, capsys):
+        """--show-analysis-results fails in machine mode, so the warning must not suggest it."""
+        machine_auth = MachineAuth("https://api.example.io", "tenant-1", "tok")
+
+        with (
+            patch(
+                "agent_scan.verify_api.fetch_agent_scan_config",
+                new_callable=AsyncMock,
+                return_value=AgentScanConfig(async_analysis_enabled=True),
+            ),
+            patch(
+                "agent_scan.verify_api._submit_async_analysis",
+                new_callable=AsyncMock,
+                return_value=(True, None, None),
+            ),
+        ):
+            await analyze_machine(
+                inspected_paths=[InspectedPath(client="cursor", path="/test/path")],
+                analysis_url=self._ANALYSIS_URL,
+                identifier="id-1",
+                machine_auth=machine_auth,
+            )
+
+        captured = capsys.readouterr()
+        assert "Warning: This scan was submitted for asynchronous analysis" in captured.err
+        assert "--show-analysis-results" not in captured.err
+
+    @pytest.mark.asyncio
     async def test_machine_auth_refresh_failure_raises(self):
         machine_auth = MachineAuth("https://api.example.io", "tenant-1", "stale-token", token_command="/opt/ads/x")
 
