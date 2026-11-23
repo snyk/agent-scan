@@ -357,7 +357,8 @@ class TestGuardUninstallE2E:
         _install(agent_scan_cmd, agent_scan_command, client, config_file, fake_hook_server, "machine-1")
         # The re-install rewrites Guard's previous config; the backup is that config minus Guard.
         _install(agent_scan_cmd, agent_scan_command, client, config_file, fake_hook_server, "machine-2")
-        assert "machine-2" in config_file.read_text()
+        # The machine ID lives in the guard configuration file, not on the hook command.
+        assert "MACHINE_ID=machine-2\n" in (_scripts_dir(config_file) / "snyk-agent-guard.conf").read_text()
         backup = Path(f"{config_file}.snyk-agent-guard.backup")
         assert json.loads(backup.read_text()) == seeded
 
