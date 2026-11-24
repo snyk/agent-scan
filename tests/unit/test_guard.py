@@ -9409,7 +9409,8 @@ class TestMachineIdentityFromEnv:
     def test_token_command_without_a_tenant_warns_and_uses_the_push_key(self, monkeypatch, capsys):
         monkeypatch.setenv("ADS_TOKEN_COMMAND", "/bin/ads")
         assert guard_module._machine_identity_from_env("  ", "https://api.snyk.io") is None
-        assert "TENANT_ID is not set, so Guard uses the push key" in capsys.readouterr().out
+        # rich wraps the warning at the terminal width.
+        assert "TENANT_ID is not set, so Guard uses the push key" in " ".join(capsys.readouterr().out.split())
 
     def test_fetch_machine_auth_passes_the_base_url(self):
         with patch(f"{_G}.fetch_access_token", return_value="tok") as fetch:
@@ -9418,6 +9419,15 @@ class TestMachineIdentityFromEnv:
         assert auth.tenant_path("/agent-monitor/hooks/cursor") == (
             "https://api.eu.snyk.io/hidden/tenants/tenant/agent-monitor/hooks/cursor"
         )
+
+    def test_fetch_machine_auth_refuses_a_relative_token_command(self):
+        identity = guard_module._MachineIdentity("ads-installer", "tenant", "https://api.eu.snyk.io")
+        with (
+            patch(f"{_G}.fetch_access_token") as fetch,
+            pytest.raises(guard_module.MachineAuthError, match="must be an absolute path"),
+        ):
+            guard_module._fetch_machine_auth(identity)
+        fetch.assert_not_called()
 
     @pytest.mark.parametrize("token", ['to"k', "to\\k", "to\x01k", "to\x7fk"])
     def test_fetch_machine_auth_refuses_a_token_the_hook_scripts_cannot_send(self, token):
@@ -9683,6 +9693,15 @@ class TestBashHookScriptMachineIdentity:
         assert _HookHandler.last_request is None
         assert result.stdout == ""  # Cursor gets nothing on stdout
         assert "token command failed" in result.stderr
+
+    def test_relative_token_command_is_refused(self, hook_server, tmp_path):
+        _fake_token_command(tmp_path)
+        result = self._run(hook_server, tmp_path, client="cursor", ADS_TOKEN_COMMAND="ads-installer")
+
+        assert result.returncode != 0
+        assert _HookHandler.last_request is None
+        assert not (tmp_path / "token-runs").exists()
+        assert "ADS_TOKEN_COMMAND must be an absolute path" in result.stderr
 
     def test_hung_token_command_fails_open_within_the_budget(self, hook_server, tmp_path):
         script = _forwarder_with_budget(tmp_path, "snyk-agent-guard.sh", 1)

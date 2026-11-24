@@ -303,8 +303,12 @@ def _machine_identity_from_env(tenant_id: str, base_url: str) -> _MachineIdentit
 def _fetch_machine_auth(identity: _MachineIdentity) -> MachineAuth:
     """Run the token command once and return the token for the Python-sent events.
 
-    Raises MachineAuthError when the command fails; there is no push-key fallback.
+    Raises MachineAuthError when the command is not an absolute path or fails; there is no
+    push-key fallback.
     """
+    if not os.path.isabs(identity.token_command):
+        # A bare name is looked up in the hook's PATH, and on Windows in the current directory too.
+        raise MachineAuthError("The token command must be an absolute path.")
     token = fetch_access_token(identity.token_command, identity.base_url)
     if _TOKEN_UNSAFE_RE.search(token):
         raise MachineAuthError(

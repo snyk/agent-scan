@@ -168,6 +168,11 @@ if ($machineIdentity) {
         Write-Error "TENANT_ID is required (pass -TenantId or set env var; $required)"
         exit 1
     }
+    # A bare name would be looked up in PATH and the current directory.
+    if (-not [System.IO.Path]::IsPathRooted($TokenCommand)) {
+        Write-Error "ADS_TOKEN_COMMAND must be an absolute path"
+        exit 1
+    }
     # Tenant ids are UUIDs; one that would need escaping in the URL path is refused.
     if ($TenantId -notmatch '^[A-Za-z0-9._~-]+$') {
         Write-Error "TENANT_ID is not a valid tenant id"

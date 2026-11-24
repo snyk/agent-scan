@@ -246,6 +246,8 @@ hook_main() {
     machine_identity=1
     [[ -n "${REMOTE_HOOKS_BASE_URL:-}" ]] || die "REMOTE_HOOKS_BASE_URL environment variable is not set (machine identity needs ADS_TOKEN_COMMAND, REMOTE_HOOKS_BASE_URL and TENANT_ID)"
     [[ -n "${TENANT_ID:-}" ]] || die "TENANT_ID environment variable is not set (machine identity needs ADS_TOKEN_COMMAND, REMOTE_HOOKS_BASE_URL and TENANT_ID)"
+    # A bare name would be looked up in the agent's PATH.
+    [[ "$ADS_TOKEN_COMMAND" == /* ]] || die "ADS_TOKEN_COMMAND must be an absolute path"
     # Tenant ids are UUIDs; one that would need escaping in the URL path is refused.
     [[ "$TENANT_ID" =~ ^[A-Za-z0-9._~-]+$ ]] || die "TENANT_ID is not a valid tenant id"
   else
