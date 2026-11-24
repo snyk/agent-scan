@@ -1,3 +1,4 @@
+import contextlib
 import io
 import os
 import subprocess
@@ -211,6 +212,10 @@ class TestGetReadableHomeDirectoriesWindowsTimeout:
     raising, WSL enumeration still proceeds (so a hung CIM query doesn't
     erase the WSL half of the result), and the failure is logged.
     """
+
+    @pytest.fixture(autouse=True)
+    def _no_registry_profiles(self, monkeypatch):
+        monkeypatch.setattr(utils_module, "_windows_profile_paths_from_registry", lambda: [])
 
     def test_windows_profile_query_timeout_does_not_hang(self, monkeypatch, caplog):
         from pathlib import Path
@@ -447,6 +452,10 @@ class TestGetReadableHomeDirectoriesWindows:
     ``platform.system`` mock.
     """
 
+    @pytest.fixture(autouse=True)
+    def _no_registry_profiles(self, monkeypatch):
+        monkeypatch.setattr(utils_module, "_windows_profile_paths_from_registry", lambda: [])
+
     def _stub_subprocess_run_with_paths(self, monkeypatch, paths):
         """Make ``subprocess.run`` return the given paths as Win32_UserProfile output."""
         stdout = "\n".join(str(p) for p in paths) + "\n"
@@ -608,3 +617,115 @@ class TestGetReadableHomeDirectoriesWindows:
 
         usernames = {u for _p, u in result}
         assert usernames == {"wsl_alice"}, f"WSL homes must still surface when CIM query fails; got {usernames}"
+
+
+class _FakeWinreg:
+    """Just enough of ``winreg`` to read ``ProfileList``. ``profiles`` maps a SID to its
+    ``ProfileImagePath`` (value, kind), or None when the value is missing."""
+
+    HKEY_LOCAL_MACHINE = "HKLM"
+    REG_SZ = 1
+    REG_EXPAND_SZ = 2
+
+    def __init__(self, profiles, error=None):
+        self.profiles = profiles
+        self.error = error
+
+    def OpenKey(self, parent, sub_key):
+        if parent == self.HKEY_LOCAL_MACHINE:
+            if self.error is not None:
+                raise self.error
+            assert sub_key == utils_module._PROFILE_LIST_KEY
+            return contextlib.nullcontext("profile_list")
+        return contextlib.nullcontext(sub_key)
+
+    def QueryInfoKey(self, _key):
+        return (len(self.profiles), 0, 0)
+
+    def EnumKey(self, _key, index):
+        return list(self.profiles)[index]
+
+    def QueryValueEx(self, sid, name):
+        assert name == "ProfileImagePath"
+        if self.profiles[sid] is None:
+            raise FileNotFoundError(sid)
+        return self.profiles[sid]
+
+    def ExpandEnvironmentStrings(self, value):
+        return value.replace("%SystemDrive%", "C:")
+
+
+@pytest.fixture
+def fake_winreg(monkeypatch):
+    def install(profiles, error=None):
+        monkeypatch.setattr(utils_module.sys, "platform", "win32")
+        monkeypatch.setitem(sys.modules, "winreg", _FakeWinreg(profiles, error))
+
+    return install
+
+
+def test_registry_lists_user_profiles_only(fake_winreg):
+    fake_winreg(
+        {
+            "S-1-5-18": (r"%systemroot%\system32\config\systemprofile", _FakeWinreg.REG_EXPAND_SZ),
+            "S-1-5-21-1-1001": (r"%SystemDrive%\Users\alice", _FakeWinreg.REG_EXPAND_SZ),
+            "S-1-5-21-1-1001.bak": (r"C:\Users\alice.old", _FakeWinreg.REG_SZ),
+            "S-1-5-21-1-1002": None,
+            "S-1-12-1-9": (r"C:\Users\entra", _FakeWinreg.REG_SZ),
+        }
+    )
+    assert utils_module._windows_profile_paths_from_registry() == [r"C:\Users\alice", r"C:\Users\entra"]
+
+
+def test_registry_read_failure_raises(fake_winreg):
+    fake_winreg({}, error=PermissionError("denied"))
+    with pytest.raises(OSError):
+        utils_module._windows_profile_paths_from_registry()
+
+
+class TestWindowsProfileSource:
+    """The registry is read first; PowerShell runs only when it fails or lists nothing."""
+
+    @pytest.fixture(autouse=True)
+    def _windows(self, monkeypatch):
+        monkeypatch.setattr(utils_module.platform, "system", lambda: "Windows")
+        monkeypatch.setattr(utils_module, "get_wsl_home_directories", lambda: [])
+
+    def _cim(self, monkeypatch, paths):
+        calls = []
+
+        def fake_cim():
+            calls.append(1)
+            return [str(p) for p in paths]
+
+        monkeypatch.setattr(utils_module, "_windows_profile_paths_from_cim", fake_cim)
+        return calls
+
+    def test_registry_profiles_skip_powershell(self, monkeypatch, tmp_path):
+        (tmp_path / "alice").mkdir()
+        monkeypatch.setattr(utils_module, "_windows_profile_paths_from_registry", lambda: [str(tmp_path / "alice")])
+        calls = self._cim(monkeypatch, [])
+
+        assert get_readable_home_directories(all_users=True) == [(tmp_path / "alice", "alice")]
+        assert calls == []
+
+    @pytest.mark.parametrize("registry_error", [None, PermissionError("denied")])
+    def test_falls_back_to_powershell(self, monkeypatch, tmp_path, registry_error):
+        (tmp_path / "bob").mkdir()
+
+        def registry():
+            if registry_error is not None:
+                raise registry_error
+            return []
+
+        monkeypatch.setattr(utils_module, "_windows_profile_paths_from_registry", registry)
+        calls = self._cim(monkeypatch, [tmp_path / "bob"])
+
+        assert get_readable_home_directories(all_users=True) == [(tmp_path / "bob", "bob")]
+        assert calls == [1]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="reads the real registry")
+def test_registry_lists_current_user_profile():
+    paths = [os.path.normcase(p) for p in utils_module._windows_profile_paths_from_registry()]
+    assert os.path.normcase(os.path.expanduser("~")) in paths

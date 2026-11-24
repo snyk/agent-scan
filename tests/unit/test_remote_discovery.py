@@ -81,6 +81,31 @@ def test_find_read_skips_files_over_budget_without_reading(tmp_path: Path, monke
     assert set(opened) == set(read)
 
 
+@pytest.mark.parametrize(
+    ("error", "reason"),
+    [
+        (PermissionError(13, "denied"), "unreadable"),
+        # Say, a OneDrive file macOS can't download.
+        (OSError(11, "resource deadlock avoided"), "read_error"),
+        (ValueError("bad path"), "read_error"),
+    ],
+)
+def test_read_errors_report_reason(tmp_path: Path, monkeypatch, error: Exception, reason: str) -> None:
+    from agent_scan.remote_discovery import executor
+
+    path = tmp_path / "mcp.json"
+    path.write_text("{}")
+
+    def failing_open(*_a, **_k):
+        raise error
+
+    monkeypatch.setattr(executor, "open", failing_open, raising=False)
+    result = run_op({"op_id": "1", "kind": "read", "paths": [str(path)]})
+
+    assert result["files"] == []
+    assert [(s["path"], s["reason"]) for s in result["skipped"]] == [(str(path), reason)]
+
+
 def test_cancelled_op_stops() -> None:
     import threading
 
