@@ -1,19 +1,20 @@
 """Machine identity auth for the Cerberus tenant routes.
 
 The ADS installer enrolls the machine and passes Agent Scan the installer's
-token command, the tenant id and the Snyk API base URL (``--token-command``,
-``--tenant-id``, ``--base-url``). ``<token command> token --base-url <base url>``
-prints a machine access token for that API on stdout, which authenticates
+token command and the tenant id (``--token-command``, ``--tenant-id``). The
+Snyk API is the scheme and host of ``--analysis-url``, the gateway that serves
+the push-key routes too. ``<token command> token --base-url <api>`` prints a
+machine access token for that API on stdout, which authenticates
 ``/hidden/tenants/{tenant_id}/...`` as a bearer token. The token is never
 logged and never put on a command line.
 
-The installer decides the auth type up front: all three values set is machine
-mode, none of them set is push-key mode. Some but not all of them is a
-configuration error, and a token command that fails is an error too. Neither
-falls back to the push key.
+Both values set is machine mode. Otherwise the scan uses the push key. Once in
+machine mode, a token command that fails is an error, and the scan never falls
+back to the push key.
 """
 
 import logging
+import os
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -27,13 +28,10 @@ logger = logging.getLogger(__name__)
 TENANT_API_VERSION = "2024-10-15"
 
 # How long one run of the token command may take before the scan fails. The
-# command prints a cached token, or refreshes it over the network first (the
-# installer bounds that refresh to a minute).
-TOKEN_COMMAND_TIMEOUT_S = 60
-# Bounds the token command's error output in our own error message.
-_STDERR_EXCERPT_CHARS = 300
-
-_SCAN_VALUE_NAMES = ("--token-command", "--tenant-id", "--base-url")
+# command prints a cached token, or refreshes it over the network first. The
+# installer bounds that refresh to a minute, so this leaves headroom for process
+# start-up on top of a refresh that uses its full minute.
+TOKEN_COMMAND_TIMEOUT_S = 90
 
 # Synchronous analysis has no tenant route, so machine mode cannot run it.
 SYNC_ANALYSIS_ERROR = (
@@ -83,19 +81,9 @@ class MachineAuth:
         return replace(self, access_token=token)
 
 
-def is_machine_mode(values: Sequence[str | None], names: Sequence[str] = _SCAN_VALUE_NAMES) -> bool:
-    """True when every machine identity value is set, False when none is.
-
-    ``names`` label ``values`` in the error. Raises MachineAuthError when only
-    some are set: the installer passes all of them or none.
-    """
-    present = [bool(value and value.strip()) for value in values]
-    if not any(present):
-        return False
-    if all(present):
-        return True
-    missing = ", ".join(name for name, ok in zip(names, present, strict=True) if not ok)
-    raise MachineAuthError(f"Machine identity needs {', '.join(names)} set together; missing: {missing}.")
+def is_machine_mode(values: Sequence[str | None]) -> bool:
+    """True when every machine identity value is set. Otherwise the scan uses the push key."""
+    return all(value and value.strip() for value in values)
 
 
 def fetch_access_token(token_command: str, base_url: str, *, timeout: float = TOKEN_COMMAND_TIMEOUT_S) -> str:
@@ -105,8 +93,8 @@ def fetch_access_token(token_command: str, base_url: str, *, timeout: float = TO
     with, so a token is never minted for one API and sent to another.
 
     Raises MachineAuthError when the command cannot run, fails, times out or
-    prints anything other than one token. The message never holds stdout, where
-    the token would be.
+    prints anything other than one token. The message holds neither stdout, where
+    the token would be, nor stderr, which may echo credentials.
     """
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
     try:
@@ -124,10 +112,7 @@ def fetch_access_token(token_command: str, base_url: str, *, timeout: float = TO
     except (OSError, ValueError) as e:
         raise MachineAuthError(f"The token command could not run: {e}") from None
     if completed.returncode != 0:
-        detail = (completed.stderr or "").strip()[-_STDERR_EXCERPT_CHARS:]
-        raise MachineAuthError(
-            f"The token command exited with {completed.returncode}{f': {detail}' if detail else '.'}"
-        )
+        raise MachineAuthError(f"The token command exited with {completed.returncode}.")
     token = (completed.stdout or "").strip()
     if not token or any(c.isspace() for c in token):
         raise MachineAuthError("The token command did not print a single access token.")
@@ -137,20 +122,25 @@ def fetch_access_token(token_command: str, base_url: str, *, timeout: float = TO
 def resolve_machine_auth(
     token_command: str | None,
     tenant_id: str | None,
-    base_url: str | None,
+    base_url: str,
 ) -> MachineAuth | None:
-    """Machine auth when all three values are set, None (push-key mode) when none is.
+    """Machine auth for ``base_url`` when the token command and tenant id are both set, else None (push-key mode).
 
-    Runs the token command once. Raises MachineAuthError when only some values
-    are set or the token command fails.
+    Runs the token command once. Raises MachineAuthError when the token command
+    is not an absolute path or fails.
     """
-    if not is_machine_mode((token_command, tenant_id, base_url)):
+    if not is_machine_mode((token_command, tenant_id)):
         return None
-    assert token_command and tenant_id and base_url
-    token = fetch_access_token(token_command.strip(), base_url.strip())
+    assert token_command and tenant_id
+    token_command = token_command.strip()
+    if not os.path.isabs(token_command):
+        # A bare name is looked up in PATH, and on Windows in the current directory too.
+        raise MachineAuthError("The token command must be an absolute path.")
+    base_url = base_url.strip()
+    token = fetch_access_token(token_command, base_url)
     return MachineAuth(
-        base_url=base_url.strip(),
+        base_url=base_url,
         tenant_id=tenant_id.strip(),
         access_token=token,
-        token_command=token_command.strip(),
+        token_command=token_command,
     )

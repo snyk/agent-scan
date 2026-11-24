@@ -1,6 +1,6 @@
 [project]
 name = "snyk-agent-scan"
-version = "0.7.0"
+version = "0.7.1"
 description = "Agent supply chain security scanner."
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -12,7 +12,7 @@ classifiers = [
 dependencies = [
     "rich==14.2.0",
     "pyjson5>=1.6.8",
-    "pydantic>=2.11.2",
+    "pydantic>=2.14.2",
     "lark>=1.1.9",
     "psutil>=5.9.0",
     "pyyaml>=6.0.2",

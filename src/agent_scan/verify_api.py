@@ -102,14 +102,19 @@ RETRYABLE_TRANSPORT_EXCEPTIONS = (
 _CONFIG_REQUEST_TIMEOUT = 5
 
 
-def _warn_async_results_not_shown() -> None:
-    """Notify push-key users that async scans return no local results and how to opt into them."""
-    rich.print(
-        "[yellow]Warning: This scan was submitted for asynchronous analysis, so results are processed on the "
-        "Snyk side and will not be shown here. Re-run with --show-analysis-results to run the analysis "
-        "synchronously and display results locally.[/yellow]",
-        file=sys.stderr,
+def _warn_async_results_not_shown(machine_mode: bool = False) -> None:
+    """Notify users that async scans return no local results.
+
+    Push-key users can opt into local results. Machine mode has no synchronous route,
+    so the hint to re-run with --show-analysis-results is left out there.
+    """
+    message = (
+        "Warning: This scan was submitted for asynchronous analysis, so results are processed on the "
+        "Snyk side and will not be shown here."
     )
+    if not machine_mode:
+        message += " Re-run with --show-analysis-results to run the analysis synchronously and display results locally."
+    rich.print(f"[yellow]{message}[/yellow]", file=sys.stderr)
 
 
 def _print_scan_sent_success(user_info: ScanUserInfo) -> None:
@@ -575,6 +580,7 @@ async def analyze_machine(
         agent_scan_config: Config already fetched for this push key; fetched here when omitted
         machine_auth: Machine token for the tenant routes. It replaces the push key for the
             config and async analysis, and the token is refreshed before the async submit.
+            A failed async submit raises MachineAuthError, so the scan exits 1.
             Synchronous analysis (the tenant config disables async, or results are shown) has
             no tenant route, so machine mode always fails it
     """
@@ -637,10 +643,13 @@ async def analyze_machine(
                 unauthorized_text=unauthorized_text,
             )
             if success:
-                _warn_async_results_not_shown()
+                _warn_async_results_not_shown(machine_mode=machine_auth is not None)
                 _print_scan_sent_success(user_info)
                 return _accepted_async_response(payload)
             error_text = error_text or "Could not reach analysis server."
+            if machine_auth is not None:
+                # Installer-scheduled runs read the exit code, so a failed submit exits 1.
+                raise MachineAuthError(error_text)
             if raise_on_error:
                 raise RuntimeError(error_text)
             return _analysis_error_response(payload, error_text, exc)

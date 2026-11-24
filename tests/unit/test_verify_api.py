@@ -1769,6 +1769,61 @@ class TestAnalyzeMachineAsyncRouting:
         assert mock_submit.await_args.args[2]["Authorization"] == "Bearer fresh-token"
 
     @pytest.mark.asyncio
+    async def test_machine_auth_async_warning_omits_show_results_hint(self, capsys):
+        """--show-analysis-results fails in machine mode, so the warning must not suggest it."""
+        machine_auth = MachineAuth("https://api.example.io", "tenant-1", "tok")
+
+        with (
+            patch(
+                "agent_scan.verify_api.fetch_agent_scan_config",
+                new_callable=AsyncMock,
+                return_value=AgentScanConfig(async_analysis_enabled=True),
+            ),
+            patch(
+                "agent_scan.verify_api._submit_async_analysis",
+                new_callable=AsyncMock,
+                return_value=(True, None, None),
+            ),
+        ):
+            await analyze_machine(
+                inspected_paths=[InspectedPath(client="cursor", path="/test/path")],
+                analysis_url=self._ANALYSIS_URL,
+                identifier="id-1",
+                machine_auth=machine_auth,
+            )
+
+        captured = capsys.readouterr()
+        assert "Warning: This scan was submitted for asynchronous analysis" in captured.err
+        assert "--show-analysis-results" not in captured.err
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("raise_on_error", [False, True], ids=["default", "raise_on_error"])
+    async def test_machine_auth_failed_submit_raises(self, raise_on_error):
+        """A rejected tenant submit exits the scan with 1, so scheduled runs see the failure."""
+        machine_auth = MachineAuth("https://api.example.io", "tenant-1", "tok")
+
+        with (
+            patch(
+                "agent_scan.verify_api.fetch_agent_scan_config",
+                new_callable=AsyncMock,
+                return_value=AgentScanConfig(async_analysis_enabled=True),
+            ),
+            patch(
+                "agent_scan.verify_api._submit_async_analysis",
+                new_callable=AsyncMock,
+                return_value=(False, "Analysis server returned 400.", None),
+            ),
+            pytest.raises(MachineAuthError, match="returned 400"),
+        ):
+            await analyze_machine(
+                inspected_paths=[InspectedPath(client="cursor", path="/test/path")],
+                analysis_url=self._ANALYSIS_URL,
+                identifier="id-1",
+                machine_auth=machine_auth,
+                raise_on_error=raise_on_error,
+            )
+
+    @pytest.mark.asyncio
     async def test_machine_auth_refresh_failure_raises(self):
         machine_auth = MachineAuth("https://api.example.io", "tenant-1", "stale-token", token_command="/opt/ads/x")
 
@@ -1825,6 +1880,10 @@ class TestAnalyzeMachineAsyncRouting:
         error = result.scan_path_responses[0].error
         assert error is not None and error.is_failure
         assert "no machine identity route" in error.message
+
+
+# Absolute on every platform: machine mode refuses a token command that is not an absolute path.
+_TOKEN_COMMAND = os.path.abspath("/opt/ads/installer")
 
 
 def _token_run(returncode=0, stdout="", stderr=""):
@@ -1887,55 +1946,55 @@ class TestMachineAuth:
             caplog.at_level(logging.DEBUG),
             patch("agent_scan.machine_auth.subprocess.run", return_value=_token_run(stdout="secret-tok\n")),
         ):
-            machine_auth = resolve_machine_auth("/opt/ads/installer", "tenant-1", "https://api.snyk.io")
+            machine_auth = resolve_machine_auth(_TOKEN_COMMAND, "tenant-1", "https://api.snyk.io")
         assert machine_auth is not None
         assert machine_auth.headers == {"Authorization": "Bearer secret-tok"}
         assert "secret-tok" not in caplog.text
         assert "secret-tok" not in repr(machine_auth)
 
-    @pytest.mark.parametrize("values", [(None, None, None), ("", " ", "")], ids=["none", "blank"])
-    def test_no_values_is_push_key_mode(self, values):
-        with patch("agent_scan.machine_auth.subprocess.run") as run:
-            assert resolve_machine_auth(*values) is None
-        run.assert_not_called()
-
     @pytest.mark.parametrize(
-        "values, missing",
-        [
-            (("/opt/ads/installer", None, None), "--tenant-id, --base-url"),
-            (("/opt/ads/installer", "tenant-1", None), "--base-url"),
-            ((None, "tenant-1", "https://api.snyk.io"), "--token-command"),
-            (("", "tenant-1", "https://api.snyk.io"), "--token-command"),
-        ],
-        ids=["command_only", "no_base_url", "no_command", "empty_command"],
+        "values",
+        [(None, None), ("", " "), (_TOKEN_COMMAND, None), (None, "tenant-1"), ("", "tenant-1")],
+        ids=["none", "blank", "command_only", "tenant_only", "empty_command"],
     )
-    def test_some_values_is_a_configuration_error(self, values, missing):
-        with patch("agent_scan.machine_auth.subprocess.run") as run, pytest.raises(MachineAuthError) as excinfo:
-            resolve_machine_auth(*values)
+    def test_without_both_values_is_push_key_mode(self, values):
+        with patch("agent_scan.machine_auth.subprocess.run") as run:
+            assert resolve_machine_auth(*values, "https://api.snyk.io") is None
         run.assert_not_called()
-        assert str(excinfo.value).endswith(f"missing: {missing}.")
 
-    def test_failed_token_command_raises(self):
+    def test_failed_token_command_raises_without_its_stderr(self):
+        run = _token_run(returncode=2, stderr="Authorization: Bearer leaked-tok")
         with (
-            patch("agent_scan.machine_auth.subprocess.run", return_value=_token_run(returncode=2, stderr="revoked")),
-            pytest.raises(MachineAuthError, match="exited with 2: revoked"),
+            patch("agent_scan.machine_auth.subprocess.run", return_value=run),
+            pytest.raises(MachineAuthError) as excinfo,
         ):
-            resolve_machine_auth("/opt/ads/installer", "tenant-1", "https://api.snyk.io")
+            resolve_machine_auth(_TOKEN_COMMAND, "tenant-1", "https://api.snyk.io")
+        assert str(excinfo.value) == "The token command exited with 2."
+        assert "leaked-tok" not in str(excinfo.value)
 
-    def test_is_machine_mode_labels_values_with_given_names(self):
-        with pytest.raises(MachineAuthError, match="missing: ADS_BASE_URL"):
-            is_machine_mode(("cmd", "tenant-1", None), ("ADS_TOKEN_COMMAND", "TENANT_ID", "ADS_BASE_URL"))
-        assert is_machine_mode(("cmd", "tenant-1", "https://api.snyk.io")) is True
+    @pytest.mark.parametrize("token_command", ["ads-installer", "bin/ads-installer"], ids=["bare_name", "relative"])
+    def test_relative_token_command_is_refused(self, token_command):
+        with (
+            patch("agent_scan.machine_auth.subprocess.run") as run,
+            pytest.raises(MachineAuthError, match="absolute path"),
+        ):
+            resolve_machine_auth(token_command, "tenant-1", "https://api.snyk.io")
+        run.assert_not_called()
+
+    def test_is_machine_mode_needs_every_value(self):
+        assert is_machine_mode(("cmd", "tenant-1")) is True
+        assert not is_machine_mode(("cmd", None))
+        assert not is_machine_mode(("cmd", " "))
 
     def test_resolve_keeps_the_token_command_for_refresh(self):
         with patch("agent_scan.machine_auth.subprocess.run", return_value=_token_run(stdout="tok-1\n")):
-            machine_auth = resolve_machine_auth(" /opt/ads/installer ", "tenant-1", "https://api.snyk.io")
+            machine_auth = resolve_machine_auth(f" {_TOKEN_COMMAND} ", "tenant-1", "https://api.snyk.io")
         assert machine_auth is not None
-        assert machine_auth.token_command == "/opt/ads/installer"
-        assert "/opt/ads/installer" not in repr(machine_auth)
+        assert machine_auth.token_command == _TOKEN_COMMAND
+        assert _TOKEN_COMMAND not in repr(machine_auth)
         with patch("agent_scan.machine_auth.subprocess.run", return_value=_token_run(stdout="tok-2\n")) as run:
             refreshed = machine_auth.refresh()
-        assert run.call_args.args[0] == ["/opt/ads/installer", "token", "--base-url", "https://api.snyk.io"]
+        assert run.call_args.args[0] == [_TOKEN_COMMAND, "token", "--base-url", "https://api.snyk.io"]
         assert refreshed.access_token == "tok-2"
         assert (refreshed.base_url, refreshed.tenant_id) == (machine_auth.base_url, machine_auth.tenant_id)
 
