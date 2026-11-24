@@ -9625,7 +9625,9 @@ class TestBashHookScriptMachineIdentity:
 
     def test_push_key_wins_over_an_ambient_token_command(self, hook_server, tmp_path):
         """An ADS_TOKEN_COMMAND in the agent's environment cannot change a push-key hook."""
-        result = self._run(hook_server, tmp_path, PUSH_KEY="pk-1234")
+        # No trailing slash here: the push-key route does not strip one, and http.server would
+        # hide the resulting "//" by collapsing it.
+        result = self._run(hook_server, tmp_path, PUSH_KEY="pk-1234", REMOTE_HOOKS_BASE_URL=hook_server)
         assert result.returncode == 0, result.stderr
         req = _HookHandler.last_request
         assert req["path"] == "/hidden/agent-monitor/hooks/claude-code?version=2025-11-11"
