@@ -40,11 +40,8 @@ set -euo pipefail
 # Agent-scan CLI version (replaced by the release pipeline).
 AGENT_SCAN_VERSION="__AGENT_SCAN_VERSION__"
 
-# Hook API version.
+# Hook API version. agent-monitor publishes both hook routes (push key and tenant) under it.
 VERSION="2025-11-11"
-
-# API version the gateway publishes the tenant routes at (machine identity).
-TENANT_VERSION="2024-10-15"
 
 # Timeout, in seconds, for the whole request; with machine identity the token command's time
 # comes out of it too. agent-monitor may legitimately take ~50 s to
@@ -278,7 +275,7 @@ hook_main() {
 
   local url
   if (( machine_identity )); then
-    url="${ADS_BASE_URL%/}/hidden/tenants/${TENANT_ID}${endpoint#/hidden}?version=${TENANT_VERSION}"
+    url="${ADS_BASE_URL%/}/hidden/tenants/${TENANT_ID}${endpoint#/hidden}?version=${VERSION}"
   else
     url="${REMOTE_HOOKS_BASE_URL}${endpoint}?version=${VERSION}"
   fi

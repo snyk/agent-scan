@@ -60,11 +60,8 @@ $ErrorActionPreference = "Stop"
 # Agent-scan CLI version (replaced by the release pipeline).
 $AGENT_SCAN_VERSION = "__AGENT_SCAN_VERSION__"
 
-# Hook API version.
+# Hook API version. agent-monitor publishes both hook routes (push key and tenant) under it.
 $VERSION = "2025-11-11"
-
-# API version the gateway publishes the tenant routes at (machine identity).
-$TENANT_VERSION = "2024-10-15"
 
 # Timeout, in seconds, for the whole request (same reasoning as snyk-agent-guard.sh: the
 # agent caps the hook at 65 s and agent-monitor may legitimately take ~50 s to answer). With
@@ -227,7 +224,7 @@ if ($cliVersion -eq '__AGENT_SCAN_VERSION__') {
 }
 $userAgent = "snyk/snyk-agent-guard.ps1 Agent Scan v$cliVersion"
 if ($machineIdentity) {
-    $url = "$($AdsBaseUrl.TrimEnd('/'))/hidden/tenants/${TenantId}$($endpoint.Substring('/hidden'.Length))?version=$TENANT_VERSION"
+    $url = "$($AdsBaseUrl.TrimEnd('/'))/hidden/tenants/${TenantId}$($endpoint.Substring('/hidden'.Length))?version=$VERSION"
 } else {
     $url = "${RemoteUrl}${endpoint}?version=$VERSION"
 }

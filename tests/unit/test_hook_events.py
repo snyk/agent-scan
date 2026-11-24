@@ -103,7 +103,7 @@ def test_machine_auth_posts_to_the_tenant_route_with_a_bearer_token(client):
     assert result == (True, "")
     post = session.posts[0]
     assert post["url"] == (
-        f"https://api.eu.snyk.io/hidden/tenants/tenant-1/agent-monitor/hooks/{client}?version=2024-10-15"
+        f"https://api.eu.snyk.io/hidden/tenants/tenant-1/agent-monitor/hooks/{client}?version=2025-11-11"
     )
     headers = post["headers"]
     assert headers["Authorization"] == "Bearer machine-token"

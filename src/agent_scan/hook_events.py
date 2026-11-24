@@ -246,7 +246,9 @@ def send_hook_event(
         "Content-Type": "text/plain",
     }
     if machine_auth is not None:
-        url = machine_auth.tenant_url(client.endpoint.removeprefix("/hidden"))
+        # The hook routes share one version; the scan's tenant routes use another (tenant_url).
+        tenant_path = machine_auth.tenant_path(client.endpoint.removeprefix("/hidden"))
+        url = f"{tenant_path}?version={HOOK_VERSION}"
         headers.update(machine_auth.headers)
     else:
         if not base_url.lower().startswith(("http://", "https://")):

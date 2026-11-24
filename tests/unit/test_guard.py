@@ -9422,8 +9422,8 @@ class TestMachineIdentityFromEnv:
         with patch(f"{_G}.fetch_access_token", return_value="tok") as fetch:
             auth = guard_module._fetch_machine_auth(_IDENTITY)
         fetch.assert_called_once_with("/Users/me/.local/bin/ads-installer", "https://api.eu.snyk.io")
-        assert auth.tenant_url("/agent-monitor/hooks/cursor") == (
-            "https://api.eu.snyk.io/hidden/tenants/tenant/agent-monitor/hooks/cursor?version=2024-10-15"
+        assert auth.tenant_path("/agent-monitor/hooks/cursor") == (
+            "https://api.eu.snyk.io/hidden/tenants/tenant/agent-monitor/hooks/cursor"
         )
 
     @pytest.mark.parametrize("token", ['to"k', "to\\k", "to\x01k", "to\x7fk"])
@@ -9620,7 +9620,7 @@ class TestBashHookScriptMachineIdentity:
         assert result.returncode == 0, result.stderr
         assert json.loads(result.stdout) == {"ok": True}
         req = _HookHandler.last_request
-        assert req["path"] == f"/hidden/tenants/tenant-1/agent-monitor/hooks/{client}?version=2024-10-15"
+        assert req["path"] == f"/hidden/tenants/tenant-1/agent-monitor/hooks/{client}?version=2025-11-11"
         assert req["headers"]["Authorization"] == "Bearer machine-token-123"
         assert "X-Client-Id" not in req["headers"]
         assert json.loads(req["headers"]["X-User"])["identifier"] == "machine-42"
@@ -9763,7 +9763,7 @@ class TestBashHookScriptMachineIdentity:
                 )
                 assert result.returncode == 0, result.stderr
         req = _HookHandler.last_request
-        assert req["path"] == "/hidden/tenants/tenant-1/agent-monitor/hooks/cursor?version=2024-10-15"
+        assert req["path"] == "/hidden/tenants/tenant-1/agent-monitor/hooks/cursor?version=2025-11-11"
         assert req["headers"]["Authorization"] == "Bearer machine-token-123"
         assert "X-Client-Id" not in req["headers"]
 
@@ -9815,7 +9815,7 @@ class TestInstallSwitchesAuthModes:
         assert all("PUSH_KEY='pk-1234'" in c for c in push_commands)
 
         test_event = self._install(tmp_path, hook_server, machine=True, monkeypatch=monkeypatch)
-        assert test_event["path"] == "/hidden/tenants/tenant-1/agent-monitor/hooks/claude-code?version=2024-10-15"
+        assert test_event["path"] == "/hidden/tenants/tenant-1/agent-monitor/hooks/claude-code?version=2025-11-11"
         assert test_event["headers"]["Authorization"] == "Bearer machine-token-123"
         assert "X-Client-Id" not in test_event["headers"]
         machine_commands = self._commands(tmp_path)
