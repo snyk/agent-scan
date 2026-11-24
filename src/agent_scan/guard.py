@@ -42,7 +42,7 @@ from agent_scan.hook_events import (
     next_retry_delay,
     send_hook_event,
 )
-from agent_scan.machine_auth import MachineAuth, MachineAuthError, fetch_access_token, is_machine_mode
+from agent_scan.machine_auth import MachineAuth, MachineAuthError, fetch_access_token
 from agent_scan.pushkeys import (
     GuardEnabledAccessDeniedError,
     _is_localhost,
@@ -74,8 +74,6 @@ _DETECTION_RE = re.compile(
     r"|snyk-agent-guard.*-(?:PushKey|TokenCommand)\b",
     re.DOTALL,
 )
-# The environment variables that carry machine identity, in the order is_machine_mode reports them.
-_MACHINE_IDENTITY_NAMES = ("ADS_TOKEN_COMMAND", "TENANT_ID")
 # Tenant ids are UUIDs. The hook scripts put the id in the URL path unescaped, so install refuses
 # one that would need escaping there.
 _TENANT_ID_RE = re.compile(r"^[A-Za-z0-9._~-]+$")
@@ -284,16 +282,21 @@ class _MachineIdentity(NamedTuple):
 def _machine_identity_from_env(tenant_id: str, base_url: str) -> _MachineIdentity | None:
     """ADS_TOKEN_COMMAND with ``tenant_id`` on ``base_url``, or None for push-key mode.
 
-    The installer decides the mode: machine identity when it passes ADS_TOKEN_COMMAND (with
-    TENANT_ID), push key when it does not. TENANT_ID alone is the push-key flow's tenant.
-    ``base_url`` is the Guard URL (``--url`` / REMOTE_HOOKS_BASE_URL); ADS_BASE_URL is not used.
-    Raises MachineAuthError when ADS_TOKEN_COMMAND is set without TENANT_ID.
+    Machine identity needs both ADS_TOKEN_COMMAND and TENANT_ID, as in ``scan``. TENANT_ID alone
+    is the push-key flow's tenant. ADS_TOKEN_COMMAND without TENANT_ID prints a warning and
+    uses the push key. ``base_url`` is the Guard URL (``--url`` / REMOTE_HOOKS_BASE_URL);
+    ADS_BASE_URL is not used.
     """
     token_command = os.environ.get("ADS_TOKEN_COMMAND", "").strip()
     if not token_command:
         return None
     tenant_id = tenant_id.strip()
-    is_machine_mode((token_command, tenant_id), _MACHINE_IDENTITY_NAMES)
+    if not tenant_id:
+        rich.print(
+            "[yellow]Warning:[/yellow] Machine identity needs ADS_TOKEN_COMMAND and TENANT_ID; "
+            "TENANT_ID is not set, so Guard uses the push key."
+        )
+        return None
     return _MachineIdentity(token_command=token_command, tenant_id=tenant_id, base_url=base_url.strip())
 
 

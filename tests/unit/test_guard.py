@@ -9406,10 +9406,10 @@ class TestMachineIdentityFromEnv:
         monkeypatch.setenv("ADS_BASE_URL", "https://api.snyk.io")
         assert guard_module._machine_identity_from_env(tenant, "https://api.snyk.io") is None
 
-    def test_token_command_without_a_tenant_is_a_configuration_error(self, monkeypatch):
+    def test_token_command_without_a_tenant_warns_and_uses_the_push_key(self, monkeypatch, capsys):
         monkeypatch.setenv("ADS_TOKEN_COMMAND", "/bin/ads")
-        with pytest.raises(guard_module.MachineAuthError, match="missing: TENANT_ID"):
-            guard_module._machine_identity_from_env("  ", "https://api.snyk.io")
+        assert guard_module._machine_identity_from_env("  ", "https://api.snyk.io") is None
+        assert "TENANT_ID is not set, so Guard uses the push key" in capsys.readouterr().out
 
     def test_fetch_machine_auth_passes_the_base_url(self):
         with patch(f"{_G}.fetch_access_token", return_value="tok") as fetch:
@@ -9530,20 +9530,23 @@ class TestRunInstallMachineIdentity:
         install.assert_not_called()
         assert "Managed installs use a push key" in str(mock_rich.print.call_args_list)
 
-    def test_token_command_without_a_tenant_fails_the_install(self, tmp_path, monkeypatch):
+    def test_token_command_without_a_tenant_installs_with_the_push_key(self, tmp_path, monkeypatch):
         monkeypatch.delenv("TENANT_ID", raising=False)
         args = self._args(tmp_path, tenant_id="")
         args.guard_command = "install"
         with (
             patch(f"{_G}.fetch_access_token") as fetch,
             patch(f"{_G}._install_hooks") as install,
+            patch(f"{_G}._send_servers_discovered_event", return_value=True),
             patch(f"{_G}.rich") as mock_rich,
         ):
-            assert guard_module.run_guard(args) == 1
+            guard_module.run_guard(args)
 
         fetch.assert_not_called()
-        install.assert_not_called()
-        assert "missing:" in str(mock_rich.print.call_args_list)
+        install.assert_called_once()
+        assert install.call_args.args[2] == "installer-pk"
+        assert install.call_args.kwargs["machine_identity"] is None
+        assert "so Guard uses the push key" in str(mock_rich.print.call_args_list)
 
     def test_tenant_id_that_needs_escaping_fails_the_install(self, tmp_path):
         with (
@@ -9893,13 +9896,16 @@ class TestRunDiscoverMachineIdentity:
         assert send.call_args.args[2] == "pk-1234"
         assert send.call_args.kwargs["machine_auth"] is None
 
-    def test_token_command_without_a_tenant_is_an_error(self, monkeypatch):
+    def test_token_command_without_a_tenant_needs_a_push_key(self, monkeypatch):
+        """Without TENANT_ID it is push-key mode, so discovery with no push key fails as before."""
         monkeypatch.delenv("TENANT_ID")
+        monkeypatch.delenv("PUSH_KEY", raising=False)
         with (
             patch(f"{_G}.fetch_access_token") as fetch,
             patch(f"{_G}.send_hook_event") as send,
-            patch(f"{_G}.rich"),
+            patch(f"{_G}.rich") as mock_rich,
         ):
             assert guard_module.run_guard(self._args()) == 1
         fetch.assert_not_called()
         send.assert_not_called()
+        assert "PUSH_KEY is required" in str(mock_rich.print.call_args_list)
