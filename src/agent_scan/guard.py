@@ -75,7 +75,7 @@ _DETECTION_RE = re.compile(
     re.DOTALL,
 )
 # The environment variables that carry machine identity, in the order is_machine_mode reports them.
-_MACHINE_IDENTITY_NAMES = ("ADS_TOKEN_COMMAND", "TENANT_ID", "ADS_BASE_URL")
+_MACHINE_IDENTITY_NAMES = ("ADS_TOKEN_COMMAND", "TENANT_ID")
 # Tenant ids are UUIDs. The hook scripts put the id in the URL path unescaped, so install refuses
 # one that would need escaping there.
 _TENANT_ID_RE = re.compile(r"^[A-Za-z0-9._~-]+$")
@@ -272,6 +272,8 @@ class _MachineIdentity(NamedTuple):
 
     ``"<token_command>" token --base-url <base_url>`` prints a machine access token; the hooks
     call the tenant routes for ``tenant_id`` on ``base_url`` with it, never the push key.
+    ``base_url`` is the install's ``--url`` (``REMOTE_HOOKS_BASE_URL`` in the hooks); the token
+    command refuses any API other than the one the machine enrolled with.
     """
 
     token_command: str
@@ -279,20 +281,20 @@ class _MachineIdentity(NamedTuple):
     base_url: str
 
 
-def _machine_identity_from_env(tenant_id: str) -> _MachineIdentity | None:
-    """ADS_TOKEN_COMMAND and ADS_BASE_URL with ``tenant_id``, or None for push-key mode.
+def _machine_identity_from_env(tenant_id: str, base_url: str) -> _MachineIdentity | None:
+    """ADS_TOKEN_COMMAND with ``tenant_id`` on ``base_url``, or None for push-key mode.
 
-    The installer decides the mode: machine identity when it passes ADS_TOKEN_COMMAND and
-    ADS_BASE_URL (with TENANT_ID), push key when it passes neither. TENANT_ID alone is the
-    push-key flow's tenant. Raises MachineAuthError when only some machine values are set.
+    The installer decides the mode: machine identity when it passes ADS_TOKEN_COMMAND (with
+    TENANT_ID), push key when it does not. TENANT_ID alone is the push-key flow's tenant.
+    ``base_url`` is the Guard URL (``--url`` / REMOTE_HOOKS_BASE_URL); ADS_BASE_URL is not used.
+    Raises MachineAuthError when ADS_TOKEN_COMMAND is set without TENANT_ID.
     """
     token_command = os.environ.get("ADS_TOKEN_COMMAND", "").strip()
-    base_url = os.environ.get("ADS_BASE_URL", "").strip()
-    if not (token_command or base_url):
+    if not token_command:
         return None
     tenant_id = tenant_id.strip()
-    is_machine_mode((token_command, tenant_id, base_url), _MACHINE_IDENTITY_NAMES)
-    return _MachineIdentity(token_command=token_command, tenant_id=tenant_id, base_url=base_url)
+    is_machine_mode((token_command, tenant_id), _MACHINE_IDENTITY_NAMES)
+    return _MachineIdentity(token_command=token_command, tenant_id=tenant_id, base_url=base_url.strip())
 
 
 def _fetch_machine_auth(identity: _MachineIdentity) -> MachineAuth:
@@ -331,12 +333,12 @@ def _run_install(args) -> None:
     if not tenant_id:
         tenant_id = (os.environ.get("TENANT_ID", "") or "").strip()
     managed: bool = getattr(args, "managed", False)
-    machine_identity = _machine_identity_from_env(tenant_id)
+    machine_identity = _machine_identity_from_env(tenant_id, url)
     if machine_identity is not None:
         if managed:
             rich.print(
-                "[bold red]Error:[/bold red] Managed installs use a push key; ADS_TOKEN_COMMAND and "
-                "ADS_BASE_URL (machine identity) are only for user installs. Unset them, or drop --managed."
+                "[bold red]Error:[/bold red] Managed installs use a push key; ADS_TOKEN_COMMAND "
+                "(machine identity) is only for user installs. Unset it, or drop --managed."
             )
             sys.exit(1)
         if not _TENANT_ID_RE.match(machine_identity.tenant_id):
@@ -344,7 +346,7 @@ def _run_install(args) -> None:
             sys.exit(1)
         if _BASE_URL_UNSAFE_RE.search(machine_identity.base_url):
             rich.print(
-                "[bold red]Error:[/bold red] Machine identity: ADS_BASE_URL must not contain quotes, "
+                "[bold red]Error:[/bold red] Machine identity: --url must not contain quotes, "
                 "backslashes or whitespace."
             )
             sys.exit(1)
@@ -561,15 +563,15 @@ def _read_hook_payload() -> str:
 
 
 def _run_discover(args) -> int:
-    # A push key wins, as in the hook scripts: an ADS_TOKEN_COMMAND or ADS_BASE_URL in the agent's
-    # environment must not change a push-key hook. Machine identity hooks set PUSH_KEY empty.
+    # A push key wins, as in the hook scripts: an ADS_TOKEN_COMMAND in the agent's environment
+    # must not change a push-key hook. Machine identity hooks set PUSH_KEY empty.
     push_key = os.environ.get("PUSH_KEY", "")
-    machine_identity = None if push_key else _machine_identity_from_env(os.environ.get("TENANT_ID", ""))
+    url = getattr(args, "url", None) or os.environ.get("REMOTE_HOOKS_BASE_URL") or DEFAULT_REMOTE_URL
+    machine_identity = None if push_key else _machine_identity_from_env(os.environ.get("TENANT_ID", ""), url)
     if machine_identity is None and not push_key:
         rich.print("[bold red]Error:[/bold red] PUSH_KEY is required to run guard discovery.")
         return 1
 
-    url = getattr(args, "url", None) or os.environ.get("REMOTE_HOOKS_BASE_URL") or DEFAULT_REMOTE_URL
     hook_client = getattr(args, "client", None)
     if not hook_client:
         rich.print("[bold red]Error:[/bold red] --client is required to run guard discovery.")
@@ -1923,8 +1925,8 @@ def _run_status() -> None:
     rich.print()
     rich.print("[dim]# machine identity flow (ADS installer, user-level)[/dim]")
     rich.print(
-        "[dim]ADS_TOKEN_COMMAND=<command> ADS_BASE_URL=<api-url> TENANT_ID=<tenant-id> "
-        "snyk-agent-scan guard install <client> --machine-id <machine-id>[/dim]"
+        "[dim]ADS_TOKEN_COMMAND=<command> TENANT_ID=<tenant-id> "
+        "snyk-agent-scan guard install <client> --url <api-url> --machine-id <machine-id>[/dim]"
     )
     rich.print()
     rich.print("[dim]# headless flow (MDM)[/dim]")
@@ -2476,7 +2478,7 @@ def _filter_cursor_hooks(hooks: dict) -> dict:
 
 def _parse_command_info(cmd: str, events: list[str]) -> dict:
     machine_identity = bool(_extract_env_from_cmd(cmd, "ADS_TOKEN_COMMAND"))
-    url = _extract_env_from_cmd(cmd, "ADS_BASE_URL" if machine_identity else "REMOTE_HOOKS_BASE_URL")
+    url = _extract_env_from_cmd(cmd, "REMOTE_HOOKS_BASE_URL")
     # A machine identity hook has no push key, so uninstall has nothing to revoke.
     push_key = "" if machine_identity else _extract_env_from_cmd(cmd, "PUSH_KEY")
     tenant_id = _extract_env_from_cmd(cmd, "TENANT_ID")
@@ -2497,7 +2499,6 @@ _PS_PARAM_MAP = {
     "REMOTE_HOOKS_BASE_URL": "RemoteUrl",
     "TENANT_ID": "TenantId",
     "ADS_TOKEN_COMMAND": "TokenCommand",
-    "ADS_BASE_URL": "AdsBaseUrl",
 }
 
 
@@ -2636,7 +2637,7 @@ def _render_posix_command(invocation: _HookInvocation) -> str:
             "PUSH_KEY=''",
             "PUSHKEY=''",
             f"ADS_TOKEN_COMMAND={_shell_quote(identity.token_command)}",
-            f"ADS_BASE_URL={_shell_quote(identity.base_url)}",
+            f"REMOTE_HOOKS_BASE_URL={_shell_quote(identity.base_url)}",
             f"TENANT_ID={_shell_quote(identity.tenant_id)}",
         ]
     else:
@@ -2674,7 +2675,7 @@ def _render_powershell_command(invocation: _HookInvocation) -> str:
             [
                 "-TokenCommand",
                 _ps_quote(identity.token_command),
-                "-AdsBaseUrl",
+                "-RemoteUrl",
                 _ps_quote(identity.base_url),
                 "-TenantId",
                 _ps_quote(identity.tenant_id),
@@ -2710,7 +2711,7 @@ def _render_argv(invocation: _HookInvocation) -> tuple[list[str], dict[str, str]
                 [
                     "-TokenCommand",
                     identity.token_command,
-                    "-AdsBaseUrl",
+                    "-RemoteUrl",
                     identity.base_url,
                     "-TenantId",
                     identity.tenant_id,
@@ -2730,11 +2731,11 @@ def _render_argv(invocation: _HookInvocation) -> tuple[list[str], dict[str, str]
 
     if identity is not None:
         # The installer's environment still holds PUSH_KEY; the script must not see it.
-        env = {k: v for k, v in os.environ.items() if k not in ("PUSH_KEY", "PUSHKEY", "REMOTE_HOOKS_BASE_URL")}
+        env = {k: v for k, v in os.environ.items() if k not in ("PUSH_KEY", "PUSHKEY")}
         env.update(
             {
                 "ADS_TOKEN_COMMAND": identity.token_command,
-                "ADS_BASE_URL": identity.base_url,
+                "REMOTE_HOOKS_BASE_URL": identity.base_url,
                 "TENANT_ID": identity.tenant_id,
                 "MACHINE_SERIAL": invocation.machine_serial,
             }

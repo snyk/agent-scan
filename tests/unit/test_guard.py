@@ -9166,7 +9166,7 @@ class TestUninstallLeavesNothingBehind:
 
 
 # ===================================================================
-# Machine identity (ADS_TOKEN_COMMAND, ADS_BASE_URL, TENANT_ID)
+# Machine identity (ADS_TOKEN_COMMAND, TENANT_ID, on the Guard URL)
 # ===================================================================
 
 
@@ -9196,7 +9196,7 @@ class TestMachineIdentityCommands:
                 "main",
                 False,
                 "PUSH_KEY='' PUSHKEY='' "
-                "ADS_TOKEN_COMMAND='/Users/me/.local/bin/ads-installer' ADS_BASE_URL='https://api.eu.snyk.io' "
+                "ADS_TOKEN_COMMAND='/Users/me/.local/bin/ads-installer' REMOTE_HOOKS_BASE_URL='https://api.eu.snyk.io' "
                 "TENANT_ID='tenant' MACHINE_ID='machine' MACHINE_SERIAL='' "
                 "bash '/x/snyk-agent-guard.sh' --client claude-code",
             ),
@@ -9204,14 +9204,14 @@ class TestMachineIdentityCommands:
                 "main",
                 True,
                 "powershell -File 'C:\\hooks\\snyk-agent-guard.ps1' -Client claude-code "
-                "-TokenCommand '/Users/me/.local/bin/ads-installer' -AdsBaseUrl 'https://api.eu.snyk.io' "
+                "-TokenCommand '/Users/me/.local/bin/ads-installer' -RemoteUrl 'https://api.eu.snyk.io' "
                 "-TenantId 'tenant' -MachineId 'machine'",
             ),
             (
                 "discover",
                 False,
                 "PUSH_KEY='' PUSHKEY='' "
-                "ADS_TOKEN_COMMAND='/Users/me/.local/bin/ads-installer' ADS_BASE_URL='https://api.eu.snyk.io' "
+                "ADS_TOKEN_COMMAND='/Users/me/.local/bin/ads-installer' REMOTE_HOOKS_BASE_URL='https://api.eu.snyk.io' "
                 "TENANT_ID='tenant' MACHINE_ID='machine' MACHINE_SERIAL='' "
                 "AGENT_SCAN_COMMAND='/usr/local/bin/snyk-agent-scan' "
                 "bash '/x/snyk-agent-guard-discover.sh' --client 'claude-code' --scope servers",
@@ -9220,7 +9220,7 @@ class TestMachineIdentityCommands:
                 "discover",
                 True,
                 "powershell -File 'C:\\hooks\\snyk-agent-guard-discover.ps1' -Client claude-code "
-                "-TokenCommand '/Users/me/.local/bin/ads-installer' -AdsBaseUrl 'https://api.eu.snyk.io' "
+                "-TokenCommand '/Users/me/.local/bin/ads-installer' -RemoteUrl 'https://api.eu.snyk.io' "
                 "-TenantId 'tenant' -MachineId 'machine' "
                 "-AgentScanCommand 'C:\\Program Files\\Snyk\\snyk-agent-scan.exe' -Scope servers",
             ),
@@ -9313,7 +9313,7 @@ class TestMachineIdentityCommands:
         assert env == {
             "HOME": "/h",
             "ADS_TOKEN_COMMAND": "/Users/me/.local/bin/ads-installer",
-            "ADS_BASE_URL": "https://api.eu.snyk.io",
+            "REMOTE_HOOKS_BASE_URL": "https://api.eu.snyk.io",
             "TENANT_ID": "tenant",
             "MACHINE_SERIAL": "",
             "MACHINE_ID": "machine",
@@ -9334,7 +9334,7 @@ class TestMachineIdentityCommands:
         assert argv[5:] == [
             "-TokenCommand",
             "/Users/me/.local/bin/ads-installer",
-            "-AdsBaseUrl",
+            "-RemoteUrl",
             "https://api.eu.snyk.io",
             "-TenantId",
             "tenant",
@@ -9391,32 +9391,25 @@ class TestMachineIdentityFromEnv:
         for name in ("ADS_TOKEN_COMMAND", "ADS_BASE_URL"):
             monkeypatch.delenv(name, raising=False)
 
-    def test_all_three_values_make_machine_mode(self, monkeypatch):
+    def test_token_command_and_tenant_make_machine_mode_on_the_guard_url(self, monkeypatch):
         monkeypatch.setenv("ADS_TOKEN_COMMAND", " /bin/ads-installer ")
-        monkeypatch.setenv("ADS_BASE_URL", "https://api.snyk.io")
-        assert guard_module._machine_identity_from_env(" tenant ") == guard_module._MachineIdentity(
-            token_command="/bin/ads-installer", tenant_id="tenant", base_url="https://api.snyk.io"
+        # ADS_BASE_URL is not used: the base URL is the Guard URL.
+        monkeypatch.setenv("ADS_BASE_URL", "https://api.us.snyk.io")
+        identity = guard_module._machine_identity_from_env(" tenant ", "https://api.eu.snyk.io")
+        assert identity == guard_module._MachineIdentity(
+            token_command="/bin/ads-installer", tenant_id="tenant", base_url="https://api.eu.snyk.io"
         )
 
     @pytest.mark.parametrize("tenant", ["", "tenant"])
-    def test_neither_installer_value_is_push_key_mode(self, tenant):
-        """TENANT_ID alone belongs to the push-key flow."""
-        assert guard_module._machine_identity_from_env(tenant) is None
+    def test_no_token_command_is_push_key_mode(self, monkeypatch, tenant):
+        """TENANT_ID alone belongs to the push-key flow, and ADS_BASE_URL alone changes nothing."""
+        monkeypatch.setenv("ADS_BASE_URL", "https://api.snyk.io")
+        assert guard_module._machine_identity_from_env(tenant, "https://api.snyk.io") is None
 
-    @pytest.mark.parametrize(
-        "env, tenant, missing",
-        [
-            ({"ADS_TOKEN_COMMAND": "/bin/ads"}, "tenant", "ADS_BASE_URL"),
-            ({"ADS_BASE_URL": "https://api.snyk.io"}, "tenant", "ADS_TOKEN_COMMAND"),
-            ({"ADS_TOKEN_COMMAND": "/bin/ads", "ADS_BASE_URL": "https://api.snyk.io"}, "  ", "TENANT_ID"),
-        ],
-        ids=["no_base_url", "no_token_command", "no_tenant"],
-    )
-    def test_some_values_are_a_configuration_error(self, monkeypatch, env, tenant, missing):
-        for name, value in env.items():
-            monkeypatch.setenv(name, value)
-        with pytest.raises(guard_module.MachineAuthError, match=f"missing: {missing}"):
-            guard_module._machine_identity_from_env(tenant)
+    def test_token_command_without_a_tenant_is_a_configuration_error(self, monkeypatch):
+        monkeypatch.setenv("ADS_TOKEN_COMMAND", "/bin/ads")
+        with pytest.raises(guard_module.MachineAuthError, match="missing: TENANT_ID"):
+            guard_module._machine_identity_from_env("  ", "https://api.snyk.io")
 
     def test_fetch_machine_auth_passes_the_base_url(self):
         with patch(f"{_G}.fetch_access_token", return_value="tok") as fetch:
@@ -9440,14 +9433,15 @@ class TestRunInstallMachineIdentity:
     def _env(self, monkeypatch):
         monkeypatch.setenv("PUSH_KEY", "installer-pk")  # the installer passes it for older Guard versions
         monkeypatch.setenv("ADS_TOKEN_COMMAND", "/bin/ads-installer")
-        monkeypatch.setenv("ADS_BASE_URL", "https://api.eu.snyk.io")
+        # Older installers still pass ADS_BASE_URL; Guard ignores it and uses --url.
+        monkeypatch.setenv("ADS_BASE_URL", "https://api.us.snyk.io")
         monkeypatch.delenv("MACHINE_SERIAL", raising=False)
 
     @staticmethod
-    def _args(tmp_path, *, managed=False, tenant_id="tid-1"):
+    def _args(tmp_path, *, managed=False, tenant_id="tid-1", url="https://api.eu.snyk.io"):
         return SimpleNamespace(
             client="claude",
-            url="https://api.snyk.io",
+            url=url,
             tenant_id=tenant_id,
             file=str(tmp_path / "config.json"),
             managed=managed,
@@ -9490,15 +9484,14 @@ class TestRunInstallMachineIdentity:
         send.assert_not_called()
 
     @pytest.mark.parametrize("base_url", ['https://api.snyk.io/"x', "https://api.snyk.io\\", "https://api .snyk.io"])
-    def test_base_url_that_needs_quoting_fails_the_install(self, tmp_path, monkeypatch, base_url):
-        monkeypatch.setenv("ADS_BASE_URL", base_url)
+    def test_base_url_that_needs_quoting_fails_the_install(self, tmp_path, base_url):
         with (
             patch(f"{_G}.fetch_access_token") as fetch,
             patch(f"{_G}._install_hooks") as install,
             patch(f"{_G}.rich"),
             pytest.raises(SystemExit) as excinfo,
         ):
-            _run_install(self._args(tmp_path))
+            _run_install(self._args(tmp_path, url=base_url))
         assert excinfo.value.code == 1
         fetch.assert_not_called()
         install.assert_not_called()
@@ -9537,13 +9530,9 @@ class TestRunInstallMachineIdentity:
         install.assert_not_called()
         assert "Managed installs use a push key" in str(mock_rich.print.call_args_list)
 
-    @pytest.mark.parametrize("unset", ["ADS_BASE_URL", "tenant"])
-    def test_partial_values_fail_the_install(self, tmp_path, monkeypatch, unset):
-        if unset == "tenant":
-            monkeypatch.delenv("TENANT_ID", raising=False)
-        else:
-            monkeypatch.delenv(unset)
-        args = self._args(tmp_path, tenant_id="" if unset == "tenant" else "tid-1")
+    def test_token_command_without_a_tenant_fails_the_install(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("TENANT_ID", raising=False)
+        args = self._args(tmp_path, tenant_id="")
         args.guard_command = "install"
         with (
             patch(f"{_G}.fetch_access_token") as fetch,
@@ -9594,10 +9583,11 @@ class TestBashHookScriptMachineIdentity:
             # The installed command clears PUSH_KEY and PUSHKEY, since a push key wins.
             "PUSH_KEY": "",
             "PUSHKEY": "",
-            "REMOTE_HOOKS_BASE_URL": server,
+            "REMOTE_HOOKS_BASE_URL": server + "/",
             "MACHINE_ID": "machine-42",
             "TENANT_ID": "tenant-1",
-            "ADS_BASE_URL": server + "/",
+            # Ignored: the hook uses REMOTE_HOOKS_BASE_URL.
+            "ADS_BASE_URL": "http://ads-base-url.invalid",
         }
         if "ADS_TOKEN_COMMAND" not in env_overrides:
             env["ADS_TOKEN_COMMAND"] = str(_fake_token_command(tmp_path))
@@ -9633,11 +9623,9 @@ class TestBashHookScriptMachineIdentity:
         assert "stray-pk" not in argv
         assert "machine-token-123" not in result.stderr + result.stdout
 
-    @pytest.mark.parametrize("ambient", [{"ADS_BASE_URL": "https://api.snyk.io"}, {}])
-    def test_push_key_wins_over_ambient_machine_values(self, hook_server, tmp_path, ambient):
-        """ADS_* in the agent's environment cannot change a push-key hook, partial or complete."""
-        env = {"PUSH_KEY": "pk-1234", **ambient}
-        result = self._run(hook_server, tmp_path, **env)
+    def test_push_key_wins_over_an_ambient_token_command(self, hook_server, tmp_path):
+        """An ADS_TOKEN_COMMAND in the agent's environment cannot change a push-key hook."""
+        result = self._run(hook_server, tmp_path, PUSH_KEY="pk-1234")
         assert result.returncode == 0, result.stderr
         req = _HookHandler.last_request
         assert req["path"] == "/hidden/agent-monitor/hooks/claude-code?version=2025-11-11"
@@ -9651,8 +9639,8 @@ class TestBashHookScriptMachineIdentity:
         assert result.returncode == 0, result.stderr
         assert _HookHandler.last_request["headers"]["Authorization"] == "Bearer machine-token-123"
 
-    def test_runs_without_push_key_or_remote_url(self, hook_server, tmp_path):
-        result = self._run(hook_server, tmp_path, PUSH_KEY=None, REMOTE_HOOKS_BASE_URL=None)
+    def test_runs_without_push_key(self, hook_server, tmp_path):
+        result = self._run(hook_server, tmp_path, PUSH_KEY=None, PUSHKEY=None)
         assert result.returncode == 0, result.stderr
         assert _HookHandler.last_request["headers"]["Authorization"] == "Bearer machine-token-123"
 
@@ -9704,7 +9692,7 @@ class TestBashHookScriptMachineIdentity:
         assert _HookHandler.last_request is None
         assert "token command did not finish in time" in result.stderr
 
-    @pytest.mark.parametrize("missing", ["ADS_TOKEN_COMMAND", "TENANT_ID", "ADS_BASE_URL"])
+    @pytest.mark.parametrize("missing", ["TENANT_ID", "REMOTE_HOOKS_BASE_URL"])
     def test_partial_machine_identity_is_a_usage_error(self, hook_server, tmp_path, missing):
         result = self._run(hook_server, tmp_path, **{missing: None})
 
@@ -9783,11 +9771,9 @@ class TestInstallSwitchesAuthModes:
     def _install(self, tmp_path, server, *, machine: bool, monkeypatch):
         if machine:
             monkeypatch.setenv("ADS_TOKEN_COMMAND", str(_fake_token_command(tmp_path)))
-            monkeypatch.setenv("ADS_BASE_URL", server)
             monkeypatch.setenv("PUSH_KEY", "installer-pk")
         else:
             monkeypatch.delenv("ADS_TOKEN_COMMAND", raising=False)
-            monkeypatch.delenv("ADS_BASE_URL", raising=False)
             monkeypatch.setenv("PUSH_KEY", "pk-1234")
         args = SimpleNamespace(
             client="claude",
@@ -9829,7 +9815,6 @@ class TestInstallSwitchesAuthModes:
     def test_rejected_tenant_route_test_event_fails_the_install(self, tmp_path, hook_server, monkeypatch):
         """The test server answers without "success": true, as agent-monitor does for a rejected credential."""
         monkeypatch.setenv("ADS_TOKEN_COMMAND", str(_fake_token_command(tmp_path)))
-        monkeypatch.setenv("ADS_BASE_URL", hook_server)
         args = SimpleNamespace(
             client="claude",
             url=hook_server,
@@ -9856,7 +9841,8 @@ class TestRunDiscoverMachineIdentity:
         monkeypatch.setenv("PUSH_KEY", "")  # the machine identity hook command clears it
         monkeypatch.setenv("ADS_TOKEN_COMMAND", "/bin/ads-installer")
         monkeypatch.setenv("TENANT_ID", "tenant-1")
-        monkeypatch.setenv("ADS_BASE_URL", "https://api.eu.snyk.io")
+        monkeypatch.setenv("REMOTE_HOOKS_BASE_URL", "https://api.eu.snyk.io")
+        monkeypatch.setenv("ADS_BASE_URL", "https://api.us.snyk.io")  # ignored
 
     @staticmethod
     def _args():
@@ -9891,7 +9877,7 @@ class TestRunDiscoverMachineIdentity:
         send.assert_not_called()
 
     def test_push_key_wins_over_ambient_machine_values(self, monkeypatch):
-        """A push-key hook's discovery keeps the push key when ADS_* leak in from the agent's environment."""
+        """A push-key hook's discovery keeps the push key when ADS_TOKEN_COMMAND leaks in from the agent."""
         monkeypatch.setenv("PUSH_KEY", "pk-1234")
         monkeypatch.delenv("TENANT_ID")
         with (
@@ -9905,8 +9891,8 @@ class TestRunDiscoverMachineIdentity:
         assert send.call_args.args[2] == "pk-1234"
         assert send.call_args.kwargs["machine_auth"] is None
 
-    def test_partial_values_are_an_error(self, monkeypatch):
-        monkeypatch.delenv("ADS_BASE_URL")
+    def test_token_command_without_a_tenant_is_an_error(self, monkeypatch):
+        monkeypatch.delenv("TENANT_ID")
         with (
             patch(f"{_G}.fetch_access_token") as fetch,
             patch(f"{_G}.send_hook_event") as send,

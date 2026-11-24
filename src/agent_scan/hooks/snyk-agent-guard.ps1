@@ -4,16 +4,16 @@
 #
 # Usage:
 #   powershell -File snyk-agent-guard.ps1 -Client claude-code -PushKey '...' -RemoteUrl 'https://...'
-#   powershell -File snyk-agent-guard.ps1 -Client cursor -TokenCommand '...' -AdsBaseUrl 'https://...' -TenantId '...'
+#   powershell -File snyk-agent-guard.ps1 -Client cursor -TokenCommand '...' -RemoteUrl 'https://...' -TenantId '...'
 #
 # Reads a JSON payload from stdin and POSTs it (base64-encoded) to the Agent Guard endpoint.
 #
 # Two auth modes, chosen by guard install and never mixed (see snyk-agent-guard.sh): the push key
-# (-PushKey, -RemoteUrl), or machine identity (-TokenCommand, -AdsBaseUrl and -TenantId, or
-# ADS_TOKEN_COMMAND, ADS_BASE_URL and TENANT_ID). With machine identity every run calls
-# `<token command> token --base-url <base url>` and POSTs to the tenant route with the token as a
-# bearer token. A push key wins: parameters are looked at before env vars, and at each level a push
-# key before machine identity, so ADS_* in the agent's environment cannot change a hook installed
+# (-PushKey, -RemoteUrl), or machine identity (-TokenCommand, -RemoteUrl and -TenantId, or
+# ADS_TOKEN_COMMAND, REMOTE_HOOKS_BASE_URL and TENANT_ID). With machine identity every run calls
+# `<token command> token --base-url <remote url>` and POSTs to the tenant route with the token as
+# a bearer token. A push key wins: parameters are looked at before env vars, and at each level a
+# push key before machine identity, so an ADS_TOKEN_COMMAND in the agent's environment cannot change a hook installed
 # with -PushKey, and a PUSH_KEY there cannot change one installed with -TokenCommand. Machine
 # identity applies when it is chosen that way; a missing value is then a usage error. A token
 # command that fails, times out or prints anything other than one token fails open like an
@@ -49,10 +49,7 @@ param(
     [string]$MachineSerial,
 
     [Parameter(Mandatory=$false)]
-    [string]$TokenCommand,
-
-    [Parameter(Mandatory=$false)]
-    [string]$AdsBaseUrl
+    [string]$TokenCommand
 )
 
 $ErrorActionPreference = "Stop"
@@ -101,7 +98,7 @@ function Get-AccessToken([string]$command, [string]$baseUrl, [int]$timeoutSecond
     # The base URL goes into a hand-quoted argument string; guard install refuses one that would
     # need escaping there, and so does this.
     if ($baseUrl -match '["\\\s]') {
-        throw "ADS_BASE_URL is not a plain URL"
+        throw "REMOTE_HOOKS_BASE_URL is not a plain URL"
     }
     try {
         $startInfo = New-Object System.Diagnostics.ProcessStartInfo
@@ -148,27 +145,23 @@ function Get-AccessToken([string]$command, [string]$baseUrl, [int]$timeoutSecond
 # (see the header).
 if ($PushKey) {
     $machineIdentity = $false
-} elseif ($TokenCommand -or $AdsBaseUrl) {
+} elseif ($TokenCommand) {
     $machineIdentity = $true
 } elseif ($env:PUSH_KEY -or $env:PUSHKEY) {
     $machineIdentity = $false
 } else {
-    $machineIdentity = [bool]($env:ADS_TOKEN_COMMAND -or $env:ADS_BASE_URL)
+    $machineIdentity = [bool]$env:ADS_TOKEN_COMMAND
 }
 if ($machineIdentity) {
     if (-not $TokenCommand) { $TokenCommand = $env:ADS_TOKEN_COMMAND }
-    if (-not $AdsBaseUrl) { $AdsBaseUrl = $env:ADS_BASE_URL }
+    if (-not $RemoteUrl) { $RemoteUrl = $env:REMOTE_HOOKS_BASE_URL }
 }
 
 if ($machineIdentity) {
     if (-not $TenantId) { $TenantId = $env:TENANT_ID }
-    $required = "machine identity needs ADS_TOKEN_COMMAND, ADS_BASE_URL and TENANT_ID"
-    if (-not $TokenCommand) {
-        Write-Error "ADS_TOKEN_COMMAND is required (pass -TokenCommand or set env var; $required)"
-        exit 1
-    }
-    if (-not $AdsBaseUrl) {
-        Write-Error "ADS_BASE_URL is required (pass -AdsBaseUrl or set env var; $required)"
+    $required = "machine identity needs ADS_TOKEN_COMMAND, REMOTE_HOOKS_BASE_URL and TENANT_ID"
+    if (-not $RemoteUrl) {
+        Write-Error "REMOTE_HOOKS_BASE_URL is required (pass -RemoteUrl or set env var; $required)"
         exit 1
     }
     if (-not $TenantId) {
@@ -224,7 +217,7 @@ if ($cliVersion -eq '__AGENT_SCAN_VERSION__') {
 }
 $userAgent = "snyk/snyk-agent-guard.ps1 Agent Scan v$cliVersion"
 if ($machineIdentity) {
-    $url = "$($AdsBaseUrl.TrimEnd('/'))/hidden/tenants/${TenantId}$($endpoint.Substring('/hidden'.Length))?version=$VERSION"
+    $url = "$($RemoteUrl.TrimEnd('/'))/hidden/tenants/${TenantId}$($endpoint.Substring('/hidden'.Length))?version=$VERSION"
 } else {
     $url = "${RemoteUrl}${endpoint}?version=$VERSION"
 }
@@ -281,7 +274,7 @@ $accessToken = $null
 if ($machineIdentity) {
     $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
     try {
-        $accessToken = Get-AccessToken $TokenCommand $AdsBaseUrl $TIMEOUT_SECONDS
+        $accessToken = Get-AccessToken $TokenCommand $RemoteUrl $TIMEOUT_SECONDS
     } catch {
         FailOpen "$($_.Exception.Message)"
     }

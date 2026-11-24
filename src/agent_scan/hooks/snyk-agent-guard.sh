@@ -8,21 +8,22 @@
 #   PUSH_KEY='...' REMOTE_HOOKS_BASE_URL='...' bash snyk-agent-guard.sh --client cursor
 #   PUSH_KEY='...' REMOTE_HOOKS_BASE_URL='...' bash snyk-agent-guard.sh --client codex
 #   PUSH_KEY='...' REMOTE_HOOKS_BASE_URL='...' bash snyk-agent-guard.sh --client github-copilot
-#   PUSH_KEY= PUSHKEY= ADS_TOKEN_COMMAND='...' ADS_BASE_URL='...' TENANT_ID='...' bash snyk-agent-guard.sh --client cursor
+#   PUSH_KEY= PUSHKEY= ADS_TOKEN_COMMAND='...' REMOTE_HOOKS_BASE_URL='...' TENANT_ID='...' bash snyk-agent-guard.sh --client cursor
 #
 # Reads a JSON payload from stdin and POSTs it (base64-encoded) to the Agent Guard endpoint.
 #
 # Two auth modes, chosen by guard install and never mixed:
 #   push key          PUSH_KEY and REMOTE_HOOKS_BASE_URL: the push-key route with X-Client-Id.
-#   machine identity  ADS_TOKEN_COMMAND, ADS_BASE_URL and TENANT_ID (set by guard install for an
-#                     ADS installer user-mode install on an enrolled machine): every run calls
-#                     `"$ADS_TOKEN_COMMAND" token --base-url "$ADS_BASE_URL"` and POSTs to the
-#                     tenant route on ADS_BASE_URL with the token as a bearer token. The token
-#                     is never logged and never put on a command line.
-# A push key wins: when PUSH_KEY (or PUSHKEY) is set, the hook uses it and ignores ADS_*, so an
-# ADS_TOKEN_COMMAND or ADS_BASE_URL in the agent's environment cannot change a push-key hook.
-# Machine identity applies when no push key is set and ADS_TOKEN_COMMAND or ADS_BASE_URL is; a
-# missing value is then a usage error. guard install's machine identity commands set PUSH_KEY and
+#   machine identity  ADS_TOKEN_COMMAND, REMOTE_HOOKS_BASE_URL and TENANT_ID (set by guard install
+#                     for an ADS installer user-mode install on an enrolled machine): every run
+#                     calls `"$ADS_TOKEN_COMMAND" token --base-url "$REMOTE_HOOKS_BASE_URL"` and
+#                     POSTs to the tenant route on REMOTE_HOOKS_BASE_URL with the token as a bearer
+#                     token. The token command refuses any API other than the enrolled one. The
+#                     token is never logged and never put on a command line.
+# A push key wins: when PUSH_KEY (or PUSHKEY) is set, the hook uses it and ignores
+# ADS_TOKEN_COMMAND, so one in the agent's environment cannot change a push-key hook. Machine
+# identity applies when no push key is set and ADS_TOKEN_COMMAND is; a missing value is then a
+# usage error. guard install's machine identity commands set PUSH_KEY and
 # PUSHKEY empty, so a push key in the agent's environment cannot change them either. A token
 # command that fails, times out or prints anything other than one token fails open like an
 # unreachable API; there is no fallback to the push key.
@@ -165,7 +166,7 @@ get_agent_surface() {
 
 # Usage: fetch_access_token <deadline>
 #
-# Runs `"$ADS_TOKEN_COMMAND" token --base-url "$ADS_BASE_URL"` and sets ACCESS_TOKEN to the token
+# Runs `"$ADS_TOKEN_COMMAND" token --base-url "$REMOTE_HOOKS_BASE_URL"` and sets ACCESS_TOKEN to the token
 # it prints. On failure ACCESS_TOKEN is empty, TOKEN_ERROR holds a fixed reason and the function
 # returns 1. Called directly, not in $(...), so both variables reach the caller.
 #
@@ -184,7 +185,7 @@ fetch_access_token() {
     # The child prints its own PID before it execs the token command, so the marker cannot land
     # inside the token (bash 3.2 has no BASHPID; exec keeps the PID).
     "$BASH" -c 'printf "\n%s%d\n" "$1" "$$"; shift; exec "$@"' bash "$pid_marker" \
-      "$ADS_TOKEN_COMMAND" token --base-url "$ADS_BASE_URL" &
+      "$ADS_TOKEN_COMMAND" token --base-url "$REMOTE_HOOKS_BASE_URL" &
     child=$!
     child_status=0
     wait "$child" || child_status=$?
@@ -239,12 +240,12 @@ hook_main() {
   [[ -n "$client" ]] || die "Missing required argument: --client <claude-code|cursor|codex|github-copilot>"
 
   local machine_identity=0 pushkey="${PUSH_KEY:-${PUSHKEY:-}}"
-  # A push key wins over ADS_* (see the header), so only the push key decides a push-key hook.
-  if [[ -z "$pushkey" && ( -n "${ADS_TOKEN_COMMAND:-}" || -n "${ADS_BASE_URL:-}" ) ]]; then
+  # A push key wins over ADS_TOKEN_COMMAND (see the header), so only the push key decides a
+  # push-key hook.
+  if [[ -z "$pushkey" && -n "${ADS_TOKEN_COMMAND:-}" ]]; then
     machine_identity=1
-    [[ -n "${ADS_TOKEN_COMMAND:-}" ]] || die "ADS_TOKEN_COMMAND environment variable is not set (machine identity needs ADS_TOKEN_COMMAND, ADS_BASE_URL and TENANT_ID)"
-    [[ -n "${ADS_BASE_URL:-}" ]] || die "ADS_BASE_URL environment variable is not set (machine identity needs ADS_TOKEN_COMMAND, ADS_BASE_URL and TENANT_ID)"
-    [[ -n "${TENANT_ID:-}" ]] || die "TENANT_ID environment variable is not set (machine identity needs ADS_TOKEN_COMMAND, ADS_BASE_URL and TENANT_ID)"
+    [[ -n "${REMOTE_HOOKS_BASE_URL:-}" ]] || die "REMOTE_HOOKS_BASE_URL environment variable is not set (machine identity needs ADS_TOKEN_COMMAND, REMOTE_HOOKS_BASE_URL and TENANT_ID)"
+    [[ -n "${TENANT_ID:-}" ]] || die "TENANT_ID environment variable is not set (machine identity needs ADS_TOKEN_COMMAND, REMOTE_HOOKS_BASE_URL and TENANT_ID)"
     # Tenant ids are UUIDs; one that would need escaping in the URL path is refused.
     [[ "$TENANT_ID" =~ ^[A-Za-z0-9._~-]+$ ]] || die "TENANT_ID is not a valid tenant id"
   else
@@ -275,7 +276,7 @@ hook_main() {
 
   local url
   if (( machine_identity )); then
-    url="${ADS_BASE_URL%/}/hidden/tenants/${TENANT_ID}${endpoint#/hidden}?version=${VERSION}"
+    url="${REMOTE_HOOKS_BASE_URL%/}/hidden/tenants/${TENANT_ID}${endpoint#/hidden}?version=${VERSION}"
   else
     url="${REMOTE_HOOKS_BASE_URL}${endpoint}?version=${VERSION}"
   fi
