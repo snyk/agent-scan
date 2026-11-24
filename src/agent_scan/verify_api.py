@@ -580,6 +580,7 @@ async def analyze_machine(
         agent_scan_config: Config already fetched for this push key; fetched here when omitted
         machine_auth: Machine token for the tenant routes. It replaces the push key for the
             config and async analysis, and the token is refreshed before the async submit.
+            A failed async submit raises MachineAuthError, so the scan exits 1.
             Synchronous analysis (the tenant config disables async, or results are shown) has
             no tenant route, so machine mode always fails it
     """
@@ -646,6 +647,9 @@ async def analyze_machine(
                 _print_scan_sent_success(user_info)
                 return _accepted_async_response(payload)
             error_text = error_text or "Could not reach analysis server."
+            if machine_auth is not None:
+                # Installer-scheduled runs read the exit code, so a failed submit exits 1.
+                raise MachineAuthError(error_text)
             if raise_on_error:
                 raise RuntimeError(error_text)
             return _analysis_error_response(payload, error_text, exc)

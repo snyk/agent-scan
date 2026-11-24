@@ -155,7 +155,6 @@ class TestIsInteractiveRun:
     _MACHINE: ClassVar[dict[str, str]] = {
         "token_command": "/opt/ads/installer",
         "tenant_id": "tenant-1",
-        "base_url": "https://api.snyk.io",
     }
 
     def test_machine_identity_scan_without_push_key_is_non_interactive(self):
@@ -166,9 +165,9 @@ class TestIsInteractiveRun:
         )
 
     def test_partial_machine_identity_does_not_mark_the_run(self):
-        """main() rejects partial values before this runs; on its own it changes nothing."""
-        args = _ns(command="scan", token_command="/opt/ads/installer", tenant_id=None, base_url=None)
-        assert is_interactive_run(args) is True
+        """One of the two values is not machine mode, so the run stays as without it."""
+        assert is_interactive_run(_ns(command="scan", token_command="/opt/ads/installer", tenant_id=None)) is True
+        assert is_interactive_run(_ns(command="scan", token_command=None, tenant_id="tenant-1")) is True
 
     def test_evo_ignores_machine_identity(self):
         assert is_interactive_run(_ns(command="evo", **self._MACHINE)) is True

@@ -278,13 +278,13 @@ class TestMachineAuthExits:
             cli.main()
         return excinfo.value.code
 
-    def test_partial_values_are_a_usage_error(self, monkeypatch, capsys):
+    def test_partial_values_warn_and_use_the_push_key(self, monkeypatch, capsys):
         run = AsyncMock()
         monkeypatch.setattr(cli, "print_scan_inspect", run)
         code = self._main(monkeypatch, ["scan", "--push-key", "pk", "--token-command", "/opt/ads/installer"])
-        assert code == cli.CLI_USAGE_ERROR_EXIT_CODE
-        run.assert_not_called()
-        assert "missing: --tenant-id, --base-url" in capsys.readouterr().err
+        assert code == 0
+        run.assert_awaited_once()
+        assert "--tenant-id is not set, so the scan uses the push key" in capsys.readouterr().err
 
     def test_token_command_failure_exits_1(self, monkeypatch, capsys):
         from agent_scan.machine_auth import MachineAuthError
@@ -300,8 +300,6 @@ class TestMachineAuthExits:
             "/x",
             "--tenant-id",
             "t",
-            "--base-url",
-            "https://api.snyk.io",
         ]
         assert self._main(monkeypatch, argv) == 1
         assert "Machine identity: The token command exited with 3." in capsys.readouterr().err

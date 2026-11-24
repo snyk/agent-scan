@@ -663,10 +663,10 @@ def add_machine_auth_arguments(parser):
         type=str,
         default=None,
         help=(
-            "Command that prints a machine access token when run as "
-            "'<command> token --base-url <base url>'. Set together with --tenant-id and "
-            "--base-url to call the tenant routes with that token; the scan fails if the "
-            "command fails."
+            "Absolute path of a command that prints a machine access token when run as "
+            "'<command> token --base-url <api>', where <api> is the scheme and host of "
+            "--analysis-url. Set together with --tenant-id to call the tenant routes with "
+            "that token; the scan fails if the command fails."
         ),
         metavar="PATH",
     )
@@ -677,13 +677,9 @@ def add_machine_auth_arguments(parser):
         help="Snyk tenant ID the --token-command token is for.",
         metavar="ID",
     )
-    parser.add_argument(
-        "--base-url",
-        type=str,
-        default=None,
-        help="Snyk API base URL that hosts the tenant routes for --token-command (for example https://api.snyk.io).",
-        metavar="URL",
-    )
+    # Accepted and ignored: installers that wrote base_url to the scan config file keep working.
+    # The API is the scheme and host of --analysis-url.
+    parser.add_argument("--base-url", type=str, default=None, help=argparse.SUPPRESS)
 
 
 def add_scan_arguments(scan_parser):
@@ -754,49 +750,46 @@ def _effective_push_key(args) -> str | None:
     return get_push_key(getattr(args, "control_servers", []) or [])
 
 
-def _machine_auth_values(args) -> tuple[str | None, str | None, str | None]:
-    """--token-command, --tenant-id and --base-url; all None on evo, which always mints its own push key."""
+def _machine_auth_values(args) -> tuple[str | None, str | None]:
+    """--token-command and --tenant-id; both None on evo, which always mints its own push key."""
     if getattr(args, "command", None) == "evo":
-        return (None, None, None)
-    return (
-        getattr(args, "token_command", None),
-        getattr(args, "tenant_id", None),
-        getattr(args, "base_url", None),
-    )
+        return (None, None)
+    return (getattr(args, "token_command", None), getattr(args, "tenant_id", None))
 
 
 def _is_machine_auth_scan(args) -> bool:
-    """True when all machine identity values are set. Partial values are rejected in main()."""
-    try:
-        return is_machine_mode(_machine_auth_values(args))
-    except MachineAuthError:
-        return False
+    """True when --token-command and --tenant-id are both set."""
+    return is_machine_mode(_machine_auth_values(args))
 
 
-def enforce_machine_auth_values(args) -> None:
-    """Exit with a usage error when only some of the machine identity values are set."""
+def warn_partial_machine_auth(args) -> None:
+    """Warn when only one machine identity value is set; the scan then uses the push key."""
     if getattr(args, "command", None) not in (None, "scan"):
         return
-    try:
-        is_machine_mode(_machine_auth_values(args))
-    except MachineAuthError as e:
-        rich.print(f"[bold red]Error:[/bold red] {escape(str(e))}", file=sys.stderr)
-        sys.exit(CLI_USAGE_ERROR_EXIT_CODE)
+    token_command, tenant_id = _machine_auth_values(args)
+    present = {"--token-command": token_command, "--tenant-id": tenant_id}
+    missing = [name for name, value in present.items() if not (value and value.strip())]
+    if len(missing) == 1:
+        rich.print(
+            f"[yellow]Warning: Machine identity needs --token-command and --tenant-id; {missing[0]} is not set, "
+            "so the scan uses the push key.[/yellow]",
+            file=sys.stderr,
+        )
 
 
 async def _resolve_machine_auth(args) -> MachineAuth | None:
-    """Machine auth from --token-command, --tenant-id and --base-url, or None in push-key mode.
+    """Machine auth from --token-command and --tenant-id on the --analysis-url API, or None in push-key mode.
 
     Runs the token command once here; the async analysis submit refreshes the token.
-    Raises MachineAuthError when the values are incomplete or the token command
-    fails: machine mode never falls back to the push key.
+    Raises MachineAuthError when the token command is not an absolute path or fails:
+    machine mode never falls back to the push key.
     """
-    token_command, tenant_id, base_url = _machine_auth_values(args)
+    token_command, tenant_id = _machine_auth_values(args)
     return await asyncio.to_thread(
         resolve_machine_auth,
         token_command,
         tenant_id,
-        base_url,
+        discovery_base_url(args.analysis_url),
     )
 
 
@@ -1153,7 +1146,7 @@ def main():
     # Resolve deferred defaults and enforce safety rules before dispatching.
     resolve_server_io_default(args)
     enforce_consent_requirements(args)
-    enforce_machine_auth_values(args)
+    warn_partial_machine_auth(args)
 
     # Display version banner
     if not (hasattr(args, "json") and args.json):
@@ -1320,6 +1313,9 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> ScanRespo
     identifier: str | None = _effective_identifier(args) if mode == "scan" else None
 
     machine_auth: MachineAuth | None = await _resolve_machine_auth(args) if mode == "scan" else None
+    if machine_auth is not None and not identifier:
+        # The tenant analysis route requires X-Scan-User-Id.
+        identifier = get_hostname() or None
 
     # Only push-key and machine-auth tenants have a config endpoint; everyone else keeps the defaults.
     agent_scan_config = AgentScanConfig()
