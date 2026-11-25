@@ -145,25 +145,6 @@ $xUser = @{
     machine_serial = $serial
 } | ConvertTo-Json -Compress
 
-# Identify whether GitHub Copilot invoked this hook (see get_agent_surface in
-# snyk-agent-guard.sh for why the -Client argument cannot answer this: one Copilot hook
-# config is shared by the CLI, Copilot in VS Code, and the Copilot desktop app, so only
-# the inherited environment identifies them). Empty when the sender isn't Copilot, in
-# which case the header is omitted and agent-monitor falls back to its non-Copilot
-# agent name.
-# Only reported for the Copilot client: these variables describe the environment rather
-# than the caller and are inherited, so another agent running inside a Copilot session
-# would otherwise claim a Copilot surface.
-$agentSurface = if ($Client -ne "github-copilot") {
-    ""
-} elseif ($env:AI_AGENT -eq "github_copilot_vscode_agent") {
-    "copilot-vscode"
-} elseif ($env:AI_AGENT -like "github_copilot_*" -or $env:COPILOT_CLI) {
-    "copilot"
-} else {
-    ""
-}
-
 # Execute request. Any failure past this point fails open; see FailOpen.
 try {
     $headers = @{
@@ -172,8 +153,28 @@ try {
         "Content-Type" = "text/plain"
         "X-Client-Id"  = $PushKey
     }
-    if ($agentSurface) {
-        $headers["X-Agent-Surface"] = $agentSurface
+    # Preserve the difference between an empty variable and an absent variable.
+    $surfaceEnv = [Environment]::GetEnvironmentVariables()
+    $markerNames = switch ($Client) {
+        "claude-code" { "CLAUDE_CODE_ENTRYPOINT" }
+        "codex" { "CODEX_INTERNAL_ORIGINATOR_OVERRIDE" }
+        "cursor" { "CURSOR_INVOKED_AS", "CURSOR_CLI_MODE", "CURSOR_CLI" }
+        "github-copilot" { "AI_AGENT", "COPILOT_CLI" }
+    }
+    $evidence = @{}
+    foreach ($name in $markerNames) {
+        $value = $surfaceEnv[$name]
+        if ($null -eq $value) {
+            continue
+        }
+        if ($name -eq "CURSOR_CLI" -or $value.Length -gt 128 -or $value -cmatch '[^ -~]') {
+            $evidence[$name] = $null
+        } else {
+            $evidence[$name] = $value
+        }
+    }
+    if ($evidence.Count) {
+        $headers["X-Agent-Surface-Evidence"] = ConvertTo-Json -InputObject $evidence -Compress
     }
     $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($body)
     $response = Invoke-WebRequest -Uri $url -Method POST -Body $bodyBytes -Headers $headers `
