@@ -284,7 +284,9 @@ class TestMachineAuthExits:
         code = self._main(monkeypatch, ["scan", "--push-key", "pk", "--token-command", "/opt/ads/installer"])
         assert code == 0
         run.assert_awaited_once()
-        assert "--tenant-id is not set, so the scan uses the push key" in capsys.readouterr().err
+        # Rich wraps the warning at the console width, so compare with whitespace collapsed.
+        err = " ".join(capsys.readouterr().err.split())
+        assert "--tenant-id is not set, so the scan uses the push key" in err
 
     def test_token_command_failure_exits_1(self, monkeypatch, capsys):
         from agent_scan.machine_auth import MachineAuthError
