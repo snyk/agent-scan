@@ -368,6 +368,66 @@ async def test_machine_auth_uses_tenant_routes_with_bearer_token() -> None:
     assert all("X-Push-Key" not in h for h in seen)
 
 
+async def _discover_with_machine_auth(statuses: dict[str, list[int]], fresh_token: str):
+    """Run a tenant session whose token command prints ``fresh_token``; returns the error, headers and result."""
+    from unittest.mock import patch
+
+    from agent_scan.machine_auth import TENANT_API_VERSION, MachineAuth
+    from agent_scan.remote_discovery.client import run_remote_discovery
+
+    seen: list[dict[str, str]] = []
+    server, _bodies = await _serve(statuses, version=TENANT_API_VERSION, headers=seen)
+    machine_auth = MachineAuth(str(server.make_url("/")), "tenant-1", "old-token", token_command="/opt/ads/installer")
+    error, result = None, None
+    try:
+        with (
+            patch("agent_scan.remote_discovery.client.get_readable_home_directories", return_value=_HOMES),
+            patch("agent_scan.machine_auth.fetch_access_token", return_value=fresh_token) as fetch,
+        ):
+            try:
+                result = await run_remote_discovery("https://unused.example", machine_auth=machine_auth)
+            except Exception as e:
+                error = e
+    finally:
+        await server.close()
+    return error, [h.get("Authorization") for h in seen], result, fetch
+
+
+_TENANT_STEPS = "/hidden/tenants/tenant-1/coding-agent-discovery/sessions/s1/steps"
+
+
+@pytest.mark.asyncio
+async def test_machine_auth_401_retries_with_a_fresh_token() -> None:
+    # The token expired while ops ran: the step is resent once with the new token.
+    error, auth, result, fetch = await _discover_with_machine_auth({_TENANT_STEPS: [401]}, "new-token")
+    assert error is None
+    assert result.session_id == "s1"
+    assert auth == ["Bearer old-token", "Bearer old-token", "Bearer new-token"]
+    fetch.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_machine_auth_401_with_the_same_token_fails() -> None:
+    from agent_scan.remote_discovery.client import RemoteDiscoveryError
+
+    error, auth, _result, fetch = await _discover_with_machine_auth({_TENANT_STEPS: [401]}, "old-token")
+    assert isinstance(error, RemoteDiscoveryError)
+    assert error.status == 401
+    assert auth == ["Bearer old-token", "Bearer old-token"]
+    fetch.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_machine_auth_refreshes_at_most_once_per_request() -> None:
+    from agent_scan.remote_discovery.client import RemoteDiscoveryError
+
+    error, auth, _result, fetch = await _discover_with_machine_auth({_TENANT_STEPS: [401, 401]}, "new-token")
+    assert isinstance(error, RemoteDiscoveryError)
+    assert error.status == 401
+    assert auth == ["Bearer old-token", "Bearer old-token", "Bearer new-token"]
+    fetch.assert_called_once()
+
+
 @pytest.mark.asyncio
 async def test_timeout_stops_a_slow_op() -> None:
     import asyncio

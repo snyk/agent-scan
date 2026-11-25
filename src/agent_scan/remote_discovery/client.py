@@ -42,6 +42,29 @@ class RemoteDiscoveryError(Exception):
         self.status = status
 
 
+class _Auth:
+    """The request auth headers; machine auth swaps in a fresh token when the backend rejects one."""
+
+    def __init__(self, headers: dict[str, str], machine_auth: MachineAuth | None = None) -> None:
+        self.headers = headers
+        self._machine_auth = machine_auth
+
+    async def refresh(self) -> bool:
+        """Run the token command again; True when it printed a different token.
+
+        A session can outlive the machine token, which lasts 30 minutes. Raises
+        MachineAuthError when the command fails.
+        """
+        if self._machine_auth is None:
+            return False
+        fresh = await asyncio.to_thread(self._machine_auth.refresh)
+        if fresh.access_token == self._machine_auth.access_token:
+            return False
+        self._machine_auth = fresh
+        self.headers = fresh.headers
+        return True
+
+
 class _SessionLost(Exception):
     """A step got 404: the backend no longer has the session."""
 
@@ -80,23 +103,33 @@ async def _post(
     session: aiohttp.ClientSession,
     url: str,
     payload: dict[str, Any],
-    headers: dict[str, str],
+    auth: _Auth,
     result: RemoteResult,
 ) -> dict[str, Any]:
     """POST with retries on 429/5xx, timeouts and connection errors.
 
-    Resending the same bytes is safe: the backend replays a step it has already applied.
+    A 401 is retried once with a fresh machine token, when the token command
+    prints a new one. Resending the same bytes is safe: the backend replays a
+    step it has already applied.
     """
     body = json.dumps(payload).encode()
-    for attempt in range(MAX_RETRIES + 1):
+    refreshed = False
+    attempt = 0
+    while attempt <= MAX_RETRIES:
         result.bytes_sent += len(body)
         retry_after: float | None = None
         try:
             async with session.post(
-                url, data=body, headers={**headers, "Content-Type": "application/json"}
+                url, data=body, headers={**auth.headers, "Content-Type": "application/json"}
             ) as response:
                 if response.status < 400:
                     return await response.json()
+                if response.status == 401 and not refreshed:
+                    refreshed = True
+                    if await auth.refresh():
+                        logger.info("Remote discovery got 401; retrying with a fresh machine token.")
+                        result.retries += 1
+                        continue
                 if response.status not in RETRYABLE_STATUSES or attempt == MAX_RETRIES:
                     # Detail only: bounded reason strings, never request content.
                     raise RemoteDiscoveryError(
@@ -110,6 +143,7 @@ async def _post(
                 raise
         result.retries += 1
         await asyncio.sleep(_retry_delay(attempt, retry_after))
+        attempt += 1
     raise AssertionError("unreachable")
 
 
@@ -181,11 +215,11 @@ async def run_remote_discovery(
     if machine_auth is not None:
         base = machine_auth.tenant_path("/coding-agent-discovery/sessions")
         query = f"?version={TENANT_API_VERSION}"
-        headers = machine_auth.headers
+        auth = _Auth(machine_auth.headers, machine_auth)
     else:
         base = backend_url.rstrip("/") + "/hidden/coding-agent-discovery/sessions"
         query = f"?version={DISCOVERY_API_VERSION}"
-        headers = {"X-Push-Key": push_key} if push_key else {}
+        auth = _Auth({"X-Push-Key": push_key} if push_key else {})
     home_list = homes(all_users, home_dirs_with_users)
     if not home_list:
         # The backend rejects an empty homes list, and local discovery finds nothing either.
@@ -206,7 +240,7 @@ async def run_remote_discovery(
     ) as session:
         for attempt in range(MAX_RESTARTS + 1):
             try:
-                await _run_session(session, base, query, init, headers, result, cancel)
+                await _run_session(session, base, query, init, auth, result, cancel)
                 break
             except _SessionLost as lost:
                 if attempt == MAX_RESTARTS:
@@ -223,11 +257,11 @@ async def _run_session(
     base: str,
     query: str,
     init: dict[str, Any],
-    headers: dict[str, str],
+    auth: _Auth,
     result: RemoteResult,
     cancel: threading.Event,
 ) -> None:
-    response = await _post(session, base + query, init, headers, result)
+    response = await _post(session, base + query, init, auth, result)
     result.session_id = response["session_id"]
     result.supported_agents = response.get("supported_agents", [])
     while True:
@@ -242,7 +276,7 @@ async def _run_session(
         result.rounds += 1
         result.ops += len(ops)
         try:
-            response = await _post(session, f"{base}/{result.session_id}/steps{query}", step, headers, result)
+            response = await _post(session, f"{base}/{result.session_id}/steps{query}", step, auth, result)
         except RemoteDiscoveryError as error:
             # Steps only: an init 404 means the route is missing, not the session.
             if error.status == 404:
