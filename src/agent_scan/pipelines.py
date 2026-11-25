@@ -15,6 +15,7 @@ from agent_scan.inspect import (
     get_mcp_config_per_client,
     inspect_client,
 )
+from agent_scan.machine_auth import MachineAuth
 from agent_scan.models import (
     CandidateClient,
     ClientToInspect,
@@ -58,6 +59,8 @@ class AnalyzeArgs(BaseModel):
     agent_scan_config: AgentScanConfig | None = None
     # Extra scan_metadata for the analysis request.
     scan_metadata: dict[str, Any] = Field(default_factory=dict)
+    # Machine token for the tenant routes; the push key is used without it.
+    machine_auth: MachineAuth | None = None
 
 
 class PushArgs(BaseModel):
@@ -229,10 +232,11 @@ class RemoteOutcome:
 async def discover_clients_remotely(
     inspect_args: InspectArgs,
     discovery_url: str,
-    push_key: str,
+    push_key: str | None,
     cli_version: str | None = None,
     identifier: str | None = None,
     skip_ssl_verify: bool = False,
+    machine_auth: MachineAuth | None = None,
     home_dirs_with_users: list[tuple[Path, str]] | None = None,
 ) -> RemoteOutcome:
     """``discover_clients_to_inspect`` through the coding-agent-discovery service.
@@ -250,6 +254,7 @@ async def discover_clients_remotely(
             identifier=identifier,
             all_users=inspect_args.all_users,
             skip_ssl_verify=skip_ssl_verify,
+            machine_auth=machine_auth,
             home_dirs_with_users=home_dirs_with_users,
         )
         clients_to_inspect = build_clients(remote.found)
@@ -290,6 +295,7 @@ async def discover_clients(
     cli_version: str | None = None,
     identifier: str | None = None,
     skip_ssl_verify: bool = False,
+    machine_auth: MachineAuth | None = None,
 ) -> tuple[DiscoveredClients, dict[str, Any]]:
     """Discover per ``mode`` and return the clients plus the ``discovery`` scan metadata.
 
@@ -298,9 +304,10 @@ async def discover_clients(
     * on: remote discovery is used, with no local fallback: a failure gives only the
       local-only pieces and a partial result is used as is.
 
-    Remote needs a push key and whole-machine discovery; otherwise every mode is local.
+    Remote needs a push key or ``machine_auth``, and whole-machine discovery; otherwise
+    every mode is local. ``machine_auth`` wins over the push key.
     """
-    if mode == "off" or not push_key or not supports_remote_discovery(inspect_args):
+    if mode == "off" or not (push_key or machine_auth) or not supports_remote_discovery(inspect_args):
         discovered = await discover_clients_to_inspect(inspect_args)
         metadata: dict[str, Any] = {"mode": mode, "source": "local", "local": counts(discovered[0])}
         if mode != "off":
@@ -316,6 +323,7 @@ async def discover_clients(
         cli_version=cli_version,
         identifier=identifier,
         skip_ssl_verify=skip_ssl_verify,
+        machine_auth=machine_auth,
         home_dirs_with_users=homes,
     )
     if mode == "on":
@@ -450,7 +458,10 @@ async def inspect_analyze_push_pipeline(
         identifier=analyze_args.identifier,
         additional_headers=analyze_args.additional_headers,
         verbose=verbose,
-        skip_pushing=bool(push_args.control_servers) or bool(push_args.push_key),
+        # Machine mode replaces the push key, so it skips pushing like a push-key scan.
+        skip_pushing=bool(push_args.control_servers)
+        or bool(push_args.push_key)
+        or analyze_args.machine_auth is not None,
         push_key=push_args.push_key,
         max_retries=analyze_args.max_retries,
         skip_ssl_verify=analyze_args.skip_ssl_verify,
@@ -458,6 +469,7 @@ async def inspect_analyze_push_pipeline(
         scanned_usernames=scanned_usernames,
         show_analysis_results=analyze_args.show_analysis_results,
         agent_scan_config=analyze_args.agent_scan_config,
+        machine_auth=analyze_args.machine_auth,
     )
 
     return response

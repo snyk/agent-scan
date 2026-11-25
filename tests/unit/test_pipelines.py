@@ -4,12 +4,14 @@ import aiohttp
 import pytest
 
 from agent_scan.agents import DiscoveryScope
+from agent_scan.machine_auth import MachineAuth
 from agent_scan.models import ClientToInspect, ControlServer, InspectedPath
 from agent_scan.models.api.v20260710 import ScanPathResponse, ScanResponse
 from agent_scan.pipelines import (
     AnalyzeArgs,
     InspectArgs,
     PushArgs,
+    RemoteOutcome,
     discover_clients,
     discover_clients_remotely,
     inspect_analyze_push_pipeline,
@@ -158,6 +160,31 @@ async def test_skip_pushing_false_when_neither_control_servers_nor_push_key_set(
 
 
 @pytest.mark.asyncio
+async def test_skip_pushing_true_for_machine_auth_without_push_key():
+    """Machine mode replaces the push key, so it sets X-Push: skip like a push-key scan."""
+    inspected_paths = [InspectedPath(client="cursor", path="/config")]
+    response = ScanResponse(scan_path_responses=[ScanPathResponse(client="cursor", path="/config")])
+    machine_auth = MachineAuth("https://api.snyk.io", "tenant-1", "tok")
+
+    with (
+        patch(
+            "agent_scan.pipelines.inspect_pipeline",
+            new_callable=AsyncMock,
+            return_value=(inspected_paths, ["alice"]),
+        ),
+        patch("agent_scan.pipelines.analyze_machine", new_callable=AsyncMock, return_value=response) as analyze,
+    ):
+        await inspect_analyze_push_pipeline(
+            InspectArgs(timeout=10, tokens=[], paths=[]),
+            AnalyzeArgs(analysis_url="https://test.example/api", machine_auth=machine_auth),
+            PushArgs(control_servers=[], version="0.6.0"),
+        )
+
+    assert analyze.await_args.kwargs["skip_pushing"] is True
+    assert analyze.await_args.kwargs["push_key"] is None
+
+
+@pytest.mark.asyncio
 async def test_skip_pushing_false_when_push_key_explicitly_empty_string():
     """An explicit empty-string --push-key (used only to override a legacy
     header without adopting it, see cli._effective_push_key's ``is not None``
@@ -215,7 +242,8 @@ def test_supports_remote_discovery(kwargs, expected):
 
 
 @pytest.mark.asyncio
-async def test_discover_clients_remotely_builds_clients():
+@pytest.mark.parametrize("machine_auth", [None, MachineAuth("https://api.snyk.io", "tenant-1", "tok")])
+async def test_discover_clients_remotely_builds_clients(machine_auth):
     remote = RemoteResult(
         found={
             "clients": [{"name": "cursor", "client_path": "~/.cursor", "username": "alice"}],
@@ -234,6 +262,7 @@ async def test_discover_clients_remotely_builds_clients():
             cli_version="1.0",
             identifier="machine-1",
             skip_ssl_verify=True,
+            machine_auth=machine_auth,
         )
 
     discovered = result.discovered
@@ -250,6 +279,7 @@ async def test_discover_clients_remotely_builds_clients():
         "identifier": "machine-1",
         "all_users": False,
         "skip_ssl_verify": True,
+        "machine_auth": machine_auth,
         "home_dirs_with_users": [],
     }
 
@@ -360,6 +390,23 @@ async def test_discover_clients_remotely_skips_local_only_when_backend_fails():
         result = await discover_clients_remotely(InspectArgs(timeout=10, tokens=[], paths=[]), "https://x", "k")
     assert (result.discovered, result.failure_reason) == (None, "http_500")
     find.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_machine_auth_without_push_key_uses_remote():
+    machine_auth = MachineAuth("https://api.snyk.io", "tenant-1", "tok")
+    remote = RemoteOutcome(([], [], ["alice"]))
+    with (
+        patch("agent_scan.pipelines.discover_clients_remotely", new_callable=AsyncMock, return_value=remote) as run,
+        patch("agent_scan.pipelines.discover_clients_to_inspect", new_callable=AsyncMock) as local,
+    ):
+        _, metadata = await discover_clients(
+            InspectArgs(timeout=10, tokens=[], paths=[]), "on", "https://x", None, machine_auth=machine_auth
+        )
+
+    local.assert_not_awaited()
+    assert run.await_args.kwargs["machine_auth"] == machine_auth
+    assert metadata["source"] == "remote"
 
 
 @pytest.mark.asyncio

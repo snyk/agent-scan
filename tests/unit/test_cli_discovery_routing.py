@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from agent_scan.cli import run_scan
+from agent_scan.machine_auth import MachineAuth, MachineAuthError
 from agent_scan.models import ClientToInspect, InspectedPath, ScanResponse
 from agent_scan.pipelines import RemoteOutcome
 from agent_scan.verify_api import AgentScanConfig
@@ -199,3 +200,131 @@ async def test_push_key_wins_over_snyk_token():
     assert fetch.await_args.args[1] == "some-user-push-key"
     assert remote.await_args.args[2] == "some-user-push-key"
     local.assert_not_awaited()
+
+
+# Absolute on every platform: machine mode refuses a token command that is not an absolute path.
+_TOKEN_COMMAND = os.path.abspath("/opt/ads/installer")
+_MACHINE_ARGS = {"token_command": _TOKEN_COMMAND, "tenant_id": "tenant-1"}
+# Scheme and host of the analysis URL in _push_key_scan_args.
+_API = "https://some.analysis.endpoint.com"
+
+
+@pytest.mark.asyncio
+async def test_machine_auth_runs_token_command_once_and_reaches_every_tenant_call():
+    config = AgentScanConfig(remote_discovery_mode="on", async_analysis_enabled=True)
+    with patch("agent_scan.machine_auth.fetch_access_token", return_value="machine-token") as fetch_token:
+        fetch, remote, _local, _inspect, analyze = await _run(_push_key_scan_args(**_MACHINE_ARGS), config)
+
+    expected = MachineAuth(_API, "tenant-1", "machine-token")
+    fetch_token.assert_called_once_with(_TOKEN_COMMAND, _API)
+    assert fetch.await_args.kwargs["machine_auth"] == expected
+    assert remote.await_args.kwargs["machine_auth"] == expected
+    assert analyze.await_args.kwargs["machine_auth"] == expected
+    # A push key on the command line is forwarded as before; machine mode never sends it.
+    assert analyze.await_args.kwargs["push_key"] == "some-user-push-key"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {},
+        {**_MACHINE_ARGS, "command": "evo"},
+        {"token_command": _TOKEN_COMMAND},
+        {"tenant_id": "tenant-1"},
+        # An installer that still writes base_url without the other two values.
+        {"base_url": "https://api.snyk.io"},
+    ],
+    ids=["no_machine_values", "evo", "token_command_only", "tenant_id_only", "base_url_only"],
+)
+async def test_push_key_mode_keeps_push_key(overrides):
+    config = AgentScanConfig(remote_discovery_mode="on")
+    with patch("agent_scan.machine_auth.fetch_access_token") as fetch_token:
+        fetch, remote, _local, _inspect, analyze = await _run(_push_key_scan_args(**overrides), config)
+
+    fetch_token.assert_not_called()
+    assert fetch.await_args.args[1] == "some-user-push-key"
+    assert fetch.await_args.kwargs["machine_auth"] is None
+    assert remote.await_args.args[2] == "some-user-push-key"
+    assert remote.await_args.kwargs["machine_auth"] is None
+    assert analyze.await_args.kwargs["machine_auth"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "overrides, fetch_token_kwargs",
+    [
+        (_MACHINE_ARGS, {"side_effect": MachineAuthError("The token command exited with 1.")}),
+        ({**_MACHINE_ARGS, "token_command": "ads-installer"}, {"return_value": "machine-token"}),
+    ],
+    ids=["token_command_fails", "relative_token_command"],
+)
+async def test_machine_auth_failure_stops_the_scan_before_any_call(overrides, fetch_token_kwargs):
+    """No push-key fallback: nothing is fetched, discovered or analyzed."""
+    config = AgentScanConfig(remote_discovery_mode="on")
+    with (
+        patch("agent_scan.machine_auth.fetch_access_token", **fetch_token_kwargs),
+        patch("agent_scan.cli.fetch_agent_scan_config", new=AsyncMock(return_value=config)) as fetch,
+        patch("agent_scan.pipelines.discover_clients_remotely", new=AsyncMock()) as remote,
+        patch("agent_scan.pipelines.analyze_machine", new=AsyncMock()) as analyze,
+        pytest.raises(MachineAuthError),
+    ):
+        await run_scan(_push_key_scan_args(**overrides), mode="scan")
+
+    fetch.assert_not_awaited()
+    remote.assert_not_awaited()
+    analyze.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "config, overrides",
+    [
+        (AgentScanConfig(async_analysis_enabled=False), {}),
+        (AgentScanConfig(async_analysis_enabled=True), {"show_analysis_results": True}),
+        (AgentScanConfig(async_analysis_enabled=True), {"ci": True}),
+    ],
+    ids=["async_disabled", "show_results", "ci"],
+)
+async def test_machine_auth_sync_analysis_stops_the_scan_before_discovery(config, overrides):
+    """Sync analysis has no tenant route: the scan fails right after the config read."""
+    with (
+        patch("agent_scan.machine_auth.fetch_access_token", return_value="machine-token"),
+        patch("agent_scan.cli.fetch_agent_scan_config", new=AsyncMock(return_value=config)) as fetch,
+        patch("agent_scan.pipelines.discover_clients_remotely", new=AsyncMock()) as remote,
+        patch("agent_scan.pipelines.discover_clients_to_inspect", new=AsyncMock()) as local,
+        patch("agent_scan.pipelines.analyze_machine", new=AsyncMock()) as analyze,
+        pytest.raises(MachineAuthError, match="no machine identity route"),
+    ):
+        await run_scan(_push_key_scan_args(**_MACHINE_ARGS, **overrides), mode="scan")
+
+    fetch.assert_awaited_once()
+    remote.assert_not_awaited()
+    local.assert_not_awaited()
+    analyze.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_machine_auth_ignores_base_url_and_uses_the_analysis_url_api():
+    config = AgentScanConfig(remote_discovery_mode="on", async_analysis_enabled=True)
+    args = _push_key_scan_args(**_MACHINE_ARGS, base_url="https://other.example.io")
+    with patch("agent_scan.machine_auth.fetch_access_token", return_value="machine-token") as fetch_token:
+        _fetch, _remote, _local, _inspect, analyze = await _run(args, config)
+
+    fetch_token.assert_called_once_with(_TOKEN_COMMAND, _API)
+    assert analyze.await_args.kwargs["machine_auth"].base_url == _API
+
+
+@pytest.mark.asyncio
+async def test_machine_auth_without_machine_id_sends_the_hostname():
+    """The tenant analysis route requires X-Scan-User-Id."""
+    config = AgentScanConfig(remote_discovery_mode="on", async_analysis_enabled=True)
+    args = _push_key_scan_args(**_MACHINE_ARGS, control_servers=[], machine_id=None)
+    with (
+        patch("agent_scan.machine_auth.fetch_access_token", return_value="machine-token"),
+        patch("agent_scan.cli.get_hostname", return_value="host-1"),
+    ):
+        _fetch, remote, _local, _inspect, analyze = await _run(args, config)
+
+    assert analyze.await_args.kwargs["identifier"] == "host-1"
+    assert remote.await_args.kwargs["identifier"] == "host-1"
