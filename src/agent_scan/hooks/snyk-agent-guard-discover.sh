@@ -25,6 +25,7 @@ only_client_and_scope() {
 only_client_and_scope "$@" || exit 0
 
 CONFIG_FILE="$(dirname "${BASH_SOURCE[0]}")/snyk-agent-guard.conf"
+[[ "$CONFIG_FILE" == /* ]] || CONFIG_FILE="$PWD/$CONFIG_FILE"
 [[ -f "$CONFIG_FILE" && -r "$CONFIG_FILE" ]] || exit 0
 
 PUSH_KEY=""
@@ -48,6 +49,8 @@ done < "$CONFIG_FILE"
 # MACHINE_SERIAL is exported even when empty: an inherited value must not stand in for
 # the one captured at install.
 export PUSH_KEY REMOTE_HOOKS_BASE_URL MACHINE_ID MACHINE_SERIAL
+# The child reads installed observations from this file. Replace any inherited path.
+export SNYK_GUARD_INSTALL_CONFIG="$CONFIG_FILE"
 
 [[ -n "$MACHINE_ID" ]] || exit 0
 [[ -n "$AGENT_SCAN_COMMAND" ]] || exit 0

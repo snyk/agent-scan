@@ -156,7 +156,13 @@ $xUser = @{
     identifier = $MachineId
     cli_version = $cliVersion
     machine_serial = $serial
-} | ConvertTo-Json -Compress
+}
+foreach ($key in @("INSTALL_SOURCE", "INSTALL_MODE", "OS", "ARCH")) {
+    if ($Config[$key]) {
+        $xUser[$key.ToLowerInvariant()] = $Config[$key]
+    }
+}
+$xUser = ConvertTo-Json -InputObject $xUser -Compress
 
 # Identify whether GitHub Copilot invoked this hook (see get_agent_surface in
 # snyk-agent-guard.sh for why the -Client argument cannot answer this: one Copilot hook

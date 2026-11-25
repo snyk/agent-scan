@@ -1,12 +1,21 @@
 """E2E test for guard install — ensures the bundled hook scripts are accessible."""
 
+import hashlib
 import json
 import os
+import shlex
+import shutil
+import struct
 import subprocess
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from agent_scan import guard, guard_platform
+from agent_scan.run import run
+from agent_scan.version import version_info
 from tests.e2e.conftest import _FakeHookServer
 
 _FORWARDER_SCRIPT = "snyk-agent-guard.ps1" if os.name == "nt" else "snyk-agent-guard.sh"
@@ -34,7 +43,17 @@ def _guard_env(**extra: str) -> dict[str, str]:
     COLUMNS keeps rich from wrapping output lines that the tests match against.
     """
     env = {
-        k: v for k, v in os.environ.items() if k not in {"SNYK_TOKEN", "TENANT_ID", "MACHINE_ID", "AGENT_SCAN_COMMAND"}
+        k: v
+        for k, v in os.environ.items()
+        if k
+        not in {
+            "SNYK_TOKEN",
+            "TENANT_ID",
+            "MACHINE_ID",
+            "AGENT_SCAN_COMMAND",
+            "SNYK_GUARD_INSTALL_SOURCE",
+            "SNYK_GUARD_INSTALL_CONFIG",
+        }
     }
     return {**env, "COLUMNS": "500", **extra}
 
@@ -84,6 +103,290 @@ def _assert_scripts_removed(config_file: Path) -> None:
     scripts_dir = _scripts_dir(config_file)
     assert not (scripts_dir / _FORWARDER_SCRIPT).exists()
     assert not (scripts_dir / _DISCOVER_SCRIPT).exists()
+
+
+@pytest.mark.parametrize("managed", [False, True], ids=["user", "managed"])
+@pytest.mark.parametrize("first_source", ["ads", "manual"])
+def test_installed_hooks_report_provenance(fake_hook_server, agent_scan_command, tmp_path, managed, first_source):
+    config_file = tmp_path / "installation with spaces" / "settings.json"
+    scripts_dir = _scripts_dir(config_file)
+    bundled_scripts = Path(__file__).resolve().parents[2] / "src" / "agent_scan" / "hooks"
+    mode = "managed" if managed else "user"
+
+    # Reinstall with the other source to verify that the installed observation is refreshed.
+    for source in (first_source, "manual" if first_source == "ads" else "ads"):
+        _FakeHookServer.requests.clear()
+        marker = {"SNYK_GUARD_INSTALL_SOURCE": "ads"} if source == "ads" else {}
+        result = _run_cli(
+            [sys.executable, "-m", "src.agent_scan.run"],
+            "guard",
+            "install",
+            "claude",
+            "--file",
+            str(config_file),
+            "--url",
+            fake_hook_server,
+            *(["--managed"] if managed else []),
+            env=_guard_env(
+                PUSH_KEY="test-pk-e2e",
+                MACHINE_ID="e2e-machine-id",
+                AGENT_SCAN_COMMAND=str(agent_scan_command),
+                **marker,
+            ),
+        )
+        assert result.returncode == 0, _describe(result)
+
+        adjacent_config = scripts_dir / "snyk-agent-guard.conf"
+        contents = adjacent_config.read_text()
+        assert f"INSTALL_SOURCE={source}\n" in contents
+        assert f"INSTALL_MODE={mode}\n" in contents
+        if os.name != "nt":
+            assert adjacent_config.stat().st_mode & 0o777 == (0o644 if managed else 0o600)
+        for script in (_FORWARDER_SCRIPT, _DISCOVER_SCRIPT):
+            assert (scripts_dir / script).read_bytes() == (bundled_scripts / script).read_bytes()
+
+        settings = json.loads(config_file.read_text())
+        forwarder = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+        discovery = next(
+            hook["command"]
+            for group in settings["hooks"]["SessionStart"]
+            for hook in group["hooks"]
+            if _DISCOVER_SCRIPT in hook["command"]
+        )
+        other_source = "manual" if source == "ads" else "ads"
+        other_mode = "user" if managed else "managed"
+        inherited_config = tmp_path / "inherited.conf"
+        inherited_config.write_text(f"INSTALL_SOURCE={other_source}\nINSTALL_MODE={other_mode}\n")
+        inherited = _guard_env(
+            SNYK_GUARD_INSTALL_SOURCE=other_source,
+            SNYK_GUARD_INSTALL_CONFIG=str(inherited_config),
+            INSTALL_SOURCE=other_source,
+            INSTALL_MODE=other_mode,
+            CFG_INSTALL_SOURCE=other_source,
+            CFG_INSTALL_MODE=other_mode,
+        )
+        for command, event in [(forwarder, "PreToolUse"), (discovery, "SessionStart")]:
+            argv = ["powershell", "-Command", command] if os.name == "nt" else shlex.split(command)
+            response = subprocess.run(
+                argv,
+                input=json.dumps({"hook_event_name": event, "session_id": "captured-session"}),
+                env=inherited,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            assert response.returncode == 0, _describe(response)
+
+        assert [request["body"]["hook_event_name"] for request in _FakeHookServer.requests] == [
+            "hooksConfigured",
+            "hooksConfiguredServerDiscovery",
+            "PreToolUse",
+            "sessionStartServerDiscovery",
+        ]
+        for request in _FakeHookServer.requests:
+            user = json.loads(request["headers"]["X-User"])
+            assert (user["install_source"], user["install_mode"]) == (source, mode)
+            assert user["identifier"] == "e2e-machine-id"
+            if os.name == "nt":
+                assert user["os"] == "Windows"
+            if request["body"]["hook_event_name"].endswith("ServerDiscovery"):
+                assert user["cli_version"] == version_info
+            else:
+                # Source checkouts ship the placeholder, which the forwarders report as unknown.
+                assert user["cli_version"] == "unknown"
+
+
+_PLATFORM_FIELDS = ("os", "arch")
+
+
+def _run_installed_grouped_hooks(config_file, *, powershell=False):
+    tmp_path = config_file.parent
+    discovery_script = "snyk-agent-guard-discover.ps1" if powershell else "snyk-agent-guard-discover.sh"
+    settings = json.loads(config_file.read_text())
+    forwarder = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    discovery = next(
+        hook["command"]
+        for group in settings["hooks"]["SessionStart"]
+        for hook in group["hooks"]
+        if discovery_script in hook["command"]
+    )
+    inherited_config = tmp_path / "inherited.conf"
+    inherited_config.write_text("OS=incorrect\nOS_VERSION=incorrect\nARCH=incorrect\nKERNEL_RELEASE=incorrect\n")
+    for command, event in [(forwarder, "PreToolUse"), (discovery, "SessionStart")]:
+        argv = ["powershell", "-NoProfile", "-Command", command] if powershell else shlex.split(command)
+        response = subprocess.run(
+            argv,
+            input=json.dumps({"hook_event_name": event, "session_id": "captured-session"}),
+            env=_guard_env(
+                SNYK_GUARD_INSTALL_CONFIG=str(inherited_config),
+                OS="incorrect",
+                OS_VERSION="incorrect",
+                ARCH="incorrect",
+                KERNEL_RELEASE="incorrect",
+                CFG_OS="incorrect",
+                CFG_OS_VERSION="incorrect",
+                CFG_ARCH="incorrect",
+                CFG_KERNEL_RELEASE="incorrect",
+            ),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert response.returncode == 0, _describe(response)
+
+
+@pytest.mark.skipif(sys.platform not in ("linux", "darwin"), reason="Linux and macOS snapshot")
+def test_installed_hooks_report_platform(fake_hook_server, agent_scan_command, tmp_path):
+    config_file = tmp_path / "settings.json"
+    _install([sys.executable, "-m", "src.agent_scan.run"], agent_scan_command, "claude", config_file, fake_hook_server)
+    bundled_scripts = Path(__file__).resolve().parents[2] / "src" / "agent_scan" / "hooks"
+    scripts_dir = _scripts_dir(config_file)
+    for script in (_FORWARDER_SCRIPT, _DISCOVER_SCRIPT):
+        assert (scripts_dir / script).read_bytes() == (bundled_scripts / script).read_bytes()
+
+    _run_installed_grouped_hooks(config_file)
+
+    assert [request["body"]["hook_event_name"] for request in _FakeHookServer.requests] == [
+        "hooksConfigured",
+        "hooksConfiguredServerDiscovery",
+        "PreToolUse",
+        "sessionStartServerDiscovery",
+    ]
+    first_user = json.loads(_FakeHookServer.requests[0]["headers"]["X-User"])
+    expected = {field: first_user[field] for field in _PLATFORM_FIELDS}
+    assert expected["os"] == {"linux": "Linux", "darwin": "Darwin"}[sys.platform]
+    assert expected["arch"] in {"x64", "arm64"}
+    for request in _FakeHookServer.requests:
+        user = json.loads(request["headers"]["X-User"])
+        assert {field: user[field] for field in expected} == expected
+        assert "os_version" not in user and "kernel_release" not in user
+
+
+_PLATFORM_EVENTS = (
+    "hooksConfigured",
+    "hooksConfiguredServerDiscovery",
+    "PreToolUse",
+    "sessionStartServerDiscovery",
+)
+
+
+def _assert_windows_http(platform, events=_PLATFORM_EVENTS, *, script_version="unknown"):
+    assert tuple(request["body"]["hook_event_name"] for request in _FakeHookServer.requests) == events
+    for request in _FakeHookServer.requests:
+        event = request["body"]["hook_event_name"]
+        user = json.loads(request["headers"]["X-User"])
+        assert {field: user[field] for field in _PLATFORM_FIELDS if field in user} == platform
+        assert user["identifier"] == "e2e-machine-id"
+        assert user["cli_version"] == (version_info if event.endswith("ServerDiscovery") else script_version)
+    _FakeHookServer.requests.clear()
+
+
+def _windows_executable_arch(executable):
+    # The COFF Machine field identifies the executable, independent of the host
+    # architecture or how Python's sysconfig describes its own build.
+    with Path(executable).open("rb") as binary:
+        binary.seek(0x3C)
+        pe_offset = struct.unpack("<I", binary.read(4))[0]
+        binary.seek(pe_offset)
+        assert binary.read(4) == b"PE\0\0"
+        machine = struct.unpack("<H", binary.read(2))[0]
+    return {0x014C: "386", 0x01C4: "arm", 0x8664: "x64", 0xAA64: "arm64"}[machine]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Requires native Windows and Windows PowerShell 5.1")
+@pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
+def test_native_windows_install_reports_platform(
+    fake_hook_server, agent_scan_cmd, agent_scan_command, tmp_path, monkeypatch
+):
+    ps_version = subprocess.check_output(
+        ["powershell", "-NoProfile", "-Command", "$PSVersionTable.PSVersion.ToString()"], text=True, timeout=15
+    )
+    assert ps_version.strip().startswith("5.1.")
+    binary = agent_scan_cmd[0] if len(agent_scan_cmd) == 1 else sys.executable
+    expected = {"os": "Windows", "arch": _windows_executable_arch(binary)}
+
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    config_file = tmp_path / "installation with spaces" / "settings.json"
+    _install(agent_scan_cmd, agent_scan_command, "claude", config_file, fake_hook_server)
+    bundled_scripts = Path(__file__).resolve().parents[2] / "src" / "agent_scan" / "hooks"
+    scripts_dir = _scripts_dir(config_file)
+    checksums = _FakeHookServer.requests[0]["body"]["hooks_script"]
+    for script, checksum in ((_FORWARDER_SCRIPT, "new_checksum"), (_DISCOVER_SCRIPT, "discover_new_checksum")):
+        installed_bytes = (scripts_dir / script).read_bytes()
+        assert installed_bytes == (bundled_scripts / script).read_bytes()
+        assert checksums[checksum] == hashlib.sha256(installed_bytes).hexdigest()
+    _run_installed_grouped_hooks(config_file, powershell=True)
+    _assert_windows_http(expected)
+
+
+def test_installed_powershell_hooks_use_the_windows_install_snapshot(
+    fake_hook_server, agent_scan_command, tmp_path, monkeypatch
+):
+    if os.name != "nt":
+        pwsh = shutil.which("pwsh")
+        if pwsh is None:
+            pytest.skip("PowerShell is unavailable")
+        bin_dir = tmp_path / "bin"
+        bin_dir.mkdir()
+        (bin_dir / "powershell").symlink_to(pwsh)
+        monkeypatch.setenv("PATH", str(bin_dir), prepend=os.pathsep)
+        monkeypatch.setattr(guard, "IS_WINDOWS", True)
+    monkeypatch.setenv("USERPROFILE" if os.name == "nt" else "HOME", str(tmp_path))
+
+    # An x64 process running on an ARM64 Windows machine.
+    monkeypatch.setattr(guard_platform, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(guard_platform, "sysconfig", SimpleNamespace(get_platform=lambda: "win-amd64"))
+    monkeypatch.setenv("PROCESSOR_ARCHITECTURE", "ARM64")
+    monkeypatch.setenv("PROCESSOR_ARCHITEW6432", "ARM64")
+    # Model the released artifact one version ahead of the running discovery CLI.
+    script_version = "9.9.9-test"
+    bundled_scripts = guard.importlib_resources.files("agent_scan.hooks")
+    stamped_bundle = tmp_path / "release"
+    stamped_bundle.mkdir()
+    bundled_script = stamped_bundle / "snyk-agent-guard.ps1"
+    original = bundled_scripts.joinpath(bundled_script.name).read_bytes()
+    stamped = original.replace(
+        b'$AGENT_SCAN_VERSION = "__AGENT_SCAN_VERSION__"', f'$AGENT_SCAN_VERSION = "{script_version}"'.encode(), 1
+    )
+    assert stamped != original
+    bundled_script.write_bytes(stamped)
+    trampoline = "snyk-agent-guard-discover.ps1"
+    (stamped_bundle / trampoline).write_bytes(bundled_scripts.joinpath(trampoline).read_bytes())
+    monkeypatch.setattr(guard, "importlib_resources", SimpleNamespace(files=lambda _: stamped_bundle))
+
+    config_file = tmp_path / "installation with spaces" / "settings.json"
+    monkeypatch.setattr(
+        sys, "argv", ["agent-scan", "guard", "install", "claude", "--file", str(config_file), "--url", fake_hook_server]
+    )
+    monkeypatch.setenv("PUSH_KEY", "test-pk-e2e")
+    monkeypatch.setenv("MACHINE_ID", "e2e-machine-id")
+    monkeypatch.setenv("AGENT_SCAN_COMMAND", str(agent_scan_command))
+    for key in ("SNYK_TOKEN", "TENANT_ID", "SNYK_GUARD_INSTALL_CONFIG", "SNYK_GUARD_INSTALL_SOURCE"):
+        monkeypatch.delenv(key, raising=False)
+
+    def install():
+        with pytest.raises(SystemExit) as result:
+            run()
+        assert result.value.code == 0
+        assert (_scripts_dir(config_file) / bundled_script.name).read_bytes() == stamped
+
+    initial = {"os": "Windows", "arch": "x64"}
+    install()
+    _assert_windows_http(initial, _PLATFORM_EVENTS[:2], script_version=script_version)
+
+    monkeypatch.setattr(guard_platform, "sysconfig", SimpleNamespace(get_platform=lambda: "win-arm64"))
+    _run_installed_grouped_hooks(config_file, powershell=True)
+    _assert_windows_http(initial, _PLATFORM_EVENTS[2:], script_version=script_version)
+
+    install()
+    _run_installed_grouped_hooks(config_file, powershell=True)
+    _assert_windows_http({**initial, "arch": "arm64"}, script_version=script_version)
+
+    # A failed probe must replace stale observations and leave both senders usable.
+    monkeypatch.setattr(guard_platform, "sysconfig", SimpleNamespace(get_platform=lambda: "win-unrecognized"))
+    install()
+    _run_installed_grouped_hooks(config_file, powershell=True)
+    _assert_windows_http({"os": "Windows"}, script_version=script_version)
 
 
 class TestGuardInstallE2E:

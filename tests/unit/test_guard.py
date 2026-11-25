@@ -5283,13 +5283,16 @@ class TestInstallHooksOrchestration:
         path, content = ctx["write_guard_config"].call_args.args
         assert path == guard_module._guard_config_path(config)
         assert ctx["write_guard_config"].call_args.kwargs == {"managed": False}
-        assert guard_module._parse_guard_config(content.decode()) == {
+        expected = {
             "PUSH_KEY": "pk-test",
             "REMOTE_HOOKS_BASE_URL": "https://api.snyk.io",
             "TENANT_ID": "tid-1",
             "MACHINE_ID": "machine-42",
             "AGENT_SCAN_COMMAND": "/usr/local/bin/snyk-agent-scan",
+            "INSTALL_SOURCE": "manual",
+            "INSTALL_MODE": "user",
         }
+        assert guard_module._parse_guard_config(content.decode()).items() >= expected.items()
         assert ctx["build"].call_args == mock_call(ctx["dest"], "claude-code")
 
     @pytest.mark.parametrize("serial", ["C02XYZ123", "control-\x01\b\f\x1f"])
@@ -7178,6 +7181,7 @@ class TestRunInstallSendsServersDiscovered:
             discovery_scope=DiscoveryScope.SERVERS,
             retry_policy=guard_module.INSTALL_RETRY_POLICY,
             machine_serial="",
+            install_metadata={},
         )
 
     def test_install_does_not_request_skills_discovery(self, tmp_path, monkeypatch):
@@ -9288,13 +9292,16 @@ class TestHookConfigEndToEnd:
             assert "pk-1" not in command and "machine-42" not in command and success_hook_server not in command
 
         guard_config = guard_module._guard_config_path(config)
-        assert guard_module._read_guard_config(guard_config) == {
+        expected = {
             "PUSH_KEY": "pk-1",
             "REMOTE_HOOKS_BASE_URL": success_hook_server,
             "TENANT_ID": "tid-1",
             "MACHINE_ID": "machine-42",
             "AGENT_SCAN_COMMAND": "/usr/local/bin/snyk-agent-scan",
+            "INSTALL_SOURCE": "manual",
+            "INSTALL_MODE": "user",
         }
+        assert guard_module._read_guard_config(guard_config).items() >= expected.items()
         assert stat.S_IMODE(guard_config.stat().st_mode) == 0o600
         for name in ("snyk-agent-guard.sh", "snyk-agent-guard-discover.sh"):
             assert (guard_config.parent / name).read_bytes() == _get_script_path(name).read_bytes()

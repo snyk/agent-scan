@@ -33,6 +33,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 lacks stdlib TOML
 
 from agent_scan.agents import DiscoveryScope
 from agent_scan.agents.claude_desktop import ClaudeDesktopDiscoverer
+from agent_scan.guard_platform import collect_platform
 from agent_scan.hook_events import (
     HOOK_CLIENTS,
     INSTALL_RETRY_POLICY,
@@ -72,6 +73,8 @@ _DETECTION_RE = re.compile(r"""(?:^|[/\\'"\s])snyk-agent-guard(?:-discover)?\.(?
 # Installation configuration read by the hook scripts, next to them in the hooks directory.
 # Not a .json file: Copilot loads every *.json file in ~/.copilot/hooks as a hook config.
 GUARD_CONFIG_NAME = "snyk-agent-guard.conf"
+_PLATFORM_KEYS = {"OS": "os", "ARCH": "arch"}
+_INSTALL_METADATA_KEYS = {"INSTALL_SOURCE": "install_source", "INSTALL_MODE": "install_mode", **_PLATFORM_KEYS}
 _GUARD_CONFIG_KEYS = (
     "PUSH_KEY",
     "REMOTE_HOOKS_BASE_URL",
@@ -79,6 +82,7 @@ _GUARD_CONFIG_KEYS = (
     "MACHINE_ID",
     "MACHINE_SERIAL",
     "AGENT_SCAN_COMMAND",
+    *_INSTALL_METADATA_KEYS,
 )
 _PERMISSION_DENIED = "__permission_denied__"
 # Install backs up a config file to ``<file>`` + this suffix. The name is Guard's own
@@ -356,16 +360,19 @@ def _run_install(args) -> None:
     minted = not headless  # True if we minted the key in this run
 
     first_installed_client: str | None = None
+    first_installed_config_path: Path | None = None
     failed_clients: list[str] = []
     try:
         for c in clients:
             try:
+                hook_client = _hook_client_name(c)
+                config_path = _config_path(c, getattr(args, "file", None), managed=managed)
                 _install_hooks(
                     c,
-                    _hook_client_name(c),
+                    hook_client,
                     push_key,
                     url,
-                    _config_path(c, getattr(args, "file", None), managed=managed),
+                    config_path,
                     scope,
                     _client_label(c),
                     minted,
@@ -384,7 +391,8 @@ def _run_install(args) -> None:
                 rich.print(f"[yellow]Warning:[/yellow] Installation failed for {_client_label(c)}; continuing.")
                 continue
             if first_installed_client is None:
-                first_installed_client = _hook_client_name(c)
+                first_installed_config_path = _guard_config_path(config_path)
+                first_installed_client = hook_client
     except BaseException:
         if minted:
             if first_installed_client is not None:
@@ -400,7 +408,7 @@ def _run_install(args) -> None:
     if failed_clients and first_installed_client is None and minted:
         _revoke_after_failure(url, tenant_id, snyk_token, push_key)
 
-    if first_installed_client is not None:
+    if first_installed_client is not None and first_installed_config_path is not None:
         _send_servers_discovered_event(
             push_key,
             url,
@@ -409,6 +417,7 @@ def _run_install(args) -> None:
             discovery_scope=DiscoveryScope.SERVERS,
             retry_policy=INSTALL_RETRY_POLICY,
             machine_serial=machine_serial,
+            install_metadata=_read_install_metadata(first_installed_config_path),
         )
 
     if failed_clients:
@@ -490,6 +499,7 @@ def _run_discover(args) -> int:
     except Exception:
         pass
 
+    install_config = os.environ.get("SNYK_GUARD_INSTALL_CONFIG")
     success = _send_servers_discovered_event(
         push_key,
         url,
@@ -500,6 +510,7 @@ def _run_discover(args) -> int:
         session_marker=session_id or "session-start-server-discovery",
         target_folders=target_folders,
         discovery_scope=getattr(args, "scope", DiscoveryScope.ALL),
+        install_metadata=_read_install_metadata(Path(install_config)) if install_config else {},
     )
     return 0 if success else 1
 
@@ -676,6 +687,11 @@ def _read_guard_config(path: Path) -> dict[str, str]:
         return {}
 
 
+def _read_install_metadata(path: Path) -> dict[str, str]:
+    config = _read_guard_config(path)
+    return {field: config[key] for key, field in _INSTALL_METADATA_KEYS.items() if config.get(key)}
+
+
 def _write_guard_config(path: Path, content: bytes, *, managed: bool) -> bool:
     """Write the guard configuration file atomically. Returns True if it changed.
 
@@ -735,7 +751,9 @@ def _install_hooks(
     forwarder_script_path = _forwarder_script_path(config_path)
     discover_script_path = _discover_script_path(config_path)
     guard_config_path = _guard_config_path(config_path)
+    platform = collect_platform()
     config_values = {
+        **{key: platform[field] for key, field in _PLATFORM_KEYS.items() if field in platform},
         "PUSH_KEY": push_key,
         "REMOTE_HOOKS_BASE_URL": url,
         "TENANT_ID": tenant_id,
@@ -744,6 +762,8 @@ def _install_hooks(
         # from their environment.
         "MACHINE_SERIAL": machine_serial,
         "AGENT_SCAN_COMMAND": agent_scan_command or "",
+        "INSTALL_SOURCE": "ads" if os.environ.get("SNYK_GUARD_INSTALL_SOURCE") == "ads" else "manual",
+        "INSTALL_MODE": scope,
     }
     # Rendered (and validated) before any file is touched.
     guard_config = _render_guard_config(config_values)
@@ -805,7 +825,13 @@ def _install_hooks(
         if test_event.status == "unconfirmed":
             _warn_test_event_unconfirmed(test_event)
             _report_test_event_unconfirmed(
-                push_key, url, hook_client, machine_id, test_event, machine_serial=machine_serial
+                push_key,
+                url,
+                hook_client,
+                machine_id,
+                test_event,
+                machine_serial=machine_serial,
+                install_metadata=_read_install_metadata(guard_config_path),
             )
 
         config_written = _write_client_config(client, config_path, prepared_config, prepared_content, preserved)
@@ -851,6 +877,7 @@ def _report_test_event_unconfirmed(
     result: _TestEventResult,
     *,
     machine_serial: str,
+    install_metadata: Mapping[str, str] | None = None,
 ) -> None:
     """Best-effort telemetry: the install continued although the test event never got through."""
     payload_dict = {
@@ -861,7 +888,13 @@ def _report_test_event_unconfirmed(
         "test_event_last_error": result.error,
     }
     ok, detail = send_hook_event(
-        url, hook_client, push_key, json.dumps(payload_dict), machine_id, machine_serial=machine_serial
+        url,
+        hook_client,
+        push_key,
+        json.dumps(payload_dict),
+        machine_id,
+        machine_serial=machine_serial,
+        install_metadata=install_metadata,
     )
     if not ok:
         rich.print(f"[dim]Could not report the unconfirmed test event: {detail}[/dim]")
@@ -2185,6 +2218,7 @@ def _send_servers_discovered_event(
     discovery_scope: DiscoveryScope = DiscoveryScope.ALL,
     retry_policy: RetryPolicy | None = None,
     machine_serial: str,
+    install_metadata: Mapping[str, str] | None = None,
 ) -> bool:
     """Discover MCP servers and send an install- or session-scoped discovery event.
 
@@ -2217,7 +2251,14 @@ def _send_servers_discovered_event(
     payload = json.dumps(payload_dict)
 
     ok, detail = send_hook_event(
-        url, hook_client, push_key, payload, machine_id, retry_policy=retry_policy, machine_serial=machine_serial
+        url,
+        hook_client,
+        push_key,
+        payload,
+        machine_id,
+        retry_policy=retry_policy,
+        machine_serial=machine_serial,
+        install_metadata=install_metadata,
     )
     if ok:
         server_count = sum(len(entry.get("servers", [])) for entry in servers)
