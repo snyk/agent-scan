@@ -3,6 +3,7 @@
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -84,6 +85,110 @@ def _assert_scripts_removed(config_file: Path) -> None:
     scripts_dir = _scripts_dir(config_file)
     assert not (scripts_dir / _FORWARDER_SCRIPT).exists()
     assert not (scripts_dir / _DISCOVER_SCRIPT).exists()
+
+
+def _run_installed_grouped_hooks(config_file, *, powershell=False):
+    discovery_script = "snyk-agent-guard-discover.ps1" if powershell else "snyk-agent-guard-discover.sh"
+    settings = json.loads(config_file.read_text())
+    forwarder = settings["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
+    discovery = next(
+        hook["command"]
+        for group in settings["hooks"]["SessionStart"]
+        for hook in group["hooks"]
+        if discovery_script in hook["command"]
+    )
+    for command, event in [(forwarder, "PreToolUse"), (discovery, "SessionStart")]:
+        argv = ["powershell", "-NoProfile", "-Command", command] if powershell else ["bash", "-c", command]
+        response = subprocess.run(
+            argv,
+            input=json.dumps({"hook_event_name": event, "session_id": "captured-session"}),
+            env=_guard_env(),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert response.returncode == 0, _describe(response)
+
+
+@pytest.mark.parametrize(
+    ("client", "filename", "marker", "value"),
+    [
+        ("claude", "settings.json", "CLAUDE_CODE_ENTRYPOINT", "sdk-cli"),
+        ("codex", "hooks.json", "CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex Desktop"),
+    ],
+)
+def test_installed_hooks_use_runtime_surface_only_after_setup(
+    client, filename, marker, value, monkeypatch, fake_hook_server, agent_scan_command, tmp_path
+):
+    config_file = tmp_path / filename
+    monkeypatch.setenv("USERPROFILE" if os.name == "nt" else "HOME", str(tmp_path))
+    monkeypatch.setenv(marker, value)
+    _install([sys.executable, "-m", "src.agent_scan.run"], agent_scan_command, client, config_file, fake_hook_server)
+    _run_installed_grouped_hooks(config_file, powershell=os.name == "nt")
+    assert [r["body"]["hook_event_name"] for r in _FakeHookServer.requests] == [
+        "hooksConfigured",
+        "hooksConfiguredServerDiscovery",
+        "PreToolUse",
+        "sessionStartServerDiscovery",
+    ]
+    _assert_installer_and_runtime_evidence({marker: value})
+
+
+def test_installed_copilot_hooks_distinguish_setup_from_runtime(
+    fake_hook_server,
+    agent_scan_command,
+    tmp_path,
+):
+    config_file = tmp_path / "hooks" / "snyk-agent-guard.json"
+    copilot_env = {"AI_AGENT": "github_copilot_vscode_agent", "COPILOT_CLI": "1"}
+    cli = [sys.executable, "-m", "src.agent_scan.run"]
+    result = _run_cli(
+        cli,
+        "guard",
+        "install",
+        "github-copilot",
+        "--file",
+        str(config_file),
+        "--url",
+        fake_hook_server,
+        env=_guard_env(
+            PUSH_KEY="test-pk-e2e",
+            MACHINE_ID="test-machine",
+            AGENT_SCAN_COMMAND=str(agent_scan_command),
+            **copilot_env,
+        ),
+    )
+    assert result.returncode == 0, _describe(result)
+
+    hooks = json.loads(config_file.read_text())["hooks"]
+    command_key = "powershell" if os.name == "nt" else "bash"
+    for hook in hooks["SessionStart"]:
+        command = hook[command_key]
+        argv = ["powershell", "-Command", command] if os.name == "nt" else ["bash", "-c", command]
+        runtime = subprocess.run(
+            argv,
+            input='{"hook_event_name":"SessionStart","session_id":"copilot-session"}',
+            env=_guard_env(**copilot_env),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert runtime.returncode == 0, _describe(runtime)
+
+    assert [r["body"]["hook_event_name"] for r in _FakeHookServer.requests] == [
+        "hooksConfigured",
+        "hooksConfiguredServerDiscovery",
+        "SessionStart",
+        "sessionStartServerDiscovery",
+    ]
+    _assert_installer_and_runtime_evidence(copilot_env)
+
+
+def _assert_installer_and_runtime_evidence(expected):
+    headers = [r["headers"] for r in _FakeHookServer.requests]
+    assert all("X-Agent-Surface" not in h for h in headers)
+    assert all("X-Agent-Surface-Evidence" not in h for h in headers[:2])
+    assert [json.loads(h["X-Agent-Surface-Evidence"]) for h in headers[2:]] == [expected, expected]
 
 
 class TestGuardInstallE2E:

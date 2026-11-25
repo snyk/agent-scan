@@ -36,6 +36,7 @@ from agent_scan.agents.claude_desktop import ClaudeDesktopDiscoverer
 from agent_scan.hook_events import (
     HOOK_CLIENTS,
     INSTALL_RETRY_POLICY,
+    SURFACE_EVIDENCE_MARKERS,
     RetryPolicy,
     classify_failure_detail,
     next_retry_delay,
@@ -769,7 +770,12 @@ def _report_test_event_unconfirmed(
         "test_event_last_error": result.error,
     }
     ok, detail = send_hook_event(
-        url, hook_client, push_key, json.dumps(payload_dict), machine_id, machine_serial=machine_serial
+        url,
+        hook_client,
+        push_key,
+        json.dumps(payload_dict),
+        machine_id,
+        machine_serial=machine_serial,
     )
     if not ok:
         rich.print(f"[dim]Could not report the unconfirmed test event: {detail}[/dim]")
@@ -1959,6 +1965,9 @@ def _invoke_hook_script(
             machine_serial=machine_serial,
         )
     )
+    # This subprocess verifies the install. Its inherited agent markers do not describe a hook invocation.
+    for marker in SURFACE_EVIDENCE_MARKERS.get(hook_client, ()):
+        env.pop(marker, None)
 
     try:
         result = subprocess.run(
@@ -2136,7 +2145,13 @@ def _send_servers_discovered_event(
     payload = json.dumps(payload_dict)
 
     ok, detail = send_hook_event(
-        url, hook_client, push_key, payload, machine_id, retry_policy=retry_policy, machine_serial=machine_serial
+        url,
+        hook_client,
+        push_key,
+        payload,
+        machine_id,
+        retry_policy=retry_policy,
+        machine_serial=machine_serial,
     )
     if ok:
         server_count = sum(len(entry.get("servers", [])) for entry in servers)
@@ -2481,7 +2496,8 @@ def _render_powershell_command(invocation: _HookInvocation) -> str:
     return " ".join(parts)
 
 
-def _render_argv(invocation: _HookInvocation) -> tuple[list[str], dict[str, str] | None]:
+def _render_argv(invocation: _HookInvocation) -> tuple[list[str], dict[str, str]]:
+    env = dict(os.environ)
     if IS_WINDOWS:
         argv = [
             "powershell",
@@ -2502,14 +2518,13 @@ def _render_argv(invocation: _HookInvocation) -> tuple[list[str], dict[str, str]
             argv.extend(["-AgentScanCommand", invocation.agent_scan_command])
         if invocation.scope:
             argv.extend(["-Scope", invocation.scope])
-        return argv, None
+        return argv, env
 
-    env = {
-        **os.environ,
-        "PUSH_KEY": invocation.push_key,
-        "REMOTE_HOOKS_BASE_URL": invocation.url,
-        "MACHINE_SERIAL": invocation.machine_serial,
-    }
+    env.update(
+        PUSH_KEY=invocation.push_key,
+        REMOTE_HOOKS_BASE_URL=invocation.url,
+        MACHINE_SERIAL=invocation.machine_serial,
+    )
     if invocation.tenant_id:
         env["TENANT_ID"] = invocation.tenant_id
     if invocation.machine_id:

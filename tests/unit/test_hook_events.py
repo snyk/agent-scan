@@ -13,6 +13,7 @@ import pytest
 from agent_scan.hook_events import _HOOK_REQUEST_TIMEOUT_SECONDS, classify_failure_detail, send_hook_event
 from agent_scan.hook_version import HOOK_VERSION
 from agent_scan.version import version_info
+from tests.unit._hook_surface_cases import HOOK_SURFACE_CASES
 
 
 class _FakeResponse:
@@ -87,45 +88,41 @@ def test_sends_existing_hook_wire_contract(client, serial, monkeypatch):
     }
 
 
-@pytest.mark.parametrize(
-    ("env", "expected_surface"),
-    [
-        # A process the agent spawned inherits its environment, which is the only thing
-        # identifying the sender: one hook config serves every Copilot surface.
-        ({"AI_AGENT": "github_copilot_vscode_agent"}, "copilot-vscode"),
-        ({"AI_AGENT": "github_copilot_app_agent"}, "copilot"),
-        ({"COPILOT_CLI": "1"}, "copilot"),
-        # A future Copilot host joins the app/CLI surface rather than going unrecognized.
-        ({"AI_AGENT": "github_copilot_future_agent"}, "copilot"),
-        # Run from a plain shell (`guard install`): no surface, so the header is omitted
-        # and agent-monitor attributes the event by its type instead.
-        ({}, None),
-        # Copilot sets CLAUDE_PROJECT_DIR itself, so CLAUDE_* says nothing about the agent.
-        ({"CLAUDE_PROJECT_DIR": "/repo"}, None),
-    ],
-)
-def test_reports_the_agent_surface_from_the_environment(env, expected_surface):
+@pytest.mark.parametrize(("client", "runtime_env", "expected_evidence"), HOOK_SURFACE_CASES)
+def test_discovery_distinguishes_installation_from_runtime(client, runtime_env, expected_evidence):
     session = _FakeSession()
+    with patch.dict(os.environ, runtime_env, clear=True), _patch_session(session):
+        for event in (
+            "hooksConfigured",
+            "hooksConfiguredServerDiscovery",
+            "hooksConfiguredTestEventUnconfirmed",
+            "sessionStartServerDiscovery",
+        ):
+            send_hook_event(
+                "https://api.snyk.io",
+                client,
+                "push-key",
+                json.dumps({"hook_event_name": event}),
+                "machine",
+                machine_serial="serial-1",
+            )
+    assert [json.loads(post["headers"]["X-User"])["machine_serial"] for post in session.posts] == ["serial-1"] * 4
+    assert [json.loads(post["headers"].get("X-Agent-Surface-Evidence", "{}")) for post in session.posts] == [
+        {},
+        {},
+        {},
+        expected_evidence,
+    ]
+    assert all("X-Agent-Surface" not in post["headers"] for post in session.posts)
 
-    with (
-        patch.dict(os.environ, env, clear=True),
-        patch("agent_scan.hook_events.get_hostname", return_value="host-1"),
-        patch("agent_scan.hook_events.get_username", return_value="user-1"),
-        _patch_session(session),
-    ):
-        send_hook_event("https://api.snyk.io", "github-copilot", "push-key", "{}", "machine-1", machine_serial="")
 
-    headers = session.posts[0]["headers"]
-    assert headers.get("X-Agent-Surface") == expected_surface
-
-
-@pytest.mark.parametrize("client", ["claude-code", "cursor", "codex"])
-def test_other_clients_never_claim_a_copilot_surface(client):
+@pytest.mark.parametrize("client", ["claude-code", "codex", "cursor"])
+def test_other_clients_never_send_copilot_evidence(client):
     """The env describes the environment, not the caller, and it is inherited.
 
     Run another agent from a shell a Copilot session spawned and its hooks see AI_AGENT
     and COPILOT_CLI too — but the hook that fired belongs to whichever config invoked us,
-    so only the Copilot client may report a surface.
+    so only the Copilot client may report a Copilot surface.
     """
     session = _FakeSession()
     copilot_env = {"AI_AGENT": "github_copilot_vscode_agent", "COPILOT_CLI": "1"}
@@ -138,7 +135,7 @@ def test_other_clients_never_claim_a_copilot_surface(client):
     ):
         send_hook_event("https://api.snyk.io", client, "push-key", "{}", "machine-1", machine_serial="")
 
-    assert "X-Agent-Surface" not in session.posts[0]["headers"]
+    assert "X-Agent-Surface-Evidence" not in session.posts[0]["headers"]
 
 
 @pytest.mark.parametrize(

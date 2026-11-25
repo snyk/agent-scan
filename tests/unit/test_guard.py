@@ -82,6 +82,7 @@ from agent_scan.models import ClientToInspect, InspectedPath, InspectedServer, R
 from agent_scan.models.errors import CouldNotParseMCPConfig, FileNotFoundConfig
 from agent_scan.pushkeys import GuardEnabledAccessDeniedError
 from agent_scan.utils import toml_escape
+from tests.unit._hook_surface_cases import HOOK_SURFACE_CASES
 
 
 @pytest.fixture(autouse=True)
@@ -654,7 +655,7 @@ class TestHookInvocationRenderers:
             "MACHINE_SERIAL": "serial'raw",
         }
 
-    def test_render_argv_windows_returns_unquoted_argv_without_environment(self):
+    def test_render_argv_windows_returns_unquoted_argv_and_inherited_environment(self):
         invocation = guard_module._HookInvocation(
             script_path=Path(r"C:\hooks\snyk-agent-guard.ps1"),
             hook_client="codex",
@@ -664,7 +665,7 @@ class TestHookInvocationRenderers:
             machine_serial="serial'raw",
         )
 
-        with patch(f"{_G}.IS_WINDOWS", True):
+        with patch.dict(os.environ, {"EXISTING": "value"}, clear=True), patch(f"{_G}.IS_WINDOWS", True):
             argv, env = guard_module._render_argv(invocation)
 
         assert argv == [
@@ -682,7 +683,7 @@ class TestHookInvocationRenderers:
             "-MachineSerial",
             "serial'raw",
         ]
-        assert env is None
+        assert env == {"EXISTING": "value"}
 
     def test_render_argv_posix_carries_discovery_fields(self):
         """The discovery trampoline forwards ``"$@"`` to ``guard discover``, so scope travels in argv."""
@@ -735,7 +736,7 @@ class TestHookInvocationRenderers:
             scope="servers",
         )
 
-        with patch(f"{_G}.IS_WINDOWS", True):
+        with patch.dict(os.environ, {"EXISTING": "value"}, clear=True), patch(f"{_G}.IS_WINDOWS", True):
             argv, env = guard_module._render_argv(invocation)
 
         assert argv == [
@@ -755,7 +756,7 @@ class TestHookInvocationRenderers:
             "-Scope",
             "servers",
         ]
-        assert env is None
+        assert env == {"EXISTING": "value"}
 
     def test_render_posix_command_preserves_empty_serial(self):
         invocation = guard_module._HookInvocation(
@@ -4112,6 +4113,57 @@ class TestHookScriptVersionPlaceholder:
         assert _VERSION_PLACEHOLDER not in _get_script_path(name).read_bytes()
 
 
+@pytest.mark.parametrize("forwarder", ["bash", "powershell"])
+@pytest.mark.parametrize(("client", "runtime_env", "expected_evidence"), HOOK_SURFACE_CASES)
+def test_hook_forwarder_sends_surface_evidence(hook_server, forwarder, client, runtime_env, expected_evidence):
+    inherited_env = dict(os.environ)
+    for key in (
+        "AI_AGENT",
+        "COPILOT_CLI",
+        "CURSOR_INVOKED_AS",
+        "CURSOR_CLI",
+        "CURSOR_CLI_MODE",
+        "CLAUDE_CODE_ENTRYPOINT",
+        "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
+    ):
+        inherited_env.pop(key, None)
+    env = {
+        **inherited_env,
+        "PUSH_KEY": "test-pk-surface",
+        "REMOTE_HOOKS_BASE_URL": hook_server,
+        "MACHINE_ID": "machine-42",
+        "TERM_PROGRAM": "vscode",
+        "CURSOR_VERSION": "1.2.3",
+        **runtime_env,
+    }
+    options = {
+        "input": '{"hookEventName":"PreToolUse","sessionId":"s1"}',
+        "capture_output": True,
+        "text": True,
+        "timeout": 75,  # Allow a cold PowerShell startup and the 60-second HTTP deadline.
+        "env": env,
+    }
+    if forwarder == "bash":
+        if IS_WINDOWS or not shutil.which("bash"):
+            pytest.skip("POSIX Bash is unavailable")
+        result = subprocess.run(["bash", str(_get_script_path("snyk-agent-guard.sh")), "--client", client], **options)
+    else:
+        powershell = shutil.which("powershell")
+        ps = powershell or shutil.which("pwsh")
+        if ps is None:
+            pytest.skip("PowerShell is unavailable")
+        result = subprocess.run(
+            [ps, "-File", str(_get_script_path("snyk-agent-guard.ps1")), "-Client", client], **options
+        )
+    assert result.returncode == 0, result.stderr
+    request = _HookHandler.last_request
+    assert request is not None
+    evidence = json.loads(request["headers"].get("X-Agent-Surface-Evidence", "{}"))
+    assert evidence == expected_evidence
+    assert "X-Agent-Surface" not in request["headers"]
+    assert "agent_surface" not in json.loads(request["headers"]["X-User"])
+
+
 @pytest.mark.skipif(IS_WINDOWS, reason="bash script; skipped on Windows")
 class TestBashHookScript:
     """Integration: invoke the real .sh script against a local HTTP server."""
@@ -4232,40 +4284,6 @@ class TestBashHookScript:
         )
         assert result.returncode == 0, result.stderr
         assert "/hidden/agent-monitor/hooks/github-copilot" in _HookHandler.last_request["path"]
-
-    @pytest.mark.parametrize(
-        ("client", "expected_surface"),
-        [
-            ("github-copilot", "copilot-vscode"),
-            # A Copilot-looking environment must not make another client's hook claim a
-            # Copilot surface: these variables are inherited, so running any agent from a
-            # shell a Copilot session spawned sets them, while the hook that fired belongs
-            # to whichever config invoked the script.
-            ("claude-code", None),
-            ("cursor", None),
-            ("codex", None),
-        ],
-    )
-    def test_surface_header_is_scoped_to_the_copilot_client(self, hook_server, client, expected_surface):
-        script = _get_script_path("snyk-agent-guard.sh")
-        result = subprocess.run(
-            ["bash", str(script), "--client", client],
-            input='{"hookEventName":"PreToolUse","sessionId":"s1"}',
-            capture_output=True,
-            text=True,
-            timeout=10,
-            env={
-                "PATH": "/usr/bin:/bin:/usr/local/bin",
-                "PUSH_KEY": "test-pk-surface",
-                "REMOTE_HOOKS_BASE_URL": hook_server,
-                "MACHINE_ID": "machine-42",
-                "AI_AGENT": "github_copilot_vscode_agent",
-                "COPILOT_CLI": "1",
-            },
-        )
-        assert result.returncode == 0, result.stderr
-        headers = _HookHandler.last_request["headers"]
-        assert headers.get("X-Agent-Surface") == expected_surface
 
     def test_response_body_is_forwarded_unchanged(self, hook_server):
         """The script is a pass-through: agent-monitor's body reaches the agent verbatim."""
@@ -6236,7 +6254,8 @@ class TestInvokeHookScript:
                 Path("/hook.sh"), "cursor", "pk", "https://api.snyk.io", "{}", machine_id="  ", machine_serial=""
             )
 
-    def test_windows_invocation_machine_id_shape(self):
+    def test_windows_invocation_machine_id_shape(self, monkeypatch):
+        monkeypatch.setenv("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex Desktop")
         completed = subprocess.CompletedProcess([], 0, stdout="ok", stderr="")
         with patch(f"{_G}.IS_WINDOWS", True), patch("subprocess.run", return_value=completed) as run:
             result = guard_module._invoke_hook_script(
@@ -6263,7 +6282,7 @@ class TestInvokeHookScript:
             "-MachineId",
             "machine-42",
         ]
-        assert run.call_args.kwargs["env"] is None
+        assert "CODEX_INTERNAL_ORIGINATOR_OVERRIDE" not in run.call_args.kwargs["env"]
 
     def test_nonzero_exit_returns_stderr(self):
         completed = subprocess.CompletedProcess([], 7, stdout="", stderr="bad request\n")
@@ -6369,7 +6388,7 @@ class TestSendTestEventRetry:
         ],
     )
     def test_transient_failure_is_retried_until_success(self, detail):
-        result, invoke, sleep = self._run([(False, detail), (False, detail), (True, "")])
+        result, _, sleep = self._run([(False, detail), (False, detail), (True, "")])
         assert result.status == "sent"
         assert result.attempts == 3
         assert [c.args[0] for c in sleep.call_args_list] == [1.0, 2.0]  # initial delay, then backoff

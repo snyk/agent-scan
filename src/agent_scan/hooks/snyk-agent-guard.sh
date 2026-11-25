@@ -120,29 +120,28 @@ get_username() {
   printf '%s' "unknown"
 }
 
-# Identify the agent surface that invoked this hook, for the X-Agent-Surface header.
-#
-# The --client argument can't answer this: GitHub Copilot's user-level hook config
-# (~/.copilot/hooks) is read by every Copilot surface, so one installed config fires
-# from the CLI, from Copilot inside VS Code, and from the Copilot desktop app alike —
-# and by any other chat participant hosted in VS Code. All Copilot surfaces run the
-# same engine and send byte-identical payloads, so the environment the hook process
-# inherits is the only thing that tells them apart:
-#
-#   AI_AGENT=github_copilot_vscode_agent  -> Copilot inside VS Code ("copilot-vscode")
-#   AI_AGENT=github_copilot_app_agent     -> Copilot desktop app    ("copilot")
-#   COPILOT_CLI set, no AI_AGENT          -> Copilot CLI            ("copilot")
-#
-# Only reported for the Copilot client: these variables describe the environment rather
-# than the caller and are inherited, so another agent running inside a Copilot session
-# would otherwise claim a Copilot surface.
-get_agent_surface() {
-  local client=${1:-}
-  [[ "$client" == "github-copilot" ]] || return 0
-  if [[ "${AI_AGENT:-}" == "github_copilot_vscode_agent" ]]; then
-    printf '%s' "copilot-vscode"
-  elif [[ "${AI_AGENT:-}" == github_copilot_* || -n "${COPILOT_CLI:-}" ]]; then
-    printf '%s' "copilot"
+# Emit only the invoking detector's markers, including present-but-empty values.
+get_surface_evidence() {
+  case "$1" in
+    claude-code) set -- CLAUDE_CODE_ENTRYPOINT ;;
+    codex) set -- CODEX_INTERNAL_ORIGINATOR_OVERRIDE ;;
+    cursor) set -- CURSOR_INVOKED_AS CURSOR_CLI_MODE CURSOR_CLI ;;
+    github-copilot) set -- AI_AGENT COPILOT_CLI ;;
+    *) return 0 ;;
+  esac
+  local LC_ALL=C key value fields=""
+  for key in "$@"; do
+    [[ -n "${!key+x}" ]] || continue
+    value="${!key}"
+    if [[ "$key" == CURSOR_CLI || ${#value} -gt 128 || "$value" == *[!\ -~]* ]]; then
+      value=null
+    else
+      value="$(json_quote "$value")"
+    fi
+    fields+="${fields:+,}\"$key\":$value"
+  done
+  if [[ -n "$fields" ]]; then
+    printf '{%s}' "$fields"
   fi
 }
 
@@ -223,9 +222,6 @@ hook_main() {
   local resp body http_code marker
   marker="__SNYK_AGENT_SCAN_HOOK_HTTP_CODE__="
 
-  local agent_surface
-  agent_surface="$(get_agent_surface "$client")"
-
   local -a curl_args
   curl_args=(
     -sS
@@ -238,8 +234,10 @@ hook_main() {
     -H "X-Client-Id: ${pushkey}"
     --data-binary @-
   )
-  if [[ -n "$agent_surface" ]]; then
-    curl_args+=(-H "X-Agent-Surface: ${agent_surface}")
+  local evidence
+  evidence="$(get_surface_evidence "$client")"
+  if [[ -n "$evidence" ]]; then
+    curl_args+=(-H "X-Agent-Surface-Evidence: ${evidence}")
   fi
 
   local curl_status=0
