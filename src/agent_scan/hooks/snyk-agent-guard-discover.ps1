@@ -44,6 +44,8 @@ $env:MACHINE_ID = $Config["MACHINE_ID"]
 # Always set, even when empty (which removes it): an inherited MACHINE_SERIAL must not
 # stand in for the one captured at install.
 $env:MACHINE_SERIAL = $Config["MACHINE_SERIAL"]
+# The child reads installed observations from this file. Replace any inherited path.
+$env:SNYK_GUARD_INSTALL_CONFIG = $ConfigFile
 if (-not $env:MACHINE_ID) { exit 0 }
 
 $cmd = $Config["AGENT_SCAN_COMMAND"]

@@ -84,6 +84,10 @@ CFG_PUSH_KEY=""
 CFG_REMOTE_HOOKS_BASE_URL=""
 CFG_MACHINE_ID=""
 CFG_MACHINE_SERIAL=""
+CFG_INSTALL_SOURCE=""
+CFG_INSTALL_MODE=""
+CFG_OS=""
+CFG_ARCH=""
 
 load_config() {
   [[ -f "$CONFIG_FILE" && -r "$CONFIG_FILE" ]] \
@@ -99,6 +103,10 @@ load_config() {
       REMOTE_HOOKS_BASE_URL) CFG_REMOTE_HOOKS_BASE_URL="$value" ;;
       MACHINE_ID) CFG_MACHINE_ID="$value" ;;
       MACHINE_SERIAL) CFG_MACHINE_SERIAL="$value" ;;
+      INSTALL_SOURCE) CFG_INSTALL_SOURCE="$value" ;;
+      INSTALL_MODE) CFG_INSTALL_MODE="$value" ;;
+      OS) CFG_OS="$value" ;;
+      ARCH) CFG_ARCH="$value" ;;
     esac
   done < "$CONFIG_FILE"
 }
@@ -241,12 +249,14 @@ hook_main() {
     machine_serial="$(json_quote "$CFG_MACHINE_SERIAL")"
   fi
 
-  x_user="$(printf '{%s:%s,%s:%s,%s:%s,%s:%s,%s:%s}' \
-    "\"hostname\"" "$(json_quote "$hostname")" \
-    "\"machine_serial\"" "$machine_serial" \
-    "\"username\"" "$(json_quote "$username")" \
-    "\"identifier\"" "$(json_quote "$CFG_MACHINE_ID")" \
-    "\"cli_version\"" "$(json_quote "$cli_version")")"
+  x_user="$(printf '{"hostname":%s,"machine_serial":%s,"username":%s,"identifier":%s,"cli_version":%s' \
+    "$(json_quote "$hostname")" "$machine_serial" "$(json_quote "$username")" \
+    "$(json_quote "$CFG_MACHINE_ID")" "$(json_quote "$cli_version")")"
+  if [[ -n "$CFG_INSTALL_SOURCE" ]]; then x_user+=",\"install_source\":$(json_quote "$CFG_INSTALL_SOURCE")"; fi
+  if [[ -n "$CFG_INSTALL_MODE" ]]; then x_user+=",\"install_mode\":$(json_quote "$CFG_INSTALL_MODE")"; fi
+  if [[ -n "$CFG_OS" ]]; then x_user+=",\"os\":$(json_quote "$CFG_OS")"; fi
+  if [[ -n "$CFG_ARCH" ]]; then x_user+=",\"arch\":$(json_quote "$CFG_ARCH")"; fi
+  x_user+='}'
 
   # Execute request
   local resp body http_code marker

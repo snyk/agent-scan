@@ -8,7 +8,7 @@ import json
 import os
 import re
 import time
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
 import aiohttp
 
@@ -16,6 +16,9 @@ from agent_scan.hook_version import HOOK_VERSION
 from agent_scan.utils import get_hostname, get_username
 from agent_scan.verify_api import RETRYABLE_TRANSPORT_EXCEPTIONS, backend_client_session
 from agent_scan.version import version_info
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 
 class HookClient(NamedTuple):
@@ -204,6 +207,7 @@ def send_hook_event(
     max_retries: int = 1,
     retry_policy: RetryPolicy | None = None,
     machine_serial: str,
+    install_metadata: Mapping[str, str] | None = None,
 ) -> tuple[bool, str]:
     """POST a hook event using the same wire contract as the hook scripts.
 
@@ -221,6 +225,7 @@ def send_hook_event(
     hostname = get_hostname()
     x_user = json.dumps(
         {
+            **(install_metadata or {}),
             "hostname": hostname,
             "machine_serial": machine_serial or None,
             "username": get_username(),
