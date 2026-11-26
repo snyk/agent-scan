@@ -423,7 +423,10 @@ with `ADS_TOKEN_COMMAND` set, install fails. The hook commands pass
 | --- | --- | --- |
 | present | either | the file only; the environment is ignored |
 | absent | yes | the environment (`PUSH_KEY`, or `PUSHKEY` when `PUSH_KEY` is unset; `REMOTE_HOOKS_BASE_URL`; `MACHINE_ID`; `MACHINE_SERIAL`; for discovery also `AGENT_SCAN_COMMAND`). A push key is required: machine identity is never taken from the environment |
-| absent | no | nowhere: the hook stops with a usage error |
+| absent | no | nowhere: the hook fails open (exit 0, one line on stderr, the `systemMessage` where supported), and the environment is not used |
+
+A file that exists but can't be read, for example one without read permission, fails open the same way, with or
+without `--from-env`. The discovery hook then does nothing.
 
 This lets the hook scripts run without `guard install`, for example from a plugin that ships them. Such a hook
 command just adds `--from-env`. On POSIX, the command can set the values from differently named variables, for

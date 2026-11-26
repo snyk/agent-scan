@@ -11,8 +11,9 @@
 # no such file and the command passes -FromEnv are the values taken from the environment
 # instead (PUSH_KEY, or PUSHKEY when PUSH_KEY is unset; REMOTE_HOOKS_BASE_URL, MACHINE_ID,
 # MACHINE_SERIAL). That mode needs a push key, never uses machine identity, and accepts only
-# an https Snyk host as REMOTE_HOOKS_BASE_URL. Without either, the script stops with a usage
-# error.
+# an https Snyk host as REMOTE_HOOKS_BASE_URL. Otherwise a missing or unreadable configuration
+# file fails open (see below) without reading the environment, so a lost file does not block
+# the agent.
 #
 # Reads a JSON payload from stdin and POSTs it (base64-encoded) to the Agent Guard endpoint.
 #
@@ -29,8 +30,8 @@
 # The request is bounded by $TIMEOUT_SECONDS below. Transport and HTTP failures, that timeout
 # included, fail open: exit 0, one line on stderr, and on stdout a systemMessage JSON object
 # for the clients whose hook output defines one (Claude Code, Codex) so the user is told
-# that Agent Guard did not validate the action; nothing on stdout for the others. Usage
-# errors exit 1.
+# that Agent Guard did not validate the action; nothing on stdout for the others. A missing
+# or unreadable configuration file fails open the same way. Usage errors exit 1.
 #
 # Requirements: PowerShell 5.1+ (built-in on Windows 10+)
 #
@@ -169,11 +170,18 @@ if (-not (Test-Path -LiteralPath $ConfigFile) -and $FromEnv) {
     $ConfigSource = $ConfigFile
     # A file wins over -FromEnv; say so, since the environment is then silently ignored.
     if ($FromEnv) { $ConfigSource = "$ConfigFile (used instead of the environment while it exists)" }
+    # Fails open like an unreachable API: the hook is installed, only its values are gone, and
+    # exiting 1 would block the agent (Copilot denies the tool call).
+    $configMissing = "configuration file missing or unreadable: $ConfigFile; run 'snyk-agent-scan guard install'"
     if (-not (Test-Path -LiteralPath $ConfigFile -PathType Leaf)) {
-        Write-Error "Configuration file not found: $ConfigFile (run 'snyk-agent-scan guard install')"
-        exit 1
+        FailOpen $configMissing
     }
-    foreach ($line in Get-Content -LiteralPath $ConfigFile -Encoding UTF8) {
+    try {
+        $configLines = @(Get-Content -LiteralPath $ConfigFile -Encoding UTF8)
+    } catch {
+        FailOpen $configMissing
+    }
+    foreach ($line in $configLines) {
         $parts = $line.Split([char[]]@('='), 2)
         if ($parts.Count -eq 2) { $Config[$parts[0]] = $parts[1] }
     }

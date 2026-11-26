@@ -10601,6 +10601,41 @@ class TestHookConfigEndToEnd:
         assert not config.exists()
 
 
+@contextlib.contextmanager
+def _unreadable(path: Path):
+    """Make *path* unreadable for this user for the duration of the block."""
+    if IS_WINDOWS:
+        if not shutil.which("icacls"):
+            pytest.skip("icacls not available")
+        user = os.environ["USERNAME"]
+        subprocess.run(["icacls", str(path), "/deny", f"{user}:(R)"], check=True, capture_output=True)
+        try:
+            yield
+        finally:
+            subprocess.run(["icacls", str(path), "/remove:d", user], check=True, capture_output=True)
+    else:
+        if os.geteuid() == 0:
+            pytest.skip("root can read a file without read permission")
+        path.chmod(0)
+        try:
+            yield
+        finally:
+            path.chmod(0o600)
+
+
+def _assert_failed_open_for_missing_config(result: subprocess.CompletedProcess, client: str) -> None:
+    assert result.returncode == 0, result.stderr
+    assert "configuration file missing or unreadable" in result.stderr
+    assert guard_module.GUARD_CONFIG_NAME in result.stderr
+    assert "failing open" in result.stderr
+    assert len(result.stderr.strip().splitlines()) == 1
+    if client in SYSTEM_MESSAGE_CLIENTS:
+        assert json.loads(result.stdout) == {"systemMessage": FAIL_OPEN_MESSAGE}
+    else:
+        assert result.stdout == ""
+    assert _HookHandler.last_request is None
+
+
 @pytest.mark.skipif(IS_WINDOWS, reason="bash script; skipped on Windows")
 class TestHookScriptsReadOnlyTheHookConfig:
     """The scripts take no values from the environment or the command line."""
@@ -10658,10 +10693,12 @@ class TestHookScriptsReadOnlyTheHookConfig:
         assert result.returncode == 0, result.stderr
         assert _HookHandler.last_request["headers"]["X-Client-Id"] == "pk-file"
 
-    def test_missing_guard_config_is_a_usage_error(self, tmp_path, hook_server):
+    @pytest.mark.parametrize("client", SYSTEM_MESSAGE_CLIENTS + NO_STDOUT_CLIENTS)
+    def test_missing_guard_config_fails_open_without_the_environment(self, tmp_path, hook_server, client):
+        """A lost file must not block the agent (Copilot denies on exit 1), nor bring in the environment."""
         script = self._install(tmp_path, "snyk-agent-guard.sh", None)
         result = self._run(
-            ["bash", str(script), "--client", "claude-code"],
+            ["bash", str(script), "--client", client],
             {
                 "PATH": "/usr/bin:/bin:/usr/local/bin",
                 "PUSH_KEY": "pk-env",
@@ -10669,9 +10706,31 @@ class TestHookScriptsReadOnlyTheHookConfig:
                 "MACHINE_ID": "machine-env",
             },
         )
-        assert result.returncode == 1
-        assert "Configuration file not found" in result.stderr
-        assert _HookHandler.last_request is None
+        _assert_failed_open_for_missing_config(result, client)
+
+    @pytest.mark.parametrize("from_env", [False, True], ids=["config-file", "from-env"])
+    def test_unreadable_guard_config_fails_open_without_the_environment(self, tmp_path, hook_server, from_env):
+        """An existing file still wins over --from-env, so one that can't be read fails open too."""
+        script = self._install(
+            tmp_path,
+            "snyk-agent-guard.sh",
+            f"PUSH_KEY=pk-file\nREMOTE_HOOKS_BASE_URL={hook_server}\nMACHINE_ID=machine-file\n",
+        )
+        env = {
+            "PATH": "/usr/bin:/bin:/usr/local/bin",
+            "PUSH_KEY": "pk-env",
+            "REMOTE_HOOKS_BASE_URL": "https://api.snyk.io",
+            "MACHINE_ID": "machine-env",
+        }
+        with _unreadable(script.parent / guard_module.GUARD_CONFIG_NAME):
+            result = self._run(["bash", str(script), "--client", "claude-code", *(["--from-env"] * from_env)], env)
+        _assert_failed_open_for_missing_config(result, "claude-code")
+
+    def test_guard_config_that_is_a_directory_fails_open(self, tmp_path, hook_server):
+        script = self._install(tmp_path, "snyk-agent-guard.sh", None)
+        (script.parent / guard_module.GUARD_CONFIG_NAME).mkdir()
+        result = self._run(["bash", str(script), "--client", "codex"], {"PATH": "/usr/bin:/bin:/usr/local/bin"})
+        _assert_failed_open_for_missing_config(result, "codex")
 
     def test_values_are_never_evaluated(self, tmp_path, hook_server):
         marker = tmp_path / "pwned"
@@ -11520,11 +11579,23 @@ class TestPowerShellScriptsEnvMode:
         assert result.returncode == 0, result.stderr
         assert _HookHandler.last_request["headers"]["X-Client-Id"] == "pk-file"
 
-    def test_without_from_env_a_missing_guard_config_is_a_usage_error(self, tmp_path, hook_server):
+    @pytest.mark.parametrize("client", SYSTEM_MESSAGE_CLIENTS + NO_STDOUT_CLIENTS)
+    def test_without_from_env_a_missing_guard_config_fails_open(self, tmp_path, hook_server, client):
         env = {"PUSH_KEY": "pk", "REMOTE_HOOKS_BASE_URL": hook_server, "MACHINE_ID": "m"}
-        result = self._run("snyk-agent-guard.ps1", tmp_path, ["-Client", "claude-code"], env, payload=self._EVENT)
-        assert result.returncode == 1
-        assert "Configuration file not found" in result.stderr
+        result = self._run("snyk-agent-guard.ps1", tmp_path, ["-Client", client], env, payload=self._EVENT)
+        _assert_failed_open_for_missing_config(result, client)
+
+    @pytest.mark.parametrize("from_env", [False, True], ids=["config-file", "from-env"])
+    def test_unreadable_guard_config_fails_open(self, tmp_path, hook_server, from_env):
+        config = f"PUSH_KEY=pk-file\nREMOTE_HOOKS_BASE_URL={hook_server}\nMACHINE_ID=m-file\n"
+        conf = tmp_path / "hooks" / guard_module.GUARD_CONFIG_NAME
+        conf.parent.mkdir()
+        conf.write_text(config)
+        env = {"PUSH_KEY": "pk-env", "REMOTE_HOOKS_BASE_URL": hook_server, "MACHINE_ID": "m-env"}
+        args = ["-Client", "claude-code", *(["-FromEnv"] * from_env)]
+        with _unreadable(conf):
+            result = self._run("snyk-agent-guard.ps1", tmp_path, args, env, payload=self._EVENT)
+        _assert_failed_open_for_missing_config(result, "claude-code")
 
     def test_an_endpoint_other_than_snyk_is_refused(self, tmp_path):
         env = {"PUSH_KEY": "pk", "REMOTE_HOOKS_BASE_URL": "https://attacker.example", "MACHINE_ID": "m"}

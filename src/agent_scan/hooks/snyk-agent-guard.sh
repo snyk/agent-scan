@@ -15,7 +15,8 @@
 # --from-env are the values taken from the environment instead (PUSH_KEY, or PUSHKEY when
 # PUSH_KEY is unset; REMOTE_HOOKS_BASE_URL, MACHINE_ID, MACHINE_SERIAL). That mode needs a
 # push key, never uses machine identity, and accepts only an https Snyk host as
-# REMOTE_HOOKS_BASE_URL. Without either, the script stops with a usage error.
+# REMOTE_HOOKS_BASE_URL. Otherwise a missing or unreadable configuration file fails open
+# (see below) without reading the environment, so a lost file does not block the agent.
 #
 # Reads a JSON payload from stdin and POSTs it (base64-encoded) to the Agent Guard endpoint.
 #
@@ -37,8 +38,8 @@
 # The request is bounded by TIMEOUT_SECONDS below. Transport and HTTP failures, that timeout
 # included, fail open: exit 0, one line on stderr, and on stdout a systemMessage JSON object
 # for the clients whose hook output defines one (Claude Code, Codex) so the user is told
-# that Agent Guard did not validate the action; nothing on stdout for the others. Usage
-# errors exit 1.
+# that Agent Guard did not validate the action; nothing on stdout for the others. A missing
+# or unreadable configuration file fails open the same way. Usage errors exit 1.
 #
 # Requirements: bash, curl, base64, tr
 #
@@ -114,8 +115,9 @@ CONFIG_SOURCE="$CONFIG_FILE"
 ENV_URL_RE='^https://([A-Za-z0-9-]+\.)*snyk\.io(:[0-9]+)?(/.*)?$'
 
 # Sets CONFIG_SOURCE to the file, or to "the environment" with --from-env and no file.
+# Usage: load_config <from_env> <client>
 load_config() {
-  local from_env="$1"
+  local from_env="$1" client="$2"
   if [[ ! -e "$CONFIG_FILE" && "$from_env" == "1" ]]; then
     CONFIG_SOURCE="the environment"
     # Push key only: machine identity is never taken from the environment. PUSHKEY stands in
@@ -134,8 +136,11 @@ load_config() {
   if [[ "$from_env" == "1" ]]; then
     CONFIG_SOURCE="${CONFIG_FILE} (used instead of the environment while it exists)"
   fi
-  [[ -f "$CONFIG_FILE" && -r "$CONFIG_FILE" ]] \
-    || die "Configuration file not found: ${CONFIG_FILE} (run 'snyk-agent-scan guard install')"
+  # Fails open like an unreachable API: the hook is installed, only its values are gone, and
+  # exiting 1 would block the agent (Copilot denies the tool call).
+  if [[ ! -f "$CONFIG_FILE" || ! -r "$CONFIG_FILE" ]]; then
+    fail_open "$client" "configuration file missing or unreadable: ${CONFIG_FILE}; run 'snyk-agent-scan guard install'"
+  fi
   local line key value
   while IFS= read -r line || [[ -n "$line" ]]; do
     line="${line%$'\r'}"
@@ -301,7 +306,7 @@ hook_main() {
 
   [[ -n "$client" ]] || die "Missing required argument: --client <claude-code|cursor|codex|github-copilot>"
 
-  load_config "$from_env"
+  load_config "$from_env" "$client"
   local machine_identity=0 pushkey="$CFG_PUSH_KEY"
   # A push key wins over ADS_TOKEN_COMMAND (see the header).
   if [[ -z "$pushkey" && -n "$CFG_ADS_TOKEN_COMMAND" ]]; then
