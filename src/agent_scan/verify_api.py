@@ -16,7 +16,7 @@ from mcp.types import Prompt, Resource, ResourceTemplate, Tool
 from pydantic import BaseModel, ValidationError, field_validator
 from rich.markup import escape
 
-from agent_scan.machine_auth import SYNC_ANALYSIS_ERROR, MachineAuth, MachineAuthError
+from agent_scan.machine_auth import SYNC_ANALYSIS_ERROR, AuthRetry, MachineAuthError, MachineCredential
 from agent_scan.models.api.common import ScanUserInfo
 from agent_scan.models.api.v20260710 import (
     McpEntitySummary,
@@ -164,12 +164,13 @@ async def fetch_agent_scan_config(
     trace_configs: list | None = None,
     skip_ssl_verify: bool = False,
     max_retries: int = 2,
-    machine_auth: MachineAuth | None = None,
+    machine_auth: MachineCredential | None = None,
 ) -> AgentScanConfig:
     """Fetch the tenant's runtime config.
 
     With ``machine_auth`` it reads the tenant route with the machine token,
-    otherwise the push-key route on the analysis server.
+    otherwise the push-key route on the analysis server. A token refreshed after
+    a 401 stays in ``machine_auth`` for the rest of the scan.
 
     With the push key it returns the all-off default on any error, non-2xx, or after
     exhausting retries, so callers fall back to legacy discovery and synchronous analysis.
@@ -187,16 +188,17 @@ async def fetch_agent_scan_config(
 
     if machine_auth is not None:
         config_url = machine_auth.tenant_url(_TENANT_AGENT_SCAN_CONFIG_PATH)
-        auth_headers = machine_auth.headers
     else:
         config_url = agent_scan_config_url(analysis_url)
-        auth_headers = {"X-Push-Key": push_key or ""}
-    for attempt in range(max_retries):
+    push_headers = {"X-Push-Key": push_key or ""}
+    auth_retry = AuthRetry(machine_auth)
+    attempt = 0
+    while attempt < max_retries:
         try:
             async with backend_client_session(trace_configs, skip_ssl_verify) as session:
                 async with session.get(
                     config_url,
-                    headers=auth_headers,
+                    headers=machine_auth.headers if machine_auth is not None else push_headers,
                     timeout=aiohttp.ClientTimeout(total=_CONFIG_REQUEST_TIMEOUT),
                 ) as response:
                     if response.status == 200:
@@ -204,6 +206,9 @@ async def fetch_agent_scan_config(
                             return AgentScanConfig.model_validate(await response.json())
                         except (ValueError, ValidationError) as e:
                             return unavailable(f"Agent Scan config response is invalid ({e})")
+                    if await auth_retry.should_retry(response.status):
+                        logger.info("Agent Scan config got 401; retrying with a fresh machine token.")
+                        continue
                     if response.status < 500:
                         return unavailable(f"Agent Scan config request returned {response.status}")
                     logger.warning(
@@ -220,6 +225,7 @@ async def fetch_agent_scan_config(
 
         if attempt < max_retries - 1:
             await asyncio.sleep(2**attempt)  # 1s, 2s, ...
+        attempt += 1
 
     return unavailable(f"Agent Scan config request failed after {max_retries} attempt(s)")
 
@@ -243,12 +249,15 @@ async def _submit_async_analysis(
     skip_ssl_verify: bool,
     max_retries: int = 3,
     unauthorized_text: str = "Unauthorized. Please check your push key.",
+    machine_auth: MachineCredential | None = None,
 ) -> tuple[bool, str | None, Exception | None]:
     """Stream the gzipped payload to the async accept endpoint.
 
     Retries transient transport failures and 5xx responses with exponential
     backoff, mirroring the synchronous path. 4xx responses are deterministic
-    and are not retried.
+    and are not retried, except a 401 with ``machine_auth``: that is retried
+    once with a fresh machine token, when the token command prints a new one.
+    A failing token command is returned as an error, not raised.
 
     Returns:
         (success, error_message, exception) tuple.
@@ -264,8 +273,10 @@ async def _submit_async_analysis(
 
     last_error_text: str | None = None
     last_exc: Exception | None = None
+    auth_retry = AuthRetry(machine_auth)
+    attempt = 0
 
-    for attempt in range(max_retries):
+    while attempt < max_retries:
         try:
             async with backend_client_session(trace_configs, skip_ssl_verify) as session:
                 async with session.post(
@@ -278,6 +289,16 @@ async def _submit_async_analysis(
                         logger.info("Scan accepted for asynchronous analysis.")
                         return True, None, None
                     if response.status == 401:
+                        try:
+                            retry = await auth_retry.should_retry(response.status)
+                        except MachineAuthError as e:
+                            error_text = f"{unauthorized_text} Refreshing the machine token failed: {e}"
+                            logger.error(error_text)
+                            return False, error_text, e
+                        if retry and machine_auth is not None:
+                            logger.info("Async analysis got 401; retrying with a fresh machine token.")
+                            headers.update(machine_auth.headers)
+                            continue
                         error_text = unauthorized_text
                         logger.error(error_text)
                         return False, error_text, None
@@ -326,6 +347,7 @@ async def _submit_async_analysis(
         if attempt < max_retries - 1:
             backoff_time = 2**attempt  # 1s, 2s, 4s
             await asyncio.sleep(backoff_time)
+        attempt += 1
 
     error_text = f"Tried calling verification api {max_retries} times. Could not reach analysis server."
     if last_error_text:
@@ -560,7 +582,7 @@ async def analyze_machine(
     scanned_usernames: list[str] | None = None,
     show_analysis_results: bool = False,
     agent_scan_config: AgentScanConfig | None = None,
-    machine_auth: MachineAuth | None = None,
+    machine_auth: MachineCredential | None = None,
 ) -> ScanResponse:
     """
     Analyze the scan paths with the analysis server.
@@ -624,7 +646,7 @@ async def analyze_machine(
         if agent_scan_config.async_analysis_enabled:
             if machine_auth is not None:
                 # The token from the start of the scan may have expired by now.
-                machine_auth = await asyncio.to_thread(machine_auth.refresh)
+                await machine_auth.refresh()
                 async_url = machine_auth.tenant_url(_TENANT_ASYNC_ANALYSIS_PATH)
                 async_headers = {**headers, **machine_auth.headers}
                 unauthorized_text = "Unauthorized. Please check the machine credential of this installation."
@@ -641,6 +663,7 @@ async def analyze_machine(
                 skip_ssl_verify,
                 max_retries,
                 unauthorized_text=unauthorized_text,
+                machine_auth=machine_auth,
             )
             if success:
                 _warn_async_results_not_shown(machine_mode=machine_auth is not None)

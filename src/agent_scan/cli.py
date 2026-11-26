@@ -26,8 +26,8 @@ from agent_scan.agents import DiscoveryScope
 from agent_scan.consent import collect_consent
 from agent_scan.machine_auth import (
     SYNC_ANALYSIS_ERROR,
-    MachineAuth,
     MachineAuthError,
+    MachineCredential,
     is_machine_mode,
     resolve_machine_auth,
 )
@@ -777,20 +777,23 @@ def warn_partial_machine_auth(args) -> None:
         )
 
 
-async def _resolve_machine_auth(args) -> MachineAuth | None:
-    """Machine auth from --token-command and --tenant-id on the --analysis-url API, or None in push-key mode.
+async def _resolve_machine_auth(args) -> MachineCredential | None:
+    """The scan's machine credential from --token-command and --tenant-id on the --analysis-url API,
+    or None in push-key mode.
 
     Runs the token command once here; the async analysis submit refreshes the token.
-    Raises MachineAuthError when the token command is not an absolute path or fails:
-    machine mode never falls back to the push key.
+    Every request in the scan shares the credential, so a token refreshed after a 401
+    is reused by later requests. Raises MachineAuthError when the token command is not
+    an absolute path or fails: machine mode never falls back to the push key.
     """
     token_command, tenant_id = _machine_auth_values(args)
-    return await asyncio.to_thread(
+    auth = await asyncio.to_thread(
         resolve_machine_auth,
         token_command,
         tenant_id,
         discovery_base_url(args.analysis_url),
     )
+    return MachineCredential(auth) if auth is not None else None
 
 
 def _effective_identifier(args) -> str | None:
@@ -1312,7 +1315,7 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> ScanRespo
     push_key: str | None = _effective_push_key(args) if mode == "scan" else None
     identifier: str | None = _effective_identifier(args) if mode == "scan" else None
 
-    machine_auth: MachineAuth | None = await _resolve_machine_auth(args) if mode == "scan" else None
+    machine_auth: MachineCredential | None = await _resolve_machine_auth(args) if mode == "scan" else None
     if machine_auth is not None and not identifier:
         # The tenant analysis route requires X-Scan-User-Id.
         identifier = get_hostname() or None

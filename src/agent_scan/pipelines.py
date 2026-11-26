@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import aiohttp
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from agent_scan.agents import DISCOVERERS, DiscoveryScope, find_discoverers
 from agent_scan.direct_scanner import direct_scan_to_server_config, is_direct_scan
@@ -15,7 +15,7 @@ from agent_scan.inspect import (
     get_mcp_config_per_client,
     inspect_client,
 )
-from agent_scan.machine_auth import MachineAuth
+from agent_scan.machine_auth import MachineAuthError, MachineCredential
 from agent_scan.models import (
     CandidateClient,
     ClientToInspect,
@@ -50,6 +50,9 @@ class InspectArgs(BaseModel):
 
 
 class AnalyzeArgs(BaseModel):
+    # Lets machine_auth hold the scan's shared credential as is, without a copy.
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     analysis_url: str
     identifier: str | None = None
     additional_headers: dict | None = None
@@ -60,7 +63,7 @@ class AnalyzeArgs(BaseModel):
     # Extra scan_metadata for the analysis request.
     scan_metadata: dict[str, Any] = Field(default_factory=dict)
     # Machine token for the tenant routes; the push key is used without it.
-    machine_auth: MachineAuth | None = None
+    machine_auth: MachineCredential | None = None
 
 
 class PushArgs(BaseModel):
@@ -236,7 +239,7 @@ async def discover_clients_remotely(
     cli_version: str | None = None,
     identifier: str | None = None,
     skip_ssl_verify: bool = False,
-    machine_auth: MachineAuth | None = None,
+    machine_auth: MachineCredential | None = None,
     home_dirs_with_users: list[tuple[Path, str]] | None = None,
 ) -> RemoteOutcome:
     """``discover_clients_to_inspect`` through the coding-agent-discovery service.
@@ -295,7 +298,7 @@ async def discover_clients(
     cli_version: str | None = None,
     identifier: str | None = None,
     skip_ssl_verify: bool = False,
-    machine_auth: MachineAuth | None = None,
+    machine_auth: MachineCredential | None = None,
 ) -> tuple[DiscoveredClients, dict[str, Any]]:
     """Discover per ``mode`` and return the clients plus the ``discovery`` scan metadata.
 
@@ -373,6 +376,8 @@ async def discover_clients(
 def _fallback_reason(error: Exception) -> str:
     if isinstance(error, RemoteDiscoveryError):
         return error.reason
+    if isinstance(error, MachineAuthError):
+        return "token_command"
     if isinstance(error, asyncio.TimeoutError):
         return "timeout"
     if isinstance(error, aiohttp.ClientError):

@@ -4,7 +4,7 @@ import aiohttp
 import pytest
 
 from agent_scan.agents import DiscoveryScope
-from agent_scan.machine_auth import MachineAuth
+from agent_scan.machine_auth import MachineAuth, MachineAuthError, MachineCredential
 from agent_scan.models import ClientToInspect, ControlServer, InspectedPath
 from agent_scan.models.api.v20260710 import ScanPathResponse, ScanResponse
 from agent_scan.pipelines import (
@@ -164,7 +164,7 @@ async def test_skip_pushing_true_for_machine_auth_without_push_key():
     """Machine mode replaces the push key, so it sets X-Push: skip like a push-key scan."""
     inspected_paths = [InspectedPath(client="cursor", path="/config")]
     response = ScanResponse(scan_path_responses=[ScanPathResponse(client="cursor", path="/config")])
-    machine_auth = MachineAuth("https://api.snyk.io", "tenant-1", "tok")
+    machine_auth = MachineCredential(MachineAuth("https://api.snyk.io", "tenant-1", "tok"))
 
     with (
         patch(
@@ -293,9 +293,10 @@ async def test_discover_clients_remotely_builds_clients(machine_auth):
         (aiohttp.ClientConnectionError("down"), "connection"),
         (TimeoutError(), "timeout"),
         (KeyError("found"), "malformed_response"),
+        (MachineAuthError("The token command exited with 1."), "token_command"),
         (RuntimeError("x"), "error"),
     ],
-    ids=["backend_error", "too_many_rounds", "connection", "timeout", "malformed_response", "other"],
+    ids=["backend_error", "too_many_rounds", "connection", "timeout", "malformed_response", "token_command", "other"],
 )
 async def test_discover_clients_remotely_returns_reason_on_failure(error, reason):
     with patch("agent_scan.pipelines.run_remote_discovery", new_callable=AsyncMock, side_effect=error):

@@ -363,12 +363,12 @@ async def test_push_key_uses_push_key_routes() -> None:
 async def test_machine_auth_uses_tenant_routes_with_bearer_token() -> None:
     from unittest.mock import patch
 
-    from agent_scan.machine_auth import TENANT_API_VERSION, MachineAuth
+    from agent_scan.machine_auth import TENANT_API_VERSION, MachineAuth, MachineCredential
     from agent_scan.remote_discovery.client import run_remote_discovery
 
     seen: list[dict[str, str]] = []
     server, bodies = await _serve({}, version=TENANT_API_VERSION, headers=seen)
-    machine_auth = MachineAuth(str(server.make_url("/")), "tenant-1", "machine-token")
+    machine_auth = MachineCredential(MachineAuth(str(server.make_url("/")), "tenant-1", "machine-token"))
     tenant_sessions = "/hidden/tenants/tenant-1/coding-agent-discovery/sessions"
     try:
         with patch("agent_scan.remote_discovery.client.get_readable_home_directories", return_value=_HOMES):
@@ -387,12 +387,14 @@ async def _discover_with_machine_auth(statuses: dict[str, list[int]], fresh_toke
     """Run a tenant session whose token command prints ``fresh_token``; returns the error, headers and result."""
     from unittest.mock import patch
 
-    from agent_scan.machine_auth import TENANT_API_VERSION, MachineAuth
+    from agent_scan.machine_auth import TENANT_API_VERSION, MachineAuth, MachineCredential
     from agent_scan.remote_discovery.client import run_remote_discovery
 
     seen: list[dict[str, str]] = []
     server, _bodies = await _serve(statuses, version=TENANT_API_VERSION, headers=seen)
-    machine_auth = MachineAuth(str(server.make_url("/")), "tenant-1", "old-token", token_command="/opt/ads/installer")
+    machine_auth = MachineCredential(
+        MachineAuth(str(server.make_url("/")), "tenant-1", "old-token", token_command="/opt/ads/installer")
+    )
     error, result = None, None
     try:
         with (

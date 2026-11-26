@@ -13,6 +13,7 @@ machine mode, a token command that fails is an error, and the scan never falls
 back to the push key.
 """
 
+import asyncio
 import logging
 import os
 import subprocess
@@ -79,6 +80,73 @@ class MachineAuth:
             return self
         token = fetch_access_token(self.token_command, self.base_url)
         return replace(self, access_token=token)
+
+
+async def refresh_after_401(auth: MachineAuth) -> MachineAuth | None:
+    """After a 401, the auth with a new token, or None when a retry would send the same token.
+
+    The token can expire mid-scan. The command prints its cached token while it
+    still looks valid, so getting the same token back means a retry would fail
+    too. Raises MachineAuthError when the command fails.
+    """
+    if not auth.token_command:
+        return None
+    fresh = await asyncio.to_thread(auth.refresh)
+    return None if fresh.access_token == auth.access_token else fresh
+
+
+class MachineCredential:
+    """The scan's machine auth, shared by every request in the scan.
+
+    A token refreshed by one request (say, the config fetch after a 401) is the
+    one every later request starts with.
+    """
+
+    def __init__(self, auth: MachineAuth) -> None:
+        self.auth = auth
+
+    @property
+    def headers(self) -> dict[str, str]:
+        return self.auth.headers
+
+    def tenant_path(self, path: str) -> str:
+        return self.auth.tenant_path(path)
+
+    def tenant_url(self, path: str) -> str:
+        return self.auth.tenant_url(path)
+
+    async def refresh(self) -> None:
+        """Run the token command again. Raises MachineAuthError when it fails."""
+        self.auth = await asyncio.to_thread(self.auth.refresh)
+
+    async def refresh_after_401(self) -> bool:
+        """After a 401, swap in a new token; False when the command printed the same one.
+
+        Raises MachineAuthError when the command fails.
+        """
+        fresh = await refresh_after_401(self.auth)
+        if fresh is None:
+            return False
+        self.auth = fresh
+        return True
+
+
+class AuthRetry:
+    """One request's 401 rule: retry once, with a new machine token."""
+
+    def __init__(self, credential: MachineCredential | None) -> None:
+        self._credential = credential
+        self._used = False
+
+    async def should_retry(self, status: int) -> bool:
+        """True when the request should be sent again with the credential's new headers.
+
+        Raises MachineAuthError when the token command fails.
+        """
+        if status != 401 or self._credential is None or self._used:
+            return False
+        self._used = True
+        return await self._credential.refresh_after_401()
 
 
 def is_machine_mode(values: Sequence[str | None]) -> bool:

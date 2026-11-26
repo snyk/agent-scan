@@ -215,11 +215,12 @@ async def test_machine_auth_runs_token_command_once_and_reaches_every_tenant_cal
     with patch("agent_scan.machine_auth.fetch_access_token", return_value="machine-token") as fetch_token:
         fetch, remote, _local, _inspect, analyze = await _run(_push_key_scan_args(**_MACHINE_ARGS), config)
 
-    expected = MachineAuth(_API, "tenant-1", "machine-token")
     fetch_token.assert_called_once_with(_TOKEN_COMMAND, _API)
-    assert fetch.await_args.kwargs["machine_auth"] == expected
-    assert remote.await_args.kwargs["machine_auth"] == expected
-    assert analyze.await_args.kwargs["machine_auth"] == expected
+    credential = fetch.await_args.kwargs["machine_auth"]
+    assert credential.auth == MachineAuth(_API, "tenant-1", "machine-token")
+    # One shared credential, so a token refreshed by one call is used by the next.
+    assert remote.await_args.kwargs["machine_auth"] is credential
+    assert analyze.await_args.kwargs["machine_auth"] is credential
     # A push key on the command line is forwarded as before; machine mode never sends it.
     assert analyze.await_args.kwargs["push_key"] == "some-user-push-key"
 
@@ -312,7 +313,7 @@ async def test_machine_auth_ignores_base_url_and_uses_the_analysis_url_api():
         _fetch, _remote, _local, _inspect, analyze = await _run(args, config)
 
     fetch_token.assert_called_once_with(_TOKEN_COMMAND, _API)
-    assert analyze.await_args.kwargs["machine_auth"].base_url == _API
+    assert analyze.await_args.kwargs["machine_auth"].auth.base_url == _API
 
 
 @pytest.mark.asyncio
