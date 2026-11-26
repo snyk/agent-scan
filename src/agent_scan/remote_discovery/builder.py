@@ -5,9 +5,12 @@ The backend did all file parsing; this only validates server maps with our model
 the signature check and resolves the keys the backend marks ``canonical``.
 """
 
+import logging
 import os
 from pathlib import Path, PureWindowsPath
 from typing import Any
+
+from pydantic import ValidationError
 
 from agent_scan.agents.base import _canonicalize_keys
 from agent_scan.models import (
@@ -21,6 +24,8 @@ from agent_scan.models import (
 )
 from agent_scan.signed_binary import check_server_signature
 
+logger = logging.getLogger(__name__)
+
 McpValue = list[tuple[str, StdioServer | RemoteServer]] | UnknownConfigFormat | CouldNotParseMCPConfig
 
 
@@ -32,7 +37,11 @@ def _servers(candidate: dict[str, Any]) -> dict[str, StdioServer | RemoteServer]
     try:
         for raw in candidate["maps"]:
             servers.update(MCPServerMap(servers=raw).servers)
-    except Exception:
+    except ValidationError:
+        return None
+    except Exception as e:
+        # Type only: the message can include the raw command, which may hold secrets.
+        logger.warning("MCP server map failed validation with %s", type(e).__name__)
         return None
     return servers
 
