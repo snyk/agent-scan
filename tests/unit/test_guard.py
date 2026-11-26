@@ -10608,7 +10608,9 @@ def _unreadable(path: Path):
         if not shutil.which("icacls"):
             pytest.skip("icacls not available")
         user = os.environ["USERNAME"]
-        subprocess.run(["icacls", str(path), "/deny", f"{user}:(R)"], check=True, capture_output=True)
+        # Read data only: denying (R) would also deny reading the ACL, and the restore below
+        # could then not remove the entry again.
+        subprocess.run(["icacls", str(path), "/deny", f"{user}:(RD)"], check=True, capture_output=True)
         try:
             yield
         finally:
