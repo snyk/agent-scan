@@ -9173,6 +9173,9 @@ class TestUninstallLeavesNothingBehind:
 _IDENTITY = guard_module._MachineIdentity(
     token_command="/Users/me/.local/bin/ads-installer", tenant_id="tenant", base_url="https://api.eu.snyk.io"
 )
+# Guard runs only an absolute token command; abspath adds the drive on Windows.
+_TOKEN_COMMAND = os.path.abspath("/bin/ads-installer")
+_FETCH_IDENTITY = _IDENTITY._replace(token_command=os.path.abspath(_IDENTITY.token_command))
 
 
 def _fake_token_command(tmp_path: Path, body: str = "echo machine-token-123") -> Path:
@@ -9309,7 +9312,7 @@ class TestMachineIdentityCommands:
         with patch.dict(os.environ, installer_env, clear=True), patch(f"{_G}.IS_WINDOWS", False):
             argv, env = guard_module._render_argv(invocation)
 
-        assert argv == ["bash", "/hooks/snyk-agent-guard.sh", "--client", "cursor"]
+        assert argv == ["bash", str(Path("/hooks/snyk-agent-guard.sh")), "--client", "cursor"]
         assert env == {
             "HOME": "/h",
             "ADS_TOKEN_COMMAND": "/Users/me/.local/bin/ads-installer",
@@ -9414,8 +9417,8 @@ class TestMachineIdentityFromEnv:
 
     def test_fetch_machine_auth_passes_the_base_url(self):
         with patch(f"{_G}.fetch_access_token", return_value="tok") as fetch:
-            auth = guard_module._fetch_machine_auth(_IDENTITY)
-        fetch.assert_called_once_with("/Users/me/.local/bin/ads-installer", "https://api.eu.snyk.io")
+            auth = guard_module._fetch_machine_auth(_FETCH_IDENTITY)
+        fetch.assert_called_once_with(_FETCH_IDENTITY.token_command, "https://api.eu.snyk.io", timeout=90)
         assert auth.tenant_path("/agent-monitor/hooks/cursor") == (
             "https://api.eu.snyk.io/hidden/tenants/tenant/agent-monitor/hooks/cursor"
         )
@@ -9435,14 +9438,14 @@ class TestMachineIdentityFromEnv:
             patch(f"{_G}.fetch_access_token", return_value=token),
             pytest.raises(guard_module.MachineAuthError, match="quotes, backslashes or control characters"),
         ):
-            guard_module._fetch_machine_auth(_IDENTITY)
+            guard_module._fetch_machine_auth(_FETCH_IDENTITY)
 
 
 class TestRunInstallMachineIdentity:
     @pytest.fixture(autouse=True)
     def _env(self, monkeypatch):
         monkeypatch.setenv("PUSH_KEY", "installer-pk")  # the installer passes it for older Guard versions
-        monkeypatch.setenv("ADS_TOKEN_COMMAND", "/bin/ads-installer")
+        monkeypatch.setenv("ADS_TOKEN_COMMAND", _TOKEN_COMMAND)
         # Older installers still pass ADS_BASE_URL; Guard ignores it and uses --url.
         monkeypatch.setenv("ADS_BASE_URL", "https://api.us.snyk.io")
         monkeypatch.delenv("MACHINE_SERIAL", raising=False)
@@ -9467,11 +9470,11 @@ class TestRunInstallMachineIdentity:
         ):
             _run_install(self._args(tmp_path))
 
-        assert fetch.call_args_list[0] == mock_call("/bin/ads-installer", "https://api.eu.snyk.io")
+        assert fetch.call_args_list[0] == mock_call(_TOKEN_COMMAND, "https://api.eu.snyk.io", timeout=90)
         mint.assert_not_called()
         assert install.call_args.args[2] == ""  # never the installer's push key
         assert install.call_args.kwargs["machine_identity"] == guard_module._MachineIdentity(
-            token_command="/bin/ads-installer", tenant_id="tid-1", base_url="https://api.eu.snyk.io"
+            token_command=_TOKEN_COMMAND, tenant_id="tid-1", base_url="https://api.eu.snyk.io"
         )
         assert "machine_auth" not in install.call_args.kwargs
         assert send.call_args.args[0] == ""
@@ -9863,7 +9866,7 @@ class TestRunDiscoverMachineIdentity:
     def _env(self, monkeypatch):
         monkeypatch.setenv("MACHINE_ID", "machine-42")
         monkeypatch.setenv("PUSH_KEY", "")  # the machine identity hook command clears it
-        monkeypatch.setenv("ADS_TOKEN_COMMAND", "/bin/ads-installer")
+        monkeypatch.setenv("ADS_TOKEN_COMMAND", _TOKEN_COMMAND)
         monkeypatch.setenv("TENANT_ID", "tenant-1")
         monkeypatch.setenv("REMOTE_HOOKS_BASE_URL", "https://api.eu.snyk.io")
         monkeypatch.setenv("ADS_BASE_URL", "https://api.us.snyk.io")  # ignored
@@ -9881,7 +9884,8 @@ class TestRunDiscoverMachineIdentity:
         ):
             assert guard_module.run_guard(self._args()) == 0
 
-        fetch.assert_called_once_with("/bin/ads-installer", "https://api.eu.snyk.io")
+        # The hook budget also covers discovery, so the token gets less than the scan default.
+        fetch.assert_called_once_with(_TOKEN_COMMAND, "https://api.eu.snyk.io", timeout=10.0)
         assert send.call_args.args[2] == ""
         auth = send.call_args.kwargs["machine_auth"]
         assert (auth.tenant_id, auth.base_url, auth.access_token) == ("tenant-1", "https://api.eu.snyk.io", "tok")

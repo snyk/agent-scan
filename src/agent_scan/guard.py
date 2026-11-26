@@ -42,7 +42,7 @@ from agent_scan.hook_events import (
     next_retry_delay,
     send_hook_event,
 )
-from agent_scan.machine_auth import MachineAuth, MachineAuthError, fetch_access_token
+from agent_scan.machine_auth import TOKEN_COMMAND_TIMEOUT_S, MachineAuth, MachineAuthError, fetch_access_token
 from agent_scan.pushkeys import (
     GuardEnabledAccessDeniedError,
     _is_localhost,
@@ -97,6 +97,9 @@ _GUARD_JSON_SCAFFOLDING: dict[str, tuple[dict, ...]] = {
 }
 _STDIN_READ_TIMEOUT_SECONDS = 5.0
 _DISCOVERY_TIMEOUT_SECONDS = 60.0
+# guard discover runs inside an agent hook (about 60 s) that also covers discovery, so its token
+# fetch gets a short limit instead of the scan's TOKEN_COMMAND_TIMEOUT_S.
+_DISCOVER_TOKEN_TIMEOUT_SECONDS = 10.0
 _HOOK_SCRIPT_TIMEOUT_SECONDS = 15.0
 # Extra time the forwarder subprocess gets beyond the install budget (interpreter startup, teardown).
 _HOOK_SCRIPT_OVERHEAD_SECONDS = 2.0
@@ -300,7 +303,7 @@ def _machine_identity_from_env(tenant_id: str, base_url: str) -> _MachineIdentit
     return _MachineIdentity(token_command=token_command, tenant_id=tenant_id, base_url=base_url.strip())
 
 
-def _fetch_machine_auth(identity: _MachineIdentity) -> MachineAuth:
+def _fetch_machine_auth(identity: _MachineIdentity, *, timeout: float = TOKEN_COMMAND_TIMEOUT_S) -> MachineAuth:
     """Run the token command once and return the token for the Python-sent events.
 
     Raises MachineAuthError when the command is not an absolute path or fails; there is no
@@ -309,7 +312,7 @@ def _fetch_machine_auth(identity: _MachineIdentity) -> MachineAuth:
     if not os.path.isabs(identity.token_command):
         # A bare name is looked up in the hook's PATH, and on Windows in the current directory too.
         raise MachineAuthError("The token command must be an absolute path.")
-    token = fetch_access_token(identity.token_command, identity.base_url)
+    token = fetch_access_token(identity.token_command, identity.base_url, timeout=timeout)
     if _TOKEN_UNSAFE_RE.search(token):
         raise MachineAuthError(
             "The token command printed a token with quotes, backslashes or control characters, "
@@ -591,7 +594,7 @@ def _run_discover(args) -> int:
     machine_auth: MachineAuth | None = None
     if machine_identity is not None:
         try:
-            machine_auth = _fetch_machine_auth(machine_identity)
+            machine_auth = _fetch_machine_auth(machine_identity, timeout=_DISCOVER_TOKEN_TIMEOUT_SECONDS)
         except MachineAuthError as e:
             # Like an unreachable API: one line, no event, and never the push key.
             rich.print(f"[yellow]Warning:[/yellow] Could not send discovered MCP servers: {escape(str(e))}")
