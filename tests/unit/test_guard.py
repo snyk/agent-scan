@@ -9861,6 +9861,304 @@ class TestInstallSwitchesAuthModes:
         assert _HookHandler.last_request["headers"]["Authorization"] == "Bearer machine-token-123"
 
 
+def _fake_ps_token_command(tmp_path: Path, lines: tuple[str, ...] = ("machine-token-123",), exit_code: int = 0) -> Path:
+    """A stand-in for `<command> token --base-url <url>` that the .ps1 scripts can start.
+
+    A .cmd on Windows, a bash script elsewhere (pwsh). Each run appends its arguments to
+    ``token-runs``; it exits 2 unless called as ``token --base-url <url>``.
+    """
+    runs = tmp_path / "token-runs"
+    if IS_WINDOWS:
+        command = tmp_path / "ads-installer.cmd"
+        body = [
+            "@echo off",
+            f'echo %*>> "{runs}"',
+            'if not "%~1"=="token" exit /b 2',
+            'if not "%~2"=="--base-url" exit /b 2',
+            *(f"echo {line}" for line in lines),
+            f"exit /b {exit_code}",
+        ]
+        command.write_text("\r\n".join(body) + "\r\n")
+    else:
+        command = tmp_path / "ads-installer"
+        body = [
+            "#!/bin/bash",
+            f'echo "$*" >> {_shell_quote(str(runs))}',
+            '[ "$1" = token ] && [ "$2" = --base-url ] || exit 2',
+            *(f"echo {_shell_quote(line)}" for line in lines),
+            f"exit {exit_code}",
+        ]
+        command.write_text("\n".join(body) + "\n")
+        command.chmod(0o755)
+    return command
+
+
+class TestPowerShellHookScriptMachineIdentity:
+    """Integration: the real .ps1 forwarder in machine identity mode against a local HTTP server.
+
+    Mirrors TestBashHookScriptMachineIdentity. The values come from parameters, as in the
+    commands guard install writes, or from the environment.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _skip_no_powershell(self):
+        if not shutil.which("powershell") and not shutil.which("pwsh"):
+            pytest.skip("powershell not available")
+
+    @staticmethod
+    def _ps_cmd():
+        return "powershell" if shutil.which("powershell") else "pwsh"
+
+    @staticmethod
+    def _env(**overrides: str | None) -> dict[str, str]:
+        names = ("PUSH_KEY", "PUSHKEY", "ADS_TOKEN_COMMAND", "TENANT_ID", "REMOTE_HOOKS_BASE_URL", "MACHINE_ID")
+        env = {k: v for k, v in os.environ.items() if k not in names}
+        env.update({k: v for k, v in overrides.items() if v is not None})
+        return env
+
+    def _run(self, args: list[str], client: str = "claude-code", env: dict[str, str] | None = None):
+        return subprocess.run(
+            [self._ps_cmd(), "-File", str(_get_script_path("snyk-agent-guard.ps1")), "-Client", client, *args],
+            input='{"hook_event_name":"PreToolUse","session_id":"s1"}',
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env if env is not None else self._env(),
+        )
+
+    @staticmethod
+    def _machine_args(server: str, token_command: Path | str, tenant: str | None = "tenant-1") -> list[str]:
+        args = ["-TokenCommand", str(token_command), "-RemoteUrl", server + "/", "-MachineId", "machine-42"]
+        return [*args, "-TenantId", tenant] if tenant is not None else args
+
+    @pytest.mark.parametrize("client", ["claude-code", "cursor", "codex", "github-copilot"])
+    def test_sends_to_the_tenant_route_with_a_bearer_token(self, hook_server, tmp_path, client):
+        result = self._run(self._machine_args(hook_server, _fake_ps_token_command(tmp_path)), client=client)
+
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == {"ok": True}
+        req = _HookHandler.last_request
+        assert req["path"] == f"/hidden/tenants/tenant-1/agent-monitor/hooks/{client}?version=2025-11-11"
+        assert req["headers"]["Authorization"] == "Bearer machine-token-123"
+        assert "X-Client-Id" not in req["headers"]
+        assert json.loads(req["headers"]["X-User"])["identifier"] == "machine-42"
+        assert req["body"].startswith("base64:")
+        runs = (tmp_path / "token-runs").read_text().splitlines()
+        assert len(runs) == 1
+        assert runs[0].startswith("token --base-url ")
+        assert hook_server in runs[0]
+        assert "machine-token-123" not in result.stderr + result.stdout
+
+    def test_values_from_the_environment(self, hook_server, tmp_path):
+        env = self._env(
+            ADS_TOKEN_COMMAND=str(_fake_ps_token_command(tmp_path)),
+            REMOTE_HOOKS_BASE_URL=hook_server,
+            TENANT_ID="tenant-1",
+            MACHINE_ID="machine-42",
+        )
+        result = self._run([], env=env)
+
+        assert result.returncode == 0, result.stderr
+        req = _HookHandler.last_request
+        assert req["path"] == "/hidden/tenants/tenant-1/agent-monitor/hooks/claude-code?version=2025-11-11"
+        assert req["headers"]["Authorization"] == "Bearer machine-token-123"
+
+    def test_push_key_parameter_wins_over_a_token_command(self, hook_server, tmp_path):
+        args = [*self._machine_args(hook_server, _fake_ps_token_command(tmp_path)), "-PushKey", "pk-1234"]
+        # No trailing slash: the push-key route keeps the URL as given.
+        args[args.index("-RemoteUrl") + 1] = hook_server
+        result = self._run(args)
+
+        assert result.returncode == 0, result.stderr
+        req = _HookHandler.last_request
+        assert req["path"] == "/hidden/agent-monitor/hooks/claude-code?version=2025-11-11"
+        assert req["headers"]["X-Client-Id"] == "pk-1234"
+        assert "Authorization" not in req["headers"]
+        assert not (tmp_path / "token-runs").exists()
+
+    def test_push_key_parameter_wins_over_an_ambient_token_command(self, hook_server, tmp_path):
+        """An ADS_TOKEN_COMMAND in the agent's environment cannot change a push-key hook."""
+        env = self._env(ADS_TOKEN_COMMAND=str(_fake_ps_token_command(tmp_path)), TENANT_ID="tenant-1")
+        result = self._run(["-PushKey", "pk-1234", "-RemoteUrl", hook_server, "-MachineId", "machine-42"], env=env)
+
+        assert result.returncode == 0, result.stderr
+        assert _HookHandler.last_request["headers"]["X-Client-Id"] == "pk-1234"
+        assert not (tmp_path / "token-runs").exists()
+
+    def test_token_command_parameter_wins_over_an_ambient_push_key(self, hook_server, tmp_path):
+        """A PUSH_KEY in the agent's environment cannot change a machine identity hook."""
+        env = self._env(PUSH_KEY="stray-pk", PUSHKEY="stray-pk")
+        result = self._run(self._machine_args(hook_server, _fake_ps_token_command(tmp_path)), env=env)
+
+        assert result.returncode == 0, result.stderr
+        req = _HookHandler.last_request
+        assert req["headers"]["Authorization"] == "Bearer machine-token-123"
+        assert "X-Client-Id" not in req["headers"]
+        assert "stray-pk" not in json.dumps(req["headers"])
+
+    def test_runs_the_token_command_on_every_invocation(self, hook_server, tmp_path):
+        args = self._machine_args(hook_server, _fake_ps_token_command(tmp_path))
+        self._run(args)
+        self._run(args)
+        assert len((tmp_path / "token-runs").read_text().splitlines()) == 2
+
+    @pytest.mark.parametrize(
+        "lines, exit_code, reason",
+        [
+            (("partial-token",), 3, "token command failed (exit 3)"),
+            (("two words",), 0, "no single access token"),
+            (("one", "two"), 0, "no single access token"),
+            ((), 0, "no single access token"),
+        ],
+    )
+    def test_failed_token_command_fails_open(self, hook_server, tmp_path, lines, exit_code, reason):
+        token_command = _fake_ps_token_command(tmp_path, lines, exit_code)
+        result = self._run(self._machine_args(hook_server, token_command))
+
+        assert result.returncode == 0, result.stderr
+        assert _HookHandler.last_request is None
+        assert json.loads(result.stdout) == {"systemMessage": FAIL_OPEN_MESSAGE}
+        assert reason in result.stderr
+        assert "failing open" in result.stderr
+        assert "partial-token" not in result.stderr
+
+    def test_missing_token_command_fails_open(self, hook_server, tmp_path):
+        result = self._run(self._machine_args(hook_server, tmp_path / "missing"), client="cursor")
+
+        assert result.returncode == 0, result.stderr
+        assert _HookHandler.last_request is None
+        assert result.stdout == ""  # Cursor gets nothing on stdout
+        assert "token command could not run" in result.stderr
+
+    def test_relative_token_command_is_refused(self, hook_server, tmp_path):
+        _fake_ps_token_command(tmp_path)
+        result = self._run(self._machine_args(hook_server, "ads-installer"), client="cursor")
+
+        assert result.returncode != 0
+        assert _HookHandler.last_request is None
+        assert not (tmp_path / "token-runs").exists()
+        assert "ADS_TOKEN_COMMAND must be an absolute path" in result.stderr
+
+    def test_missing_tenant_id_is_a_usage_error(self, hook_server, tmp_path):
+        result = self._run(self._machine_args(hook_server, _fake_ps_token_command(tmp_path), tenant=None))
+
+        assert result.returncode != 0
+        assert _HookHandler.last_request is None
+        assert "TENANT_ID is required" in result.stderr
+        assert not (tmp_path / "token-runs").exists()
+
+    def test_missing_remote_url_is_a_usage_error(self, tmp_path):
+        args = ["-TokenCommand", str(_fake_ps_token_command(tmp_path)), "-TenantId", "tenant-1", "-MachineId", "m"]
+        result = self._run(args)
+
+        assert result.returncode != 0
+        assert "REMOTE_HOOKS_BASE_URL is required" in result.stderr
+        assert not (tmp_path / "token-runs").exists()
+
+    def test_tenant_id_that_needs_escaping_is_a_usage_error(self, hook_server, tmp_path):
+        result = self._run(self._machine_args(hook_server, _fake_ps_token_command(tmp_path), tenant="../other"))
+
+        assert result.returncode != 0
+        assert _HookHandler.last_request is None
+        assert "not a valid tenant id" in result.stderr
+        assert not (tmp_path / "token-runs").exists()
+
+    def test_http_error_on_the_tenant_route_fails_open(self, error_hook_server, tmp_path):
+        result = self._run(self._machine_args(error_hook_server, _fake_ps_token_command(tmp_path)))
+
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == {"systemMessage": FAIL_OPEN_MESSAGE}
+        assert "boom" not in result.stdout
+        assert "failing open" in result.stderr
+
+
+class TestPowerShellDiscoveryHookScriptMachineIdentity:
+    """The discover .ps1 hands machine identity to `guard discover` through the environment."""
+
+    @pytest.fixture(autouse=True)
+    def _skip_no_powershell(self):
+        if not shutil.which("powershell") and not shutil.which("pwsh"):
+            pytest.skip("powershell not available")
+
+    @staticmethod
+    def _ps_cmd():
+        return "powershell" if shutil.which("powershell") else "pwsh"
+
+    @staticmethod
+    def _env_recording_stub(tmp_path: Path) -> tuple[Path, Path]:
+        """A `snyk-agent-scan` stub that writes the auth environment it sees as JSON."""
+        record = tmp_path / "seen-env.json"
+        helper = tmp_path / "record_env.py"
+        names = ["PUSH_KEY", "PUSHKEY", "ADS_TOKEN_COMMAND", "TENANT_ID", "REMOTE_HOOKS_BASE_URL", "MACHINE_ID"]
+        helper.write_text(
+            "import json, os\n"
+            f"with open({str(record)!r}, 'w') as fh:\n"
+            f"    json.dump({{n: os.environ.get(n) for n in {names!r}}}, fh)\n"
+        )
+        if IS_WINDOWS:
+            stub = tmp_path / "snyk-agent-scan.cmd"
+            stub.write_text(f'@echo off\r\n"{sys.executable}" "{helper}" %*\r\n')
+        else:
+            stub = tmp_path / "snyk-agent-scan"
+            stub.write_text(f'#!/bin/sh\nexec {_shell_quote(sys.executable)} {_shell_quote(str(helper))} "$@"\n')
+            stub.chmod(0o755)
+        return stub, record
+
+    def _run(self, args: list[str], env: dict[str, str]):
+        return subprocess.run(
+            [
+                self._ps_cmd(),
+                "-File",
+                str(_get_script_path("snyk-agent-guard-discover.ps1")),
+                "-Client",
+                "cursor",
+                *args,
+            ],
+            input="{}",
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+
+    def test_machine_identity_reaches_guard_discover_without_an_ambient_push_key(self, tmp_path):
+        stub, record = self._env_recording_stub(tmp_path)
+        env = {**os.environ, "PUSH_KEY": "stray-pk", "PUSHKEY": "stray-pk"}
+        args = [
+            "-AgentScanCommand", str(stub),
+            "-TokenCommand", "/opt/ads/ads-installer",
+            "-TenantId", "tenant-1",
+            "-RemoteUrl", "https://api.eu.snyk.io",
+            "-MachineId", "machine-42",
+        ]  # fmt: skip
+        result = self._run(args, env)
+
+        assert result.returncode == 0, result.stderr
+        seen = json.loads(record.read_text())
+        assert seen["ADS_TOKEN_COMMAND"] == "/opt/ads/ads-installer"
+        assert seen["TENANT_ID"] == "tenant-1"
+        assert seen["REMOTE_HOOKS_BASE_URL"] == "https://api.eu.snyk.io"
+        assert seen["MACHINE_ID"] == "machine-42"
+        # `guard discover` lets a push key win, so the agent's one must not reach it.
+        assert seen["PUSH_KEY"] is None
+        assert seen["PUSHKEY"] is None
+
+    def test_push_key_hook_keeps_its_push_key(self, tmp_path):
+        stub, record = self._env_recording_stub(tmp_path)
+        args = [
+            "-AgentScanCommand", str(stub),
+            "-PushKey", "pk-1234",
+            "-RemoteUrl", "https://api.eu.snyk.io",
+            "-MachineId", "machine-42",
+        ]  # fmt: skip
+        result = self._run(args, {k: v for k, v in os.environ.items() if k != "ADS_TOKEN_COMMAND"})
+
+        assert result.returncode == 0, result.stderr
+        seen = json.loads(record.read_text())
+        assert seen["PUSH_KEY"] == "pk-1234"
+        assert seen["ADS_TOKEN_COMMAND"] is None
+
+
 class TestRunDiscoverMachineIdentity:
     @pytest.fixture(autouse=True)
     def _env(self, monkeypatch):

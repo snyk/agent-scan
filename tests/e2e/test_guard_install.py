@@ -395,3 +395,119 @@ class TestGuardUninstallE2E:
         )
         assert result.returncode != 0
         assert "--file cannot be used with client 'all'" in result.stdout + result.stderr
+
+
+def _fake_token_command(tmp_path: Path) -> Path:
+    """A stand-in for the ADS installer's `<command> token --base-url <url>`."""
+    command = tmp_path / "bin" / "ads-installer"
+    command.parent.mkdir()
+    command.write_text(
+        '#!/bin/bash\n[ "$1" = token ] && [ "$2" = --base-url ] && [ -n "$3" ] || exit 2\necho e2e-machine-token\n'
+    )
+    command.chmod(0o755)
+    return command
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the fake token command is a bash script; PowerShell has unit tests")
+class TestGuardMachineIdentityE2E:
+    """Machine identity (ADS_TOKEN_COMMAND + TENANT_ID) through the real CLI, via uv and the binary."""
+
+    @staticmethod
+    def _install_env(token_command: Path, agent_scan_command) -> dict[str, str]:
+        # Installers still pass a push key for older Guard versions; machine identity ignores it.
+        return _guard_env(
+            ADS_TOKEN_COMMAND=str(token_command),
+            TENANT_ID="e2e-tenant",
+            PUSH_KEY="installer-pk",
+            AGENT_SCAN_COMMAND=str(agent_scan_command),
+        )
+
+    @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
+    @pytest.mark.parametrize(("client", "config_name", "user_hook", "event"), CLIENT_CASES)
+    def test_install_and_uninstall(
+        self, agent_scan_cmd, agent_scan_command, tmp_path, fake_hook_server, client, config_name, user_hook, event
+    ):
+        config_file = tmp_path / "agent" / config_name
+        token_command = _fake_token_command(tmp_path)
+        result = _run_cli(
+            agent_scan_cmd,
+            "guard",
+            "install",
+            client,
+            "--file",
+            str(config_file),
+            "--url",
+            fake_hook_server,
+            "--machine-id",
+            "e2e-machine-id",
+            env=self._install_env(token_command, agent_scan_command),
+        )
+        assert result.returncode == 0, f"guard install failed:\n{_describe(result)}"
+
+        # The hook commands carry the machine identity and never the installer's push key.
+        installed = config_file.read_text()
+        assert f"ADS_TOKEN_COMMAND='{token_command}'" in installed
+        assert "TENANT_ID='e2e-tenant'" in installed
+        assert "installer-pk" not in installed
+
+        # Every event, the hook script's test event included, goes to the tenant route with
+        # the token, never with a push key.
+        assert _FakeHookServer.requests
+        assert "hooksConfigured" in [r["body"]["hook_event_name"] for r in _FakeHookServer.requests]
+        for request in _FakeHookServer.requests:
+            assert request["path"].startswith("/hidden/tenants/e2e-tenant/agent-monitor/hooks/"), request["path"]
+            headers = {k.lower(): v for k, v in request["headers"].items()}
+            assert headers["authorization"] == "Bearer e2e-machine-token"
+            assert "x-client-id" not in headers
+        assert "installer-pk" not in result.stdout + result.stderr
+        assert "e2e-machine-token" not in result.stdout + result.stderr
+
+        # Machine identity has no push key, so uninstall revokes nothing even with SNYK_TOKEN set.
+        result = _uninstall(agent_scan_cmd, client, config_file, SNYK_TOKEN="e2e-token", TENANT_ID="e2e-tenant")
+        assert "snyk-agent-guard" not in (config_file.read_text() if config_file.exists() else "")
+        _assert_scripts_removed(config_file)
+        assert _FakeHookServer.deletes == []
+        assert "revoked" not in result.stdout
+
+    @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
+    def test_managed_install_is_refused(self, agent_scan_cmd, agent_scan_command, tmp_path, fake_hook_server):
+        result = _run_cli(
+            agent_scan_cmd,
+            "guard",
+            "install",
+            "claude",
+            "--managed",
+            "--url",
+            fake_hook_server,
+            "--machine-id",
+            "e2e-machine-id",
+            env=self._install_env(_fake_token_command(tmp_path), agent_scan_command),
+        )
+        assert result.returncode != 0
+        assert "Managed installs use a push key" in result.stdout + result.stderr
+        assert _FakeHookServer.requests == []
+
+    @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
+    def test_failing_token_command_fails_the_install(
+        self, agent_scan_cmd, agent_scan_command, tmp_path, fake_hook_server
+    ):
+        token_command = _fake_token_command(tmp_path)
+        token_command.write_text("#!/bin/bash\nexit 1\n")
+        config_file = tmp_path / "settings.json"
+        result = _run_cli(
+            agent_scan_cmd,
+            "guard",
+            "install",
+            "claude",
+            "--file",
+            str(config_file),
+            "--url",
+            fake_hook_server,
+            "--machine-id",
+            "e2e-machine-id",
+            env=self._install_env(token_command, agent_scan_command),
+        )
+        assert result.returncode != 0
+        assert not config_file.exists()
+        assert not (tmp_path / "hooks").exists()
+        assert _FakeHookServer.requests == []
