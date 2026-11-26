@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from agent_scan.models import CouldNotParseMCPConfig
 from agent_scan.remote_discovery.builder import build_clients
 from agent_scan.remote_discovery.executor import run_op
 
@@ -154,6 +155,20 @@ def test_merge_last_write_wins_and_canonical(tmp_path: Path) -> None:
     # Two spellings of one file merge under its resolved path.
     assert [name for name, _ in configs[real.resolve().as_posix()]] == ["via-link", "direct"]
     assert str(link) not in configs
+
+
+@pytest.mark.parametrize("command", ["", 'npx -y "@scope/pkg'])
+def test_unparseable_command_fails_only_its_file(command: str) -> None:
+    bad = _mcp("/bad.json", "ok")
+    bad["candidates"][0]["maps"][0]["bad"] = {"command": command}
+    found = {
+        "clients": [{"name": "claude code", "client_path": "/x", "username": "me"}],
+        "mcp_configs": [bad, _mcp("/good.json", "good")],
+        "skills_dirs": [],
+    }
+    (client,) = build_clients(found)
+    assert isinstance(client.mcp_configs["/bad.json"], CouldNotParseMCPConfig)
+    assert [name for name, _ in client.mcp_configs["/good.json"]] == ["good"]
 
 
 def _stdio_found(raw: dict, roots: list[str]) -> dict:
