@@ -246,6 +246,79 @@ class TestIsAgentScanCommand:
     def test_no_match_empty(self):
         assert not _is_agent_scan_command("")
 
+    @pytest.mark.parametrize(
+        "command",
+        [
+            pytest.param("cat /tmp/snyk-agent-guard.sh", id="cat"),
+            pytest.param("vim snyk-agent-guard.sh", id="vim"),
+            pytest.param("grep foo ~/.claude/hooks/snyk-agent-guard.sh", id="grep"),
+            pytest.param("cp snyk-agent-guard.ps1 backup/", id="cp"),
+            pytest.param("bash wrapper.sh /p/snyk-agent-guard.sh --client c", id="wrapper-argument"),
+            pytest.param("bash /p/snyk-agent-guard.sh", id="no-client"),
+            pytest.param("mybash /p/snyk-agent-guard.sh --client c", id="other-interpreter"),
+            pytest.param("powershell -Command 'Get-Content C:\\h\\snyk-agent-guard.ps1' -Client c", id="ps-no-file"),
+        ],
+    )
+    def test_no_match_command_that_only_mentions_the_script(self, command):
+        """A customer hook that references the script is theirs: install must not replace it
+        and uninstall must not delete it."""
+        assert not _is_agent_scan_command(command)
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            pytest.param(
+                'PUSH_KEY="$SNYK_PK" REMOTE_HOOKS_BASE_URL="$API" bash \'/p/hooks/snyk-agent-guard.sh\' '
+                "--client cursor --from-env",
+                id="env-mode",
+            ),
+            pytest.param(
+                "powershell -File 'C:\\h\\snyk-agent-guard-discover.ps1' -Client codex -Scope servers -FromEnv",
+                id="ps-discover-env-mode",
+            ),
+            pytest.param(
+                "PUSH_KEY='' PUSHKEY='' ADS_TOKEN_COMMAND='/x' TENANT_ID='t' bash '/p/snyk-agent-guard.sh' --client codex",
+                id="legacy-machine-identity",
+            ),
+            pytest.param(
+                "bash '/home/o'\"'\"'brien/.claude/hooks/snyk-agent-guard.sh' --client claude-code",
+                id="bash-apostrophe",
+            ),
+            pytest.param(
+                "powershell -File 'C:\\Users\\o''brien\\hooks\\snyk-agent-guard.ps1' -Client claude-code",
+                id="ps-apostrophe",
+            ),
+            pytest.param("bash '/home/u/My Folder/hooks/snyk-agent-guard.sh' --client claude-code", id="spaces"),
+            pytest.param(
+                'PUSH_KEY="$PUSH_KEY" bash "${PLUGIN_ROOT}/scripts/snyk-agent-guard.sh" --client claude-code',
+                id="double-quoted",
+            ),
+            pytest.param(
+                "command = \"PUSH_KEY='pk' bash '/home/u/.codex/hooks/snyk-agent-guard.sh' --client codex\"",
+                id="toml-line",
+            ),
+            pytest.param(
+                "command = \"powershell -File 'C:\\\\h\\\\snyk-agent-guard.ps1' -Client codex\"", id="toml-line-windows"
+            ),
+        ],
+    )
+    def test_matches_every_shape_guard_writes(self, command):
+        assert _is_agent_scan_command(command)
+
+    @pytest.mark.parametrize("is_windows", [False, True], ids=["posix", "windows"])
+    def test_matches_the_commands_install_builds(self, is_windows):
+        script = Path(
+            r"C:\Users\o'brien\hooks\snyk-agent-guard.ps1" if is_windows else "/home/o'brien/hooks/snyk-agent-guard.sh"
+        )
+        discover = script.with_name(script.name.replace("guard.", "guard-discover."))
+        with patch(f"{_G}.IS_WINDOWS", is_windows):
+            commands = [
+                _build_hook_command(script, "cursor"),
+                _build_hook_command(script, "cursor", prefix=('PUSH_KEY="$PK"',), from_env=True),
+                guard_module._build_discover_hook_command(discover, "cursor"),
+            ]
+        assert all(_is_agent_scan_command(c) for c in commands), commands
+
 
 class TestShellQuote:
     def test_simple(self):
@@ -499,9 +572,7 @@ class TestHookInvocationRenderers:
 
 
 class TestPrepareClaudeDiscoveryHook:
-    discover_command = (
-        "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' bash '/x/snyk-agent-guard-discover.sh'"
-    )
+    discover_command = "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' bash '/x/snyk-agent-guard-discover.sh' --client 'claude-code' --scope servers"
 
     def test_adds_separate_async_matcherless_session_start_group(self, tmp_path):
         with patch(f"{_G}.IS_WINDOWS", False):
@@ -565,9 +636,7 @@ class TestPrepareClaudeDiscoveryHook:
 
 
 class TestPrepareCursorDiscoveryHook:
-    discover_command = (
-        "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' bash '/x/snyk-agent-guard-discover.sh'"
-    )
+    discover_command = "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' bash '/x/snyk-agent-guard-discover.sh' --client 'cursor' --scope servers"
 
     def test_adds_flat_session_start_entry(self, tmp_path):
         data, _, _ = _prepare_cursor_config(
@@ -635,9 +704,7 @@ COPILOT_AGENTGUARD_CMD = "PUSH_KEY='pk-old' REMOTE_HOOKS_BASE_URL='https://api.s
 
 
 class TestPrepareGitHubCopilotDiscoveryHook:
-    discover_command = (
-        "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' bash '/x/snyk-agent-guard-discover.sh'"
-    )
+    discover_command = "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' bash '/x/snyk-agent-guard-discover.sh' --client 'github-copilot' --scope servers"
 
     def test_adds_flat_session_start_entry(self, tmp_path):
         data, _, _ = _prepare_copilot_config(
@@ -698,9 +765,7 @@ class TestPrepareGitHubCopilotDiscoveryHook:
 
 
 class TestPrepareCodexDiscoveryHook:
-    discover_command = (
-        "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' bash '/x/snyk-agent-guard-discover.sh'"
-    )
+    discover_command = "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' bash '/x/snyk-agent-guard-discover.sh' --client 'codex' --scope servers"
 
     def test_adds_async_matcherless_session_start_group(self, tmp_path):
         data, _, _ = _prepare_codex_config(
@@ -1269,9 +1334,7 @@ class TestDiscoveryHookScriptFiles:
 
     def test_full_claude_install_shape_then_uninstall_removes_entries_and_scripts(self, tmp_path):
         config = tmp_path / "settings.json"
-        discover_command = (
-            "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' bash '/x/snyk-agent-guard-discover.sh'"
-        )
+        discover_command = "PUSH_KEY='pk' REMOTE_HOOKS_BASE_URL='https://api.snyk.io' bash '/x/snyk-agent-guard-discover.sh' --client 'claude-code' --scope servers"
         settings, _, preserved = _prepare_claude_config(
             AGENT_SCAN_CMD,
             config,
@@ -7474,50 +7537,54 @@ class TestComputeHooksDiff:
 
     def test_multiple_removed(self):
         new = {
-            "PreToolUse": [{"hooks": [{"command": "PUSH_KEY='x' bash snyk-agent-guard.sh --a"}]}],
-            "Stop": [{"hooks": [{"command": "PUSH_KEY='x' bash snyk-agent-guard.sh --b"}]}],
+            "PreToolUse": [{"hooks": [{"command": "PUSH_KEY='x' bash snyk-agent-guard.sh --client a"}]}],
+            "Stop": [{"hooks": [{"command": "PUSH_KEY='x' bash snyk-agent-guard.sh --client b"}]}],
         }
         result = _compute_hooks_diff({}, new)
         assert set(result["removed"]) == {"PreToolUse", "Stop"}
 
     def test_multiple_added(self):
         old = {
-            "PreToolUse": [{"hooks": [{"command": "PUSH_KEY='x' bash snyk-agent-guard.sh --a"}]}],
-            "Stop": [{"hooks": [{"command": "PUSH_KEY='x' bash snyk-agent-guard.sh --b"}]}],
+            "PreToolUse": [{"hooks": [{"command": "PUSH_KEY='x' bash snyk-agent-guard.sh --client a"}]}],
+            "Stop": [{"hooks": [{"command": "PUSH_KEY='x' bash snyk-agent-guard.sh --client b"}]}],
         }
         result = _compute_hooks_diff(old, {})
         assert set(result["added"]) == {"PreToolUse", "Stop"}
 
     def test_added_removed_and_modified_combined(self):
-        old_val = [{"hooks": [{"command": "PUSH_KEY='x' bash '/old/snyk-agent-guard.sh'"}]}]
-        new_val = [{"hooks": [{"command": "PUSH_KEY='x' bash '/new/snyk-agent-guard.sh'"}]}]
+        old_val = [{"hooks": [{"command": "PUSH_KEY='x' bash '/old/snyk-agent-guard.sh' --client claude-code"}]}]
+        new_val = [{"hooks": [{"command": "PUSH_KEY='x' bash '/new/snyk-agent-guard.sh' --client claude-code"}]}]
         old = {
             "PreToolUse": old_val,
-            "ExtraEvent": [{"hooks": [{"command": "PUSH_KEY='x' bash '/extra/snyk-agent-guard.sh'"}]}],
+            "ExtraEvent": [
+                {"hooks": [{"command": "PUSH_KEY='x' bash '/extra/snyk-agent-guard.sh' --client claude-code"}]}
+            ],
         }
         new = {
             "PreToolUse": new_val,
-            "Stop": [{"hooks": [{"command": "PUSH_KEY='x' bash '/stop/snyk-agent-guard.sh'"}]}],
+            "Stop": [{"hooks": [{"command": "PUSH_KEY='x' bash '/stop/snyk-agent-guard.sh' --client claude-code"}]}],
         }
         result = _compute_hooks_diff(old, new)
         assert result["added"] == {
-            "ExtraEvent": [{"hooks": [{"command": "PUSH_KEY='x' bash '/extra/snyk-agent-guard.sh'"}]}]
+            "ExtraEvent": [
+                {"hooks": [{"command": "PUSH_KEY='x' bash '/extra/snyk-agent-guard.sh' --client claude-code"}]}
+            ]
         }
         assert result["removed"] == {
-            "Stop": [{"hooks": [{"command": "PUSH_KEY='x' bash '/stop/snyk-agent-guard.sh'"}]}]
+            "Stop": [{"hooks": [{"command": "PUSH_KEY='x' bash '/stop/snyk-agent-guard.sh' --client claude-code"}]}]
         }
         assert result["modified"] == {"PreToolUse": {"expected_value": new_val, "actual_value": old_val}}
 
     def test_unchanged_keys_excluded_from_all_categories(self):
-        cmd = "PUSH_KEY='x' bash '/path/snyk-agent-guard.sh'"
+        cmd = "PUSH_KEY='x' bash '/path/snyk-agent-guard.sh' --client claude-code"
         shared = [{"hooks": [{"command": cmd}]}]
         old = {
             "PreToolUse": shared,
-            "Extra": [{"hooks": [{"command": "PUSH_KEY='x' bash '/extra/snyk-agent-guard.sh'"}]}],
+            "Extra": [{"hooks": [{"command": "PUSH_KEY='x' bash '/extra/snyk-agent-guard.sh' --client claude-code"}]}],
         }
         new = {
             "PreToolUse": shared,
-            "Stop": [{"hooks": [{"command": "PUSH_KEY='x' bash '/stop/snyk-agent-guard.sh'"}]}],
+            "Stop": [{"hooks": [{"command": "PUSH_KEY='x' bash '/stop/snyk-agent-guard.sh' --client claude-code"}]}],
         }
         result = _compute_hooks_diff(old, new)
         assert "PreToolUse" not in result["added"]
@@ -7525,7 +7592,7 @@ class TestComputeHooksDiff:
         assert "PreToolUse" not in result["modified"]
 
     def test_old_empty_new_has_guard_hooks(self):
-        cmd = "PUSH_KEY='x' bash '/path/snyk-agent-guard.sh'"
+        cmd = "PUSH_KEY='x' bash '/path/snyk-agent-guard.sh' --client claude-code"
         new = {
             "A": [{"hooks": [{"command": cmd}]}],
             "B": [{"hooks": [{"command": cmd}]}],
@@ -7537,7 +7604,7 @@ class TestComputeHooksDiff:
         assert result["modified"] == {}
 
     def test_new_empty_old_has_guard_hooks(self):
-        cmd = "PUSH_KEY='x' bash '/path/snyk-agent-guard.sh'"
+        cmd = "PUSH_KEY='x' bash '/path/snyk-agent-guard.sh' --client claude-code"
         old = {
             "A": [{"hooks": [{"command": cmd}]}],
             "B": [{"hooks": [{"command": cmd}]}],
@@ -7548,8 +7615,28 @@ class TestComputeHooksDiff:
         assert result["modified"] == {}
 
     def test_nested_value_difference_is_modified(self):
-        old_val = [{"hooks": [{"type": "command", "command": "PUSH_KEY='x' bash snyk-agent-guard.sh", "timeout": 10}]}]
-        new_val = [{"hooks": [{"type": "command", "command": "PUSH_KEY='x' bash snyk-agent-guard.sh", "timeout": 30}]}]
+        old_val = [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "PUSH_KEY='x' bash snyk-agent-guard.sh --client claude-code",
+                        "timeout": 10,
+                    }
+                ]
+            }
+        ]
+        new_val = [
+            {
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "PUSH_KEY='x' bash snyk-agent-guard.sh --client claude-code",
+                        "timeout": 30,
+                    }
+                ]
+            }
+        ]
         result = _compute_hooks_diff({"PreToolUse": old_val}, {"PreToolUse": new_val})
         assert "PreToolUse" in result["modified"]
         assert result["modified"]["PreToolUse"]["expected_value"] == new_val
@@ -7784,14 +7871,18 @@ class TestComputeHooksDiff:
         assert ("preToolUse" in result["modified"]) is modified
 
     def test_diff_is_deep_copied_from_sources(self):
-        extra_cmd = "PUSH_KEY='x' bash '/extra/snyk-agent-guard.sh'"
-        new_cmd = "PUSH_KEY='x' bash '/new/snyk-agent-guard.sh'"
+        extra_cmd = "PUSH_KEY='x' bash '/extra/snyk-agent-guard.sh' --client claude-code"
+        new_cmd = "PUSH_KEY='x' bash '/new/snyk-agent-guard.sh' --client claude-code"
         old = {"Extra": [{"hooks": [{"command": extra_cmd}]}]}
         new = {
             "Stop": [{"hooks": [{"command": new_cmd}]}],
-            "PreToolUse": [{"hooks": [{"command": "PUSH_KEY='x' bash '/different/snyk-agent-guard.sh'"}]}],
+            "PreToolUse": [
+                {"hooks": [{"command": "PUSH_KEY='x' bash '/different/snyk-agent-guard.sh' --client claude-code"}]}
+            ],
         }
-        old["PreToolUse"] = [{"hooks": [{"command": "PUSH_KEY='x' bash '/original/snyk-agent-guard.sh'"}]}]
+        old["PreToolUse"] = [
+            {"hooks": [{"command": "PUSH_KEY='x' bash '/original/snyk-agent-guard.sh' --client claude-code"}]}
+        ]
         result = _compute_hooks_diff(old, new)
 
         result["added"]["Extra"][0]["hooks"][0]["command"] = "MUTATED"
@@ -7801,10 +7892,16 @@ class TestComputeHooksDiff:
         assert new["Stop"][0]["hooks"][0]["command"] == new_cmd
 
         result["modified"]["PreToolUse"]["expected_value"][0]["hooks"][0]["command"] = "MUTATED"
-        assert new["PreToolUse"][0]["hooks"][0]["command"] == "PUSH_KEY='x' bash '/different/snyk-agent-guard.sh'"
+        assert (
+            new["PreToolUse"][0]["hooks"][0]["command"]
+            == "PUSH_KEY='x' bash '/different/snyk-agent-guard.sh' --client claude-code"
+        )
 
         result["modified"]["PreToolUse"]["actual_value"][0]["hooks"][0]["command"] = "MUTATED"
-        assert old["PreToolUse"][0]["hooks"][0]["command"] == "PUSH_KEY='x' bash '/original/snyk-agent-guard.sh'"
+        assert (
+            old["PreToolUse"][0]["hooks"][0]["command"]
+            == "PUSH_KEY='x' bash '/original/snyk-agent-guard.sh' --client claude-code"
+        )
 
     def test_customer_hooks_only_are_ignored(self):
         """Events with only customer (non-guard) hooks produce no diff."""
@@ -7822,8 +7919,8 @@ class TestComputeHooksDiff:
 
     def test_mixed_hooks_only_guard_diffed(self):
         """When events have both guard and customer hooks, only guard hooks are compared."""
-        guard_old = {"hooks": [{"command": "PUSH_KEY='x' bash '/old/snyk-agent-guard.sh'"}]}
-        guard_new = {"hooks": [{"command": "PUSH_KEY='x' bash '/new/snyk-agent-guard.sh'"}]}
+        guard_old = {"hooks": [{"command": "PUSH_KEY='x' bash '/old/snyk-agent-guard.sh' --client claude-code"}]}
+        guard_new = {"hooks": [{"command": "PUSH_KEY='x' bash '/new/snyk-agent-guard.sh' --client claude-code"}]}
         customer = {"hooks": [{"command": "customer-tool"}]}
         old = {"PreToolUse": [customer, guard_old]}
         new = {"PreToolUse": [customer, guard_new]}
@@ -7845,8 +7942,8 @@ class TestComputeHooksDiff:
 
     def test_cursor_format_guard_hooks_diffed(self):
         """Cursor-format entries (flat dict with 'command') are correctly extracted."""
-        old = {"preToolUse": [{"command": "PUSH_KEY='x' bash snyk-agent-guard.sh --old"}]}
-        new = {"preToolUse": [{"command": "PUSH_KEY='x' bash snyk-agent-guard.sh --new"}]}
+        old = {"preToolUse": [{"command": "PUSH_KEY='x' bash snyk-agent-guard.sh --client cursor --old"}]}
+        new = {"preToolUse": [{"command": "PUSH_KEY='x' bash snyk-agent-guard.sh --client cursor --new"}]}
         result = _compute_hooks_diff(old, new)
         assert "preToolUse" in result["modified"]
 
@@ -11837,3 +11934,25 @@ class TestAgentScanCommandCheck:
         ):
             _run_install(args)
         install.assert_called_once()
+
+
+class TestUninstallKeepsHooksThatOnlyMentionTheScript:
+    """A customer hook that references the Guard script by path is not a Guard hook."""
+
+    def test_uninstall_removes_only_the_guard_hook(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("SNYK_TOKEN", raising=False)
+        script = tmp_path / "hooks" / "snyk-agent-guard.sh"
+        customer = {"type": "command", "command": f"grep -c curl {script}"}
+        guard = {"type": "command", "command": f"bash {_shell_quote(str(script))} --client claude-code"}
+        settings = tmp_path / "settings.json"
+        settings.write_text(
+            json.dumps(
+                {"hooks": {"PreToolUse": [{"matcher": "", "hooks": [guard]}, {"matcher": "", "hooks": [customer]}]}}
+            )
+        )
+
+        with patch(f"{_G}.revoke_push_key") as revoke:
+            _run_uninstall(SimpleNamespace(client="claude", file=str(settings), managed=False))
+
+        revoke.assert_not_called()
+        assert json.loads(settings.read_text())["hooks"] == {"PreToolUse": [{"matcher": "", "hooks": [customer]}]}

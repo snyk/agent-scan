@@ -67,10 +67,20 @@ _T = TypeVar("_T")
 
 ALL_CLIENTS = ["claude", "cursor", "codex", "github-copilot"]
 DEFAULT_REMOTE_URL = "https://api.snyk.io"
-# Matches our hook commands by script name, so it recognises both the current commands,
-# which carry no values, and those written by earlier versions, which prefixed the script
-# with PUSH_KEY=... assignments (POSIX) or followed it with -PushKey ... (PowerShell).
-_DETECTION_RE = re.compile(r"""(?:^|[/\\'"\s])snyk-agent-guard(?:-discover)?\.(?:sh|ps1)(?:['"\s]|$)""")
+# Matches our hook commands by their shape: `bash <script> --client` or
+# `powershell -File <script> -Client`, with the script as the interpreter's first argument.
+# That covers the current commands, which carry no values, and those written by earlier
+# versions, which prefixed them with PUSH_KEY=... assignments (POSIX) or appended -PushKey ...
+# (PowerShell). A command that only mentions the script, such as `cat .../snyk-agent-guard.sh`
+# or a wrapper taking it as a later argument, is the user's own and must not be replaced or
+# removed. The interpreter may follow a quote because Codex TOML is also matched line by line.
+_DETECTION_RE = re.compile(
+    r"""(?:^|[\s'"])(?:bash|powershell\s+-File)\s+"""
+    # The script path up to its last separator: single-quoted (with '"'"' or '' for a quote),
+    # double-quoted or unquoted; or only an opening quote; or nothing.
+    r"""(?:'(?:[^'\n]|'"'"'|'')*?[/\\]|"[^"\n]*?[/\\]|[^\s'"]*?[/\\]|['"])?"""
+    r"""snyk-agent-guard(?:-discover)?\.(?:sh|ps1)['"]?\s+(?:--client|-Client)(?:\s|$)"""
+)
 # Installation configuration read by the hook scripts, next to them in the hooks directory.
 # Not a .json file: Copilot loads every *.json file in ~/.copilot/hooks as a hook config.
 GUARD_CONFIG_NAME = "snyk-agent-guard.conf"
