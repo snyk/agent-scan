@@ -25,4 +25,6 @@ HOOK_SURFACE_CASES = [
         {"CURSOR_CLI": None, "CURSOR_CLI_MODE": "local"},
     ),
     ("cursor", {"CURSOR_INVOKED_AS": "", "CURSOR_CLI": ""}, {"CURSOR_INVOKED_AS": "", "CURSOR_CLI": None}),
+    ("cursor", {"CURSOR_AGENT_SOCKET": "/run/cursor/api.sock"}, {"CURSOR_AGENT_SOCKET": None}),
+    ("codex", {"CURSOR_AGENT_SOCKET": "/run/cursor/api.sock"}, {}),
 ]

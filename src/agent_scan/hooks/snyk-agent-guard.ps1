@@ -158,7 +158,7 @@ try {
     $markerNames = switch ($Client) {
         "claude-code" { "CLAUDE_CODE_ENTRYPOINT" }
         "codex" { "CODEX_INTERNAL_ORIGINATOR_OVERRIDE" }
-        "cursor" { "CURSOR_INVOKED_AS", "CURSOR_CLI_MODE", "CURSOR_CLI" }
+        "cursor" { "CURSOR_INVOKED_AS", "CURSOR_CLI_MODE", "CURSOR_CLI", "CURSOR_AGENT_SOCKET" }
         "github-copilot" { "AI_AGENT", "COPILOT_CLI" }
     }
     $evidence = @{}
@@ -167,7 +167,7 @@ try {
         if ($null -eq $value) {
             continue
         }
-        if ($name -eq "CURSOR_CLI" -or $value.Length -gt 128 -or $value -cmatch '[^ -~]') {
+        if ($name -in ("CURSOR_CLI", "CURSOR_AGENT_SOCKET") -or $value.Length -gt 128 -or $value -cmatch '[^ -~]') {
             $evidence[$name] = $null
         } else {
             $evidence[$name] = $value

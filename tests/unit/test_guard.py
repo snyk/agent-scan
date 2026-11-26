@@ -4123,6 +4123,7 @@ def test_hook_forwarder_sends_surface_evidence(hook_server, forwarder, client, r
         "CURSOR_INVOKED_AS",
         "CURSOR_CLI",
         "CURSOR_CLI_MODE",
+        "CURSOR_AGENT_SOCKET",
         "CLAUDE_CODE_ENTRYPOINT",
         "CODEX_INTERNAL_ORIGINATOR_OVERRIDE",
     ):
@@ -4158,8 +4159,10 @@ def test_hook_forwarder_sends_surface_evidence(hook_server, forwarder, client, r
     assert result.returncode == 0, result.stderr
     request = _HookHandler.last_request
     assert request is not None
-    evidence = json.loads(request["headers"].get("X-Agent-Surface-Evidence", "{}"))
-    assert evidence == expected_evidence
+    if expected_evidence:
+        assert json.loads(request["headers"]["X-Agent-Surface-Evidence"]) == expected_evidence
+    else:
+        assert "X-Agent-Surface-Evidence" not in request["headers"]
     assert "X-Agent-Surface" not in request["headers"]
     assert "agent_surface" not in json.loads(request["headers"]["X-User"])
 

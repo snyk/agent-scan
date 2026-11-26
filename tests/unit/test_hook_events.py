@@ -107,12 +107,13 @@ def test_discovery_distinguishes_installation_from_runtime(client, runtime_env, 
                 machine_serial="serial-1",
             )
     assert [json.loads(post["headers"]["X-User"])["machine_serial"] for post in session.posts] == ["serial-1"] * 4
-    assert [json.loads(post["headers"].get("X-Agent-Surface-Evidence", "{}")) for post in session.posts] == [
-        {},
-        {},
-        {},
-        expected_evidence,
-    ]
+    installer_posts = session.posts[:-1]
+    runtime_headers = session.posts[-1]["headers"]
+    assert all("X-Agent-Surface-Evidence" not in post["headers"] for post in installer_posts)
+    if expected_evidence:
+        assert json.loads(runtime_headers["X-Agent-Surface-Evidence"]) == expected_evidence
+    else:
+        assert "X-Agent-Surface-Evidence" not in runtime_headers
     assert all("X-Agent-Surface" not in post["headers"] for post in session.posts)
 
 

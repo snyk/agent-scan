@@ -114,7 +114,8 @@ def _run_installed_grouped_hooks(config_file, *, powershell=False):
     ("client", "filename", "marker", "value"),
     [
         ("claude", "settings.json", "CLAUDE_CODE_ENTRYPOINT", "sdk-cli"),
-        ("codex", "hooks.json", "CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex Desktop"),
+        pytest.param("codex", "hooks.json", "CODEX_INTERNAL_ORIGINATOR_OVERRIDE", "Codex Desktop", id="codex-desktop"),
+        pytest.param("codex", "hooks.json", "CODEX_INTERNAL_ORIGINATOR_OVERRIDE", None, id="codex-cli"),
     ],
 )
 def test_installed_hooks_use_runtime_surface_only_after_setup(
@@ -122,7 +123,10 @@ def test_installed_hooks_use_runtime_surface_only_after_setup(
 ):
     config_file = tmp_path / filename
     monkeypatch.setenv("USERPROFILE" if os.name == "nt" else "HOME", str(tmp_path))
-    monkeypatch.setenv(marker, value)
+    if value is None:
+        monkeypatch.delenv(marker, raising=False)
+    else:
+        monkeypatch.setenv(marker, value)
     _install([sys.executable, "-m", "src.agent_scan.run"], agent_scan_command, client, config_file, fake_hook_server)
     _run_installed_grouped_hooks(config_file, powershell=os.name == "nt")
     assert [r["body"]["hook_event_name"] for r in _FakeHookServer.requests] == [
@@ -131,7 +135,7 @@ def test_installed_hooks_use_runtime_surface_only_after_setup(
         "PreToolUse",
         "sessionStartServerDiscovery",
     ]
-    _assert_installer_and_runtime_evidence({marker: value})
+    _assert_installer_and_runtime_evidence({marker: value} if value is not None else {})
 
 
 def test_installed_copilot_hooks_distinguish_setup_from_runtime(
@@ -188,7 +192,10 @@ def _assert_installer_and_runtime_evidence(expected):
     headers = [r["headers"] for r in _FakeHookServer.requests]
     assert all("X-Agent-Surface" not in h for h in headers)
     assert all("X-Agent-Surface-Evidence" not in h for h in headers[:2])
-    assert [json.loads(h["X-Agent-Surface-Evidence"]) for h in headers[2:]] == [expected, expected]
+    if expected:
+        assert [json.loads(h["X-Agent-Surface-Evidence"]) for h in headers[2:]] == [expected, expected]
+    else:
+        assert all("X-Agent-Surface-Evidence" not in h for h in headers[2:])
 
 
 class TestGuardInstallE2E:
@@ -272,9 +279,17 @@ class TestGuardInstallE2E:
         assert session_discovery["body"]["discovery_duration_ms"] >= 0
 
     @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
-    def test_guard_install_cursor(self, agent_scan_cmd, agent_scan_command, tmp_path, fake_hook_server):
+    def test_guard_install_cursor(self, agent_scan_cmd, agent_scan_command, tmp_path, fake_hook_server, monkeypatch):
         config_file = tmp_path / "hooks.json"
+        for marker in ("CURSOR_INVOKED_AS", "CURSOR_CLI_MODE", "CURSOR_CLI"):
+            monkeypatch.delenv(marker, raising=False)
+        monkeypatch.setenv("CURSOR_AGENT_SOCKET", "/run/cursor/api.sock")
         _install(agent_scan_cmd, agent_scan_command, "cursor", config_file, fake_hook_server)
+        assert [request["body"]["hook_event_name"] for request in _FakeHookServer.requests] == [
+            "hooksConfigured",
+            "hooksConfiguredServerDiscovery",
+        ]
+        assert all("X-Agent-Surface-Evidence" not in request["headers"] for request in _FakeHookServer.requests)
 
         data = json.loads(config_file.read_text())
         assert "hooks" in data
@@ -307,6 +322,7 @@ class TestGuardInstallE2E:
         session_discovery = _FakeHookServer.requests[-1]
         assert session_discovery["body"]["hook_event_name"] == "sessionStartServerDiscovery"
         assert session_discovery["body"]["conversation_id"] == "e2e-conversation"
+        assert json.loads(session_discovery["headers"]["X-Agent-Surface-Evidence"]) == {"CURSOR_AGENT_SOCKET": None}
         assert "session_id" not in session_discovery["body"]
         assert isinstance(session_discovery["body"]["servers"], list)
         assert isinstance(session_discovery["body"]["discovery_duration_ms"], int)

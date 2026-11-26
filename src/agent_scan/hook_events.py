@@ -127,7 +127,7 @@ def next_retry_delay(policy: RetryPolicy, attempt: int, started: float, now: flo
 SURFACE_EVIDENCE_MARKERS = {
     "claude-code": ("CLAUDE_CODE_ENTRYPOINT",),
     "codex": ("CODEX_INTERNAL_ORIGINATOR_OVERRIDE",),
-    "cursor": ("CURSOR_INVOKED_AS", "CURSOR_CLI_MODE", "CURSOR_CLI"),
+    "cursor": ("CURSOR_INVOKED_AS", "CURSOR_CLI_MODE", "CURSOR_CLI", "CURSOR_AGENT_SOCKET"),
     "github-copilot": ("AI_AGENT", "COPILOT_CLI"),
 }
 
@@ -238,7 +238,9 @@ def send_hook_event(
     if not _is_installer_payload(payload):
         evidence = {
             key: value
-            if key != "CURSOR_CLI" and len(value) <= 128 and all(" " <= char <= "~" for char in value)
+            if key not in ("CURSOR_CLI", "CURSOR_AGENT_SOCKET")
+            and len(value) <= 128
+            and all(" " <= char <= "~" for char in value)
             else None
             for key in SURFACE_EVIDENCE_MARKERS.get(hook_client, ())
             if (value := os.environ.get(key)) is not None

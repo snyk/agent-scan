@@ -125,7 +125,7 @@ get_surface_evidence() {
   case "$1" in
     claude-code) set -- CLAUDE_CODE_ENTRYPOINT ;;
     codex) set -- CODEX_INTERNAL_ORIGINATOR_OVERRIDE ;;
-    cursor) set -- CURSOR_INVOKED_AS CURSOR_CLI_MODE CURSOR_CLI ;;
+    cursor) set -- CURSOR_INVOKED_AS CURSOR_CLI_MODE CURSOR_CLI CURSOR_AGENT_SOCKET ;;
     github-copilot) set -- AI_AGENT COPILOT_CLI ;;
     *) return 0 ;;
   esac
@@ -133,7 +133,7 @@ get_surface_evidence() {
   for key in "$@"; do
     [[ -n "${!key+x}" ]] || continue
     value="${!key}"
-    if [[ "$key" == CURSOR_CLI || ${#value} -gt 128 || "$value" == *[!\ -~]* ]]; then
+    if [[ "$key" == CURSOR_CLI || "$key" == CURSOR_AGENT_SOCKET || ${#value} -gt 128 || "$value" == *[!\ -~]* ]]; then
       value=null
     else
       value="$(json_quote "$value")"
