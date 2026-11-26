@@ -13,6 +13,7 @@ machine mode, a token command that fails is an error, and the scan never falls
 back to the push key.
 """
 
+import asyncio
 import logging
 import os
 import subprocess
@@ -79,6 +80,19 @@ class MachineAuth:
             return self
         token = fetch_access_token(self.token_command, self.base_url)
         return replace(self, access_token=token)
+
+
+async def refresh_after_401(auth: MachineAuth) -> MachineAuth | None:
+    """After a 401, the auth with a new token, or None when a retry would send the same token.
+
+    The token can expire mid-scan. The command prints its cached token while it
+    still looks valid, so getting the same token back means a retry would fail
+    too. Raises MachineAuthError when the command fails.
+    """
+    if not auth.token_command:
+        return None
+    fresh = await asyncio.to_thread(auth.refresh)
+    return None if fresh.access_token == auth.access_token else fresh
 
 
 def is_machine_mode(values: Sequence[str | None]) -> bool:

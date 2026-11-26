@@ -19,6 +19,7 @@ from agent_scan.machine_auth import (
     MachineAuthError,
     fetch_access_token,
     is_machine_mode,
+    refresh_after_401,
     resolve_machine_auth,
 )
 from agent_scan.models.api.common import ScanUserInfo
@@ -1071,6 +1072,39 @@ class TestFetchAgentScanConfig:
                 await fetch_agent_scan_config(self._ANALYSIS_URL, "push-abc", machine_auth=machine_auth)
 
     @pytest.mark.asyncio
+    async def test_machine_auth_401_retries_once_with_a_fresh_token(self):
+        machine_auth = MachineAuth("https://api.example.io", "tenant-1", "old-token", token_command="/opt/ads/x")
+        with (
+            patch("agent_scan.verify_api.aiohttp.ClientSession") as mock_cls,
+            patch("agent_scan.machine_auth.fetch_access_token", return_value="new-token"),
+        ):
+            session = _make_get_session_seq(
+                [_get_cm(status=401), _get_cm(status=200, json_data={"async_analysis_enabled": True})]
+            )
+            mock_cls.return_value = session
+            config = await fetch_agent_scan_config(self._ANALYSIS_URL, None, machine_auth=machine_auth)
+
+        assert config.async_analysis_enabled is True
+        assert [c.kwargs["headers"]["Authorization"] for c in session.get.call_args_list] == [
+            "Bearer old-token",
+            "Bearer new-token",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_machine_auth_401_with_the_same_token_fails_without_retry(self):
+        machine_auth = MachineAuth("https://api.example.io", "tenant-1", "old-token", token_command="/opt/ads/x")
+        with (
+            patch("agent_scan.verify_api.aiohttp.ClientSession") as mock_cls,
+            patch("agent_scan.machine_auth.fetch_access_token", return_value="old-token"),
+        ):
+            session = _make_get_session(status=401)
+            mock_cls.return_value = session
+            with pytest.raises(MachineAuthError, match="401"):
+                await fetch_agent_scan_config(self._ANALYSIS_URL, None, machine_auth=machine_auth)
+
+        session.get.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_parses_all_toggles(self):
         json_data = {"async_analysis_enabled": True, "remote_discovery_mode": "shadow", "future_toggle": 1}
         with patch("agent_scan.verify_api.aiohttp.ClientSession") as mock_cls:
@@ -1277,6 +1311,58 @@ class TestSubmitAsyncAnalysis:
             _, error_text, _ = await _submit_async_analysis(self._ASYNC_URL, payload, {}, "m", None, False)
 
         assert error_text == "Unauthorized. Please check your push key."
+
+    @pytest.mark.asyncio
+    async def test_machine_auth_401_retries_once_with_a_fresh_token(self):
+        payload = MagicMock()
+        payload.model_dump_json.return_value = "{}"
+        machine_auth = MachineAuth("https://api.example.io", "tenant-1", "old-token", token_command="/opt/ads/x")
+        sent: list[str] = []
+        responses = iter([_post_cm(status=401), _post_cm(status=202)])
+
+        def post(*_args, **kwargs):
+            sent.append(kwargs["headers"]["Authorization"])
+            return next(responses)
+
+        with (
+            patch("agent_scan.verify_api.aiohttp.ClientSession") as mock_cls,
+            patch("agent_scan.machine_auth.fetch_access_token", return_value="new-token"),
+        ):
+            session = _make_post_session_seq([])
+            session.post = MagicMock(side_effect=post)
+            mock_cls.return_value = session
+            success, error_text, _ = await _submit_async_analysis(
+                self._ASYNC_URL, payload, machine_auth.headers, "m", None, False, machine_auth=machine_auth
+            )
+
+        assert (success, error_text) == (True, None)
+        assert sent == ["Bearer old-token", "Bearer new-token"]
+
+    @pytest.mark.asyncio
+    async def test_machine_auth_401_with_the_same_token_is_not_retried(self):
+        payload = MagicMock()
+        payload.model_dump_json.return_value = "{}"
+        machine_auth = MachineAuth("https://api.example.io", "tenant-1", "old-token", token_command="/opt/ads/x")
+
+        with (
+            patch("agent_scan.verify_api.aiohttp.ClientSession") as mock_cls,
+            patch("agent_scan.machine_auth.fetch_access_token", return_value="old-token"),
+        ):
+            session = _make_post_session(status=401)
+            mock_cls.return_value = session
+            success, error_text, _ = await _submit_async_analysis(
+                self._ASYNC_URL,
+                payload,
+                machine_auth.headers,
+                "m",
+                None,
+                False,
+                unauthorized_text="machine 401",
+                machine_auth=machine_auth,
+            )
+
+        assert (success, error_text) == (False, "machine 401")
+        session.post.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_4xx_uses_backend_detail(self):
@@ -2002,6 +2088,12 @@ class TestMachineAuth:
         machine_auth = MachineAuth("https://api.snyk.io", "tenant-1", "tok")
         with patch("agent_scan.machine_auth.subprocess.run") as run:
             assert machine_auth.refresh() is machine_auth
+        run.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_refresh_after_401_without_token_command_does_not_run_it(self):
+        with patch("agent_scan.machine_auth.subprocess.run") as run:
+            assert await refresh_after_401(MachineAuth("https://api.snyk.io", "tenant-1", "tok")) is None
         run.assert_not_called()
 
     def test_tenant_url(self):

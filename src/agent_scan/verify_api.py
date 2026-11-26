@@ -16,7 +16,7 @@ from mcp.types import Prompt, Resource, ResourceTemplate, Tool
 from pydantic import BaseModel, ValidationError, field_validator
 from rich.markup import escape
 
-from agent_scan.machine_auth import SYNC_ANALYSIS_ERROR, MachineAuth, MachineAuthError
+from agent_scan.machine_auth import SYNC_ANALYSIS_ERROR, MachineAuth, MachineAuthError, refresh_after_401
 from agent_scan.models.api.common import ScanUserInfo
 from agent_scan.models.api.v20260710 import (
     McpEntitySummary,
@@ -191,7 +191,9 @@ async def fetch_agent_scan_config(
     else:
         config_url = agent_scan_config_url(analysis_url)
         auth_headers = {"X-Push-Key": push_key or ""}
-    for attempt in range(max_retries):
+    refreshed = False
+    attempt = 0
+    while attempt < max_retries:
         try:
             async with backend_client_session(trace_configs, skip_ssl_verify) as session:
                 async with session.get(
@@ -204,6 +206,13 @@ async def fetch_agent_scan_config(
                             return AgentScanConfig.model_validate(await response.json())
                         except (ValueError, ValidationError) as e:
                             return unavailable(f"Agent Scan config response is invalid ({e})")
+                    if response.status == 401 and machine_auth is not None and not refreshed:
+                        refreshed = True
+                        fresh = await refresh_after_401(machine_auth)
+                        if fresh is not None:
+                            logger.info("Agent Scan config got 401; retrying with a fresh machine token.")
+                            machine_auth, auth_headers = fresh, fresh.headers
+                            continue
                     if response.status < 500:
                         return unavailable(f"Agent Scan config request returned {response.status}")
                     logger.warning(
@@ -220,6 +229,7 @@ async def fetch_agent_scan_config(
 
         if attempt < max_retries - 1:
             await asyncio.sleep(2**attempt)  # 1s, 2s, ...
+        attempt += 1
 
     return unavailable(f"Agent Scan config request failed after {max_retries} attempt(s)")
 
@@ -243,12 +253,14 @@ async def _submit_async_analysis(
     skip_ssl_verify: bool,
     max_retries: int = 3,
     unauthorized_text: str = "Unauthorized. Please check your push key.",
+    machine_auth: MachineAuth | None = None,
 ) -> tuple[bool, str | None, Exception | None]:
     """Stream the gzipped payload to the async accept endpoint.
 
     Retries transient transport failures and 5xx responses with exponential
     backoff, mirroring the synchronous path. 4xx responses are deterministic
-    and are not retried.
+    and are not retried, except a 401 with ``machine_auth``: that is retried
+    once with a fresh machine token, when the token command prints a new one.
 
     Returns:
         (success, error_message, exception) tuple.
@@ -264,8 +276,10 @@ async def _submit_async_analysis(
 
     last_error_text: str | None = None
     last_exc: Exception | None = None
+    refreshed = False
+    attempt = 0
 
-    for attempt in range(max_retries):
+    while attempt < max_retries:
         try:
             async with backend_client_session(trace_configs, skip_ssl_verify) as session:
                 async with session.post(
@@ -277,6 +291,14 @@ async def _submit_async_analysis(
                     if response.status == 202:
                         logger.info("Scan accepted for asynchronous analysis.")
                         return True, None, None
+                    if response.status == 401 and machine_auth is not None and not refreshed:
+                        refreshed = True
+                        fresh = await refresh_after_401(machine_auth)
+                        if fresh is not None:
+                            logger.info("Async analysis got 401; retrying with a fresh machine token.")
+                            machine_auth = fresh
+                            headers.update(fresh.headers)
+                            continue
                     if response.status == 401:
                         error_text = unauthorized_text
                         logger.error(error_text)
@@ -326,6 +348,7 @@ async def _submit_async_analysis(
         if attempt < max_retries - 1:
             backoff_time = 2**attempt  # 1s, 2s, 4s
             await asyncio.sleep(backoff_time)
+        attempt += 1
 
     error_text = f"Tried calling verification api {max_retries} times. Could not reach analysis server."
     if last_error_text:
@@ -641,6 +664,7 @@ async def analyze_machine(
                 skip_ssl_verify,
                 max_retries,
                 unauthorized_text=unauthorized_text,
+                machine_auth=machine_auth,
             )
             if success:
                 _warn_async_results_not_shown(machine_mode=machine_auth is not None)

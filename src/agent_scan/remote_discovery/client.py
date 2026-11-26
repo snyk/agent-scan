@@ -15,7 +15,7 @@ from typing import Any
 import aiohttp
 
 from agent_scan.agents.base import is_own_home
-from agent_scan.machine_auth import TENANT_API_VERSION, MachineAuth
+from agent_scan.machine_auth import TENANT_API_VERSION, MachineAuth, refresh_after_401
 from agent_scan.remote_discovery.executor import run_op, to_wire
 from agent_scan.utils import get_readable_home_directories
 from agent_scan.verify_api import RETRYABLE_TRANSPORT_EXCEPTIONS, setup_tcp_connector
@@ -57,8 +57,8 @@ class _Auth:
         """
         if self._machine_auth is None:
             return False
-        fresh = await asyncio.to_thread(self._machine_auth.refresh)
-        if fresh.access_token == self._machine_auth.access_token:
+        fresh = await refresh_after_401(self._machine_auth)
+        if fresh is None:
             return False
         self._machine_auth = fresh
         self.headers = fresh.headers
