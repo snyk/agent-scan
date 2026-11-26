@@ -130,6 +130,10 @@ load_config() {
     return 0
   fi
   CONFIG_SOURCE="$CONFIG_FILE"
+  # A file wins over --from-env; say so, since the environment is then silently ignored.
+  if [[ "$from_env" == "1" ]]; then
+    CONFIG_SOURCE="${CONFIG_FILE} (used instead of the environment while it exists)"
+  fi
   [[ -f "$CONFIG_FILE" && -r "$CONFIG_FILE" ]] \
     || die "Configuration file not found: ${CONFIG_FILE} (run 'snyk-agent-scan guard install')"
   local line key value

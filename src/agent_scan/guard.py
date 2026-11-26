@@ -1155,6 +1155,10 @@ def _install_hooks(
             f"   Values:     [dim]from the hooks' environment; it must provide {needed} "
             "(install cannot check that)[/dim]"
         )
+        rich.print(
+            f"   Note:       [dim]a {GUARD_CONFIG_NAME} next to the scripts would win over the environment; "
+            "install removed any that was there[/dim]"
+        )
     rich.print()
 
 

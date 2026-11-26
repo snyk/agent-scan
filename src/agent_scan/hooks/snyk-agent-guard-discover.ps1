@@ -53,7 +53,9 @@ if ($valuesFromEnv) {
     $Config["MACHINE_SERIAL"] = $env:MACHINE_SERIAL
     $Config["AGENT_SCAN_COMMAND"] = $env:AGENT_SCAN_COMMAND
     $envUrl = $Config["REMOTE_HOOKS_BASE_URL"]
-    if ($envUrl -and $envUrl -cnotmatch $EnvUrlPattern) { exit 0 }
+    # A missing URL would make `guard discover` fall back to its default API, so it ends here
+    # like the forwarder's usage error.
+    if (-not $envUrl -or $envUrl -cnotmatch $EnvUrlPattern) { exit 0 }
 } else {
     if (-not (Test-Path -LiteralPath $ConfigFile -PathType Leaf)) { exit 0 }
     # Session-start discovery is best-effort: an unreadable file ends it quietly, as in

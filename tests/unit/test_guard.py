@@ -10979,6 +10979,39 @@ class TestHookScriptsEnvMode:
         assert result.returncode == 0, result.stderr
         assert _HookHandler.last_request["headers"]["X-Client-Id"] == "pk-file"
 
+    def test_with_from_env_a_config_file_error_says_the_file_wins(self, tmp_path, hook_server):
+        """The file silently wins over --from-env, so its errors say so."""
+        script = self._install(tmp_path, "snyk-agent-guard.sh", f"REMOTE_HOOKS_BASE_URL={hook_server}\nMACHINE_ID=m\n")
+        env = {"PATH": _ENV_PATH, "PUSH_KEY": "pk-env"}
+        result = self._run(["bash", str(script), "--client", "claude-code", "--from-env"], env)
+        assert result.returncode == 1
+        assert "(used instead of the environment while it exists)" in result.stderr
+        assert "PUSH_KEY is not set in" in result.stderr
+        # Without --from-env the message names just the file.
+        result = self._run(["bash", str(script), "--client", "claude-code"], env)
+        assert "PUSH_KEY is not set in" in result.stderr
+        assert "used instead of the environment" not in result.stderr
+
+    @pytest.mark.parametrize("url", [None, ""])
+    def test_discover_does_nothing_without_an_endpoint(self, tmp_path, url):
+        """`guard discover` would fall back to its default API, so a missing URL ends discovery."""
+        stub, record = self._discover_stub(tmp_path)
+        script = self._install(tmp_path, "snyk-agent-guard-discover.sh", None)
+        env = {
+            "PATH": _ENV_PATH,
+            "RECORD": str(record),
+            "PUSH_KEY": "pk",
+            "MACHINE_ID": "m",
+            "AGENT_SCAN_COMMAND": str(stub),
+        }
+        if url is not None:
+            env["REMOTE_HOOKS_BASE_URL"] = url
+        result = self._run(
+            ["bash", str(script), "--client", "claude-code", "--scope", "servers", "--from-env"], env, payload="{}"
+        )
+        assert result.returncode == 0
+        assert not record.exists()
+
     def test_a_missing_value_names_the_environment(self, tmp_path, hook_server):
         script = self._install(tmp_path, "snyk-agent-guard.sh", None)
         env = {"PATH": _ENV_PATH, "REMOTE_HOOKS_BASE_URL": hook_server, "MACHINE_ID": "m"}
@@ -11347,6 +11380,12 @@ class TestEnvModeInstallEndToEnd:
             **{"env_placeholders": self._PLACEHOLDERS, **kwargs},
         )
 
+    def test_install_says_a_config_file_would_win(self, tmp_path, success_hook_server):
+        with patch(f"{_G}.rich") as mock_rich:
+            self._install(tmp_path / "settings.json", success_hook_server)
+        printed = " ".join(str(c) for c in mock_rich.print.call_args_list)
+        assert f"a {guard_module.GUARD_CONFIG_NAME} next to the scripts would win over the environment" in printed
+
     def test_install_writes_no_guard_config_and_placeholder_commands(self, tmp_path, success_hook_server):
         config = tmp_path / "settings.json"
         _SuccessHookHandler.requests = []
@@ -11537,3 +11576,31 @@ class TestPowerShellScriptsEnvMode:
         assert result.returncode == 1
         assert "PUSH_KEY is not set in the environment" in result.stderr
         assert _HookHandler.last_request is None
+
+    def test_with_from_env_a_config_file_error_says_the_file_wins(self, tmp_path, hook_server):
+        config = f"REMOTE_HOOKS_BASE_URL={hook_server}\nMACHINE_ID=m\n"
+        result = self._run(
+            "snyk-agent-guard.ps1",
+            tmp_path,
+            ["-Client", "claude-code", "-FromEnv"],
+            {"PUSH_KEY": "pk-env"},
+            config,
+            self._EVENT,
+        )
+        assert result.returncode == 1
+        assert "(used instead of the environment while it exists)" in result.stderr
+
+    def test_discover_does_nothing_without_an_endpoint(self, tmp_path):
+        """`guard discover` would fall back to its default API, so a missing URL ends discovery."""
+        marker = tmp_path / "invoked"
+        stub = tmp_path / "snyk-agent-scan.cmd"
+        stub.write_text(f'@echo off\r\ntype nul > "{marker}"\r\n')
+        env = {"PUSH_KEY": "pk", "MACHINE_ID": "m", "AGENT_SCAN_COMMAND": str(stub)}
+        result = self._run(
+            "snyk-agent-guard-discover.ps1",
+            tmp_path,
+            ["-Client", "cursor", "-Scope", "servers", "-FromEnv"],
+            env,
+        )
+        assert result.returncode == 0
+        assert not marker.exists()

@@ -50,7 +50,9 @@ if [[ ! -e "$CONFIG_FILE" && "$FROM_ENV" == "1" ]]; then
   MACHINE_ID="${MACHINE_ID:-}"
   MACHINE_SERIAL="${MACHINE_SERIAL:-}"
   AGENT_SCAN_COMMAND="${AGENT_SCAN_COMMAND:-}"
-  [[ -z "$REMOTE_HOOKS_BASE_URL" || "$REMOTE_HOOKS_BASE_URL" =~ $ENV_URL_RE ]] || exit 0
+  # A missing URL would make `guard discover` fall back to its default API, so it ends here
+  # like the forwarder's usage error.
+  [[ -n "$REMOTE_HOOKS_BASE_URL" && "$REMOTE_HOOKS_BASE_URL" =~ $ENV_URL_RE ]] || exit 0
   # A command from the environment runs only as an executable file, never through eval.
   [[ -z "$AGENT_SCAN_COMMAND" || -x "$AGENT_SCAN_COMMAND" ]] || exit 0
 else

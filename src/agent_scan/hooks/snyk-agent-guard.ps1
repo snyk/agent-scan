@@ -167,6 +167,8 @@ if (-not (Test-Path -LiteralPath $ConfigFile) -and $FromEnv) {
     }
 } else {
     $ConfigSource = $ConfigFile
+    # A file wins over -FromEnv; say so, since the environment is then silently ignored.
+    if ($FromEnv) { $ConfigSource = "$ConfigFile (used instead of the environment while it exists)" }
     if (-not (Test-Path -LiteralPath $ConfigFile -PathType Leaf)) {
         Write-Error "Configuration file not found: $ConfigFile (run 'snyk-agent-scan guard install')"
         exit 1
