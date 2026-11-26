@@ -11,10 +11,10 @@ jobs:
   pre-commit:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Print hostname
         run: hostname
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       - uses: pre-commit/action@v3.0.1
@@ -34,13 +34,13 @@ jobs:
       matrix:
         os: [ubuntu-latest, ubuntu-24.04-arm, windows-latest, macos-latest, macos-15-intel]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Print scan environment variables
         run: |
           echo "AGENT_SCAN_ENVIRONMENT=${{ env.AGENT_SCAN_ENVIRONMENT }}"
           echo "AGENT_SCAN_CI_HOSTNAME=${{ env.AGENT_SCAN_CI_HOSTNAME }}"
       - name: Install the latest version of uv
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
@@ -52,7 +52,7 @@ jobs:
         run: uv run --frozen make ci-managed
       - name: Upload binary artifact
         if: github.ref == 'refs/heads/main'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: agent-scan-${{ matrix.os }}-binary
           path: dist/agent-scan*
@@ -61,7 +61,7 @@ jobs:
         run: uv run --frozen make build
       - name: Upload wheel artifact
         if: github.ref == 'refs/heads/main'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: agent-scan-${{ matrix.os }}.whl
           path: dist/*.whl
