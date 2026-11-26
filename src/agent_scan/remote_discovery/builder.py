@@ -9,8 +9,6 @@ import os
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
-from pydantic import ValidationError
-
 from agent_scan.agents.base import _canonicalize_keys
 from agent_scan.models import (
     ClientToInspect,
@@ -27,11 +25,14 @@ McpValue = list[tuple[str, StdioServer | RemoteServer]] | UnknownConfigFormat | 
 
 
 def _servers(candidate: dict[str, Any]) -> dict[str, StdioServer | RemoteServer] | None:
+    """The candidate's servers, or None if any fails validation. Like ``_validate_servers``,
+    any error counts: an unparseable command raises ``CommandParsingError``, not a
+    ``ValidationError``."""
     servers: dict[str, StdioServer | RemoteServer] = {}
     try:
         for raw in candidate["maps"]:
             servers.update(MCPServerMap(servers=raw).servers)
-    except ValidationError:
+    except Exception:
         return None
     return servers
 
