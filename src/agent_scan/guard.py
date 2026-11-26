@@ -376,6 +376,20 @@ def _env_placeholders_from_args(
     return placeholders
 
 
+def _check_agent_scan_command(value: str) -> None:
+    """Refuse an AGENT_SCAN_COMMAND the discovery hook would not run: it runs only an absolute
+    path to an executable file. A relative one would resolve against the agent's working
+    directory, the repository, and a command string is never evaluated."""
+    if not value:
+        return
+    path = Path(value)
+    if not path.is_absolute() or not path.is_file() or (not IS_WINDOWS and not os.access(path, os.X_OK)):
+        raise ValueError(
+            f"AGENT_SCAN_COMMAND must be the absolute path of an executable file, such as the "
+            f"snyk-agent-scan binary; got {value!r}. The session-start discovery hook runs nothing else."
+        )
+
+
 def _run_install(args) -> None:
     client: str = args.client
     url: str = args.url
@@ -425,6 +439,13 @@ def _run_install(args) -> None:
         )
 
     env_placeholders = _env_placeholders_from_args(args, headless, push_key, url, machine_id, machine_serial)
+    # A placeholder is expanded only when the hook runs, so install can check only a literal value.
+    if env_placeholders is None or "AGENT_SCAN_COMMAND" not in env_placeholders:
+        try:
+            _check_agent_scan_command(_agent_scan_command() or "")
+        except ValueError as e:
+            rich.print(f"[bold red]Error:[/bold red] {e}")
+            sys.exit(1)
 
     clients = ALL_CLIENTS if client == "all" else [client]
 
@@ -1159,6 +1180,11 @@ def _install_hooks(
             f"   Note:       [dim]a {GUARD_CONFIG_NAME} next to the scripts would win over the environment; "
             "install removed any that was there[/dim]"
         )
+        if "AGENT_SCAN_COMMAND" in env_placeholders:
+            rich.print(
+                "   Note:       [dim]AGENT_SCAN_COMMAND must be the absolute path of an executable file when "
+                "the hooks run; otherwise session-start discovery is skipped[/dim]"
+            )
     rich.print()
 
 

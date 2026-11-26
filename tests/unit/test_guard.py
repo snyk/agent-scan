@@ -1085,7 +1085,18 @@ class TestDiscoveryHookScriptFiles:
         assert result.returncode == 0
         assert not marker.exists()
 
-    def test_multi_word_command_receives_prefix_and_hook_arguments(self, tmp_path):
+    @pytest.mark.parametrize(
+        "command",
+        [
+            pytest.param("{stub} arg1", id="arguments"),
+            pytest.param("cd {dir}; ./runner", id="shell-syntax"),
+            pytest.param("runner", id="bare-name"),
+            pytest.param("./runner", id="relative"),
+        ],
+    )
+    def test_command_other_than_an_absolute_executable_is_never_run(self, tmp_path, command):
+        """The command is run as a file, never evaluated; a relative one would resolve against
+        the agent's working directory, the repository."""
         script = Path(guard_module.__file__).parent / "hooks" / "snyk-agent-guard-discover.sh"
         marker = tmp_path / "invoked"
         stub = tmp_path / "runner"
@@ -1099,41 +1110,47 @@ class TestDiscoveryHookScriptFiles:
             text=True,
             capture_output=True,
             timeout=5,
+            cwd=tmp_path,
             env={
                 **os.environ,
-                "AGENT_SCAN_COMMAND": f"{stub} arg1",
+                "PATH": f"{tmp_path}:{os.environ.get('PATH', '')}",
+                "AGENT_SCAN_COMMAND": command.format(stub=stub, dir=_shell_quote(str(tmp_path))),
                 "MACHINE_ID": "machine-42",
                 "MARKER": str(marker),
             },
         )
 
         assert result.returncode == 0
-        assert marker.read_text() == "arg1 guard discover --client claude-code --scope servers\n"
+        assert not marker.exists()
+        assert result.stderr == (
+            "snyk-agent-guard: AGENT_SCAN_COMMAND must be the absolute path of an executable file; "
+            "session-start discovery skipped\n"
+        )
 
-    def test_shell_syntax_command_runs_from_requested_directory(self, tmp_path):
+    def test_non_executable_file_is_never_run(self, tmp_path):
         script = Path(guard_module.__file__).parent / "hooks" / "snyk-agent-guard-discover.sh"
-        marker = tmp_path / "invoked"
         stub = tmp_path / "runner"
-        stub.write_text('#!/bin/sh\nprintf "%s\\n" "$*" > "$MARKER"\n')
-        stub.chmod(0o755)
+        stub.write_text('#!/bin/sh\ntouch "$MARKER"\n')
+        stub.chmod(0o644)
 
         result = _run_installed_hook(
             tmp_path,
-            ["bash", str(script), "--client", "cursor", "--scope", "servers"],
+            ["bash", str(script), "--client", "claude-code"],
             input="{}",
             text=True,
             capture_output=True,
             timeout=5,
             env={
                 **os.environ,
-                "AGENT_SCAN_COMMAND": f"cd {_shell_quote(str(tmp_path))}; ./runner",
+                "AGENT_SCAN_COMMAND": str(stub),
                 "MACHINE_ID": "machine-42",
-                "MARKER": str(marker),
+                "MARKER": str(tmp_path / "invoked"),
             },
         )
 
         assert result.returncode == 0
-        assert marker.read_text() == "guard discover --client cursor --scope servers\n"
+        assert not (tmp_path / "invoked").exists()
+        assert "AGENT_SCAN_COMMAND must be the absolute path" in result.stderr
 
     def test_executable_path_with_spaces_is_invoked_verbatim(self, tmp_path):
         script = Path(guard_module.__file__).parent / "hooks" / "snyk-agent-guard-discover.sh"
@@ -4391,7 +4408,7 @@ class TestPowerShellDiscoveryHookScript:
         stub.write_text(f'@echo off\r\n"{sys.executable}" "{helper}" %*\r\n')
         return stub
 
-    def _run(self, script: Path, extra_args: list[str], env: dict, payload: str = "{}"):
+    def _run(self, script: Path, extra_args: list[str], env: dict, payload: str = "{}", cwd: Path | None = None):
         return _run_installed_ps_hook(
             [self._ps_cmd(), "-File", str(script), "-Client", "claude-code", *extra_args],
             input=payload,
@@ -4399,7 +4416,37 @@ class TestPowerShellDiscoveryHookScript:
             text=True,
             timeout=30,
             env=env,
+            cwd=cwd,
         )
+
+    @pytest.mark.parametrize(
+        "command",
+        [
+            pytest.param("snyk-agent-scan.cmd", id="bare-name"),
+            pytest.param(".\\snyk-agent-scan.cmd", id="relative"),
+            pytest.param("C:snyk-agent-scan.cmd", id="drive-relative"),
+            pytest.param("{stub} arg1", id="arguments"),
+            pytest.param("& '{stub}'", id="expression"),
+        ],
+    )
+    def test_command_other_than_an_absolute_file_is_never_run(self, tmp_path, command):
+        """The command is run as a file, never evaluated; a relative one would resolve against
+        the agent's working directory, the repository."""
+        script = _get_script_path("snyk-agent-guard-discover.ps1")
+        marker = tmp_path / "invoked"
+        stub = self._recording_stub(tmp_path, marker)
+        env = {**os.environ, "MARKER": str(marker), "PATH": f"{tmp_path}{os.pathsep}{os.environ.get('PATH', '')}"}
+
+        result = self._run(
+            script,
+            ["-AgentScanCommand", command.format(stub=stub), "-MachineId", "machine-42"],
+            env,
+            cwd=tmp_path,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert not marker.exists()
+        assert "AGENT_SCAN_COMMAND must be the absolute path of an executable file" in result.stderr
 
     def test_stdin_payload_and_arguments_reach_the_child(self, tmp_path):
         """The whole point of inheriting stdin: guard discover sees the hook payload."""
@@ -9794,7 +9841,11 @@ class TestInstallSwitchesAuthModes:
             pytest.skip("bash not available")
         for name in ("ADS_TOKEN_COMMAND", "ADS_BASE_URL", "PUSH_KEY", "MACHINE_SERIAL", "TENANT_ID"):
             monkeypatch.delenv(name, raising=False)
-        monkeypatch.setenv("AGENT_SCAN_COMMAND", "/usr/local/bin/snyk-agent-scan")
+        agent_scan = tmp_path / "bin" / "snyk-agent-scan"
+        agent_scan.parent.mkdir()
+        agent_scan.write_text("#!/bin/sh\n")
+        agent_scan.chmod(0o755)
+        monkeypatch.setenv("AGENT_SCAN_COMMAND", str(agent_scan))
 
     def _install(self, tmp_path, server, *, machine: bool, monkeypatch):
         if machine:
@@ -11446,6 +11497,14 @@ class TestEnvModeInstallEndToEnd:
             self._install(tmp_path / "settings.json", success_hook_server)
         printed = " ".join(str(c) for c in mock_rich.print.call_args_list)
         assert f"a {guard_module.GUARD_CONFIG_NAME} next to the scripts would win over the environment" in printed
+        assert "AGENT_SCAN_COMMAND must be the absolute path" not in printed
+
+    def test_install_says_what_an_agent_scan_command_placeholder_must_hold(self, tmp_path, success_hook_server):
+        placeholders = {**self._PLACEHOLDERS, "AGENT_SCAN_COMMAND": "SNYK_AGENT_SCAN"}
+        with patch(f"{_G}.rich") as mock_rich:
+            self._install(tmp_path / "settings.json", success_hook_server, env_placeholders=placeholders)
+        printed = " ".join(str(c) for c in mock_rich.print.call_args_list)
+        assert "AGENT_SCAN_COMMAND must be the absolute path of an executable file when the hooks run" in printed
 
     def test_install_writes_no_guard_config_and_placeholder_commands(self, tmp_path, success_hook_server):
         config = tmp_path / "settings.json"
@@ -11677,3 +11736,104 @@ class TestPowerShellScriptsEnvMode:
         )
         assert result.returncode == 0
         assert not marker.exists()
+
+
+class TestAgentScanCommandCheck:
+    """guard install refuses an AGENT_SCAN_COMMAND the discovery hook would not run."""
+
+    @pytest.fixture
+    def executable(self, tmp_path) -> Path:
+        path = tmp_path / "bin" / ("snyk-agent-scan.exe" if IS_WINDOWS else "snyk-agent-scan")
+        path.parent.mkdir()
+        path.write_text("#!/bin/sh\n")
+        path.chmod(0o755)
+        return path
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "uvx snyk-agent-scan@latest",
+            "snyk-agent-scan",
+            "./bin/snyk-agent-scan",
+            "cd /repo; uv run -m src.agent_scan.cli",
+        ],
+    )
+    def test_refuses_anything_but_an_absolute_path(self, value):
+        with pytest.raises(ValueError, match="absolute path of an executable file"):
+            guard_module._check_agent_scan_command(value)
+
+    def test_refuses_a_missing_file(self, tmp_path):
+        with pytest.raises(ValueError, match="absolute path of an executable file"):
+            guard_module._check_agent_scan_command(str(tmp_path / "missing"))
+
+    def test_refuses_a_directory(self, tmp_path):
+        with pytest.raises(ValueError, match="absolute path of an executable file"):
+            guard_module._check_agent_scan_command(str(tmp_path))
+
+    @pytest.mark.skipif(IS_WINDOWS, reason="Windows has no execute bit")
+    def test_refuses_a_file_that_is_not_executable(self, executable):
+        executable.chmod(0o644)
+        with pytest.raises(ValueError, match="absolute path of an executable file"):
+            guard_module._check_agent_scan_command(str(executable))
+
+    def test_accepts_an_absolute_executable_and_nothing(self, executable):
+        guard_module._check_agent_scan_command(str(executable))
+        guard_module._check_agent_scan_command("")
+
+    @staticmethod
+    def _args(tmp_path, **extra):
+        return SimpleNamespace(
+            client="claude",
+            url="https://api.snyk.io",
+            tenant_id="",
+            file=str(tmp_path / "settings.json"),
+            managed=False,
+            machine_id="machine-42",
+            **extra,
+        )
+
+    @pytest.mark.parametrize("env_mode", [False, True], ids=["config-file", "env-mode"])
+    def test_install_fails_before_anything_is_minted_or_written(self, tmp_path, monkeypatch, capsys, env_mode):
+        monkeypatch.setenv("PUSH_KEY", "pk-1234")
+        monkeypatch.setenv("AGENT_SCAN_COMMAND", "uvx snyk-agent-scan@latest")
+        extra = {"no_config_file": True, "env_placeholder": ["PUSH_KEY=SNYK_PK"]} if env_mode else {}
+        with (
+            patch(f"{_G}.IS_WINDOWS", False),
+            patch(f"{_G}.mint_push_key") as mint,
+            patch(f"{_G}._install_hooks") as install,
+            pytest.raises(SystemExit) as excinfo,
+        ):
+            _run_install(self._args(tmp_path, **extra))
+        assert excinfo.value.code == 1
+        mint.assert_not_called()
+        install.assert_not_called()
+        assert "AGENT_SCAN_COMMAND must be the absolute path" in capsys.readouterr().out
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.parametrize("env_mode", [False, True], ids=["config-file", "env-mode"])
+    def test_install_accepts_an_absolute_executable(self, tmp_path, monkeypatch, executable, env_mode):
+        monkeypatch.setenv("PUSH_KEY", "pk-1234")
+        monkeypatch.setenv("AGENT_SCAN_COMMAND", str(executable))
+        extra = {"no_config_file": True, "env_placeholder": ["PUSH_KEY=SNYK_PK"]} if env_mode else {}
+        with (
+            patch(f"{_G}.IS_WINDOWS", False),
+            patch(f"{_G}._install_hooks") as install,
+            patch(f"{_G}._send_servers_discovered_event", return_value=True),
+        ):
+            _run_install(self._args(tmp_path, **extra))
+        install.assert_called_once()
+
+    def test_a_placeholder_is_only_checked_when_the_hook_runs(self, tmp_path, monkeypatch):
+        """Install can't see the value a placeholder expands to, so it doesn't refuse one."""
+        monkeypatch.setenv("PUSH_KEY", "pk-1234")
+        monkeypatch.setenv("AGENT_SCAN_COMMAND", "uvx snyk-agent-scan@latest")
+        args = self._args(
+            tmp_path, no_config_file=True, env_placeholder=["PUSH_KEY=SNYK_PK", "AGENT_SCAN_COMMAND=SNYK_CMD"]
+        )
+        with (
+            patch(f"{_G}.IS_WINDOWS", False),
+            patch(f"{_G}._install_hooks") as install,
+            patch(f"{_G}._send_servers_discovered_event", return_value=True),
+        ):
+            _run_install(args)
+        install.assert_called_once()

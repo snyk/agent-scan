@@ -405,7 +405,7 @@ configuration file, set them again after installing or uninstalling.
 | `--check-installed` | boolean | `false` | With `--managed`, skip agents that are not installed for any user on the machine. Without it, managed installs do not check. Non-managed installs always check. |
 | `--test` | boolean | `false` | **Deprecated/no-op.** |
 | `--no-config-file` | boolean | `false` | Write no guard configuration file; the hooks read their values from the environment (see below). Needs `PUSH_KEY` set and `--env-placeholder PUSH_KEY=<VAR>`. |
-| `--env-placeholder NAME=VAR` | string, repeatable | — | With `--no-config-file`, write `NAME="$VAR"` into the hook commands, expanded when the hook runs. `NAME` is one of `PUSH_KEY`, `REMOTE_HOOKS_BASE_URL`, `MACHINE_ID`, `MACHINE_SERIAL`, `AGENT_SCAN_COMMAND`. Values without a placeholder are written as literals; the push key never is. |
+| `--env-placeholder NAME=VAR` | string, repeatable | — | With `--no-config-file`, write `NAME="$VAR"` into the hook commands, expanded when the hook runs. `NAME` is one of `PUSH_KEY`, `REMOTE_HOOKS_BASE_URL`, `MACHINE_ID`, `MACHINE_SERIAL`, `AGENT_SCAN_COMMAND`. Values without a placeholder are written as literals; the push key never is. `AGENT_SCAN_COMMAND` must be the absolute path of an executable file: install refuses another literal value, and the discovery hook skips another expanded one. |
 
 #### Where the hooks get their values
 
@@ -452,10 +452,11 @@ example through `env` in a project's agent settings. The scripts limit the damag
   endpoint, for example in a developer setup, goes in the configuration file, which is not checked.
 - The hooks need a push key from the environment and never switch to machine identity there. A `PUSH_KEY="$VAR"`
   placeholder that expands to nothing is an error; it doesn't fall back to an inherited `PUSHKEY`.
-- The discovery hook runs `AGENT_SCAN_COMMAND` from the environment only if it's an existing executable file. It never
-  evaluates it as a shell command.
-- A hook command without `--from-env` never falls back to the environment, so deleting the configuration file stops
-  the hooks instead of handing them to the environment.
+- The discovery hook runs `AGENT_SCAN_COMMAND` only if it's the absolute path of an executable file, in both modes. It
+  never evaluates it as a shell command, and a relative path, which would resolve against the agent's working
+  directory (the repository), is refused.
+- A hook command without `--from-env` never falls back to the environment, so deleting the configuration file makes
+  the hooks fail open instead of handing them to the environment.
 
 There is no configuration file, so there is no configuration checksum: agent-monitor can't detect a change to the
 values between installs.
@@ -502,7 +503,7 @@ kept.
 | `SNYK_TOKEN` | Required to mint/revoke push keys and verify that Guard is enabled for the tenant |
 | `MACHINE_ID` | Required non-anonymous machine identifier sent with hook events; alternative to `guard install --machine-id` |
 | `MACHINE_SERIAL` | Optional hardware serial captured by `guard install` for hook and discovery events. Sent as `machine_serial` alongside the hostname; absent or empty values become JSON `null`. The captured value, including an empty value, overrides any later inherited `MACHINE_SERIAL`. Does not change `MACHINE_ID`. |
-| `AGENT_SCAN_COMMAND` | Optional Agent Scan command invoked by the session-start discovery hook, with the hook arguments appended. The hook is installed only when this is set. A value that is not an existing executable file is run as a shell command. |
+| `AGENT_SCAN_COMMAND` | Optional Agent Scan command invoked by the session-start discovery hook, with the hook arguments appended. The hook is installed only when this is set. It must be the absolute path of an executable file, such as the `snyk-agent-scan` binary: `guard install` refuses anything else, and the hook never runs it as a shell command. |
 | `ADS_TOKEN_COMMAND` | Machine identity: a command that prints a machine access token on stdout when run as `<command> token --base-url <url>`, where `<url>` is `guard install --url`. Set together with `TENANT_ID`; see [Guard machine identity](#guard-machine-identity). |
 
 Pass `MACHINE_SERIAL` again whenever you reinstall or update Guard hooks. Reinstalling without it, or with a blank value, replaces any previously captured serial with JSON `null`; the old value is not preserved.

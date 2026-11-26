@@ -12,7 +12,11 @@ set -euo pipefail
 # `snyk-agent-scan guard install`. Only when there is no such file and the command passes
 # --from-env are the values taken from the environment instead: a push key is then required
 # (machine identity is never taken from there), REMOTE_HOOKS_BASE_URL must be an https Snyk
-# host, and AGENT_SCAN_COMMAND an executable file (it is never evaluated).
+# host.
+#
+# In both modes AGENT_SCAN_COMMAND must be the absolute path of an executable file. It is run
+# as that file and never evaluated; a relative path would resolve against the agent's working
+# directory, which is the repository. Any other value skips discovery with one line on stderr.
 
 # The hook arguments are passed on to `guard discover`, so only --client and --scope are
 # accepted: anything else, such as --url, would apply to the push key read below.
@@ -53,8 +57,6 @@ if [[ ! -e "$CONFIG_FILE" && "$FROM_ENV" == "1" ]]; then
   # A missing URL would make `guard discover` fall back to its default API, so it ends here
   # like the forwarder's usage error.
   [[ -n "$REMOTE_HOOKS_BASE_URL" && "$REMOTE_HOOKS_BASE_URL" =~ $ENV_URL_RE ]] || exit 0
-  # A command from the environment runs only as an executable file, never through eval.
-  [[ -z "$AGENT_SCAN_COMMAND" || -x "$AGENT_SCAN_COMMAND" ]] || exit 0
 else
   [[ -f "$CONFIG_FILE" && -r "$CONFIG_FILE" ]] || exit 0
 
@@ -88,9 +90,9 @@ export PUSH_KEY ADS_TOKEN_COMMAND TENANT_ID REMOTE_HOOKS_BASE_URL MACHINE_ID MAC
 
 [[ -n "$MACHINE_ID" ]] || exit 0
 [[ -n "$AGENT_SCAN_COMMAND" ]] || exit 0
-if [[ -x "$AGENT_SCAN_COMMAND" ]]; then
-  "$AGENT_SCAN_COMMAND" guard discover "$@" >/dev/null 2>&1 || true
-else
-  eval "$AGENT_SCAN_COMMAND guard discover \"\$@\"" >/dev/null 2>&1 || true
+if [[ "$AGENT_SCAN_COMMAND" != /* || ! -f "$AGENT_SCAN_COMMAND" || ! -x "$AGENT_SCAN_COMMAND" ]]; then
+  echo "snyk-agent-guard: AGENT_SCAN_COMMAND must be the absolute path of an executable file; session-start discovery skipped" 1>&2
+  exit 0
 fi
+"$AGENT_SCAN_COMMAND" guard discover "$@" >/dev/null 2>&1 || true
 exit 0

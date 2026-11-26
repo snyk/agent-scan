@@ -11,7 +11,11 @@
 # `snyk-agent-scan guard install`. Only when there is no such file and the command passes
 # -FromEnv are the values taken from the environment instead: a push key is then required
 # (machine identity is never taken from there), REMOTE_HOOKS_BASE_URL must be an https Snyk
-# host, and AGENT_SCAN_COMMAND an existing file (it is never evaluated).
+# host.
+#
+# In both modes AGENT_SCAN_COMMAND must be the absolute path of an existing file. It is run as
+# that file and never evaluated; a relative path would resolve against the agent's working
+# directory, which is the repository. Any other value skips discovery with one line on stderr.
 #
 param(
     [Parameter(Mandatory=$true)]
@@ -84,8 +88,17 @@ if (-not $env:MACHINE_ID) { exit 0 }
 
 $cmd = $Config["AGENT_SCAN_COMMAND"]
 if (-not $cmd) { exit 0 }
-# A command from the environment runs only as an existing file, never through Invoke-Expression.
-if ($valuesFromEnv -and -not (Test-Path -LiteralPath $cmd -PathType Leaf)) { exit 0 }
+# Fully qualified only: IsPathRooted would also accept a drive-relative C:name, which resolves
+# against the working directory.
+$absolute = if ([System.IO.Path]::DirectorySeparatorChar -eq '\') {
+    $cmd -match '^([A-Za-z]:[\\/]|[\\/]{2})'
+} else {
+    $cmd.StartsWith('/')
+}
+if (-not $absolute -or -not (Test-Path -LiteralPath $cmd -PathType Leaf)) {
+    [Console]::Error.WriteLine("snyk-agent-guard: AGENT_SCAN_COMMAND must be the absolute path of an executable file; session-start discovery skipped")
+    exit 0
+}
 
 $arguments = @("guard", "discover", "--client", $Client, "--scope", $Scope)
 
@@ -94,11 +107,7 @@ $arguments = @("guard", "discover", "--client", $Client, "--scope", $Scope)
 # cap -- matching snyk-agent-guard-discover.sh, which never touches fd 0. Reading it
 # here instead would block forever on an agent that keeps the pipe open.
 try {
-    if (Test-Path -LiteralPath $cmd -PathType Leaf) {
-        & $cmd @arguments *> $null
-    } else {
-        Invoke-Expression "$cmd $($arguments -join ' ')" *> $null
-    }
+    & $cmd @arguments *> $null
 } catch {
     # Session-start discovery is best-effort telemetry.
 }
