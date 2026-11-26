@@ -17,6 +17,7 @@ from mcp.types import Implementation, InitializeResult, ServerCapabilities, Tool
 from agent_scan.machine_auth import (
     MachineAuth,
     MachineAuthError,
+    MachineCredential,
     fetch_access_token,
     is_machine_mode,
     refresh_after_401,
@@ -1037,7 +1038,7 @@ class TestFetchAgentScanConfig:
 
     @pytest.mark.asyncio
     async def test_machine_auth_sends_bearer_token_to_tenant_config_url(self):
-        machine_auth = MachineAuth("https://api.example.io/", "tenant-1", "machine-token")
+        machine_auth = MachineCredential(MachineAuth("https://api.example.io/", "tenant-1", "machine-token"))
         with patch("agent_scan.verify_api.aiohttp.ClientSession") as mock_cls:
             session = _make_get_session(status=200, json_data={"async_analysis_enabled": True})
             mock_cls.return_value = session
@@ -1062,7 +1063,7 @@ class TestFetchAgentScanConfig:
     )
     async def test_machine_auth_failure_raises_instead_of_defaults(self, session_kwargs):
         """The defaults would mean sync analysis with the push key: machine mode fails instead."""
-        machine_auth = MachineAuth("https://api.example.io", "tenant-1", "machine-token")
+        machine_auth = MachineCredential(MachineAuth("https://api.example.io", "tenant-1", "machine-token"))
         with (
             patch("agent_scan.verify_api.aiohttp.ClientSession") as mock_cls,
             patch("agent_scan.verify_api.asyncio.sleep", new_callable=AsyncMock),
@@ -1073,7 +1074,9 @@ class TestFetchAgentScanConfig:
 
     @pytest.mark.asyncio
     async def test_machine_auth_401_retries_once_with_a_fresh_token(self):
-        machine_auth = MachineAuth("https://api.example.io", "tenant-1", "old-token", token_command="/opt/ads/x")
+        machine_auth = MachineCredential(
+            MachineAuth("https://api.example.io", "tenant-1", "old-token", token_command="/opt/ads/x")
+        )
         with (
             patch("agent_scan.verify_api.aiohttp.ClientSession") as mock_cls,
             patch("agent_scan.machine_auth.fetch_access_token", return_value="new-token"),
@@ -1089,10 +1092,14 @@ class TestFetchAgentScanConfig:
             "Bearer old-token",
             "Bearer new-token",
         ]
+        # Later requests in the scan start with the new token.
+        assert machine_auth.headers == {"Authorization": "Bearer new-token"}
 
     @pytest.mark.asyncio
     async def test_machine_auth_401_with_the_same_token_fails_without_retry(self):
-        machine_auth = MachineAuth("https://api.example.io", "tenant-1", "old-token", token_command="/opt/ads/x")
+        machine_auth = MachineCredential(
+            MachineAuth("https://api.example.io", "tenant-1", "old-token", token_command="/opt/ads/x")
+        )
         with (
             patch("agent_scan.verify_api.aiohttp.ClientSession") as mock_cls,
             patch("agent_scan.machine_auth.fetch_access_token", return_value="old-token"),
@@ -1316,7 +1323,9 @@ class TestSubmitAsyncAnalysis:
     async def test_machine_auth_401_retries_once_with_a_fresh_token(self):
         payload = MagicMock()
         payload.model_dump_json.return_value = "{}"
-        machine_auth = MachineAuth("https://api.example.io", "tenant-1", "old-token", token_command="/opt/ads/x")
+        machine_auth = MachineCredential(
+            MachineAuth("https://api.example.io", "tenant-1", "old-token", token_command="/opt/ads/x")
+        )
         sent: list[str] = []
         responses = iter([_post_cm(status=401), _post_cm(status=202)])
 
@@ -1342,7 +1351,9 @@ class TestSubmitAsyncAnalysis:
     async def test_machine_auth_401_with_the_same_token_is_not_retried(self):
         payload = MagicMock()
         payload.model_dump_json.return_value = "{}"
-        machine_auth = MachineAuth("https://api.example.io", "tenant-1", "old-token", token_command="/opt/ads/x")
+        machine_auth = MachineCredential(
+            MachineAuth("https://api.example.io", "tenant-1", "old-token", token_command="/opt/ads/x")
+        )
 
         with (
             patch("agent_scan.verify_api.aiohttp.ClientSession") as mock_cls,
@@ -1362,6 +1373,39 @@ class TestSubmitAsyncAnalysis:
             )
 
         assert (success, error_text) == (False, "machine 401")
+        session.post.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_machine_auth_401_with_a_failing_token_command_returns_the_error(self):
+        payload = MagicMock()
+        payload.model_dump_json.return_value = "{}"
+        machine_auth = MachineCredential(
+            MachineAuth("https://api.example.io", "tenant-1", "old-token", token_command="/opt/ads/x")
+        )
+
+        with (
+            patch("agent_scan.verify_api.aiohttp.ClientSession") as mock_cls,
+            patch(
+                "agent_scan.machine_auth.fetch_access_token",
+                side_effect=MachineAuthError("The token command exited with 1."),
+            ),
+        ):
+            session = _make_post_session(status=401)
+            mock_cls.return_value = session
+            success, error_text, exc = await _submit_async_analysis(
+                self._ASYNC_URL,
+                payload,
+                machine_auth.headers,
+                "m",
+                None,
+                False,
+                unauthorized_text="machine 401.",
+                machine_auth=machine_auth,
+            )
+
+        assert not success
+        assert error_text == "machine 401. Refreshing the machine token failed: The token command exited with 1."
+        assert isinstance(exc, MachineAuthError)
         session.post.assert_called_once()
 
     @pytest.mark.asyncio
@@ -1790,7 +1834,7 @@ class TestAnalyzeMachineAsyncRouting:
         assert "X-Push-Key" not in call[1]["headers"]
         assert result == ScanResponse(scan_path_responses=[ScanPathResponse(path="/test/path")])
 
-    _MACHINE_AUTH = MachineAuth("https://api.example.io", "tenant-1", "machine-token")
+    _MACHINE_AUTH = MachineCredential(MachineAuth("https://api.example.io", "tenant-1", "machine-token"))
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("push_key", ["push-abc", None], ids=["with_push_key", "without_push_key"])
@@ -1829,7 +1873,9 @@ class TestAnalyzeMachineAsyncRouting:
     @pytest.mark.asyncio
     async def test_machine_auth_refreshes_the_token_before_the_async_submit(self):
         """The token from the start of a long scan may have expired by the submit."""
-        machine_auth = MachineAuth("https://api.example.io", "tenant-1", "stale-token", token_command="/opt/ads/x")
+        machine_auth = MachineCredential(
+            MachineAuth("https://api.example.io", "tenant-1", "stale-token", token_command="/opt/ads/x")
+        )
 
         with (
             patch(
@@ -1857,7 +1903,7 @@ class TestAnalyzeMachineAsyncRouting:
     @pytest.mark.asyncio
     async def test_machine_auth_async_warning_omits_show_results_hint(self, capsys):
         """--show-analysis-results fails in machine mode, so the warning must not suggest it."""
-        machine_auth = MachineAuth("https://api.example.io", "tenant-1", "tok")
+        machine_auth = MachineCredential(MachineAuth("https://api.example.io", "tenant-1", "tok"))
 
         with (
             patch(
@@ -1886,7 +1932,7 @@ class TestAnalyzeMachineAsyncRouting:
     @pytest.mark.parametrize("raise_on_error", [False, True], ids=["default", "raise_on_error"])
     async def test_machine_auth_failed_submit_raises(self, raise_on_error):
         """A rejected tenant submit exits the scan with 1, so scheduled runs see the failure."""
-        machine_auth = MachineAuth("https://api.example.io", "tenant-1", "tok")
+        machine_auth = MachineCredential(MachineAuth("https://api.example.io", "tenant-1", "tok"))
 
         with (
             patch(
@@ -1911,7 +1957,9 @@ class TestAnalyzeMachineAsyncRouting:
 
     @pytest.mark.asyncio
     async def test_machine_auth_refresh_failure_raises(self):
-        machine_auth = MachineAuth("https://api.example.io", "tenant-1", "stale-token", token_command="/opt/ads/x")
+        machine_auth = MachineCredential(
+            MachineAuth("https://api.example.io", "tenant-1", "stale-token", token_command="/opt/ads/x")
+        )
 
         with (
             patch(

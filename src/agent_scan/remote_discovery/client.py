@@ -15,7 +15,7 @@ from typing import Any
 import aiohttp
 
 from agent_scan.agents.base import is_own_home
-from agent_scan.machine_auth import TENANT_API_VERSION, MachineAuth, refresh_after_401
+from agent_scan.machine_auth import TENANT_API_VERSION, AuthRetry, MachineCredential
 from agent_scan.remote_discovery.executor import run_op, to_wire
 from agent_scan.utils import get_readable_home_directories
 from agent_scan.verify_api import RETRYABLE_TRANSPORT_EXCEPTIONS, setup_tcp_connector
@@ -43,26 +43,15 @@ class RemoteDiscoveryError(Exception):
 
 
 class _Auth:
-    """The request auth headers; machine auth swaps in a fresh token when the backend rejects one."""
+    """The request auth headers: the push key, or the scan's machine credential."""
 
-    def __init__(self, headers: dict[str, str], machine_auth: MachineAuth | None = None) -> None:
-        self.headers = headers
-        self._machine_auth = machine_auth
+    def __init__(self, headers: dict[str, str], credential: MachineCredential | None = None) -> None:
+        self._headers = headers
+        self.credential = credential
 
-    async def refresh(self) -> bool:
-        """Run the token command again; True when it printed a different token.
-
-        A session can outlive the machine token, which lasts 30 minutes. Raises
-        MachineAuthError when the command fails.
-        """
-        if self._machine_auth is None:
-            return False
-        fresh = await refresh_after_401(self._machine_auth)
-        if fresh is None:
-            return False
-        self._machine_auth = fresh
-        self.headers = fresh.headers
-        return True
+    @property
+    def headers(self) -> dict[str, str]:
+        return self.credential.headers if self.credential is not None else self._headers
 
 
 class _SessionLost(Exception):
@@ -109,11 +98,11 @@ async def _post(
     """POST with retries on 429/5xx, timeouts and connection errors.
 
     A 401 is retried once with a fresh machine token, when the token command
-    prints a new one. Resending the same bytes is safe: the backend replays a
-    step it has already applied.
+    prints a new one; a session can outlive the token. Resending the same bytes
+    is safe: the backend replays a step it has already applied.
     """
     body = json.dumps(payload).encode()
-    refreshed = False
+    auth_retry = AuthRetry(auth.credential)
     attempt = 0
     while attempt <= MAX_RETRIES:
         result.bytes_sent += len(body)
@@ -124,12 +113,10 @@ async def _post(
             ) as response:
                 if response.status < 400:
                     return await response.json()
-                if response.status == 401 and not refreshed:
-                    refreshed = True
-                    if await auth.refresh():
-                        logger.info("Remote discovery got 401; retrying with a fresh machine token.")
-                        result.retries += 1
-                        continue
+                if await auth_retry.should_retry(response.status):
+                    logger.info("Remote discovery got 401; retrying with a fresh machine token.")
+                    result.retries += 1
+                    continue
                 if response.status not in RETRYABLE_STATUSES or attempt == MAX_RETRIES:
                     # Detail only: bounded reason strings, never request content.
                     raise RemoteDiscoveryError(
@@ -203,7 +190,7 @@ async def run_remote_discovery(
     identifier: str | None = None,
     all_users: bool = False,
     skip_ssl_verify: bool = False,
-    machine_auth: MachineAuth | None = None,
+    machine_auth: MachineCredential | None = None,
     home_dirs_with_users: list[tuple[Path, str]] | None = None,
 ) -> RemoteResult:
     """Run one discovery session.
@@ -215,7 +202,7 @@ async def run_remote_discovery(
     if machine_auth is not None:
         base = machine_auth.tenant_path("/coding-agent-discovery/sessions")
         query = f"?version={TENANT_API_VERSION}"
-        auth = _Auth(machine_auth.headers, machine_auth)
+        auth = _Auth({}, machine_auth)
     else:
         base = backend_url.rstrip("/") + "/hidden/coding-agent-discovery/sessions"
         query = f"?version={DISCOVERY_API_VERSION}"
