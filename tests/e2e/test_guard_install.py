@@ -11,6 +11,7 @@ from tests.e2e.conftest import _FakeHookServer
 
 _FORWARDER_SCRIPT = "snyk-agent-guard.ps1" if os.name == "nt" else "snyk-agent-guard.sh"
 _DISCOVER_SCRIPT = "snyk-agent-guard-discover.ps1" if os.name == "nt" else "snyk-agent-guard-discover.sh"
+_GUARD_CONFIG = "snyk-agent-guard.conf"
 _GROUPED_USER_HOOK = {"matcher": "", "hooks": [{"type": "command", "command": "echo user-hook"}]}
 
 # (client, config path relative to tmp_path, user-owned hook to preserve, event it lives under)
@@ -72,6 +73,14 @@ def _install(
     scripts_dir = _scripts_dir(config_file)
     assert (scripts_dir / _FORWARDER_SCRIPT).is_file()
     assert (scripts_dir / _DISCOVER_SCRIPT).is_file()
+    # The values live in the guard configuration file next to the scripts, never in the agent config.
+    guard_config = (scripts_dir / _GUARD_CONFIG).read_text()
+    assert "PUSH_KEY=test-pk-e2e\n" in guard_config
+    assert f"REMOTE_HOOKS_BASE_URL={url}\n" in guard_config
+    assert f"MACHINE_ID={machine_id}\n" in guard_config
+    agent_config = config_file.read_text()
+    assert "test-pk-e2e" not in agent_config
+    assert url not in agent_config
 
 
 def _uninstall(agent_scan_cmd, client: str, config_file: Path, **env: str) -> subprocess.CompletedProcess:
@@ -84,6 +93,7 @@ def _assert_scripts_removed(config_file: Path) -> None:
     scripts_dir = _scripts_dir(config_file)
     assert not (scripts_dir / _FORWARDER_SCRIPT).exists()
     assert not (scripts_dir / _DISCOVER_SCRIPT).exists()
+    assert not (scripts_dir / _GUARD_CONFIG).exists()
 
 
 class TestGuardInstallE2E:
