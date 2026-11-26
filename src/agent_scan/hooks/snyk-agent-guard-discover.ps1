@@ -24,6 +24,12 @@ param(
     [string]$AgentScanCommand,
 
     [Parameter(Mandatory=$false)]
+    [string]$TenantId,
+
+    [Parameter(Mandatory=$false)]
+    [string]$TokenCommand,
+
+    [Parameter(Mandatory=$false)]
     [ValidateSet("servers","skills","all")]
     [string]$Scope = "servers"
 )
@@ -36,6 +42,15 @@ if (-not $MachineId) { $MachineId = $env:MACHINE_ID }
 if (-not $MachineId) { exit 0 }
 $env:MACHINE_ID = $MachineId
 $env:MACHINE_SERIAL = $MachineSerial
+# Machine identity for `guard discover` (see snyk-agent-guard.ps1).
+if ($TenantId)     { $env:TENANT_ID = $TenantId }
+if ($TokenCommand) { $env:ADS_TOKEN_COMMAND = $TokenCommand }
+# `guard discover` lets a push key win over machine identity, so a PUSH_KEY in the agent's
+# environment must not reach it from a machine identity hook.
+if ($TokenCommand -and -not $PushKey) {
+    Remove-Item Env:PUSH_KEY -ErrorAction SilentlyContinue
+    Remove-Item Env:PUSHKEY -ErrorAction SilentlyContinue
+}
 
 $cmd = if ($AgentScanCommand) { $AgentScanCommand } elseif ($env:AGENT_SCAN_COMMAND) { $env:AGENT_SCAN_COMMAND } else { $null }
 if (-not $cmd) { exit 0 }

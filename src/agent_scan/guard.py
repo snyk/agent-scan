@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, NamedTuple, TypeVar
 from urllib.parse import urlparse
 
 import rich
+from rich.markup import escape
 
 # ``tomllib`` is stdlib from 3.11; fall back to the ``tomli`` backport on 3.10,
 # else skip the generated TOML self-check rather than failing import.
@@ -41,6 +42,7 @@ from agent_scan.hook_events import (
     next_retry_delay,
     send_hook_event,
 )
+from agent_scan.machine_auth import TOKEN_COMMAND_TIMEOUT_S, MachineAuth, MachineAuthError, fetch_access_token
 from agent_scan.pushkeys import (
     GuardEnabledAccessDeniedError,
     _is_localhost,
@@ -65,11 +67,22 @@ _T = TypeVar("_T")
 
 ALL_CLIENTS = ["claude", "cursor", "codex", "github-copilot"]
 DEFAULT_REMOTE_URL = "https://api.snyk.io"
+# A push-key hook carries PUSH_KEY / -PushKey, a machine identity hook ADS_TOKEN_COMMAND /
+# -TokenCommand, so re-running install in either mode replaces the other's hooks.
 _DETECTION_RE = re.compile(
-    r"PUSH_KEY=.*snyk-agent-guard"
-    r"|snyk-agent-guard.*-PushKey\b",
+    r"(?:PUSH_KEY|ADS_TOKEN_COMMAND)=.*snyk-agent-guard"
+    r"|snyk-agent-guard.*-(?:PushKey|TokenCommand)\b",
     re.DOTALL,
 )
+# Tenant ids are UUIDs. The hook scripts put the id in the URL path unescaped, so install refuses
+# one that would need escaping there.
+_TENANT_ID_RE = re.compile(r"^[A-Za-z0-9._~-]+$")
+# The Windows hook passes the base URL to the token command in a hand-quoted argument string, so
+# install refuses one that would need escaping there.
+_BASE_URL_UNSAFE_RE = re.compile(r'["\\\s]')
+# The bash hook puts the token in a double-quoted curl config line and refuses one with quotes,
+# backslashes or control characters, so the Python fetch refuses the same tokens.
+_TOKEN_UNSAFE_RE = re.compile(r'["\\\x00-\x1f\x7f]')
 _PERMISSION_DENIED = "__permission_denied__"
 # Install backs up a config file to ``<file>`` + this suffix. The name is Guard's own
 # (unlike a plain ``<file>.backup``, which other tools also write), so uninstall can
@@ -84,6 +97,9 @@ _GUARD_JSON_SCAFFOLDING: dict[str, tuple[dict, ...]] = {
 }
 _STDIN_READ_TIMEOUT_SECONDS = 5.0
 _DISCOVERY_TIMEOUT_SECONDS = 60.0
+# guard discover runs inside an agent hook (about 60 s) that also covers discovery, so its token
+# fetch gets a short limit instead of the scan's TOKEN_COMMAND_TIMEOUT_S.
+_DISCOVER_TOKEN_TIMEOUT_SECONDS = 10.0
 _HOOK_SCRIPT_TIMEOUT_SECONDS = 15.0
 # Extra time the forwarder subprocess gets beyond the install budget (interpreter startup, teardown).
 _HOOK_SCRIPT_OVERHEAD_SECONDS = 2.0
@@ -195,6 +211,9 @@ def run_guard(args) -> int:
     except CodexRequirementsError as e:
         rich.print(f"[bold red]Error:[/bold red] {e}")
         return 1
+    except MachineAuthError as e:
+        rich.print(f"[bold red]Error:[/bold red] {escape(str(e))}")
+        return 1
 
 
 # ---------------------------------------------------------------------------
@@ -249,6 +268,72 @@ def _ensure_guard_enabled_for_tenant(url: str, tenant_id: str, snyk_token: str) 
         sys.exit(1)
 
 
+class _MachineIdentity(NamedTuple):
+    """What the ADS installer passes so the hooks authenticate as the enrolled machine.
+
+    ``"<token_command>" token --base-url <base_url>`` prints a machine access token; the hooks
+    call the tenant routes for ``tenant_id`` on ``base_url`` with it, never the push key.
+    ``base_url`` is the install's ``--url`` (``REMOTE_HOOKS_BASE_URL`` in the hooks); the token
+    command refuses any API other than the one the machine enrolled with.
+    """
+
+    token_command: str
+    tenant_id: str
+    base_url: str
+
+
+def _machine_identity_from_env(tenant_id: str, base_url: str) -> _MachineIdentity | None:
+    """ADS_TOKEN_COMMAND with ``tenant_id`` on ``base_url``, or None for push-key mode.
+
+    Machine identity needs both ADS_TOKEN_COMMAND and TENANT_ID, as in ``scan``. TENANT_ID alone
+    is the push-key flow's tenant. ADS_TOKEN_COMMAND without TENANT_ID prints a warning and
+    uses the push key. ``base_url`` is the Guard URL (``--url`` / REMOTE_HOOKS_BASE_URL);
+    ADS_BASE_URL is not used.
+    """
+    token_command = os.environ.get("ADS_TOKEN_COMMAND", "").strip()
+    if not token_command:
+        return None
+    tenant_id = tenant_id.strip()
+    if not tenant_id:
+        rich.print(
+            "[yellow]Warning:[/yellow] Machine identity needs ADS_TOKEN_COMMAND and TENANT_ID; "
+            "TENANT_ID is not set, so Guard uses the push key."
+        )
+        return None
+    return _MachineIdentity(token_command=token_command, tenant_id=tenant_id, base_url=base_url.strip())
+
+
+def _fetch_machine_auth(identity: _MachineIdentity, *, timeout: float = TOKEN_COMMAND_TIMEOUT_S) -> MachineAuth:
+    """Run the token command once and return the token for the Python-sent events.
+
+    Raises MachineAuthError when the command is not an absolute path or fails; there is no
+    push-key fallback.
+    """
+    if not os.path.isabs(identity.token_command):
+        # A bare name is looked up in the hook's PATH, and on Windows in the current directory too.
+        raise MachineAuthError("The token command must be an absolute path.")
+    token = fetch_access_token(identity.token_command, identity.base_url, timeout=timeout)
+    if _TOKEN_UNSAFE_RE.search(token):
+        raise MachineAuthError(
+            "The token command printed a token with quotes, backslashes or control characters, "
+            "which the hook scripts cannot send."
+        )
+    return MachineAuth(base_url=identity.base_url, tenant_id=identity.tenant_id, access_token=token)
+
+
+def _fresh_machine_auth(identity: _MachineIdentity, event: str) -> MachineAuth | None:
+    """A token for a best-effort event sent late in the install, or None when the command fails now.
+
+    An install for several clients can run for minutes after the install-time check, so each such
+    event runs the token command again (it returns its cached token while that is still valid).
+    """
+    try:
+        return _fetch_machine_auth(identity)
+    except MachineAuthError as e:
+        rich.print(f"[dim]Could not send the {event}: {escape(str(e))}[/dim]")
+        return None
+
+
 def _run_install(args) -> None:
     client: str = args.client
     url: str = args.url
@@ -258,6 +343,26 @@ def _run_install(args) -> None:
     if not tenant_id:
         tenant_id = (os.environ.get("TENANT_ID", "") or "").strip()
     managed: bool = getattr(args, "managed", False)
+    machine_identity = _machine_identity_from_env(tenant_id, url)
+    if machine_identity is not None:
+        if managed:
+            rich.print(
+                "[bold red]Error:[/bold red] Managed installs use a push key; ADS_TOKEN_COMMAND "
+                "(machine identity) is only for user installs. Unset it, or drop --managed."
+            )
+            sys.exit(1)
+        if not _TENANT_ID_RE.match(machine_identity.tenant_id):
+            rich.print("[bold red]Error:[/bold red] Machine identity: TENANT_ID is not a valid tenant id.")
+            sys.exit(1)
+        if _BASE_URL_UNSAFE_RE.search(machine_identity.base_url):
+            rich.print(
+                "[bold red]Error:[/bold red] Machine identity: --url must not contain quotes, "
+                "backslashes or whitespace."
+            )
+            sys.exit(1)
+        # Machine identity never uses a push key, so ignore any PUSH_KEY in the environment.
+        push_key = ""
+        headless = True
     machine_serial = os.environ.get("MACHINE_SERIAL", "").strip()
     machine_id = (getattr(args, "machine_id", None) or os.environ.get("MACHINE_ID", "") or "").strip()
     if not machine_id:
@@ -302,6 +407,20 @@ def _run_install(args) -> None:
 
     scope = "managed" if managed else "user"
     snyk_token = ""
+
+    if machine_identity is not None:
+        # Check the token command once before touching any config. A failure fails the install:
+        # there is no fallback to the push key.
+        rich.print("[dim]Checking the machine identity token command...[/dim]")
+        try:
+            _fetch_machine_auth(machine_identity)
+        except MachineAuthError as e:
+            rich.print(
+                f"[bold red]Error:[/bold red] Machine identity check failed: {escape(str(e))} "
+                "No hooks were installed; machine identity never falls back to the push key."
+            )
+            sys.exit(1)
+        rich.print("[green]\u2713[/green]  Machine identity token command works")
 
     if not headless:
         # Interactive flow — mint a push key
@@ -363,6 +482,7 @@ def _run_install(args) -> None:
                     snyk_token,
                     machine_id,
                     machine_serial,
+                    machine_identity=machine_identity,
                 )
             except (SystemExit, Exception) as e:
                 # With client=all one client's failure must not block the others.
@@ -391,15 +511,20 @@ def _run_install(args) -> None:
         _revoke_after_failure(url, tenant_id, snyk_token, push_key)
 
     if first_installed_client is not None:
-        _send_servers_discovered_event(
-            push_key,
-            url,
-            first_installed_client,
-            machine_id,
-            discovery_scope=DiscoveryScope.SERVERS,
-            retry_policy=INSTALL_RETRY_POLICY,
-            machine_serial=machine_serial,
+        machine_auth = (
+            _fresh_machine_auth(machine_identity, "discovered MCP servers") if machine_identity is not None else None
         )
+        if machine_identity is None or machine_auth is not None:
+            _send_servers_discovered_event(
+                push_key,
+                url,
+                first_installed_client,
+                machine_id,
+                discovery_scope=DiscoveryScope.SERVERS,
+                retry_policy=INSTALL_RETRY_POLICY,
+                machine_serial=machine_serial,
+                machine_auth=machine_auth,
+            )
 
     if failed_clients:
         names = ", ".join(_client_label(c) for c in failed_clients)
@@ -448,12 +573,15 @@ def _read_hook_payload() -> str:
 
 
 def _run_discover(args) -> int:
+    # A push key wins, as in the hook scripts: an ADS_TOKEN_COMMAND in the agent's environment
+    # must not change a push-key hook. Machine identity hooks set PUSH_KEY empty.
     push_key = os.environ.get("PUSH_KEY", "")
-    if not push_key:
+    url = getattr(args, "url", None) or os.environ.get("REMOTE_HOOKS_BASE_URL") or DEFAULT_REMOTE_URL
+    machine_identity = None if push_key else _machine_identity_from_env(os.environ.get("TENANT_ID", ""), url)
+    if machine_identity is None and not push_key:
         rich.print("[bold red]Error:[/bold red] PUSH_KEY is required to run guard discovery.")
         return 1
 
-    url = getattr(args, "url", None) or os.environ.get("REMOTE_HOOKS_BASE_URL") or DEFAULT_REMOTE_URL
     hook_client = getattr(args, "client", None)
     if not hook_client:
         rich.print("[bold red]Error:[/bold red] --client is required to run guard discovery.")
@@ -463,6 +591,14 @@ def _run_discover(args) -> int:
     if not machine_id:
         rich.print("[bold red]Error:[/bold red] MACHINE_ID is required to run guard discovery.")
         return 1
+    machine_auth: MachineAuth | None = None
+    if machine_identity is not None:
+        try:
+            machine_auth = _fetch_machine_auth(machine_identity, timeout=_DISCOVER_TOKEN_TIMEOUT_SECONDS)
+        except MachineAuthError as e:
+            # Like an unreachable API: one line, no event, and never the push key.
+            rich.print(f"[yellow]Warning:[/yellow] Could not send discovered MCP servers: {escape(str(e))}")
+            return 1
 
     target_folders: list[str] = []
     session_id = ""
@@ -490,6 +626,7 @@ def _run_discover(args) -> int:
         session_marker=session_id or "session-start-server-discovery",
         target_folders=target_folders,
         discovery_scope=getattr(args, "scope", DiscoveryScope.ALL),
+        machine_auth=machine_auth,
     )
     return 0 if success else 1
 
@@ -635,8 +772,14 @@ def _install_hooks(
     snyk_token: str,
     machine_id: str,
     machine_serial: str,
+    *,
+    machine_identity: _MachineIdentity | None = None,
 ) -> None:
-    """Post-mint install steps.  Extracted so _run_install can revoke on failure."""
+    """Post-mint install steps.  Extracted so _run_install can revoke on failure.
+
+    With ``machine_identity`` the hook commands carry it instead of the push key (``push_key``
+    is empty), and the events sent from here authenticate with a machine token.
+    """
     if client == "codex" and _is_codex_requirements_toml(config_path):
         # Check the edit before any hook script is written.
         _preflight_codex_requirements(config_path)
@@ -673,6 +816,7 @@ def _install_hooks(
         tenant_id=tenant_id,
         machine_id=machine_id,
         machine_serial=machine_serial,
+        machine_identity=machine_identity,
     )
     discover_command = None
     if install_discovery:
@@ -686,6 +830,7 @@ def _install_hooks(
             machine_id=machine_id,
             machine_serial=machine_serial,
             hook_client=hook_client,
+            machine_identity=machine_identity,
         )
     prepared_config, prepared_content, hooks_diff, preserved = _prepare_client_config(
         client,
@@ -712,6 +857,7 @@ def _install_hooks(
         discover_new_checksum=discover_script.new_checksum if discover_script else None,
         machine_id=machine_id,
         machine_serial=machine_serial,
+        machine_identity=machine_identity,
     )
     if test_event.status == "rejected":
         if not main_script.existed:
@@ -722,9 +868,21 @@ def _install_hooks(
         raise SystemExit(1)
     if test_event.status == "unconfirmed":
         _warn_test_event_unconfirmed(test_event)
-        _report_test_event_unconfirmed(
-            push_key, url, hook_client, machine_id, test_event, machine_serial=machine_serial
+        machine_auth = (
+            _fresh_machine_auth(machine_identity, "unconfirmed test event report")
+            if machine_identity is not None
+            else None
         )
+        if machine_identity is None or machine_auth is not None:
+            _report_test_event_unconfirmed(
+                push_key,
+                url,
+                hook_client,
+                machine_id,
+                test_event,
+                machine_serial=machine_serial,
+                machine_auth=machine_auth,
+            )
 
     config_written = _write_client_config(client, config_path, prepared_config, prepared_content, preserved)
     if not install_discovery and discover_script_path.exists():
@@ -737,8 +895,18 @@ def _install_hooks(
         rich.print(f"[green]\u2713[/green]  {label} {scope} hook integration up to date")
     rich.print(f"   Config:     [dim]{config_path}[/dim]")
     rich.print(f"   Script:     [dim]{dest_path}[/dim]")
-    rich.print(f"   Remote URL: [dim]{url}[/dim]")
-    rich.print(f"   Push Key:   [yellow]{_mask_key(push_key)}[/yellow]")
+    if machine_identity is not None:
+        rich.print(f"   Remote URL: [dim]{machine_identity.base_url}[/dim]")
+        rich.print(f"   Auth:       [yellow]Machine identity (tenant {machine_identity.tenant_id})[/yellow]")
+        if old_push_key:
+            # Revoking needs a Snyk API token, which a machine identity install does not have.
+            rich.print(
+                f"[yellow]Warning:[/yellow] The previous push key {_mask_key(old_push_key)} is no longer "
+                "used by these hooks but stays active. Revoke it in Snyk if nothing else uses it."
+            )
+    else:
+        rich.print(f"   Remote URL: [dim]{url}[/dim]")
+        rich.print(f"   Push Key:   [yellow]{_mask_key(push_key)}[/yellow]")
     rich.print()
 
 
@@ -759,6 +927,7 @@ def _report_test_event_unconfirmed(
     result: _TestEventResult,
     *,
     machine_serial: str,
+    machine_auth: MachineAuth | None = None,
 ) -> None:
     """Best-effort telemetry: the install continued although the test event never got through."""
     payload_dict = {
@@ -769,7 +938,13 @@ def _report_test_event_unconfirmed(
         "test_event_last_error": result.error,
     }
     ok, detail = send_hook_event(
-        url, hook_client, push_key, json.dumps(payload_dict), machine_id, machine_serial=machine_serial
+        url,
+        hook_client,
+        push_key,
+        json.dumps(payload_dict),
+        machine_id,
+        machine_serial=machine_serial,
+        machine_auth=machine_auth,
     )
     if not ok:
         rich.print(f"[dim]Could not report the unconfirmed test event: {detail}[/dim]")
@@ -1758,6 +1933,12 @@ def _run_status() -> None:
     rich.print("[dim]# managed flow[/dim]")
     rich.print("[dim]snyk-agent-scan guard install <client> --managed --machine-id <machine-id>[/dim]")
     rich.print()
+    rich.print("[dim]# machine identity flow (ADS installer, user-level)[/dim]")
+    rich.print(
+        "[dim]ADS_TOKEN_COMMAND=<command> TENANT_ID=<tenant-id> "
+        "snyk-agent-scan guard install <client> --url <api-url> --machine-id <machine-id>[/dim]"
+    )
+    rich.print()
     rich.print("[dim]# headless flow (MDM)[/dim]")
     rich.print(
         "[dim]PUSH_KEY=<YOUR_PUSH_KEY> snyk-agent-scan guard install <client> "
@@ -1778,7 +1959,10 @@ def _print_client_status(label: str, path: Path, info: dict | str | None) -> Non
         rich.print("    [dim]NOT INSTALLED[/dim]")
         return
 
-    auth_label = f"[yellow]\\[Push Key: {_mask_key(info['auth_value'])}][/yellow]"
+    if info.get("auth_type") == "machine":
+        auth_label = "[yellow]\\[Machine identity][/yellow]"
+    else:
+        auth_label = f"[yellow]\\[Push Key: {_mask_key(info['auth_value'])}][/yellow]"
     hooks_suffix = _compact_events(info["events"])
     rich.print(
         f"    [bold green]INSTALLED[/bold green]   "
@@ -1937,6 +2121,7 @@ def _invoke_hook_script(
     require_success_payload: bool = False,
     timeout: float = _HOOK_SCRIPT_TIMEOUT_SECONDS,
     machine_serial: str,
+    machine_identity: _MachineIdentity | None = None,
 ) -> tuple[bool, str]:
     """Run the hook script with ``payload`` on stdin. Returns ``(ok, detail)``.
 
@@ -1957,6 +2142,7 @@ def _invoke_hook_script(
             url=url,
             machine_id=machine_id,
             machine_serial=machine_serial,
+            machine_identity=machine_identity,
         )
     )
 
@@ -2024,8 +2210,12 @@ def _send_test_event(
     discover_new_checksum: str | None = None,
     machine_id: str,
     machine_serial: str,
+    machine_identity: _MachineIdentity | None = None,
 ) -> _TestEventResult:
     """Send a test hooksConfigured event by invoking the hook script, retrying outages.
+
+    With ``machine_identity`` the script runs it exactly like the installed hooks: the token
+    command, then the tenant route.
 
     Timeouts, DNS failures, connection resets and HTTP 5xx are retried with backoff inside
     ``INSTALL_RETRY_POLICY``'s time limit (the same rule as the install-time discovery event).
@@ -2074,6 +2264,7 @@ def _send_test_event(
             # so each attempt gets what is left of the install budget, not the 15 s default.
             timeout=max(policy.time_limit - (time.monotonic() - started), 0.0) + _HOOK_SCRIPT_OVERHEAD_SECONDS,
             machine_serial=machine_serial,
+            machine_identity=machine_identity,
         )
         elapsed = time.monotonic() - started
         if ok:
@@ -2104,6 +2295,7 @@ def _send_servers_discovered_event(
     discovery_scope: DiscoveryScope = DiscoveryScope.ALL,
     retry_policy: RetryPolicy | None = None,
     machine_serial: str,
+    machine_auth: MachineAuth | None = None,
 ) -> bool:
     """Discover MCP servers and send an install- or session-scoped discovery event.
 
@@ -2136,7 +2328,14 @@ def _send_servers_discovered_event(
     payload = json.dumps(payload_dict)
 
     ok, detail = send_hook_event(
-        url, hook_client, push_key, payload, machine_id, retry_policy=retry_policy, machine_serial=machine_serial
+        url,
+        hook_client,
+        push_key,
+        payload,
+        machine_id,
+        retry_policy=retry_policy,
+        machine_serial=machine_serial,
+        machine_auth=machine_auth,
     )
     if ok:
         server_count = sum(len(entry.get("servers", [])) for entry in servers)
@@ -2288,14 +2487,16 @@ def _filter_cursor_hooks(hooks: dict) -> dict:
 
 
 def _parse_command_info(cmd: str, events: list[str]) -> dict:
+    machine_identity = bool(_extract_env_from_cmd(cmd, "ADS_TOKEN_COMMAND"))
     url = _extract_env_from_cmd(cmd, "REMOTE_HOOKS_BASE_URL")
-    push_key = _extract_env_from_cmd(cmd, "PUSH_KEY")
+    # A machine identity hook has no push key, so uninstall has nothing to revoke.
+    push_key = "" if machine_identity else _extract_env_from_cmd(cmd, "PUSH_KEY")
     tenant_id = _extract_env_from_cmd(cmd, "TENANT_ID")
     host = urlparse(url).netloc if url else "unknown"
 
     return {
         "host": host,
-        "auth_type": "pushkey",
+        "auth_type": "machine" if machine_identity else "pushkey",
         "auth_value": push_key or "",
         "tenant_id": tenant_id,
         "url": url or DEFAULT_REMOTE_URL,
@@ -2307,6 +2508,7 @@ _PS_PARAM_MAP = {
     "PUSH_KEY": "PushKey",
     "REMOTE_HOOKS_BASE_URL": "RemoteUrl",
     "TENANT_ID": "TenantId",
+    "ADS_TOKEN_COMMAND": "TokenCommand",
 }
 
 
@@ -2433,15 +2635,28 @@ class _HookInvocation(NamedTuple):
     scope: str = ""
     quote_client: bool = False
     machine_serial: str = ""
+    # Machine identity replaces push_key, url and tenant_id: the command holds no secret.
+    machine_identity: _MachineIdentity | None = None
 
 
 def _render_posix_command(invocation: _HookInvocation) -> str:
-    parts = [
-        f"PUSH_KEY={_shell_quote(invocation.push_key)}",
-        f"REMOTE_HOOKS_BASE_URL={_shell_quote(invocation.url)}",
-    ]
-    if invocation.tenant_id:
-        parts.append(f"TENANT_ID={_shell_quote(invocation.tenant_id)}")
+    identity = invocation.machine_identity
+    if identity is not None:
+        # A push key wins in the hook scripts, so clear any push key in the agent's environment.
+        parts = [
+            "PUSH_KEY=''",
+            "PUSHKEY=''",
+            f"ADS_TOKEN_COMMAND={_shell_quote(identity.token_command)}",
+            f"REMOTE_HOOKS_BASE_URL={_shell_quote(identity.base_url)}",
+            f"TENANT_ID={_shell_quote(identity.tenant_id)}",
+        ]
+    else:
+        parts = [
+            f"PUSH_KEY={_shell_quote(invocation.push_key)}",
+            f"REMOTE_HOOKS_BASE_URL={_shell_quote(invocation.url)}",
+        ]
+        if invocation.tenant_id:
+            parts.append(f"TENANT_ID={_shell_quote(invocation.tenant_id)}")
     if invocation.machine_id:
         parts.append(f"MACHINE_ID={_shell_quote(invocation.machine_id)}")
     # Preserve an empty captured serial too; later hook environments must not supply a different value.
@@ -2463,13 +2678,23 @@ def _render_powershell_command(invocation: _HookInvocation) -> str:
         _ps_quote(str(invocation.script_path)),
         "-Client",
         invocation.hook_client,
-        "-PushKey",
-        _ps_quote(invocation.push_key),
-        "-RemoteUrl",
-        _ps_quote(invocation.url),
     ]
-    if invocation.tenant_id:
-        parts.extend(["-TenantId", _ps_quote(invocation.tenant_id)])
+    identity = invocation.machine_identity
+    if identity is not None:
+        parts.extend(
+            [
+                "-TokenCommand",
+                _ps_quote(identity.token_command),
+                "-RemoteUrl",
+                _ps_quote(identity.base_url),
+                "-TenantId",
+                _ps_quote(identity.tenant_id),
+            ]
+        )
+    else:
+        parts.extend(["-PushKey", _ps_quote(invocation.push_key), "-RemoteUrl", _ps_quote(invocation.url)])
+        if invocation.tenant_id:
+            parts.extend(["-TenantId", _ps_quote(invocation.tenant_id)])
     if invocation.machine_id:
         parts.extend(["-MachineId", _ps_quote(invocation.machine_id)])
     if invocation.machine_serial:
@@ -2482,6 +2707,7 @@ def _render_powershell_command(invocation: _HookInvocation) -> str:
 
 
 def _render_argv(invocation: _HookInvocation) -> tuple[list[str], dict[str, str] | None]:
+    identity = invocation.machine_identity
     if IS_WINDOWS:
         argv = [
             "powershell",
@@ -2489,11 +2715,20 @@ def _render_argv(invocation: _HookInvocation) -> tuple[list[str], dict[str, str]
             str(invocation.script_path),
             "-Client",
             invocation.hook_client,
-            "-PushKey",
-            invocation.push_key,
-            "-RemoteUrl",
-            invocation.url,
         ]
+        if identity is not None:
+            argv.extend(
+                [
+                    "-TokenCommand",
+                    identity.token_command,
+                    "-RemoteUrl",
+                    identity.base_url,
+                    "-TenantId",
+                    identity.tenant_id,
+                ]
+            )
+        else:
+            argv.extend(["-PushKey", invocation.push_key, "-RemoteUrl", invocation.url])
         if invocation.machine_id:
             argv.extend(["-MachineId", invocation.machine_id])
         if invocation.machine_serial:
@@ -2504,14 +2739,26 @@ def _render_argv(invocation: _HookInvocation) -> tuple[list[str], dict[str, str]
             argv.extend(["-Scope", invocation.scope])
         return argv, None
 
-    env = {
-        **os.environ,
-        "PUSH_KEY": invocation.push_key,
-        "REMOTE_HOOKS_BASE_URL": invocation.url,
-        "MACHINE_SERIAL": invocation.machine_serial,
-    }
-    if invocation.tenant_id:
-        env["TENANT_ID"] = invocation.tenant_id
+    if identity is not None:
+        # The installer's environment still holds PUSH_KEY; the script must not see it.
+        env = {k: v for k, v in os.environ.items() if k not in ("PUSH_KEY", "PUSHKEY")}
+        env.update(
+            {
+                "ADS_TOKEN_COMMAND": identity.token_command,
+                "REMOTE_HOOKS_BASE_URL": identity.base_url,
+                "TENANT_ID": identity.tenant_id,
+                "MACHINE_SERIAL": invocation.machine_serial,
+            }
+        )
+    else:
+        env = {
+            **os.environ,
+            "PUSH_KEY": invocation.push_key,
+            "REMOTE_HOOKS_BASE_URL": invocation.url,
+            "MACHINE_SERIAL": invocation.machine_serial,
+        }
+        if invocation.tenant_id:
+            env["TENANT_ID"] = invocation.tenant_id
     if invocation.machine_id:
         env["MACHINE_ID"] = invocation.machine_id
     if invocation.agent_scan_command:
@@ -2531,6 +2778,7 @@ def _build_hook_command(
     tenant_id: str = "",
     machine_id: str = "",
     machine_serial: str,
+    machine_identity: _MachineIdentity | None = None,
 ) -> str:
     invocation = _HookInvocation(
         script_path=script_path,
@@ -2540,6 +2788,7 @@ def _build_hook_command(
         machine_id=machine_id,
         machine_serial=machine_serial,
         tenant_id=tenant_id,
+        machine_identity=machine_identity,
     )
     if IS_WINDOWS:
         return _render_powershell_command(invocation)
@@ -2573,7 +2822,9 @@ def _build_discover_hook_command(
     tenant_id: str = "",
     machine_id: str = "",
     machine_serial: str,
+    machine_identity: _MachineIdentity | None = None,
 ) -> str:
+    # In push-key mode ``tenant_id`` is not passed on: `guard discover` needs no tenant there.
     invocation = _HookInvocation(
         script_path=script_path,
         hook_client=hook_client,
@@ -2584,6 +2835,7 @@ def _build_discover_hook_command(
         agent_scan_command=agent_scan_command,
         scope="servers",
         quote_client=True,
+        machine_identity=machine_identity,
     )
     if IS_WINDOWS:
         return _render_powershell_command(invocation)
