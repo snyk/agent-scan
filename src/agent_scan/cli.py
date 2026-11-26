@@ -1071,6 +1071,28 @@ def main():
             "(default: install hooks without checking). Non-managed installs always check."
         ),
     )
+    guard_install_parser.add_argument(
+        "--no-config-file",
+        action="store_true",
+        default=False,
+        dest="no_config_file",
+        help=(
+            "Write no snyk-agent-guard.conf: the hook commands pass --from-env and the hooks read their "
+            "values from the environment. Needs PUSH_KEY and --env-placeholder PUSH_KEY=<VAR>"
+        ),
+    )
+    guard_install_parser.add_argument(
+        "--env-placeholder",
+        action="append",
+        default=[],
+        dest="env_placeholder",
+        metavar="NAME=VAR",
+        help=(
+            "With --no-config-file, set NAME (PUSH_KEY, REMOTE_HOOKS_BASE_URL, MACHINE_ID, MACHINE_SERIAL or "
+            'AGENT_SCAN_COMMAND) in the hook commands as NAME="$VAR", expanded when the hook runs. '
+            "Values without a placeholder are written literally. Repeatable"
+        ),
+    )
 
     guard_discover_parser = guard_subparsers.add_parser(
         "discover",

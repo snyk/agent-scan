@@ -12,6 +12,7 @@ pytest itself stays an ordinary user so the virtualenv is not polluted with root
 import contextlib
 import json
 import os
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -23,6 +24,7 @@ from agent_scan.guard import (
     CODEX_MANAGED_HOOKS_PATH,
     COPILOT_MANAGED_HOOKS_PATH,
     CURSOR_MANAGED_HOOKS_PATH,
+    GUARD_CONFIG_NAME,
 )
 from tests.e2e.conftest import _FakeHookServer
 from tests.e2e.test_guard_install import (
@@ -78,6 +80,7 @@ def _managed_artifacts(client: str) -> list[Path]:
         _legacy_backup(config),
         scripts / _FORWARDER_SCRIPT,
         scripts / _DISCOVER_SCRIPT,
+        scripts / GUARD_CONFIG_NAME,
     ]
 
 
@@ -186,6 +189,9 @@ class TestManagedInstallE2E:
         scripts_dir = _scripts_dir(config)
         assert (scripts_dir / _FORWARDER_SCRIPT).is_file()
         assert (scripts_dir / _DISCOVER_SCRIPT).is_file()
+        # The hook values, push key included, live in the guard config file, not the agent config.
+        assert "PUSH_KEY=test-pk-e2e\n" in (scripts_dir / GUARD_CONFIG_NAME).read_text()
+        assert "test-pk-e2e" not in text
 
         if client == "codex":
             # Managed Codex hooks live in requirements.toml and point at the script directory.
@@ -209,10 +215,13 @@ class TestManagedInstallE2E:
         _install(agent_scan_cmd, agent_scan_command, client, fake_hook_server)
 
         scripts_dir = _scripts_dir(config)
-        for path in (config, scripts_dir / _FORWARDER_SCRIPT, scripts_dir / _DISCOVER_SCRIPT):
+        guard_config = scripts_dir / GUARD_CONFIG_NAME
+        for path in (config, scripts_dir / _FORWARDER_SCRIPT, scripts_dir / _DISCOVER_SCRIPT, guard_config):
             st = path.stat()
             assert st.st_uid == 0, f"{path} should be root-owned, got uid {st.st_uid}"
             assert st.st_mode & 0o022 == 0, f"{path} must not be group/world-writable: {oct(st.st_mode)}"
+        # Every user whose agent runs the hooks must be able to read the values.
+        assert stat.S_IMODE(guard_config.stat().st_mode) == 0o644
 
     @pytest.mark.parametrize("client", ALL_CLIENTS)
     def test_install_is_idempotent(self, agent_scan_cmd, agent_scan_command, fake_hook_server, client):
@@ -262,6 +271,7 @@ class TestManagedUninstallE2E:
         scripts_dir = _scripts_dir(config)
         assert not (scripts_dir / _FORWARDER_SCRIPT).exists()
         assert not (scripts_dir / _DISCOVER_SCRIPT).exists()
+        assert not (scripts_dir / GUARD_CONFIG_NAME).exists()
         # Nothing existed before install, so there is no backup; uninstall never writes one.
         assert not _guard_backup(config).exists()
         assert not _legacy_backup(config).exists()

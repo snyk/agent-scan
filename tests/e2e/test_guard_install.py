@@ -132,6 +132,16 @@ class TestGuardInstallE2E:
         assert _DISCOVER_SCRIPT in discover_command
         assert str(config_file) not in discover_command
         assert ("-ConfigFile" if os.name == "nt" else "--file") not in discover_command
+
+        # The per-install values live in the guard configuration file next to the scripts,
+        # not in the hook commands.
+        guard_config = (tmp_path / "hooks" / "snyk-agent-guard.conf").read_text()
+        assert "PUSH_KEY=test-pk-e2e\n" in guard_config
+        assert f"REMOTE_HOOKS_BASE_URL={fake_hook_server}\n" in guard_config
+        hook_commands = [h["command"] for groups in settings["hooks"].values() for g in groups for h in g["hooks"]]
+        assert hook_commands
+        assert all("test-pk-e2e" not in c and fake_hook_server not in c for c in hook_commands)
+
         assert [request["body"]["hook_event_name"] for request in _FakeHookServer.requests] == [
             "hooksConfigured",
             "hooksConfiguredServerDiscovery",
@@ -347,7 +357,8 @@ class TestGuardUninstallE2E:
         _install(agent_scan_cmd, agent_scan_command, client, config_file, fake_hook_server, "machine-1")
         # The re-install rewrites Guard's previous config; the backup is that config minus Guard.
         _install(agent_scan_cmd, agent_scan_command, client, config_file, fake_hook_server, "machine-2")
-        assert "machine-2" in config_file.read_text()
+        # The machine ID lives in the guard configuration file, not on the hook command.
+        assert "MACHINE_ID=machine-2\n" in (_scripts_dir(config_file) / "snyk-agent-guard.conf").read_text()
         backup = Path(f"{config_file}.snyk-agent-guard.backup")
         assert json.loads(backup.read_text()) == seeded
 
@@ -444,10 +455,15 @@ class TestGuardMachineIdentityE2E:
         )
         assert result.returncode == 0, f"guard install failed:\n{_describe(result)}"
 
-        # The hook commands carry the machine identity and never the installer's push key.
+        # The machine identity lives in the guard configuration file, never the installer's push
+        # key; the hook commands carry none of the values.
+        guard_config = (_scripts_dir(config_file) / "snyk-agent-guard.conf").read_text()
+        assert f"ADS_TOKEN_COMMAND={token_command}\n" in guard_config
+        assert "TENANT_ID=e2e-tenant\n" in guard_config
+        assert "installer-pk" not in guard_config
         installed = config_file.read_text()
-        assert f"ADS_TOKEN_COMMAND='{token_command}'" in installed
-        assert "TENANT_ID='e2e-tenant'" in installed
+        assert str(token_command) not in installed
+        assert "e2e-tenant" not in installed
         assert "installer-pk" not in installed
 
         # Every event, the hook script's test event included, goes to the tenant route with
@@ -511,3 +527,64 @@ class TestGuardMachineIdentityE2E:
         assert not config_file.exists()
         assert not (tmp_path / "hooks").exists()
         assert _FakeHookServer.requests == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="placeholders are POSIX-only; Windows needs every value as NAME=NAME")
+class TestGuardInstallEnvModeE2E:
+    """`guard install --no-config-file`: no snyk-agent-guard.conf, the commands read the values
+    from placeholders expanded when the hook runs."""
+
+    @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
+    def test_env_mode_install_and_uninstall(self, agent_scan_cmd, agent_scan_command, tmp_path, fake_hook_server):
+        config_file = tmp_path / "settings.json"
+        result = _run_cli(
+            agent_scan_cmd,
+            "guard",
+            "install",
+            "claude",
+            "--file",
+            str(config_file),
+            "--url",
+            fake_hook_server,
+            "--machine-id",
+            "e2e-machine-id",
+            "--no-config-file",
+            "--env-placeholder",
+            "PUSH_KEY=E2E_PUSH_KEY",
+            env=_guard_env(PUSH_KEY="test-pk-e2e", AGENT_SCAN_COMMAND=str(agent_scan_command)),
+        )
+        assert result.returncode == 0, f"guard install failed:\n{_describe(result)}"
+        assert not (_scripts_dir(config_file) / "snyk-agent-guard.conf").exists()
+        settings = json.loads(config_file.read_text())
+        hook_commands = [h["command"] for groups in settings["hooks"].values() for g in groups for h in g["hooks"]]
+        assert hook_commands
+        assert all(c.startswith('PUSH_KEY="$E2E_PUSH_KEY" ') and c.endswith("--from-env") for c in hook_commands)
+        assert all("test-pk-e2e" not in c for c in hook_commands)
+        # The test event ran the installed script in env mode.
+        assert _FakeHookServer.requests[0]["body"]["hook_event_name"] == "hooksConfigured"
+
+        _uninstall(agent_scan_cmd, "claude", config_file)
+        # The settings file held nothing but Guard's hooks, so uninstall deletes it.
+        assert not config_file.exists()
+        _assert_scripts_removed(config_file)
+
+    @pytest.mark.parametrize("agent_scan_cmd", ["uv"], indirect=True)
+    def test_env_mode_refuses_a_literal_push_key(self, agent_scan_cmd, agent_scan_command, tmp_path, fake_hook_server):
+        config_file = tmp_path / "settings.json"
+        result = _run_cli(
+            agent_scan_cmd,
+            "guard",
+            "install",
+            "claude",
+            "--file",
+            str(config_file),
+            "--url",
+            fake_hook_server,
+            "--machine-id",
+            "e2e-machine-id",
+            "--no-config-file",
+            env=_guard_env(PUSH_KEY="test-pk-e2e", AGENT_SCAN_COMMAND=str(agent_scan_command)),
+        )
+        assert result.returncode != 0
+        assert "PUSH_KEY" in result.stdout + result.stderr
+        assert not config_file.exists()

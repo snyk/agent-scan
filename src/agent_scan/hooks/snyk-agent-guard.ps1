@@ -3,22 +3,27 @@
 # Supports Claude Code, Cursor, Codex, and Github Copilot via the -Client argument.
 #
 # Usage:
-#   powershell -File snyk-agent-guard.ps1 -Client claude-code -PushKey '...' -RemoteUrl 'https://...'
-#   powershell -File snyk-agent-guard.ps1 -Client cursor -TokenCommand '...' -RemoteUrl 'https://...' -TenantId '...'
+#   powershell -File snyk-agent-guard.ps1 -Client claude-code
+#   powershell -File snyk-agent-guard.ps1 -Client claude-code -FromEnv
+#
+# Configuration is read from snyk-agent-guard.conf next to this script, written by
+# `snyk-agent-scan guard install` (see the Configuration section below). Only when there is
+# no such file and the command passes -FromEnv are the values taken from the environment
+# instead (PUSH_KEY or PUSHKEY, ADS_TOKEN_COMMAND, REMOTE_HOOKS_BASE_URL, TENANT_ID,
+# MACHINE_ID, MACHINE_SERIAL); REMOTE_HOOKS_BASE_URL must then be a Snyk host. Without
+# either, the script stops with a usage error.
 #
 # Reads a JSON payload from stdin and POSTs it (base64-encoded) to the Agent Guard endpoint.
 #
 # Two auth modes, chosen by guard install and never mixed (see snyk-agent-guard.sh): the push key
-# (-PushKey, -RemoteUrl), or machine identity (-TokenCommand, -RemoteUrl and -TenantId, or
-# ADS_TOKEN_COMMAND, REMOTE_HOOKS_BASE_URL and TENANT_ID). With machine identity every run calls
+# (PUSH_KEY, REMOTE_HOOKS_BASE_URL), or machine identity (ADS_TOKEN_COMMAND, REMOTE_HOOKS_BASE_URL
+# and TENANT_ID). With machine identity every run calls
 # `<token command> token --base-url <remote url>` and POSTs to the tenant route with the token as
-# a bearer token. A push key wins: parameters are looked at before env vars, and at each level a
-# push key before machine identity, so an ADS_TOKEN_COMMAND in the agent's environment cannot change a hook installed
-# with -PushKey, and a PUSH_KEY there cannot change one installed with -TokenCommand. Machine
-# identity applies when it is chosen that way; a missing value is then a usage error. A token
-# command that fails, times out or prints anything other than one token fails open like an
-# unreachable API; there is no fallback to the push key. The token is never logged and never put
-# on a command line.
+# a bearer token. A push key wins: when PUSH_KEY is set, ADS_TOKEN_COMMAND is ignored. Machine
+# identity applies when no push key is set and ADS_TOKEN_COMMAND is; a missing value is then a
+# usage error. A token command that fails, times out or prints anything other than one token
+# fails open like an unreachable API; there is no fallback to the push key. The token is never
+# logged and never put on a command line.
 #
 # The request is bounded by $TIMEOUT_SECONDS below. Transport and HTTP failures, that timeout
 # included, fail open: exit 0, one line on stderr, and on stdout a systemMessage JSON object
@@ -33,23 +38,16 @@ param(
     [ValidateSet("claude-code","cursor","codex","github-copilot")]
     [string]$Client,
 
-    [Parameter(Mandatory=$false)]
+    # Accepted but never used: hook commands written by earlier versions still pass these,
+    # and must keep working until `guard install` rewrites them. All values come from the
+    # configuration file; the variables are overwritten from it below.
     [string]$PushKey,
-
-    [Parameter(Mandatory=$false)]
     [string]$RemoteUrl,
-
-    [Parameter(Mandatory=$false)]
     [string]$TenantId,
-
-    [Parameter(Mandatory=$false)]
     [string]$MachineId,
-
-    [Parameter(Mandatory=$false)]
     [string]$MachineSerial,
 
-    [Parameter(Mandatory=$false)]
-    [string]$TokenCommand
+    [switch]$FromEnv
 )
 
 $ErrorActionPreference = "Stop"
@@ -141,31 +139,59 @@ function Get-AccessToken([string]$command, [string]$baseUrl, [int]$timeoutSecond
 # Main
 # ---------------------------------------------------------------------------
 
-# Parameters take precedence over env vars, and at each level a push key over machine identity
-# (see the header).
-if ($PushKey) {
-    $machineIdentity = $false
-} elseif ($TokenCommand) {
-    $machineIdentity = $true
-} elseif ($env:PUSH_KEY -or $env:PUSHKEY) {
-    $machineIdentity = $false
-} else {
-    $machineIdentity = [bool]$env:ADS_TOKEN_COMMAND
-}
-if ($machineIdentity) {
-    if (-not $TokenCommand) { $TokenCommand = $env:ADS_TOKEN_COMMAND }
-    if (-not $RemoteUrl) { $RemoteUrl = $env:REMOTE_HOOKS_BASE_URL }
-}
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
 
-if ($machineIdentity) {
-    if (-not $TenantId) { $TenantId = $env:TENANT_ID }
-    $required = "machine identity needs ADS_TOKEN_COMMAND, REMOTE_HOOKS_BASE_URL and TENANT_ID"
-    if (-not $RemoteUrl) {
-        Write-Error "REMOTE_HOOKS_BASE_URL is required (pass -RemoteUrl or set env var; $required)"
+# Installation configuration, written by `snyk-agent-scan guard install` next to this
+# script.
+$ConfigFile = Join-Path $PSScriptRoot "snyk-agent-guard.conf"
+# The endpoint an environment may name: https to snyk.io, snykgov.io or a subdomain, or
+# localhost. The configuration file is trusted and not checked.
+$EnvUrlPattern = '^(https://([A-Za-z0-9-]+\.)*(snyk|snykgov)\.io|https?://(localhost|127\.0\.0\.1))(:[0-9]+)?(/.*)?$'
+$Config = @{}
+if (-not (Test-Path -LiteralPath $ConfigFile) -and $FromEnv) {
+    $ConfigSource = "the environment"
+    $Config["PUSH_KEY"] = if ($env:PUSH_KEY) { $env:PUSH_KEY } else { $env:PUSHKEY }
+    $Config["ADS_TOKEN_COMMAND"] = $env:ADS_TOKEN_COMMAND
+    $Config["TENANT_ID"] = $env:TENANT_ID
+    $Config["REMOTE_HOOKS_BASE_URL"] = $env:REMOTE_HOOKS_BASE_URL
+    $Config["MACHINE_ID"] = $env:MACHINE_ID
+    $Config["MACHINE_SERIAL"] = $env:MACHINE_SERIAL
+    $envUrl = $Config["REMOTE_HOOKS_BASE_URL"]
+    if ($envUrl -and $envUrl -cnotmatch $EnvUrlPattern) {
+        Write-Error "REMOTE_HOOKS_BASE_URL from the environment is not a Snyk endpoint: $envUrl"
         exit 1
     }
+} else {
+    $ConfigSource = $ConfigFile
+    if (-not (Test-Path -LiteralPath $ConfigFile -PathType Leaf)) {
+        Write-Error "Configuration file not found: $ConfigFile (run 'snyk-agent-scan guard install')"
+        exit 1
+    }
+    foreach ($line in Get-Content -LiteralPath $ConfigFile -Encoding UTF8) {
+        $parts = $line.Split([char[]]@('='), 2)
+        if ($parts.Count -eq 2) { $Config[$parts[0]] = $parts[1] }
+    }
+}
+# Always overwritten, even with nothing: a value passed on the command line is never used.
+$PushKey = $Config["PUSH_KEY"]
+$TokenCommand = $Config["ADS_TOKEN_COMMAND"]
+$TenantId = $Config["TENANT_ID"]
+$RemoteUrl = $Config["REMOTE_HOOKS_BASE_URL"]
+$MachineId = $Config["MACHINE_ID"]
+$MachineSerial = $Config["MACHINE_SERIAL"]
+
+# A push key wins over machine identity (see the header).
+$machineIdentity = (-not $PushKey) -and [bool]$TokenCommand
+if (-not $RemoteUrl) {
+    $required = if ($machineIdentity) { " (machine identity needs ADS_TOKEN_COMMAND, REMOTE_HOOKS_BASE_URL and TENANT_ID)" } else { "" }
+    Write-Error "REMOTE_HOOKS_BASE_URL is not set in $ConfigSource$required"
+    exit 1
+}
+if ($machineIdentity) {
     if (-not $TenantId) {
-        Write-Error "TENANT_ID is required (pass -TenantId or set env var; $required)"
+        Write-Error "TENANT_ID is not set in $ConfigSource (machine identity needs ADS_TOKEN_COMMAND, REMOTE_HOOKS_BASE_URL and TENANT_ID)"
         exit 1
     }
     # A bare name would be looked up in PATH and the current directory.
@@ -178,23 +204,12 @@ if ($machineIdentity) {
         Write-Error "TENANT_ID is not a valid tenant id"
         exit 1
     }
-} else {
-    if (-not $PushKey) { $PushKey = if ($env:PUSH_KEY) { $env:PUSH_KEY } elseif ($env:PUSHKEY) { $env:PUSHKEY } else { $null } }
-    if (-not $PushKey) {
-        Write-Error "PUSH_KEY is required (pass -PushKey or set env var)"
-        exit 1
-    }
-
-    if (-not $RemoteUrl) { $RemoteUrl = $env:REMOTE_HOOKS_BASE_URL }
-    if (-not $RemoteUrl) {
-        Write-Error "REMOTE_HOOKS_BASE_URL is required (pass -RemoteUrl or set env var)"
-        exit 1
-    }
+} elseif (-not $PushKey) {
+    Write-Error "PUSH_KEY is not set in $ConfigSource"
+    exit 1
 }
-
-if (-not $MachineId) { $MachineId = $env:MACHINE_ID }
 if (-not $MachineId) {
-    Write-Error "MACHINE_ID is required (pass -MachineId or set env var)"
+    Write-Error "MACHINE_ID is not set in $ConfigSource"
     exit 1
 }
 

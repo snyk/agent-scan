@@ -4,29 +4,35 @@
 # Supports Claude Code, Cursor, Codex, and GitHub Copilot via the --client argument.
 #
 # Usage:
-#   PUSH_KEY='...' REMOTE_HOOKS_BASE_URL='...' bash snyk-agent-guard.sh --client claude-code
-#   PUSH_KEY='...' REMOTE_HOOKS_BASE_URL='...' bash snyk-agent-guard.sh --client cursor
-#   PUSH_KEY='...' REMOTE_HOOKS_BASE_URL='...' bash snyk-agent-guard.sh --client codex
-#   PUSH_KEY='...' REMOTE_HOOKS_BASE_URL='...' bash snyk-agent-guard.sh --client github-copilot
-#   PUSH_KEY= PUSHKEY= ADS_TOKEN_COMMAND='...' REMOTE_HOOKS_BASE_URL='...' TENANT_ID='...' bash snyk-agent-guard.sh --client cursor
+#   bash snyk-agent-guard.sh --client claude-code
+#   bash snyk-agent-guard.sh --client cursor
+#   bash snyk-agent-guard.sh --client codex
+#   bash snyk-agent-guard.sh --client github-copilot
+#   PUSH_KEY=... REMOTE_HOOKS_BASE_URL=... MACHINE_ID=... bash snyk-agent-guard.sh --client cursor --from-env
+#
+# Configuration is read from snyk-agent-guard.conf next to this script, written by
+# `snyk-agent-scan guard install`. Only when there is no such file and the command passes
+# --from-env are the values taken from the environment instead (PUSH_KEY or PUSHKEY,
+# ADS_TOKEN_COMMAND, REMOTE_HOOKS_BASE_URL, TENANT_ID, MACHINE_ID, MACHINE_SERIAL);
+# REMOTE_HOOKS_BASE_URL must then be a Snyk host. Without either, the script stops with a
+# usage error.
 #
 # Reads a JSON payload from stdin and POSTs it (base64-encoded) to the Agent Guard endpoint.
 #
 # Two auth modes, chosen by guard install and never mixed:
 #   push key          PUSH_KEY and REMOTE_HOOKS_BASE_URL: the push-key route with X-Client-Id.
-#   machine identity  ADS_TOKEN_COMMAND, REMOTE_HOOKS_BASE_URL and TENANT_ID (set by guard install
-#                     for an ADS installer user-mode install on an enrolled machine): every run
-#                     calls `"$ADS_TOKEN_COMMAND" token --base-url "$REMOTE_HOOKS_BASE_URL"` and
-#                     POSTs to the tenant route on REMOTE_HOOKS_BASE_URL with the token as a bearer
-#                     token. The token command refuses any API other than the enrolled one. The
-#                     token is never logged and never put on a command line.
-# A push key wins: when PUSH_KEY (or PUSHKEY) is set, the hook uses it and ignores
-# ADS_TOKEN_COMMAND, so one in the agent's environment cannot change a push-key hook. Machine
+#   machine identity  ADS_TOKEN_COMMAND, REMOTE_HOOKS_BASE_URL and TENANT_ID (written by guard
+#                     install for an ADS installer user-mode install on an enrolled machine):
+#                     every run calls `<ADS_TOKEN_COMMAND> token --base-url <REMOTE_HOOKS_BASE_URL>`
+#                     and POSTs to the tenant route on REMOTE_HOOKS_BASE_URL with the token as a
+#                     bearer token. The token command refuses any API other than the enrolled one.
+#                     The token is never logged and never put on a command line.
+# A push key wins: when PUSH_KEY is set, the hook uses it and ignores ADS_TOKEN_COMMAND. Machine
 # identity applies when no push key is set and ADS_TOKEN_COMMAND is; a missing value is then a
-# usage error. guard install's machine identity commands set PUSH_KEY and
-# PUSHKEY empty, so a push key in the agent's environment cannot change them either. A token
-# command that fails, times out or prints anything other than one token fails open like an
-# unreachable API; there is no fallback to the push key.
+# usage error. guard install writes only one of the two into the configuration file, and the
+# environment is not read while the file exists. A token command that fails, times out or prints
+# anything other than one token fails open like an unreachable API; there is no fallback to the
+# push key.
 #
 # The request is bounded by TIMEOUT_SECONDS below. Transport and HTTP failures, that timeout
 # included, fail open: exit 0, one line on stderr, and on stdout a systemMessage JSON object
@@ -92,6 +98,57 @@ fail_open() {
   exit 0
 }
 
+# Installation configuration, written by `snyk-agent-scan guard install` next to this
+# script.
+CONFIG_FILE="$(dirname "${BASH_SOURCE[0]}")/snyk-agent-guard.conf"
+CFG_PUSH_KEY=""
+CFG_ADS_TOKEN_COMMAND=""
+CFG_TENANT_ID=""
+CFG_REMOTE_HOOKS_BASE_URL=""
+CFG_MACHINE_ID=""
+CFG_MACHINE_SERIAL=""
+CONFIG_SOURCE="$CONFIG_FILE"
+
+# The endpoint an environment may name: https to snyk.io, snykgov.io or a subdomain, or
+# localhost. The configuration file is trusted and not checked.
+ENV_URL_RE='^(https://([A-Za-z0-9-]+\.)*(snyk|snykgov)\.io|https?://(localhost|127\.0\.0\.1))(:[0-9]+)?(/.*)?$'
+
+# Sets CONFIG_SOURCE to the file, or to "the environment" with --from-env and no file.
+load_config() {
+  local from_env="$1"
+  if [[ ! -e "$CONFIG_FILE" && "$from_env" == "1" ]]; then
+    CONFIG_SOURCE="the environment"
+    CFG_PUSH_KEY="${PUSH_KEY:-${PUSHKEY:-}}"
+    CFG_ADS_TOKEN_COMMAND="${ADS_TOKEN_COMMAND:-}"
+    CFG_TENANT_ID="${TENANT_ID:-}"
+    CFG_REMOTE_HOOKS_BASE_URL="${REMOTE_HOOKS_BASE_URL:-}"
+    CFG_MACHINE_ID="${MACHINE_ID:-}"
+    CFG_MACHINE_SERIAL="${MACHINE_SERIAL:-}"
+    if [[ -n "$CFG_REMOTE_HOOKS_BASE_URL" && ! "$CFG_REMOTE_HOOKS_BASE_URL" =~ $ENV_URL_RE ]]; then
+      die "REMOTE_HOOKS_BASE_URL from the environment is not a Snyk endpoint: ${CFG_REMOTE_HOOKS_BASE_URL}"
+    fi
+    return 0
+  fi
+  CONFIG_SOURCE="$CONFIG_FILE"
+  [[ -f "$CONFIG_FILE" && -r "$CONFIG_FILE" ]] \
+    || die "Configuration file not found: ${CONFIG_FILE} (run 'snyk-agent-scan guard install')"
+  local line key value
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    [[ "$line" == *=* ]] || continue
+    key="${line%%=*}"
+    value="${line#*=}"
+    case "$key" in
+      PUSH_KEY) CFG_PUSH_KEY="$value" ;;
+      ADS_TOKEN_COMMAND) CFG_ADS_TOKEN_COMMAND="$value" ;;
+      TENANT_ID) CFG_TENANT_ID="$value" ;;
+      REMOTE_HOOKS_BASE_URL) CFG_REMOTE_HOOKS_BASE_URL="$value" ;;
+      MACHINE_ID) CFG_MACHINE_ID="$value" ;;
+      MACHINE_SERIAL) CFG_MACHINE_SERIAL="$value" ;;
+    esac
+  done < "$CONFIG_FILE"
+}
+
 json_escape() {
   local s="${1-}"
   s="${s//\\/\\\\}"
@@ -99,7 +156,7 @@ json_escape() {
   s="${s//$'\t'/\\t}"
   s="${s//$'\r'/\\r}"
   s="${s//$'\n'/\\n}"
-  # JSON strings cannot contain any literal C0 control character. NUL cannot occur in an environment value.
+  # JSON strings cannot contain any literal C0 control character. NUL cannot occur in a shell variable.
   local code char escaped
   for (( code=1; code<32; code++ )); do
     printf -v char '\\%03o' "$code"
@@ -166,7 +223,7 @@ get_agent_surface() {
 
 # Usage: fetch_access_token <deadline>
 #
-# Runs `"$ADS_TOKEN_COMMAND" token --base-url "$REMOTE_HOOKS_BASE_URL"` and sets ACCESS_TOKEN to the token
+# Runs `"$CFG_ADS_TOKEN_COMMAND" token --base-url "$CFG_REMOTE_HOOKS_BASE_URL"` and sets ACCESS_TOKEN to the token
 # it prints. On failure ACCESS_TOKEN is empty, TOKEN_ERROR holds a fixed reason and the function
 # returns 1. Called directly, not in $(...), so both variables reach the caller.
 #
@@ -185,7 +242,7 @@ fetch_access_token() {
     # The child prints its own PID before it execs the token command, so the marker cannot land
     # inside the token (bash 3.2 has no BASHPID; exec keeps the PID).
     "$BASH" -c 'printf "\n%s%d\n" "$1" "$$"; shift; exec "$@"' bash "$pid_marker" \
-      "$ADS_TOKEN_COMMAND" token --base-url "$REMOTE_HOOKS_BASE_URL" &
+      "$CFG_ADS_TOKEN_COMMAND" token --base-url "$CFG_REMOTE_HOOKS_BASE_URL" &
     child=$!
     child_status=0
     wait "$child" || child_status=$?
@@ -227,34 +284,36 @@ fetch_access_token() {
 # ---------------------------------------------------------------------------
 
 hook_main() {
-  local client=""
+  local client="" from_env=0
 
   # Parse arguments
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --client) client="${2:-}"; shift 2 ;;
+      --from-env) from_env=1; shift ;;
       *) shift ;;
     esac
   done
 
   [[ -n "$client" ]] || die "Missing required argument: --client <claude-code|cursor|codex|github-copilot>"
 
-  local machine_identity=0 pushkey="${PUSH_KEY:-${PUSHKEY:-}}"
-  # A push key wins over ADS_TOKEN_COMMAND (see the header), so only the push key decides a
-  # push-key hook.
-  if [[ -z "$pushkey" && -n "${ADS_TOKEN_COMMAND:-}" ]]; then
+  load_config "$from_env"
+  local machine_identity=0 pushkey="$CFG_PUSH_KEY"
+  # A push key wins over ADS_TOKEN_COMMAND (see the header).
+  if [[ -z "$pushkey" && -n "$CFG_ADS_TOKEN_COMMAND" ]]; then
     machine_identity=1
-    [[ -n "${REMOTE_HOOKS_BASE_URL:-}" ]] || die "REMOTE_HOOKS_BASE_URL environment variable is not set (machine identity needs ADS_TOKEN_COMMAND, REMOTE_HOOKS_BASE_URL and TENANT_ID)"
-    [[ -n "${TENANT_ID:-}" ]] || die "TENANT_ID environment variable is not set (machine identity needs ADS_TOKEN_COMMAND, REMOTE_HOOKS_BASE_URL and TENANT_ID)"
+    local required="machine identity needs ADS_TOKEN_COMMAND, REMOTE_HOOKS_BASE_URL and TENANT_ID"
+    [[ -n "$CFG_REMOTE_HOOKS_BASE_URL" ]] || die "REMOTE_HOOKS_BASE_URL is not set in ${CONFIG_SOURCE} (${required})"
+    [[ -n "$CFG_TENANT_ID" ]] || die "TENANT_ID is not set in ${CONFIG_SOURCE} (${required})"
     # A bare name would be looked up in the agent's PATH.
-    [[ "$ADS_TOKEN_COMMAND" == /* ]] || die "ADS_TOKEN_COMMAND must be an absolute path"
+    [[ "$CFG_ADS_TOKEN_COMMAND" == /* ]] || die "ADS_TOKEN_COMMAND must be an absolute path"
     # Tenant ids are UUIDs; one that would need escaping in the URL path is refused.
-    [[ "$TENANT_ID" =~ ^[A-Za-z0-9._~-]+$ ]] || die "TENANT_ID is not a valid tenant id"
+    [[ "$CFG_TENANT_ID" =~ ^[A-Za-z0-9._~-]+$ ]] || die "TENANT_ID is not a valid tenant id"
   else
-    [[ -n "${REMOTE_HOOKS_BASE_URL:-}" ]] || die "REMOTE_HOOKS_BASE_URL environment variable is not set"
-    [[ -n "$pushkey" ]] || die "PUSH_KEY environment variable is not set"
+    [[ -n "$CFG_REMOTE_HOOKS_BASE_URL" ]] || die "REMOTE_HOOKS_BASE_URL is not set in ${CONFIG_SOURCE}"
+    [[ -n "$pushkey" ]] || die "PUSH_KEY is not set in ${CONFIG_SOURCE}"
   fi
-  [[ -n "${MACHINE_ID:-}" ]] || die "MACHINE_ID environment variable is not set"
+  [[ -n "$CFG_MACHINE_ID" ]] || die "MACHINE_ID is not set in ${CONFIG_SOURCE}"
 
   local cli_version user_agent
   cli_version="$AGENT_SCAN_VERSION"
@@ -278,9 +337,9 @@ hook_main() {
 
   local url
   if (( machine_identity )); then
-    url="${REMOTE_HOOKS_BASE_URL%/}/hidden/tenants/${TENANT_ID}${endpoint#/hidden}?version=${VERSION}"
+    url="${CFG_REMOTE_HOOKS_BASE_URL%/}/hidden/tenants/${CFG_TENANT_ID}${endpoint#/hidden}?version=${VERSION}"
   else
-    url="${REMOTE_HOOKS_BASE_URL}${endpoint}?version=${VERSION}"
+    url="${CFG_REMOTE_HOOKS_BASE_URL}${endpoint}?version=${VERSION}"
   fi
 
   # Read payload from stdin
@@ -300,15 +359,15 @@ hook_main() {
   hostname="$(get_hostname)"
   username="$(get_username)"
   machine_serial=null
-  if [[ -n "${MACHINE_SERIAL:-}" ]]; then
-    machine_serial="$(json_quote "$MACHINE_SERIAL")"
+  if [[ -n "$CFG_MACHINE_SERIAL" ]]; then
+    machine_serial="$(json_quote "$CFG_MACHINE_SERIAL")"
   fi
 
   x_user="$(printf '{%s:%s,%s:%s,%s:%s,%s:%s,%s:%s}' \
     "\"hostname\"" "$(json_quote "$hostname")" \
     "\"machine_serial\"" "$machine_serial" \
     "\"username\"" "$(json_quote "$username")" \
-    "\"identifier\"" "$(json_quote "$MACHINE_ID")" \
+    "\"identifier\"" "$(json_quote "$CFG_MACHINE_ID")" \
     "\"cli_version\"" "$(json_quote "$cli_version")")"
 
   # Execute request
