@@ -42,6 +42,7 @@ param(
     # and must keep working until `guard install` rewrites them. All values come from the
     # configuration file; the variables are overwritten from it below.
     [string]$PushKey,
+    [string]$TokenCommand,
     [string]$RemoteUrl,
     [string]$TenantId,
     [string]$MachineId,

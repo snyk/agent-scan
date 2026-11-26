@@ -2597,15 +2597,16 @@ def _send_servers_discovered_event(
 # single-quoted PowerShell parameters.
 _POSIX_EMBEDDED_QUOTE = "'\"'\"'"  # how _shell_quote writes a ' inside a single-quoted value
 _LEGACY_POSIX_VALUE_RE = re.compile(
-    r"(PUSH_KEY|REMOTE_HOOKS_BASE_URL|TENANT_ID|MACHINE_ID|MACHINE_SERIAL|AGENT_SCAN_COMMAND)='((?:[^']|"
+    r"(PUSH_KEY|PUSHKEY|ADS_TOKEN_COMMAND|REMOTE_HOOKS_BASE_URL|TENANT_ID|MACHINE_ID|MACHINE_SERIAL|AGENT_SCAN_COMMAND)='((?:[^']|"
     + re.escape(_POSIX_EMBEDDED_QUOTE)
     + r")*)' "
 )
 _LEGACY_POWERSHELL_VALUE_RE = re.compile(
-    r" -(PushKey|RemoteUrl|TenantId|MachineId|MachineSerial|AgentScanCommand) '((?:[^']|'')*)'(?= |\Z)"
+    r" -(PushKey|TokenCommand|RemoteUrl|TenantId|MachineId|MachineSerial|AgentScanCommand) '((?:[^']|'')*)'(?= |\Z)"
 )
 _LEGACY_POWERSHELL_KEYS = {
     "PushKey": "PUSH_KEY",
+    "TokenCommand": "ADS_TOKEN_COMMAND",
     "RemoteUrl": "REMOTE_HOOKS_BASE_URL",
     "TenantId": "TENANT_ID",
     "MachineId": "MACHINE_ID",
@@ -2620,8 +2621,11 @@ def _is_installed_legacy_value(key: str, value: str, config_values: Mapping[str,
 
     A push key only has to be a well-formed UUID, since a changed key is reported as
     ``push_key_changed`` rather than as a hook change. An empty value matches only for
-    the serial, the one value earlier versions wrote even when empty.
+    the serial, which earlier versions wrote even when empty, and for ``PUSH_KEY`` /
+    ``PUSHKEY`` when this install has no push key: machine identity commands cleared both.
     """
+    if key in ("PUSH_KEY", "PUSHKEY") and not value:
+        return not config_values.get("PUSH_KEY", "")
     if value == config_values.get(key, "") and (value or key == "MACHINE_SERIAL"):
         return True
     return key == "PUSH_KEY" and _PUSH_KEY_UUID_RE.fullmatch(value) is not None

@@ -7686,6 +7686,56 @@ class TestComputeHooksDiff:
         )
         assert ("preToolUse" in result["modified"]) is modified
 
+    _MACHINE_IDENTITY_INSTALL: ClassVar[dict[str, str]] = {
+        "ADS_TOKEN_COMMAND": "/Users/me/.local/bin/ads-installer",
+        "REMOTE_HOOKS_BASE_URL": "https://api.eu.snyk.io",
+        "TENANT_ID": "t1",
+        "MACHINE_ID": "m1",
+    }
+
+    @pytest.mark.parametrize(
+        "old_cmd, config_values, modified",
+        [
+            # As the machine identity release before the configuration file rendered them.
+            pytest.param(
+                "PUSH_KEY='' PUSHKEY='' ADS_TOKEN_COMMAND='/Users/me/.local/bin/ads-installer' "
+                "REMOTE_HOOKS_BASE_URL='https://api.eu.snyk.io' TENANT_ID='t1' MACHINE_ID='m1' MACHINE_SERIAL='' "
+                f"{_POSIX_GUARD_CMD}",
+                _MACHINE_IDENTITY_INSTALL,
+                False,
+                id="posix-matching",
+            ),
+            pytest.param(
+                f"{_PS_GUARD_CMD} -TokenCommand '/Users/me/.local/bin/ads-installer' "
+                "-RemoteUrl 'https://api.eu.snyk.io' -TenantId 't1' -MachineId 'm1'",
+                _MACHINE_IDENTITY_INSTALL,
+                False,
+                id="powershell-matching",
+            ),
+            pytest.param(
+                f"PUSH_KEY='' PUSHKEY='' ADS_TOKEN_COMMAND='/tmp/other' {_POSIX_GUARD_CMD}",
+                _MACHINE_IDENTITY_INSTALL,
+                True,
+                id="posix-different-token-command",
+            ),
+            # An empty push key matches only an install without one.
+            pytest.param(
+                f"PUSH_KEY='' {_POSIX_GUARD_CMD}",
+                {"PUSH_KEY": _LEGACY_PUSH_KEY, "MACHINE_ID": "m1"},
+                True,
+                id="posix-empty-push-key-on-a-push-key-install",
+            ),
+        ],
+    )
+    def test_legacy_machine_identity_commands_are_ignored_when_they_match(self, old_cmd, config_values, modified):
+        new_cmd = _PS_GUARD_CMD if old_cmd.startswith("powershell") else _POSIX_GUARD_CMD
+        result = _compute_hooks_diff(
+            {"preToolUse": [{"command": old_cmd}]},
+            {"preToolUse": [{"command": new_cmd}]},
+            config_values=config_values,
+        )
+        assert ("preToolUse" in result["modified"]) is modified
+
     def test_diff_is_deep_copied_from_sources(self):
         extra_cmd = "PUSH_KEY='x' bash '/extra/snyk-agent-guard.sh'"
         new_cmd = "PUSH_KEY='x' bash '/new/snyk-agent-guard.sh'"
@@ -9242,6 +9292,25 @@ class TestMachineIdentityConfig:
         assert info["auth_value"] == ""
         assert info["tenant_id"] == "tenant"
         assert info["host"] == "api.eu.snyk.io"
+
+    @pytest.mark.parametrize(
+        "script, legacy",
+        [
+            (
+                "snyk-agent-guard.ps1",
+                {"PushKey", "TokenCommand", "RemoteUrl", "TenantId", "MachineId", "MachineSerial"},
+            ),
+            (
+                "snyk-agent-guard-discover.ps1",
+                {"PushKey", "TokenCommand", "RemoteUrl", "TenantId", "MachineId", "MachineSerial", "AgentScanCommand"},
+            ),
+        ],
+    )
+    def test_powershell_scripts_accept_the_parameters_earlier_commands_pass(self, script, legacy):
+        """PowerShell refuses to run a script with a parameter it does not declare, so a hook
+        command written before the configuration file must keep running until install rewrites it."""
+        declared = set(re.findall(r"\[string\]\$([A-Za-z]+)", _get_script_path(script).read_text()))
+        assert legacy <= declared
 
     def test_push_key_in_the_config_wins(self, tmp_path):
         path = tmp_path / "settings.json"
