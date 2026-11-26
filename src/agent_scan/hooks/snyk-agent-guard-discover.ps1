@@ -54,7 +54,14 @@ if ($valuesFromEnv) {
     if ($envUrl -and $envUrl -cnotmatch $EnvUrlPattern) { exit 0 }
 } else {
     if (-not (Test-Path -LiteralPath $ConfigFile -PathType Leaf)) { exit 0 }
-    foreach ($line in Get-Content -LiteralPath $ConfigFile -Encoding UTF8) {
+    # Session-start discovery is best-effort: an unreadable file ends it quietly, as in
+    # snyk-agent-guard-discover.sh.
+    try {
+        $lines = Get-Content -LiteralPath $ConfigFile -Encoding UTF8
+    } catch {
+        exit 0
+    }
+    foreach ($line in $lines) {
         $parts = $line.Split([char[]]@('='), 2)
         if ($parts.Count -eq 2) { $Config[$parts[0]] = $parts[1] }
     }

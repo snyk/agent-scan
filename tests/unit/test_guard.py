@@ -11120,6 +11120,24 @@ class TestEnvModeInstallOptions:
         cmd = "PUSH_KEY=\"$SNYK_ADS_PUSH_KEY\" bash '/x/snyk-agent-guard.sh' --client cursor --from-env"
         assert _parse_command_info(cmd, [], tmp_path / "hooks.json")["auth_value"] == ""
 
+    def test_an_unset_push_key_placeholder_stays_a_push_key_install(self, tmp_path, monkeypatch):
+        """--no-config-file installs are push-key only: an ADS_TOKEN_COMMAND in the uninstaller's
+        environment must not make one look like machine identity, which would skip the revoke note."""
+        monkeypatch.delenv("SNYK_ADS_PUSH_KEY", raising=False)
+        monkeypatch.setenv("ADS_TOKEN_COMMAND", "/opt/ads/ads-installer")
+        path = tmp_path / "hooks.json"
+        cmd = "PUSH_KEY=\"$SNYK_ADS_PUSH_KEY\" bash '/x/snyk-agent-guard.sh' --client cursor --from-env"
+        info = _parse_command_info(cmd, [], path)
+        assert (info["auth_type"], info["auth_value"]) == ("pushkey", "")
+
+        with patch(f"{_G}.IS_WINDOWS", False):
+            _setup_cursor_hooks(cmd, path)
+        with patch(f"{_G}.revoke_push_key") as revoke, patch(f"{_G}.rich") as mock_rich:
+            _run_uninstall(SimpleNamespace(client="cursor", file=str(path), managed=False))
+        revoke.assert_not_called()
+        printed = " ".join(str(c) for c in mock_rich.print.call_args_list)
+        assert "Push key was not revoked" in printed
+
 
 @pytest.mark.skipif(IS_WINDOWS, reason="bash script; skipped on Windows")
 class TestEnvModeInstallEndToEnd:

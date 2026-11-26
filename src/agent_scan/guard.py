@@ -2818,8 +2818,12 @@ def _parse_command_info(cmd: str, events: list[str], config_path: Path) -> dict:
     url = values.get("REMOTE_HOOKS_BASE_URL", "")
     push_key = values.get("PUSH_KEY", "")
     # A push key wins, as in the scripts. A machine identity hook has no push key, so
-    # uninstall has nothing to revoke.
-    machine_identity = not push_key and bool(values.get("ADS_TOKEN_COMMAND", ""))
+    # uninstall has nothing to revoke. A command that assigns PUSH_KEY a placeholder is a
+    # push-key install even when the placeholder is unset here: --no-config-file installs
+    # never use machine identity, so an ADS_TOKEN_COMMAND in this environment must not turn
+    # one into it (that would skip revoking the key, and the note saying so).
+    assigns_push_key = re.search(r'(?:^| )PUSH_KEY="\$', cmd) is not None
+    machine_identity = not push_key and not assigns_push_key and bool(values.get("ADS_TOKEN_COMMAND", ""))
     host = urlparse(url).netloc if url else "unknown"
 
     return {
