@@ -9,9 +9,10 @@
 # Configuration is read from snyk-agent-guard.conf next to this script, written by
 # `snyk-agent-scan guard install` (see the Configuration section below). Only when there is
 # no such file and the command passes -FromEnv are the values taken from the environment
-# instead (PUSH_KEY or PUSHKEY, ADS_TOKEN_COMMAND, REMOTE_HOOKS_BASE_URL, TENANT_ID,
-# MACHINE_ID, MACHINE_SERIAL); REMOTE_HOOKS_BASE_URL must then be a Snyk host. Without
-# either, the script stops with a usage error.
+# instead (PUSH_KEY, or PUSHKEY when PUSH_KEY is unset; REMOTE_HOOKS_BASE_URL, MACHINE_ID,
+# MACHINE_SERIAL). That mode needs a push key, never uses machine identity, and accepts only
+# an https Snyk host as REMOTE_HOOKS_BASE_URL. Without either, the script stops with a usage
+# error.
 #
 # Reads a JSON payload from stdin and POSTs it (base64-encoded) to the Agent Guard endpoint.
 #
@@ -147,15 +148,15 @@ function Get-AccessToken([string]$command, [string]$baseUrl, [int]$timeoutSecond
 # Installation configuration, written by `snyk-agent-scan guard install` next to this
 # script.
 $ConfigFile = Join-Path $PSScriptRoot "snyk-agent-guard.conf"
-# The endpoint an environment may name: https to snyk.io, snykgov.io or a subdomain, or
-# localhost. The configuration file is trusted and not checked.
-$EnvUrlPattern = '^(https://([A-Za-z0-9-]+\.)*(snyk|snykgov)\.io|https?://(localhost|127\.0\.0\.1))(:[0-9]+)?(/.*)?$'
+# The endpoint an environment may name: https to snyk.io or a subdomain. The
+# configuration file is trusted and not checked, so a local endpoint goes there.
+$EnvUrlPattern = '^https://([A-Za-z0-9-]+\.)*snyk\.io(:[0-9]+)?(/.*)?$'
 $Config = @{}
 if (-not (Test-Path -LiteralPath $ConfigFile) -and $FromEnv) {
     $ConfigSource = "the environment"
-    $Config["PUSH_KEY"] = if ($env:PUSH_KEY) { $env:PUSH_KEY } else { $env:PUSHKEY }
-    $Config["ADS_TOKEN_COMMAND"] = $env:ADS_TOKEN_COMMAND
-    $Config["TENANT_ID"] = $env:TENANT_ID
+    # Push key only: machine identity is never taken from the environment. PUSHKEY stands in
+    # only for an unset PUSH_KEY.
+    $Config["PUSH_KEY"] = if (Test-Path Env:PUSH_KEY) { $env:PUSH_KEY } else { $env:PUSHKEY }
     $Config["REMOTE_HOOKS_BASE_URL"] = $env:REMOTE_HOOKS_BASE_URL
     $Config["MACHINE_ID"] = $env:MACHINE_ID
     $Config["MACHINE_SERIAL"] = $env:MACHINE_SERIAL

@@ -535,7 +535,11 @@ class TestGuardInstallEnvModeE2E:
     from placeholders expanded when the hook runs."""
 
     @pytest.mark.parametrize("agent_scan_cmd", ["uv", "binary"], indirect=True)
-    def test_env_mode_install_and_uninstall(self, agent_scan_cmd, agent_scan_command, tmp_path, fake_hook_server):
+    def test_env_mode_refuses_a_local_endpoint(self, agent_scan_cmd, agent_scan_command, tmp_path, fake_hook_server):
+        """The hooks accept only an https Snyk host from their environment, so install refuses a
+        local --url in env mode before writing anything. A local endpoint needs the configuration
+        file (see the default-mode tests above). The env-mode install itself runs against a local
+        server in tests/unit/test_guard.py::TestEnvModeInstallEndToEnd, on test copies of the scripts."""
         config_file = tmp_path / "settings.json"
         result = _run_cli(
             agent_scan_cmd,
@@ -553,20 +557,11 @@ class TestGuardInstallEnvModeE2E:
             "PUSH_KEY=E2E_PUSH_KEY",
             env=_guard_env(PUSH_KEY="test-pk-e2e", AGENT_SCAN_COMMAND=str(agent_scan_command)),
         )
-        assert result.returncode == 0, f"guard install failed:\n{_describe(result)}"
-        assert not (_scripts_dir(config_file) / "snyk-agent-guard.conf").exists()
-        settings = json.loads(config_file.read_text())
-        hook_commands = [h["command"] for groups in settings["hooks"].values() for g in groups for h in g["hooks"]]
-        assert hook_commands
-        assert all(c.startswith('PUSH_KEY="$E2E_PUSH_KEY" ') and c.endswith("--from-env") for c in hook_commands)
-        assert all("test-pk-e2e" not in c for c in hook_commands)
-        # The test event ran the installed script in env mode.
-        assert _FakeHookServer.requests[0]["body"]["hook_event_name"] == "hooksConfigured"
-
-        _uninstall(agent_scan_cmd, "claude", config_file)
-        # The settings file held nothing but Guard's hooks, so uninstall deletes it.
+        assert result.returncode != 0
+        assert "needs a Snyk --url" in result.stdout + result.stderr
         assert not config_file.exists()
-        _assert_scripts_removed(config_file)
+        assert not _scripts_dir(config_file).exists()
+        assert not _FakeHookServer.requests
 
     @pytest.mark.parametrize("agent_scan_cmd", ["uv"], indirect=True)
     def test_env_mode_refuses_a_literal_push_key(self, agent_scan_cmd, agent_scan_command, tmp_path, fake_hook_server):

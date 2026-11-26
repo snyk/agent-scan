@@ -9,8 +9,9 @@
 #
 # Configuration is read from snyk-agent-guard.conf next to this script, written by
 # `snyk-agent-scan guard install`. Only when there is no such file and the command passes
-# -FromEnv are the values taken from the environment instead; REMOTE_HOOKS_BASE_URL must
-# then be a Snyk host, and AGENT_SCAN_COMMAND an existing file (it is never evaluated).
+# -FromEnv are the values taken from the environment instead: a push key is then required
+# (machine identity is never taken from there), REMOTE_HOOKS_BASE_URL must be an https Snyk
+# host, and AGENT_SCAN_COMMAND an existing file (it is never evaluated).
 #
 param(
     [Parameter(Mandatory=$true)]
@@ -39,13 +40,14 @@ $ErrorActionPreference = "Stop"
 
 $ConfigFile = Join-Path $PSScriptRoot "snyk-agent-guard.conf"
 # Same rule as snyk-agent-guard.ps1.
-$EnvUrlPattern = '^(https://([A-Za-z0-9-]+\.)*(snyk|snykgov)\.io|https?://(localhost|127\.0\.0\.1))(:[0-9]+)?(/.*)?$'
+$EnvUrlPattern = '^https://([A-Za-z0-9-]+\.)*snyk\.io(:[0-9]+)?(/.*)?$'
 $Config = @{}
 $valuesFromEnv = (-not (Test-Path -LiteralPath $ConfigFile)) -and $FromEnv
 if ($valuesFromEnv) {
-    $Config["PUSH_KEY"] = if ($env:PUSH_KEY) { $env:PUSH_KEY } else { $env:PUSHKEY }
-    $Config["ADS_TOKEN_COMMAND"] = $env:ADS_TOKEN_COMMAND
-    $Config["TENANT_ID"] = $env:TENANT_ID
+    # Push key only, as in snyk-agent-guard.ps1: machine identity is never taken from the
+    # environment, so ADS_TOKEN_COMMAND and TENANT_ID are cleared below.
+    $Config["PUSH_KEY"] = if (Test-Path Env:PUSH_KEY) { $env:PUSH_KEY } else { $env:PUSHKEY }
+    if (-not $Config["PUSH_KEY"]) { exit 0 }
     $Config["REMOTE_HOOKS_BASE_URL"] = $env:REMOTE_HOOKS_BASE_URL
     $Config["MACHINE_ID"] = $env:MACHINE_ID
     $Config["MACHINE_SERIAL"] = $env:MACHINE_SERIAL

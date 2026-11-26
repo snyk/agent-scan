@@ -880,10 +880,9 @@ _ENV_MODE_KEYS = ("PUSH_KEY", "REMOTE_HOOKS_BASE_URL", "MACHINE_ID", "MACHINE_SE
 _ENV_MODE_FORWARDER_KEYS = _ENV_MODE_KEYS[:4]
 _ENV_VAR_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 # The endpoints the hook scripts accept from their environment (ENV_URL_RE in the .sh,
-# $EnvUrlPattern in the .ps1): https to snyk.io, snykgov.io or a subdomain, or localhost.
-_ENV_MODE_URL_RE = re.compile(
-    r"(https://([A-Za-z0-9-]+\.)*(snyk|snykgov)\.io|https?://(localhost|127\.0\.0\.1))(:[0-9]+)?(/.*)?"
-)
+# $EnvUrlPattern in the .ps1): https to snyk.io or a subdomain. A local endpoint
+# needs the configuration file, which is not checked.
+_ENV_MODE_URL_RE = re.compile(r"https://([A-Za-z0-9-]+\.)*snyk\.io(:[0-9]+)?(/.*)?")
 _FROM_ENV_RE = re.compile(r"(?:^|\s)(?:--from-env|-FromEnv)(?:\s|$)")
 _PLACEHOLDER_VALUE_RE = re.compile(r'"\$([A-Za-z_][A-Za-z0-9_]*)"')
 
@@ -909,8 +908,9 @@ def _check_env_mode(values: Mapping[str, str], placeholders: Mapping[str, str]) 
         )
     if not _ENV_MODE_URL_RE.fullmatch(values["REMOTE_HOOKS_BASE_URL"]):
         raise ValueError(
-            "--no-config-file needs a Snyk --url (https to snyk.io or snykgov.io): "
-            "the hook scripts accept no other endpoint from their environment"
+            "--no-config-file needs a Snyk --url (https to snyk.io or a subdomain): "
+            "the hook scripts accept no other endpoint from their environment. For a local endpoint, "
+            "install without --no-config-file"
         )
     if IS_WINDOWS:
         # `powershell -File` cannot set environment variables, so the hooks can only read
@@ -2820,20 +2820,17 @@ def _parse_command_info(cmd: str, events: list[str], config_path: Path) -> dict:
         if env_mode:
             # An env-mode hook reads a value the command doesn't assign from the variable of
             # its own name (on Windows the command assigns none), so look there too.
+            # As in the scripts: PUSHKEY stands in only for an unset PUSH_KEY.
             for key in values:
                 if not re.search(rf"(?:^| ){key}=", cmd):
-                    values[key] = os.environ.get(key, "") or (
-                        os.environ.get("PUSHKEY", "") if key == "PUSH_KEY" else ""
-                    )
+                    default = os.environ.get("PUSHKEY", "") if key == "PUSH_KEY" else ""
+                    values[key] = os.environ.get(key, default)
     url = values.get("REMOTE_HOOKS_BASE_URL", "")
     push_key = values.get("PUSH_KEY", "")
     # A push key wins, as in the scripts. A machine identity hook has no push key, so
-    # uninstall has nothing to revoke. A command that assigns PUSH_KEY a placeholder is a
-    # push-key install even when the placeholder is unset here: --no-config-file installs
-    # never use machine identity, so an ADS_TOKEN_COMMAND in this environment must not turn
-    # one into it (that would skip revoking the key, and the note saying so).
-    assigns_push_key = re.search(r'(?:^| )PUSH_KEY="\$', cmd) is not None
-    machine_identity = not push_key and not assigns_push_key and bool(values.get("ADS_TOKEN_COMMAND", ""))
+    # uninstall has nothing to revoke. Env-mode hooks never use machine identity, so an
+    # ADS_TOKEN_COMMAND in this environment does not make one look like it.
+    machine_identity = not env_mode and not push_key and bool(values.get("ADS_TOKEN_COMMAND", ""))
     host = urlparse(url).netloc if url else "unknown"
 
     return {

@@ -12,10 +12,10 @@
 #
 # Configuration is read from snyk-agent-guard.conf next to this script, written by
 # `snyk-agent-scan guard install`. Only when there is no such file and the command passes
-# --from-env are the values taken from the environment instead (PUSH_KEY or PUSHKEY,
-# ADS_TOKEN_COMMAND, REMOTE_HOOKS_BASE_URL, TENANT_ID, MACHINE_ID, MACHINE_SERIAL);
-# REMOTE_HOOKS_BASE_URL must then be a Snyk host. Without either, the script stops with a
-# usage error.
+# --from-env are the values taken from the environment instead (PUSH_KEY, or PUSHKEY when
+# PUSH_KEY is unset; REMOTE_HOOKS_BASE_URL, MACHINE_ID, MACHINE_SERIAL). That mode needs a
+# push key, never uses machine identity, and accepts only an https Snyk host as
+# REMOTE_HOOKS_BASE_URL. Without either, the script stops with a usage error.
 #
 # Reads a JSON payload from stdin and POSTs it (base64-encoded) to the Agent Guard endpoint.
 #
@@ -109,18 +109,18 @@ CFG_MACHINE_ID=""
 CFG_MACHINE_SERIAL=""
 CONFIG_SOURCE="$CONFIG_FILE"
 
-# The endpoint an environment may name: https to snyk.io, snykgov.io or a subdomain, or
-# localhost. The configuration file is trusted and not checked.
-ENV_URL_RE='^(https://([A-Za-z0-9-]+\.)*(snyk|snykgov)\.io|https?://(localhost|127\.0\.0\.1))(:[0-9]+)?(/.*)?$'
+# The endpoint an environment may name: https to snyk.io or a subdomain. The
+# configuration file is trusted and not checked, so a local endpoint goes there.
+ENV_URL_RE='^https://([A-Za-z0-9-]+\.)*snyk\.io(:[0-9]+)?(/.*)?$'
 
 # Sets CONFIG_SOURCE to the file, or to "the environment" with --from-env and no file.
 load_config() {
   local from_env="$1"
   if [[ ! -e "$CONFIG_FILE" && "$from_env" == "1" ]]; then
     CONFIG_SOURCE="the environment"
-    CFG_PUSH_KEY="${PUSH_KEY:-${PUSHKEY:-}}"
-    CFG_ADS_TOKEN_COMMAND="${ADS_TOKEN_COMMAND:-}"
-    CFG_TENANT_ID="${TENANT_ID:-}"
+    # Push key only: machine identity is never taken from the environment. PUSHKEY stands in
+    # only for an unset PUSH_KEY, not for a placeholder that expanded to nothing.
+    CFG_PUSH_KEY="${PUSH_KEY-${PUSHKEY:-}}"
     CFG_REMOTE_HOOKS_BASE_URL="${REMOTE_HOOKS_BASE_URL:-}"
     CFG_MACHINE_ID="${MACHINE_ID:-}"
     CFG_MACHINE_SERIAL="${MACHINE_SERIAL:-}"

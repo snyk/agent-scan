@@ -10,8 +10,9 @@ set -euo pipefail
 #
 # Configuration is read from snyk-agent-guard.conf next to this script, written by
 # `snyk-agent-scan guard install`. Only when there is no such file and the command passes
-# --from-env are the values taken from the environment instead; REMOTE_HOOKS_BASE_URL must
-# then be a Snyk host, and AGENT_SCAN_COMMAND an executable file (it is never evaluated).
+# --from-env are the values taken from the environment instead: a push key is then required
+# (machine identity is never taken from there), REMOTE_HOOKS_BASE_URL must be an https Snyk
+# host, and AGENT_SCAN_COMMAND an executable file (it is never evaluated).
 
 # The hook arguments are passed on to `guard discover`, so only --client and --scope are
 # accepted: anything else, such as --url, would apply to the push key read below.
@@ -36,12 +37,15 @@ set -- ${FORWARD_ARGS[@]+"${FORWARD_ARGS[@]}"}
 
 CONFIG_FILE="$(dirname "${BASH_SOURCE[0]}")/snyk-agent-guard.conf"
 # Same rule as snyk-agent-guard.sh.
-ENV_URL_RE='^(https://([A-Za-z0-9-]+\.)*(snyk|snykgov)\.io|https?://(localhost|127\.0\.0\.1))(:[0-9]+)?(/.*)?$'
+ENV_URL_RE='^https://([A-Za-z0-9-]+\.)*snyk\.io(:[0-9]+)?(/.*)?$'
 
 if [[ ! -e "$CONFIG_FILE" && "$FROM_ENV" == "1" ]]; then
-  PUSH_KEY="${PUSH_KEY:-${PUSHKEY:-}}"
-  ADS_TOKEN_COMMAND="${ADS_TOKEN_COMMAND:-}"
-  TENANT_ID="${TENANT_ID:-}"
+  # Push key only, as in snyk-agent-guard.sh: machine identity is never taken from the
+  # environment, so both are cleared before `guard discover`.
+  PUSH_KEY="${PUSH_KEY-${PUSHKEY:-}}"
+  ADS_TOKEN_COMMAND=""
+  TENANT_ID=""
+  [[ -n "$PUSH_KEY" ]] || exit 0
   REMOTE_HOOKS_BASE_URL="${REMOTE_HOOKS_BASE_URL:-}"
   MACHINE_ID="${MACHINE_ID:-}"
   MACHINE_SERIAL="${MACHINE_SERIAL:-}"

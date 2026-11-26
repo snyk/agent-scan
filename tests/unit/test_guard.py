@@ -9618,29 +9618,56 @@ class TestBashHookScriptMachineIdentity:
         assert result.returncode == 0, result.stderr
         assert _HookHandler.last_request["headers"]["Authorization"] == "Bearer machine-token-123"
 
-    def test_env_mode_takes_machine_identity_from_the_environment(self, hook_server, tmp_path):
-        """Without a configuration file, --from-env reads machine identity from the environment."""
-        script = tmp_path / "snyk-agent-guard.sh"
-        shutil.copyfile(_get_script_path("snyk-agent-guard.sh"), script)
+    @pytest.mark.parametrize("name", ["snyk-agent-guard.sh", "snyk-agent-guard-discover.sh"])
+    def test_env_mode_never_takes_machine_identity_from_the_environment(self, tmp_path, name):
+        """Without a configuration file, --from-env needs a push key: an ADS_TOKEN_COMMAND and
+        TENANT_ID in the environment never switch the hook to machine identity."""
+        record = tmp_path / "record"
+        stub = tmp_path / "snyk-agent-scan"
+        stub.write_text('#!/bin/sh\nprintf "%s|%s|%s\\n" "$PUSH_KEY" "$ADS_TOKEN_COMMAND" "$TENANT_ID" > "$RECORD"\n')
+        stub.chmod(0o755)
+        script = tmp_path / name
+        shutil.copyfile(_get_script_path(name), script)
         env = {
             "PATH": "/usr/bin:/bin:/usr/local/bin",
+            "RECORD": str(record),
             "ADS_TOKEN_COMMAND": str(_fake_token_command(tmp_path)),
             "TENANT_ID": "tenant-1",
-            "REMOTE_HOOKS_BASE_URL": hook_server,
+            "REMOTE_HOOKS_BASE_URL": "https://api.snyk.io",
             "MACHINE_ID": "machine-42",
+            "AGENT_SCAN_COMMAND": str(stub),
         }
+        args = ["--client", "cursor"] + (["--scope", "servers"] if "discover" in name else [])
         result = subprocess.run(
-            ["bash", str(script), "--client", "cursor", "--from-env"],
+            ["bash", str(script), *args, "--from-env"],
             input='{"hook_event_name":"PreToolUse","session_id":"s1"}',
             capture_output=True,
             text=True,
             timeout=20,
             env=env,
         )
-        assert result.returncode == 0, result.stderr
-        req = _HookHandler.last_request
-        assert req["path"] == "/hidden/tenants/tenant-1/agent-monitor/hooks/cursor?version=2025-11-11"
-        assert req["headers"]["Authorization"] == "Bearer machine-token-123"
+        assert not (tmp_path / "token-runs").exists()
+        if "discover" in name:
+            assert result.returncode == 0
+            assert not record.exists()  # no push key, so guard discover never runs
+        else:
+            assert result.returncode == 1
+            assert "PUSH_KEY is not set in the environment" in result.stderr
+
+        # With a push key it runs, and guard discover gets no machine identity to prefer.
+        env["PUSH_KEY"] = "pk-env"
+        if "discover" in name:
+            result = subprocess.run(
+                ["bash", str(script), *args, "--from-env"],
+                input="{}",
+                capture_output=True,
+                text=True,
+                timeout=20,
+                env=env,
+            )
+            assert result.returncode == 0, result.stderr
+            assert record.read_text() == "pk-env||\n"
+        assert not (tmp_path / "token-runs").exists()
 
     def test_runs_the_token_command_on_every_invocation(self, hook_server, tmp_path):
         self._run(hook_server, tmp_path)
@@ -10785,6 +10812,42 @@ def _bash_env_url_re() -> str:
     return m[1]
 
 
+# The shipped scripts and the installer accept only https Snyk hosts from the environment. Tests
+# that run env mode against the local test server use copies that also accept http://127.0.0.1,
+# rewritten here; nothing shipped allows it.
+_SHIPPED_ENV_URL_RE = r"^https://([A-Za-z0-9-]+\.)*snyk\.io(:[0-9]+)?(/.*)?$"
+_TEST_ENV_URL_RE = r"^(https://([A-Za-z0-9-]+\.)*snyk\.io|http://127\.0\.0\.1)(:[0-9]+)?(/.*)?$"
+
+
+def _with_local_env_urls(content: bytes) -> bytes:
+    assert content.count(_SHIPPED_ENV_URL_RE.encode()) == 1, "the script's env URL rule changed"
+    return content.replace(_SHIPPED_ENV_URL_RE.encode(), _TEST_ENV_URL_RE.encode())
+
+
+@pytest.fixture
+def local_env_mode(monkeypatch):
+    """Let env mode reach the local test server: the installer accepts http://127.0.0.1 for
+    --no-config-file, and the scripts it copies accept it from their environment."""
+    real_files = guard_module.importlib_resources.files
+
+    class _Source:
+        def __init__(self, path):
+            self._path = path
+
+        def read_bytes(self) -> bytes:
+            return _with_local_env_urls(self._path.read_bytes())
+
+    class _Package:
+        def __init__(self, package):
+            self._package = real_files(package)
+
+        def joinpath(self, name):
+            return _Source(self._package.joinpath(name))
+
+    monkeypatch.setattr(guard_module.importlib_resources, "files", _Package)
+    monkeypatch.setattr(guard_module, "_ENV_MODE_URL_RE", re.compile(_TEST_ENV_URL_RE[1:-1]))
+
+
 @pytest.mark.skipif(IS_WINDOWS, reason="bash script; skipped on Windows")
 class TestHookScriptsEnvMode:
     """Without a guard config file, a command that passes --from-env takes the values from
@@ -10795,11 +10858,77 @@ class TestHookScriptsEnvMode:
         if not shutil.which("bash"):
             pytest.skip("bash not available")
 
-    _install = staticmethod(TestHookScriptsReadOnlyTheHookConfig._install)
+    @staticmethod
+    def _install(tmp_path: Path, name: str, config: str | None) -> Path:
+        """Like TestHookScriptsReadOnlyTheHookConfig._install, with a copy that also accepts the
+        local test server from the environment (see _with_local_env_urls)."""
+        script = TestHookScriptsReadOnlyTheHookConfig._install(tmp_path, name, config)
+        script.write_bytes(_with_local_env_urls(script.read_bytes()))
+        return script
 
     @staticmethod
     def _run(command: list[str], env: dict, payload: str = '{"hook_event_name":"test","session_id":"s1"}'):
         return subprocess.run(command, input=payload, capture_output=True, text=True, timeout=10, env=env)
+
+    @pytest.mark.parametrize("name", ["snyk-agent-guard.sh", "snyk-agent-guard-discover.sh"])
+    @pytest.mark.parametrize("url", ["http://127.0.0.1:1", "http://localhost:1", "https://localhost"])
+    def test_the_shipped_scripts_refuse_a_local_endpoint_from_the_environment(self, tmp_path, name, url):
+        """A local endpoint needs the configuration file; the environment may only name Snyk."""
+        marker = tmp_path / "invoked"
+        stub = tmp_path / "snyk-agent-scan"
+        stub.write_text(f"#!/bin/sh\ntouch '{marker}'\n")
+        stub.chmod(0o755)
+        script = TestHookScriptsReadOnlyTheHookConfig._install(tmp_path, name, None)
+        env = {
+            "PATH": _ENV_PATH,
+            "PUSH_KEY": "pk",
+            "REMOTE_HOOKS_BASE_URL": url,
+            "MACHINE_ID": "m",
+            "AGENT_SCAN_COMMAND": str(stub),
+        }
+        args = ["--client", "claude-code", "--from-env"]
+        result = self._run(["bash", str(script), *args], env, payload="{}")
+        if name == "snyk-agent-guard.sh":
+            assert result.returncode == 1
+            assert "not a Snyk endpoint" in result.stderr
+        else:
+            assert result.returncode == 0
+            assert not marker.exists()
+
+    def test_a_config_file_may_name_a_local_endpoint(self, tmp_path, hook_server):
+        """The local developer setup: the configuration file is trusted and not checked."""
+        script = TestHookScriptsReadOnlyTheHookConfig._install(
+            tmp_path, "snyk-agent-guard.sh", f"PUSH_KEY=pk-file\nREMOTE_HOOKS_BASE_URL={hook_server}\nMACHINE_ID=m\n"
+        )
+        result = self._run(["bash", str(script), "--client", "claude-code"], {"PATH": _ENV_PATH})
+        assert result.returncode == 0, result.stderr
+        assert _HookHandler.last_request["headers"]["X-Client-Id"] == "pk-file"
+
+    @pytest.mark.parametrize("name", ["snyk-agent-guard.sh", "snyk-agent-guard-discover.sh"])
+    def test_an_empty_push_key_placeholder_does_not_fall_back_to_pushkey(self, tmp_path, hook_server, name):
+        """PUSHKEY stands in only for an unset PUSH_KEY, not for a placeholder that expanded to nothing."""
+        marker = tmp_path / "invoked"
+        stub = tmp_path / "snyk-agent-scan"
+        stub.write_text(f"#!/bin/sh\ntouch '{marker}'\n")
+        stub.chmod(0o755)
+        script = self._install(tmp_path, name, None)
+        args = "--client cursor" + (" --scope servers" if "discover" in name else "")
+        command = f'PUSH_KEY="$UNSET_PUSH_KEY" bash {_shell_quote(str(script))} {args} --from-env'
+        env = {
+            "PATH": _ENV_PATH,
+            "PUSHKEY": "pk-inherited",
+            "REMOTE_HOOKS_BASE_URL": hook_server,
+            "MACHINE_ID": "m",
+            "AGENT_SCAN_COMMAND": str(stub),
+        }
+        result = self._run(["bash", "-c", command], env, payload="{}")
+        assert _HookHandler.last_request is None
+        if "discover" in name:
+            assert result.returncode == 0
+            assert not marker.exists()
+        else:
+            assert result.returncode == 1
+            assert "PUSH_KEY is not set in the environment" in result.stderr
 
     @pytest.mark.parametrize("key_variable", ["PUSH_KEY", "PUSHKEY"])
     def test_values_come_from_the_environment(self, tmp_path, hook_server, key_variable):
@@ -10880,7 +11009,6 @@ class TestHookScriptsEnvMode:
             "https://api.snyk.io",
             "https://api.eu.snyk.io/",
             "https://snyk.io:8443/x",
-            "https://api.snykgov.io",
             "http://localhost:1",
             "https://127.0.0.1",
             "http://api.snyk.io",
@@ -11192,7 +11320,7 @@ class TestEnvModeInstallEndToEnd:
     _PLACEHOLDERS: ClassVar[dict[str, str]] = {"PUSH_KEY": "SNYK_TEST_PUSH_KEY", "MACHINE_ID": "SNYK_TEST_MACHINE_ID"}
 
     @pytest.fixture(autouse=True)
-    def _env(self, monkeypatch):
+    def _env(self, monkeypatch, local_env_mode):
         if not shutil.which("bash"):
             pytest.skip("bash not available")
         monkeypatch.setenv("AGENT_SCAN_COMMAND", "/usr/local/bin/snyk-agent-scan")
@@ -11293,14 +11421,35 @@ class TestPowerShellScriptsEnvMode:
             pytest.skip("powershell not available")
 
     @staticmethod
-    def _run(script: str, tmp_path: Path, args: list[str], env: dict, config: str | None = None, payload: str = "{}"):
+    def _run(
+        script: str,
+        tmp_path: Path,
+        args: list[str],
+        env: dict,
+        config: str | None = None,
+        payload: str = "{}",
+        *,
+        local: bool = True,
+    ):
+        """Run a copy of *script*; with *local* (the default) one that also accepts the local test
+        server from the environment (see _with_local_env_urls)."""
         hooks_dir = tmp_path / "hooks"
         hooks_dir.mkdir(exist_ok=True)
         dest = hooks_dir / script
-        shutil.copyfile(_get_script_path(script), dest)
+        content = _get_script_path(script).read_bytes()
+        dest.write_bytes(_with_local_env_urls(content) if local else content)
         if config is not None:
             (hooks_dir / guard_module.GUARD_CONFIG_NAME).write_text(config)
-        names = ("PUSH_KEY", "PUSHKEY", "REMOTE_HOOKS_BASE_URL", "MACHINE_ID", "MACHINE_SERIAL", "AGENT_SCAN_COMMAND")
+        names = (
+            "PUSH_KEY",
+            "PUSHKEY",
+            "ADS_TOKEN_COMMAND",
+            "TENANT_ID",
+            "REMOTE_HOOKS_BASE_URL",
+            "MACHINE_ID",
+            "MACHINE_SERIAL",
+            "AGENT_SCAN_COMMAND",
+        )
         base = {k: v for k, v in os.environ.items() if k not in names}
         exe = "powershell" if shutil.which("powershell") else "pwsh"
         return subprocess.run(
@@ -11359,3 +11508,32 @@ class TestPowerShellScriptsEnvMode:
         )
         assert result.returncode == 0
         assert not hijack.exists()
+
+    @pytest.mark.parametrize("url", ["http://127.0.0.1:1", "http://localhost:1"])
+    def test_the_shipped_script_refuses_a_local_endpoint_from_the_environment(self, tmp_path, url):
+        env = {"PUSH_KEY": "pk", "REMOTE_HOOKS_BASE_URL": url, "MACHINE_ID": "m"}
+        result = self._run(
+            "snyk-agent-guard.ps1",
+            tmp_path,
+            ["-Client", "claude-code", "-FromEnv"],
+            env,
+            payload=self._EVENT,
+            local=False,
+        )
+        assert result.returncode == 1
+        assert "not a Snyk endpoint" in result.stderr
+
+    def test_env_mode_never_takes_machine_identity_from_the_environment(self, tmp_path, hook_server):
+        env = {
+            # Never run: env mode has no machine identity.
+            "ADS_TOKEN_COMMAND": sys.executable,
+            "TENANT_ID": "tenant-1",
+            "REMOTE_HOOKS_BASE_URL": hook_server,
+            "MACHINE_ID": "m",
+        }
+        result = self._run(
+            "snyk-agent-guard.ps1", tmp_path, ["-Client", "claude-code", "-FromEnv"], env, payload=self._EVENT
+        )
+        assert result.returncode == 1
+        assert "PUSH_KEY is not set in the environment" in result.stderr
+        assert _HookHandler.last_request is None
