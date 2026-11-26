@@ -11138,6 +11138,52 @@ class TestEnvModeInstallOptions:
         printed = " ".join(str(c) for c in mock_rich.print.call_args_list)
         assert "Push key was not revoked" in printed
 
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "PUSH_KEY=\"$SNYK_ADS_PUSH_KEY\" TENANT_ID='tid-1' bash '/x/snyk-agent-guard.sh' --client cursor --from-env",
+            "bash '/x/snyk-agent-guard.sh' --client cursor --from-env",
+        ],
+        ids=["placeholder", "inherited"],
+    )
+    def test_uninstall_never_revokes_an_env_mode_push_key(self, tmp_path, monkeypatch, cmd):
+        """The key comes from the hooks' environment and is usually shared by every machine;
+        install never minted it, so uninstall must not revoke it even with SNYK_TOKEN set."""
+        monkeypatch.setenv("SNYK_ADS_PUSH_KEY", "pk-shared")
+        monkeypatch.setenv("PUSH_KEY", "pk-shared")
+        monkeypatch.setenv("TENANT_ID", "tid-1")
+        monkeypatch.setenv("SNYK_TOKEN", "snyk-tok")
+        path = tmp_path / "hooks.json"
+        info = _parse_command_info(cmd, [], path)
+        assert (info["auth_value"], info["env_mode"]) == ("pk-shared", True)
+
+        with patch(f"{_G}.IS_WINDOWS", False):
+            _setup_cursor_hooks(cmd, path)
+        with patch(f"{_G}.revoke_push_key") as revoke, patch(f"{_G}.rich") as mock_rich:
+            _run_uninstall(SimpleNamespace(client="cursor", file=str(path), managed=False))
+        revoke.assert_not_called()
+        printed = " ".join(str(c) for c in mock_rich.print.call_args_list)
+        assert "read it from their environment" in printed
+        assert not path.exists()  # the file held only Guard's hooks
+
+    def test_uninstall_still_revokes_a_config_file_push_key(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SNYK_TOKEN", "snyk-tok")
+        path = tmp_path / "hooks.json"
+        with patch(f"{_G}.IS_WINDOWS", False):
+            cmd = _build_hook_command(guard_module._forwarder_script_path(path), "cursor")
+            _setup_cursor_hooks(cmd, path)
+        config = guard_module._guard_config_path(path)
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_bytes(
+            guard_module._render_guard_config(
+                {"PUSH_KEY": "pk-own", "REMOTE_HOOKS_BASE_URL": "https://api.snyk.io", "TENANT_ID": "tid-1"}
+            )
+        )
+        assert _parse_command_info(cmd, [], path)["env_mode"] is False
+        with patch(f"{_G}.revoke_push_key") as revoke, patch(f"{_G}.rich"):
+            _run_uninstall(SimpleNamespace(client="cursor", file=str(path), managed=False))
+        revoke.assert_called_once_with("https://api.snyk.io", "tid-1", "snyk-tok", "pk-own")
+
 
 @pytest.mark.skipif(IS_WINDOWS, reason="bash script; skipped on Windows")
 class TestEnvModeInstallEndToEnd:

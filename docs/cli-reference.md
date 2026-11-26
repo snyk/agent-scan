@@ -454,6 +454,9 @@ example through `env` in a project's agent settings. The scripts limit the damag
 There is no configuration file, so there is no configuration checksum: agent-monitor can't detect a change to the
 values between installs.
 
+`guard uninstall` never revokes the push key of environment-mode hooks. Install didn't mint it, and in cloud-agent or
+plugin setups every machine usually shares it. Revoke it in Snyk when nothing else uses it.
+
 ### `guard discover`
 
 ```bash

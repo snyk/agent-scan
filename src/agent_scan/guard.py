@@ -2055,7 +2055,14 @@ def _uninstall_single_client(client: str, args, managed: bool) -> None:
     _remove_hook_script(client, config_path)
 
     # Try to revoke the push key
-    if info and info.get("auth_value"):
+    if info and info.get("env_mode"):
+        # The key came from the hooks' environment. Install never minted it, and in cloud-agent
+        # or plugin setups every machine usually shares it, so revoking it here would break them.
+        rich.print(
+            "[dim]   Push key was not revoked: these hooks read it from their environment, "
+            "where it is usually shared. Revoke it in Snyk if nothing else uses it.[/dim]"
+        )
+    elif info and info.get("auth_value"):
         _try_revoke_push_key(info, label)
     elif info and info.get("auth_type") != "machine":
         # A machine identity install has no push key to revoke.
@@ -2803,11 +2810,14 @@ def _parse_command_info(cmd: str, events: list[str], config_path: Path) -> dict:
     """Describe an installed hook from the guard configuration file, which is what the scripts
     use. An install made by an earlier version has none; its values are on the hook command."""
     guard_config_path = _guard_config_path(config_path)
+    # Env mode: no configuration file, and the command opts in with --from-env.
+    env_mode = False
     if guard_config_path.is_file():
         values = _read_guard_config(guard_config_path)
     else:
         values = {key: _resolve_placeholder(_extract_env_from_cmd(cmd, key)) for key in _PS_PARAM_MAP}
-        if _FROM_ENV_RE.search(cmd):
+        env_mode = _FROM_ENV_RE.search(cmd) is not None
+        if env_mode:
             # An env-mode hook reads a value the command doesn't assign from the variable of
             # its own name (on Windows the command assigns none), so look there too.
             for key in values:
@@ -2833,6 +2843,7 @@ def _parse_command_info(cmd: str, events: list[str], config_path: Path) -> dict:
         "tenant_id": values.get("TENANT_ID", ""),
         "url": url or DEFAULT_REMOTE_URL,
         "events": events,
+        "env_mode": env_mode,
     }
 
 
