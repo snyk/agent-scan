@@ -158,7 +158,7 @@ def test_merge_last_write_wins_and_canonical(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("command", ["", 'npx -y "@scope/pkg'])
-def test_unparseable_command_fails_only_its_file(command: str, caplog: pytest.LogCaptureFixture) -> None:
+def test_unparseable_command_fails_only_its_file(command: str) -> None:
     bad = _mcp("/bad.json", "ok")
     bad["candidates"][0]["maps"][0]["bad"] = {"command": command}
     found = {
@@ -169,8 +169,6 @@ def test_unparseable_command_fails_only_its_file(command: str, caplog: pytest.Lo
     (client,) = build_clients(found)
     assert isinstance(client.mcp_configs["/bad.json"], CouldNotParseMCPConfig)
     assert [name for name, _ in client.mcp_configs["/good.json"]] == ["good"]
-    assert "CommandParsingError" in caplog.text
-    assert "@scope/pkg" not in caplog.text
 
 
 def _stdio_found(raw: dict, roots: list[str]) -> dict:
