@@ -10111,7 +10111,7 @@ class TestPowerShellHookScriptMachineIdentity:
 
     @staticmethod
     def _machine_config(server: str, token_command: Path | str, **overrides: str | None) -> dict[str, str]:
-        config = {
+        config: dict[str, str | None] = {
             "ADS_TOKEN_COMMAND": str(token_command),
             "REMOTE_HOOKS_BASE_URL": server + "/",
             "TENANT_ID": "tenant-1",
