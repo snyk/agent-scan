@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import codecs
 import contextlib
 import copy
 import hashlib
@@ -3114,7 +3115,7 @@ def _atomic_write_text(path: Path, content: str, *, mode: int | None = None, new
 _LONE_SURROGATE_RE = re.compile("[\ud800-\udfff]")
 
 
-def _dump_config_json(data: dict) -> str:
+def _dump_config_json(data: dict, *, with_bom: bool = False) -> str:
     """Serialise a user's agent config for writing back to disk.
 
     Non-ASCII characters are written as-is, so a user's ``"café ☕"`` stays
@@ -3126,14 +3127,23 @@ def _dump_config_json(data: dict) -> str:
     strings), which keeps the file valid UTF-8 and loads back to the same value.
     """
     content = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
-    return _LONE_SURROGATE_RE.sub(lambda m: f"\\u{ord(m.group()):04x}", content)
+    content = _LONE_SURROGATE_RE.sub(lambda m: f"\\u{ord(m.group()):04x}", content)
+    return "\ufeff" + content if with_bom else content
 
 
 def _read_json_or_empty(path: Path) -> dict:
     if not path.exists():
         return {}
-    with open(path, encoding="utf-8") as f:
-        return json.load(f)
+    content = path.read_text(encoding="utf-8-sig")
+    return json.loads(content) if content.strip() else {}
+
+
+def _has_utf8_bom(path: Path) -> bool:
+    try:
+        with path.open("rb") as f:
+            return f.read(len(codecs.BOM_UTF8)) == codecs.BOM_UTF8
+    except FileNotFoundError:
+        return False
 
 
 def _write_json_if_changed(path: Path, data: dict, *, client: str) -> bool:
@@ -3141,25 +3151,26 @@ def _write_json_if_changed(path: Path, data: dict, *, client: str) -> bool:
 
     The current file is backed up first, without any Agent Guard hooks (see _backup_file).
     """
-    new_content = _dump_config_json(data)
-    if path.exists():
-        old_content = path.read_text(encoding="utf-8")
+    old_content = path.read_text(encoding="utf-8") if path.exists() else None
+    with_bom = old_content is not None and _has_utf8_bom(path)
+    new_content = _dump_config_json(data, with_bom=with_bom)
+    if old_content is not None:
         if old_content == new_content:
             return False
-        _backup_file(path, lambda: _json_config_without_guard(path, client))
+        _backup_file(path, lambda: _json_config_without_guard(path, client, with_bom=with_bom))
     _atomic_write_text(path, new_content)
     return True
 
 
-def _json_config_without_guard(path: Path, client: str) -> str | None:
+def _json_config_without_guard(path: Path, client: str, *, with_bom: bool) -> str | None:
     """*client*'s JSON config at ``path`` without Agent Guard, or None if it has no Guard hooks."""
     data = _read_json_or_empty(path)
     stripped = _strip_guard_from_json_config(data, client)
-    return None if stripped == data else _dump_config_json(stripped)
+    return None if stripped == data else _dump_config_json(stripped, with_bom=with_bom)
 
 
 def _write_json(path: Path, data: dict) -> None:
-    _atomic_write_text(path, _dump_config_json(data))
+    _atomic_write_text(path, _dump_config_json(data, with_bom=_has_utf8_bom(path)))
 
 
 def _preserved_note(count: int) -> str:

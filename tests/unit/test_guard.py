@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import codecs
 import contextlib
 import json
 import os
@@ -1028,6 +1029,47 @@ class TestPrepareCodexDiscoveryHook:
         _uninstall_test_client("codex", path)
 
         assert json.loads(path.read_text()) == {"user": True}
+
+
+class TestJsonConfigEncoding:
+    @pytest.mark.parametrize("content", [b"", b" \t\r\n", codecs.BOM_UTF8, codecs.BOM_UTF8 + b" \r\n"])
+    def test_install_treats_blank_config_as_empty(self, tmp_path, content):
+        path = tmp_path / "settings.json"
+        path.write_bytes(content)
+        assert _detect_claude_install(path) is None
+
+        _setup_claude_hooks(AGENT_SCAN_CMD, path)
+
+        assert _detect_claude_install(path) is not None
+        assert path.read_bytes().startswith(codecs.BOM_UTF8) == content.startswith(codecs.BOM_UTF8)
+        assert _guard_backup(path).read_bytes() == content
+
+    def test_bom_and_user_content_survive_install_and_uninstall(self, tmp_path):
+        path = tmp_path / "settings.json"
+        user_config = {"label": "café"}
+        path.write_text(json.dumps(user_config, ensure_ascii=False), encoding="utf-8-sig")
+        original = path.read_bytes()
+
+        _setup_claude_hooks(AGENT_SCAN_CMD, path)
+
+        installed = path.read_bytes()
+        assert installed.startswith(codecs.BOM_UTF8)
+        assert _detect_claude_install(path) is not None
+        assert _guard_backup(path).read_bytes() == original
+
+        config, _, preserved = _prepare_claude_config(AGENT_SCAN_CMD, path)
+        assert _write_config(config, path, preserved, client="claude") is False
+        assert path.read_bytes() == installed
+        assert _guard_backup(path).read_bytes() == original
+
+        _setup_claude_hooks(AGENT_SCAN_CMD.replace("pk-1234", "pk-new"), path)
+        guard_free_backup = _guard_backup(path).read_bytes()
+        assert guard_free_backup.startswith(codecs.BOM_UTF8)
+
+        _uninstall_test_client("claude", path)
+
+        assert path.read_bytes() == guard_free_backup
+        assert json.loads(path.read_text(encoding="utf-8-sig")) == user_config
 
 
 class TestWriteConfig:
