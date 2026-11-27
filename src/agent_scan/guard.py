@@ -3138,13 +3138,21 @@ def _read_json_or_empty(path: Path) -> dict:
     return json.loads(content) if content.strip() else {}
 
 
+def _has_utf8_bom(path: Path) -> bool:
+    try:
+        with path.open("rb") as f:
+            return f.read(len(codecs.BOM_UTF8)) == codecs.BOM_UTF8
+    except FileNotFoundError:
+        return False
+
+
 def _write_json_if_changed(path: Path, data: dict, *, client: str) -> bool:
     """Write *client*'s JSON config to path only if content differs. Returns True if written.
 
     The current file is backed up first, without any Agent Guard hooks (see _backup_file).
     """
     old_content = path.read_text(encoding="utf-8") if path.exists() else None
-    with_bom = old_content is not None and old_content.startswith("\ufeff")
+    with_bom = old_content is not None and _has_utf8_bom(path)
     new_content = _dump_config_json(data, with_bom=with_bom)
     if old_content is not None:
         if old_content == new_content:
@@ -3162,10 +3170,7 @@ def _json_config_without_guard(path: Path, client: str, *, with_bom: bool) -> st
 
 
 def _write_json(path: Path, data: dict) -> None:
-    with_bom = False
-    with contextlib.suppress(FileNotFoundError), path.open("rb") as f:
-        with_bom = f.read(len(codecs.BOM_UTF8)) == codecs.BOM_UTF8
-    _atomic_write_text(path, _dump_config_json(data, with_bom=with_bom))
+    _atomic_write_text(path, _dump_config_json(data, with_bom=_has_utf8_bom(path)))
 
 
 def _preserved_note(count: int) -> str:
