@@ -1364,6 +1364,13 @@ def _remove_guard_hook_groups(lines: list[str]) -> list[tuple]:
     return removals
 
 
+def _split_toml_bom(text: str) -> tuple[str, str]:
+    """Separate a leading UTF-8 BOM from the TOML that Guard parses and edits."""
+    if text.startswith("\ufeff"):
+        return text[:1], text[1:]
+    return "", text
+
+
 def _load_codex_requirements(text: str) -> dict:
     if tomllib is None:  # pragma: no cover - tomli is a dependency on Python 3.10
         raise CodexRequirementsError("cannot check TOML on this Python (tomllib/tomli missing); not modifying it")
@@ -1460,6 +1467,7 @@ def _strip_guard_from_codex_requirements(text: str, config_path: Path = CODEX_MA
     Raises CodexRequirementsError if ``text`` is not valid TOML or the edit
     cannot be verified; the caller must then leave the file untouched.
     """
+    bom, text = _split_toml_bom(text)
     data = _load_codex_requirements(text)
     lines = _split_toml_lines(text)
     removals = _remove_guard_hook_groups(lines)
@@ -1488,7 +1496,7 @@ def _strip_guard_from_codex_requirements(text: str, config_path: Path = CODEX_MA
     new_text = "".join(lines)
     if new_text != text:
         _check_codex_requirements_edit(new_text, expected)
-    return new_text
+    return bom + new_text
 
 
 def _merge_guard_into_codex_requirements(
@@ -1516,6 +1524,7 @@ def _merge_guard_into_codex_requirements(
     Raises CodexRequirementsError, before anything is written, if ``text`` is
     not valid TOML or if the edit cannot be verified.
     """
+    bom, text = _split_toml_bom(text)
     data = _load_codex_requirements(text)
     features: dict = data.get("features", {})
     hooks_data: dict = data.get("hooks", {})
@@ -1574,7 +1583,7 @@ def _merge_guard_into_codex_requirements(
         tail = "\n" + tail
     new_text = base + tail.replace("\n", newline)
     _check_codex_requirements_edit(new_text, expected)
-    return new_text, warnings
+    return bom + new_text, warnings
 
 
 def _read_codex_requirements_text(path: Path) -> str:
