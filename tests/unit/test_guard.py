@@ -3666,6 +3666,50 @@ class TestCodexRequirementsInPlace:
             CODEX_AGENT_SCAN_CMD, path
         )
 
+    @pytest.mark.parametrize("policy", ["", "[features]\r\nhooks = true\r\n# déjà vu\r\n"])
+    def test_managed_install_preserves_bom_prefixed_requirements(self, tmp_path, monkeypatch, policy):
+        path = tmp_path / "requirements.toml"
+        original = codecs.BOM_UTF8 + policy.encode()
+        path.write_bytes(original)
+        monkeypatch.setenv("PUSH_KEY", "pk-codex")
+        monkeypatch.delenv("ADS_TOKEN_COMMAND", raising=False)
+        monkeypatch.delenv("TENANT_ID", raising=False)
+        args = SimpleNamespace(
+            guard_command="install",
+            client="codex",
+            managed=True,
+            file=str(path),
+            url="https://api.snyk.io",
+            machine_id="machine-42",
+        )
+
+        with (
+            patch(f"{_G}._send_test_event", return_value=_TEST_EVENT_SENT),
+            patch(f"{_G}._send_servers_discovered_event"),
+        ):
+            assert guard_module.run_guard(args) == 0
+
+        installed = path.read_bytes()
+        assert installed.startswith(original)
+        assert b"[[hooks.SessionStart]]" in installed
+        assert _guard_backup(path).read_bytes() == original
+
+    def test_managed_uninstall_preserves_policy_after_bom_prefixed_hook(self, tmp_path, monkeypatch):
+        path = tmp_path / "requirements.toml"
+        policy = b"[features]\r\nhooks = true\r\n"
+        hook = (
+            "[[hooks.Stop]]\r\n"
+            "[[hooks.Stop.hooks]]\r\n"
+            'type = "command"\r\n'
+            f"command = {toml_escape(CODEX_AGENT_SCAN_CMD)}\r\n\r\n"
+        ).encode()
+        path.write_bytes(codecs.BOM_UTF8 + hook + policy)
+        monkeypatch.delenv("SNYK_TOKEN", raising=False)
+
+        args = SimpleNamespace(guard_command="uninstall", client="codex", managed=True, file=str(path))
+        assert guard_module.run_guard(args) == 0
+        assert path.read_bytes() == codecs.BOM_UTF8 + policy
+
     def test_install_twice_does_not_rewrite(self, tmp_path):
         path = tmp_path / "requirements.toml"
         path.write_text(_CODEX_ADMIN_POLICY, encoding="utf-8")
