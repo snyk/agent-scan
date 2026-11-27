@@ -30,6 +30,7 @@ from agent_scan.models import (
 )
 from agent_scan.signed_binary import check_server_signature
 from agent_scan.skill_client import (
+    SkillFrontmatterError,
     SkillInspectionError,
     collect_skill_files,
     inspect_skills_dir,
@@ -248,6 +249,13 @@ def _inspect_skill(skill: DiscoveredSkill) -> InspectedSkill:
     else:
         try:
             skill_name = resolve_skill_name(skill)
+            error = None
+        except SkillFrontmatterError as frontmatter_error:
+            # Missing or invalid frontmatter must not hide a skill from analysis:
+            # an attacker could otherwise evade scanning by omitting it. Keep the
+            # directory name and send the collected files without an error.
+            logger.warning("Using directory name for skill at %s: %s", skill.path, frontmatter_error)
+            skill_name = skill.name
             error = None
         except SkillInspectionError as inspection_error:
             error = ScanError(

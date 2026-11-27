@@ -882,6 +882,56 @@ async def test_inspect_skill_falls_back_to_directory_name_on_frontmatter_error(t
     skill = result.skills[0]
     assert skill.name == "failing-dir-name"
     assert {file.path for file in skill.files} == {"SKILL.md", "helper.py"}
+    # Invalid frontmatter falls back to the directory name; the skill is still analyzed.
+    assert skill.error is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "skill_md",
+    [
+        "\ufeff# Trading bot\r\n\r\nRun the installer first.\r\n",  # BOM, no frontmatter
+        "---\r\nslug: agent\r\ndisplayName: Agent\r\n---\r\n# Body\r\n",  # registry keys, no name
+        "---\nname: only-a-name\n---\n# Body",  # missing description
+        "---\n[one, two]\n---\n# Body",  # non-mapping frontmatter
+    ],
+)
+async def test_inspect_skill_with_unusable_frontmatter_is_still_sent_for_analysis(tmp_path, skill_md):
+    skill_dir = tmp_path / "dir-name"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_bytes(skill_md.encode("utf-8"))
+
+    client = ClientToInspect(
+        name="cursor",
+        client_path="/proj",
+        mcp_configs={},
+        skills_dirs={"/proj/skills": [DiscoveredSkill(name="dir-name", path=str(skill_dir))]},
+    )
+
+    result = await inspect_client(client, timeout=1, tokens=[], scan_skills=True)
+
+    (skill,) = result.skills
+    assert skill.name == "dir-name"
+    assert skill.error is None
+    assert [file.path for file in skill.files] == ["SKILL.md"]
+
+
+@pytest.mark.asyncio
+async def test_inspect_skill_without_skill_md_still_reports_an_error(tmp_path):
+    skill_dir = tmp_path / "no-manifest"
+    skill_dir.mkdir()
+    (skill_dir / "README.md").write_text("# Not a skill manifest")
+
+    client = ClientToInspect(
+        name="cursor",
+        client_path="/proj",
+        mcp_configs={},
+        skills_dirs={"/proj/skills": [DiscoveredSkill(name="no-manifest", path=str(skill_dir))]},
+    )
+
+    result = await inspect_client(client, timeout=1, tokens=[], scan_skills=True)
+
+    (skill,) = result.skills
     assert skill.error is not None
     assert skill.error.category == "skill_scan_error"
 

@@ -18,6 +18,7 @@ from agent_scan.models.skill import DiscoveredSkill, SkillFrontmatter
 from agent_scan.redact import redact_text
 from agent_scan.skill_client import (
     BINARY_FILE_DESCRIPTION_PREFIX,
+    SkillFrontmatterError,
     SkillInspectionError,
     collect_skill_files,
     inspect_commands_dir,
@@ -380,6 +381,19 @@ def test_parse_skill_frontmatter_rejects_non_text_identity_fields(tmp_path, fiel
 
     with pytest.raises(SkillInspectionError, match=rf"{field}.*non-empty string"):
         parse_skill_frontmatter(skill_md.content, str(skill))
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "# No frontmatter at all",
+        "---\nname: [unterminated\n---\n# Body",
+        "---\nslug: x\n---\n# Body",
+    ],
+)
+def test_frontmatter_problems_raise_the_dedicated_error(content):
+    with pytest.raises(SkillFrontmatterError):
+        parse_skill_frontmatter(content, "/skills/x")
 
 
 def test_parse_skill_frontmatter_returns_validated_metadata():

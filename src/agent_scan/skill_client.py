@@ -29,6 +29,15 @@ class SkillInspectionError(Exception):
     """A collected skill could not be interpreted as a valid text skill."""
 
 
+class SkillFrontmatterError(SkillInspectionError):
+    """SKILL.md exists and is readable, but its frontmatter is missing or invalid.
+
+    The skill is still installed and agents can still load its instructions, so
+    callers fall back to the directory name and keep scanning instead of
+    reporting a skill error. (The analysis backend applies the same fallback.)
+    """
+
+
 def get_skill_md_path(path: str) -> str | None:
     for file in os.listdir(path):
         if file.lower() == "skill.md":
@@ -54,21 +63,25 @@ def parse_skill_frontmatter(content: str, skill_path: str) -> SkillFrontmatter:
     """Parse and validate the required identity metadata in a SKILL.md file."""
     yaml_content = _extract_leading_frontmatter_yaml(content)
     if yaml_content is None:
-        raise SkillInspectionError(
+        raise SkillFrontmatterError(
             f"Invalid SKILL.md file: {skill_path}. Could not find the YAML and the MD parts in the SKILL.md file."
         )
     try:
         yaml_data = yaml.safe_load(yaml_content)
     except YAMLError as e:
-        raise SkillInspectionError(f"Invalid SKILL.md file: {skill_path}. YAML formatter contains invalid yaml.") from e
+        raise SkillFrontmatterError(
+            f"Invalid SKILL.md file: {skill_path}. YAML formatter contains invalid yaml."
+        ) from e
     if not isinstance(yaml_data, dict):
-        raise SkillInspectionError(f"Invalid SKILL.md file: {skill_path}. YAML frontmatter must be a mapping.")
+        raise SkillFrontmatterError(f"Invalid SKILL.md file: {skill_path}. YAML frontmatter must be a mapping.")
     for field in ("name", "description"):
         if field not in yaml_data:
-            raise SkillInspectionError(f"Invalid SKILL.md file: {skill_path}. Missing {field} in the YAML frontmatter.")
+            raise SkillFrontmatterError(
+                f"Invalid SKILL.md file: {skill_path}. Missing {field} in the YAML frontmatter."
+            )
         value = yaml_data[field]
         if not isinstance(value, str) or not value.strip():
-            raise SkillInspectionError(
+            raise SkillFrontmatterError(
                 f"Invalid SKILL.md file: {skill_path}. YAML frontmatter {field} must be a non-empty string."
             )
     return SkillFrontmatter(
