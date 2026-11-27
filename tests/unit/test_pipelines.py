@@ -4,18 +4,21 @@ import aiohttp
 import pytest
 
 from agent_scan.agents import DiscoveryScope
+from agent_scan.machine_auth import MachineAuth, MachineAuthError, MachineCredential
 from agent_scan.models import ClientToInspect, ControlServer, InspectedPath
 from agent_scan.models.api.v20260710 import ScanPathResponse, ScanResponse
 from agent_scan.pipelines import (
     AnalyzeArgs,
     InspectArgs,
     PushArgs,
+    RemoteOutcome,
     discover_clients,
     discover_clients_remotely,
     inspect_analyze_push_pipeline,
     supports_remote_discovery,
 )
 from agent_scan.remote_discovery.client import RemoteDiscoveryError, RemoteResult
+from agent_scan.remote_discovery.parity import compare
 from agent_scan.verify_api import AgentScanConfig
 
 
@@ -157,6 +160,31 @@ async def test_skip_pushing_false_when_neither_control_servers_nor_push_key_set(
 
 
 @pytest.mark.asyncio
+async def test_skip_pushing_true_for_machine_auth_without_push_key():
+    """Machine mode replaces the push key, so it sets X-Push: skip like a push-key scan."""
+    inspected_paths = [InspectedPath(client="cursor", path="/config")]
+    response = ScanResponse(scan_path_responses=[ScanPathResponse(client="cursor", path="/config")])
+    machine_auth = MachineCredential(MachineAuth("https://api.snyk.io", "tenant-1", "tok"))
+
+    with (
+        patch(
+            "agent_scan.pipelines.inspect_pipeline",
+            new_callable=AsyncMock,
+            return_value=(inspected_paths, ["alice"]),
+        ),
+        patch("agent_scan.pipelines.analyze_machine", new_callable=AsyncMock, return_value=response) as analyze,
+    ):
+        await inspect_analyze_push_pipeline(
+            InspectArgs(timeout=10, tokens=[], paths=[]),
+            AnalyzeArgs(analysis_url="https://test.example/api", machine_auth=machine_auth),
+            PushArgs(control_servers=[], version="0.6.0"),
+        )
+
+    assert analyze.await_args.kwargs["skip_pushing"] is True
+    assert analyze.await_args.kwargs["push_key"] is None
+
+
+@pytest.mark.asyncio
 async def test_skip_pushing_false_when_push_key_explicitly_empty_string():
     """An explicit empty-string --push-key (used only to override a legacy
     header without adopting it, see cli._effective_push_key's ``is not None``
@@ -214,7 +242,8 @@ def test_supports_remote_discovery(kwargs, expected):
 
 
 @pytest.mark.asyncio
-async def test_discover_clients_remotely_builds_clients():
+@pytest.mark.parametrize("machine_auth", [None, MachineAuth("https://api.snyk.io", "tenant-1", "tok")])
+async def test_discover_clients_remotely_builds_clients(machine_auth):
     remote = RemoteResult(
         found={
             "clients": [{"name": "cursor", "client_path": "~/.cursor", "username": "alice"}],
@@ -233,6 +262,7 @@ async def test_discover_clients_remotely_builds_clients():
             cli_version="1.0",
             identifier="machine-1",
             skip_ssl_verify=True,
+            machine_auth=machine_auth,
         )
 
     discovered = result.discovered
@@ -249,6 +279,8 @@ async def test_discover_clients_remotely_builds_clients():
         "identifier": "machine-1",
         "all_users": False,
         "skip_ssl_verify": True,
+        "machine_auth": machine_auth,
+        "home_dirs_with_users": [],
     }
 
 
@@ -261,9 +293,10 @@ async def test_discover_clients_remotely_builds_clients():
         (aiohttp.ClientConnectionError("down"), "connection"),
         (TimeoutError(), "timeout"),
         (KeyError("found"), "malformed_response"),
+        (MachineAuthError("The token command exited with 1."), "token_command"),
         (RuntimeError("x"), "error"),
     ],
-    ids=["backend_error", "too_many_rounds", "connection", "timeout", "malformed_response", "other"],
+    ids=["backend_error", "too_many_rounds", "connection", "timeout", "malformed_response", "token_command", "other"],
 )
 async def test_discover_clients_remotely_returns_reason_on_failure(error, reason):
     with patch("agent_scan.pipelines.run_remote_discovery", new_callable=AsyncMock, side_effect=error):
@@ -361,6 +394,23 @@ async def test_discover_clients_remotely_skips_local_only_when_backend_fails():
 
 
 @pytest.mark.asyncio
+async def test_machine_auth_without_push_key_uses_remote():
+    machine_auth = MachineAuth("https://api.snyk.io", "tenant-1", "tok")
+    remote = RemoteOutcome(([], [], ["alice"]))
+    with (
+        patch("agent_scan.pipelines.discover_clients_remotely", new_callable=AsyncMock, return_value=remote) as run,
+        patch("agent_scan.pipelines.discover_clients_to_inspect", new_callable=AsyncMock) as local,
+    ):
+        _, metadata = await discover_clients(
+            InspectArgs(timeout=10, tokens=[], paths=[]), "on", "https://x", None, machine_auth=machine_auth
+        )
+
+    local.assert_not_awaited()
+    assert run.await_args.kwargs["machine_auth"] == machine_auth
+    assert metadata["source"] == "remote"
+
+
+@pytest.mark.asyncio
 async def test_on_mode_backend_failure_keeps_local_only_sources(tmp_path):
     vscode = _FakeDiscoverer(
         ClientToInspect(name="vscode", client_path="~/.vscode", mcp_configs={"/ext.js": []}, skills_dirs={})
@@ -383,3 +433,27 @@ async def test_on_mode_backend_failure_keeps_local_only_sources(tmp_path):
     assert [(c.name, c.username, list(c.mcp_configs)) for c in clients] == [("vscode", "alice", ["/ext.js"])]
     assert metadata["remote_error_reason"] == "http_503"
     assert metadata["remote"]["mcp_configs"] == 1
+
+
+@pytest.mark.asyncio
+async def test_shadow_looks_up_homes_once(tmp_path):
+    """Each Windows lookup can time out on its own, so a second one could see other homes."""
+    first = [(tmp_path / "alice", "alice")]
+    later = [(tmp_path / "wsl", "wsl")]
+    local = AsyncMock(return_value=([], [], ["alice"]))
+    with (
+        patch("agent_scan.pipelines.get_readable_home_directories", side_effect=[first, later, later]) as lookup,
+        patch(
+            "agent_scan.pipelines.run_remote_discovery", new_callable=AsyncMock, return_value=RemoteResult()
+        ) as remote,
+        patch("agent_scan.pipelines.discover_clients_to_inspect", new=local),
+        patch("agent_scan.pipelines.find_discoverers", return_value=[]) as find,
+        patch("agent_scan.pipelines.compare", wraps=compare) as compare_spy,
+    ):
+        await discover_clients(InspectArgs(timeout=10, tokens=[], paths=[]), "shadow", "https://x", "k")
+
+    assert lookup.call_count == 1
+    assert compare_spy.call_args.args[4] == first
+    assert local.await_args.kwargs["home_dirs_with_users"] == first
+    assert remote.await_args.kwargs["home_dirs_with_users"] == first
+    find.assert_called_once_with(tmp_path / "alice")

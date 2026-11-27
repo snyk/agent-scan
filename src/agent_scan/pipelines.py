@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import aiohttp
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from agent_scan.agents import DISCOVERERS, DiscoveryScope, find_discoverers
 from agent_scan.direct_scanner import direct_scan_to_server_config, is_direct_scan
@@ -15,6 +15,7 @@ from agent_scan.inspect import (
     get_mcp_config_per_client,
     inspect_client,
 )
+from agent_scan.machine_auth import MachineAuthError, MachineCredential
 from agent_scan.models import (
     CandidateClient,
     ClientToInspect,
@@ -28,7 +29,7 @@ from agent_scan.models import (
 from agent_scan.redact import redact_inspected_path
 from agent_scan.remote_discovery.builder import build_clients
 from agent_scan.remote_discovery.client import RemoteDiscoveryError, run_remote_discovery
-from agent_scan.remote_discovery.parity import LocalPhaseKeys, client_keys, compare, counts
+from agent_scan.remote_discovery.parity import LocalPhaseKeys, client_keys, compare, counts, home_counts
 from agent_scan.utils import get_readable_home_directories
 from agent_scan.verify_api import AgentScanConfig, RemoteDiscoveryMode, analyze_machine
 from agent_scan.well_known_clients import get_well_known_clients
@@ -49,6 +50,9 @@ class InspectArgs(BaseModel):
 
 
 class AnalyzeArgs(BaseModel):
+    # Lets machine_auth hold the scan's shared credential as is, without a copy.
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     analysis_url: str
     identifier: str | None = None
     additional_headers: dict | None = None
@@ -58,6 +62,8 @@ class AnalyzeArgs(BaseModel):
     agent_scan_config: AgentScanConfig | None = None
     # Extra scan_metadata for the analysis request.
     scan_metadata: dict[str, Any] = Field(default_factory=dict)
+    # Machine token for the tenant routes; the push key is used without it.
+    machine_auth: MachineCredential | None = None
 
 
 class PushArgs(BaseModel):
@@ -73,14 +79,17 @@ class PushArgs(BaseModel):
 async def discover_clients_to_inspect(
     inspect_args: InspectArgs,
     phase_keys: LocalPhaseKeys | None = None,
+    home_dirs_with_users: list[tuple[Path, str]] | None = None,
 ) -> tuple[list[ClientToInspect], list[InspectedPath], list[str]]:
     """
     Discover the clients/configs that would be inspected, without actually
     starting any MCP servers.
 
     ``phase_keys``, if given, collects what each phase found, for shadow comparison.
+    ``home_dirs_with_users``, if given, is used instead of looking the homes up again.
     """
-    home_dirs_with_users = get_readable_home_directories(all_users=inspect_args.all_users)
+    if home_dirs_with_users is None:
+        home_dirs_with_users = get_readable_home_directories(all_users=inspect_args.all_users)
     all_usernames: list[str] = [username for _path, username in home_dirs_with_users]
 
     unresolved_paths: list[InspectedPath] = []
@@ -226,15 +235,19 @@ class RemoteOutcome:
 async def discover_clients_remotely(
     inspect_args: InspectArgs,
     discovery_url: str,
-    push_key: str,
+    push_key: str | None,
     cli_version: str | None = None,
     identifier: str | None = None,
     skip_ssl_verify: bool = False,
+    machine_auth: MachineCredential | None = None,
+    home_dirs_with_users: list[tuple[Path, str]] | None = None,
 ) -> RemoteOutcome:
     """``discover_clients_to_inspect`` through the coding-agent-discovery service.
 
     A backend failure leaves ``discovered`` None. Never raises.
     """
+    if home_dirs_with_users is None:
+        home_dirs_with_users = get_readable_home_directories(all_users=inspect_args.all_users)
     try:
         remote = await run_remote_discovery(
             discovery_url,
@@ -244,6 +257,8 @@ async def discover_clients_remotely(
             identifier=identifier,
             all_users=inspect_args.all_users,
             skip_ssl_verify=skip_ssl_verify,
+            machine_auth=machine_auth,
+            home_dirs_with_users=home_dirs_with_users,
         )
         clients_to_inspect = build_clients(remote.found)
     except Exception as e:
@@ -261,7 +276,6 @@ async def discover_clients_remotely(
         remote.duration_s,
         remote.partial,
     )
-    home_dirs_with_users = get_readable_home_directories(all_users=inspect_args.all_users)
     _merge_local_only(clients_to_inspect, home_dirs_with_users, inspect_args.discovery_scope)
     all_usernames = [username for _path, username in home_dirs_with_users]
     discovered: DiscoveredClients = (
@@ -284,6 +298,7 @@ async def discover_clients(
     cli_version: str | None = None,
     identifier: str | None = None,
     skip_ssl_verify: bool = False,
+    machine_auth: MachineCredential | None = None,
 ) -> tuple[DiscoveredClients, dict[str, Any]]:
     """Discover per ``mode`` and return the clients plus the ``discovery`` scan metadata.
 
@@ -292,14 +307,18 @@ async def discover_clients(
     * on: remote discovery is used, with no local fallback: a failure gives only the
       local-only pieces and a partial result is used as is.
 
-    Remote needs a push key and whole-machine discovery; otherwise every mode is local.
+    Remote needs a push key or ``machine_auth``, and whole-machine discovery; otherwise
+    every mode is local. ``machine_auth`` wins over the push key.
     """
-    if mode == "off" or not push_key or not supports_remote_discovery(inspect_args):
+    if mode == "off" or not (push_key or machine_auth) or not supports_remote_discovery(inspect_args):
         discovered = await discover_clients_to_inspect(inspect_args)
         metadata: dict[str, Any] = {"mode": mode, "source": "local", "local": counts(discovered[0])}
         if mode != "off":
             metadata["remote_skipped"] = "not_eligible"
         return discovered, metadata
+    # Looked up once: on Windows the lookup can time out, and both sides must see the same homes.
+    homes = get_readable_home_directories(all_users=inspect_args.all_users)
+    scanned = home_counts(homes)
     run_remote = discover_clients_remotely(
         inspect_args,
         discovery_url,
@@ -307,32 +326,34 @@ async def discover_clients(
         cli_version=cli_version,
         identifier=identifier,
         skip_ssl_verify=skip_ssl_verify,
+        machine_auth=machine_auth,
+        home_dirs_with_users=homes,
     )
     if mode == "on":
         outcome = await run_remote
         if outcome.discovered is None:
-            homes = get_readable_home_directories(all_users=inspect_args.all_users)
             local_only: list[ClientToInspect] = []
             _merge_local_only(local_only, homes, inspect_args.discovery_scope)
             usernames = _scanned_usernames(local_only, inspect_args, [u for _path, u in homes])
             return (local_only, [], usernames), {
                 "mode": "on",
                 "source": "remote",
+                **scanned,
                 "remote": counts(local_only),
                 "remote_error_reason": outcome.failure_reason or "error",
             }
-        metadata = {"mode": "on", "source": "remote", "remote": counts(outcome.discovered[0])}
+        metadata = {"mode": "on", "source": "remote", **scanned, "remote": counts(outcome.discovered[0])}
         if outcome.partial:
             metadata["partial"] = True
         return outcome.discovered, metadata
 
     phase_keys = LocalPhaseKeys()
     try:
-        discovered = await discover_clients_to_inspect(inspect_args, phase_keys=phase_keys)
+        discovered = await discover_clients_to_inspect(inspect_args, phase_keys=phase_keys, home_dirs_with_users=homes)
     except BaseException:
         run_remote.close()
         raise
-    metadata = {"mode": "shadow", "source": "local", "local": counts(discovered[0])}
+    metadata = {"mode": "shadow", "source": "local", **scanned, "local": counts(discovered[0])}
     try:
         outcome = await asyncio.wait_for(run_remote, SHADOW_TIMEOUT_S)
     except asyncio.TimeoutError:
@@ -343,7 +364,7 @@ async def discover_clients(
         return discovered, {**metadata, "comparison": "failed", "remote_error_reason": reason}
     remote_clients = outcome.discovered[0]
     try:
-        parity = compare(discovered[0], remote_clients, outcome.supported_agents, phase_keys)
+        parity = compare(discovered[0], remote_clients, outcome.supported_agents, phase_keys, homes)
     except Exception:
         logger.exception("Shadow discovery comparison failed.")
         parity = {"comparison": "failed", "remote_error_reason": "compare_error"}
@@ -355,6 +376,8 @@ async def discover_clients(
 def _fallback_reason(error: Exception) -> str:
     if isinstance(error, RemoteDiscoveryError):
         return error.reason
+    if isinstance(error, MachineAuthError):
+        return "token_command"
     if isinstance(error, asyncio.TimeoutError):
         return "timeout"
     if isinstance(error, aiohttp.ClientError):
@@ -440,7 +463,10 @@ async def inspect_analyze_push_pipeline(
         identifier=analyze_args.identifier,
         additional_headers=analyze_args.additional_headers,
         verbose=verbose,
-        skip_pushing=bool(push_args.control_servers) or bool(push_args.push_key),
+        # Machine mode replaces the push key, so it skips pushing like a push-key scan.
+        skip_pushing=bool(push_args.control_servers)
+        or bool(push_args.push_key)
+        or analyze_args.machine_auth is not None,
         push_key=push_args.push_key,
         max_retries=analyze_args.max_retries,
         skip_ssl_verify=analyze_args.skip_ssl_verify,
@@ -448,6 +474,7 @@ async def inspect_analyze_push_pipeline(
         scanned_usernames=scanned_usernames,
         show_analysis_results=analyze_args.show_analysis_results,
         agent_scan_config=analyze_args.agent_scan_config,
+        machine_auth=analyze_args.machine_auth,
     )
 
     return response

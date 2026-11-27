@@ -152,6 +152,26 @@ class TestIsInteractiveRun:
         args = _ns(command="evo", control_servers=[], push_key="attacker-or-stale-key")
         assert is_interactive_run(args) is True
 
+    _MACHINE: ClassVar[dict[str, str]] = {
+        "token_command": "/opt/ads/installer",
+        "tenant_id": "tenant-1",
+    }
+
+    def test_machine_identity_scan_without_push_key_is_non_interactive(self):
+        """A machine-mode scan is installer-driven like a push-key scan, so it never prompts."""
+        assert is_interactive_run(_ns(command="scan", **self._MACHINE)) is False
+        assert decide_handshake(_ns(command="scan", **self._MACHINE)) == HandshakeDecision(
+            do_stdio_handshake=False, collect_consent=False
+        )
+
+    def test_partial_machine_identity_does_not_mark_the_run(self):
+        """One of the two values is not machine mode, so the run stays as without it."""
+        assert is_interactive_run(_ns(command="scan", token_command="/opt/ads/installer", tenant_id=None)) is True
+        assert is_interactive_run(_ns(command="scan", token_command=None, tenant_id="tenant-1")) is True
+
+    def test_evo_ignores_machine_identity(self):
+        assert is_interactive_run(_ns(command="evo", **self._MACHINE)) is True
+
 
 class TestIsInteractiveRunMatrix:
     """

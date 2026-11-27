@@ -15,6 +15,7 @@ from typing import Any
 import aiohttp
 
 from agent_scan.agents.base import is_own_home
+from agent_scan.machine_auth import TENANT_API_VERSION, AuthRetry, MachineCredential
 from agent_scan.remote_discovery.executor import run_op, to_wire
 from agent_scan.utils import get_readable_home_directories
 from agent_scan.verify_api import RETRYABLE_TRANSPORT_EXCEPTIONS, setup_tcp_connector
@@ -39,6 +40,18 @@ class RemoteDiscoveryError(Exception):
         # Bounded label for scan metadata, e.g. ``http_503``.
         self.reason = reason
         self.status = status
+
+
+class _Auth:
+    """The request auth headers: the push key, or the scan's machine credential."""
+
+    def __init__(self, headers: dict[str, str], credential: MachineCredential | None = None) -> None:
+        self._headers = headers
+        self.credential = credential
+
+    @property
+    def headers(self) -> dict[str, str]:
+        return self.credential.headers if self.credential is not None else self._headers
 
 
 class _SessionLost(Exception):
@@ -79,23 +92,31 @@ async def _post(
     session: aiohttp.ClientSession,
     url: str,
     payload: dict[str, Any],
-    headers: dict[str, str],
+    auth: _Auth,
     result: RemoteResult,
 ) -> dict[str, Any]:
     """POST with retries on 429/5xx, timeouts and connection errors.
 
-    Resending the same bytes is safe: the backend replays a step it has already applied.
+    A 401 is retried once with a fresh machine token, when the token command
+    prints a new one; a session can outlive the token. Resending the same bytes
+    is safe: the backend replays a step it has already applied.
     """
     body = json.dumps(payload).encode()
-    for attempt in range(MAX_RETRIES + 1):
+    auth_retry = AuthRetry(auth.credential)
+    attempt = 0
+    while attempt <= MAX_RETRIES:
         result.bytes_sent += len(body)
         retry_after: float | None = None
         try:
             async with session.post(
-                url, data=body, headers={**headers, "Content-Type": "application/json"}
+                url, data=body, headers={**auth.headers, "Content-Type": "application/json"}
             ) as response:
                 if response.status < 400:
                     return await response.json()
+                if await auth_retry.should_retry(response.status):
+                    logger.info("Remote discovery got 401; retrying with a fresh machine token.")
+                    result.retries += 1
+                    continue
                 if response.status not in RETRYABLE_STATUSES or attempt == MAX_RETRIES:
                     # Detail only: bounded reason strings, never request content.
                     raise RemoteDiscoveryError(
@@ -109,6 +130,7 @@ async def _post(
                 raise
         result.retries += 1
         await asyncio.sleep(_retry_delay(attempt, retry_after))
+        attempt += 1
     raise AssertionError("unreachable")
 
 
@@ -142,11 +164,14 @@ def wsl_distro(home: Path) -> str | None:
     return share if server.lower() in ("wsl.localhost", "wsl$") and share else None
 
 
-def homes(all_users: bool) -> list[dict[str, Any]]:
+def homes(all_users: bool, home_dirs_with_users: list[tuple[Path, str]] | None = None) -> list[dict[str, Any]]:
     """The homes legacy would scan, in its order. With ``all_users`` on Windows this
-    includes WSL homes (``//wsl.localhost/<distro>/home/<user>``)."""
+    includes WSL homes (``//wsl.localhost/<distro>/home/<user>``). Looked up unless
+    ``home_dirs_with_users`` is given."""
+    if home_dirs_with_users is None:
+        home_dirs_with_users = get_readable_home_directories(all_users=all_users)
     out = []
-    for home, username in get_readable_home_directories(all_users=all_users):
+    for home, username in home_dirs_with_users:
         entry: dict[str, Any] = {"username": username, "home": home.as_posix(), "own": is_own_home(home)}
         distro = wsl_distro(home)
         if distro:
@@ -165,12 +190,24 @@ async def run_remote_discovery(
     identifier: str | None = None,
     all_users: bool = False,
     skip_ssl_verify: bool = False,
+    machine_auth: MachineCredential | None = None,
+    home_dirs_with_users: list[tuple[Path, str]] | None = None,
 ) -> RemoteResult:
+    """Run one discovery session.
+
+    With ``machine_auth`` the session runs on the tenant routes of its Snyk API
+    with the machine token, and ``backend_url`` and ``push_key`` are unused.
+    """
     started = time.monotonic()
-    base = backend_url.rstrip("/") + "/hidden/coding-agent-discovery/sessions"
-    query = f"?version={DISCOVERY_API_VERSION}"
-    headers = {"X-Push-Key": push_key} if push_key else {}
-    home_list = homes(all_users)
+    if machine_auth is not None:
+        base = machine_auth.tenant_path("/coding-agent-discovery/sessions")
+        query = f"?version={TENANT_API_VERSION}"
+        auth = _Auth({}, machine_auth)
+    else:
+        base = backend_url.rstrip("/") + "/hidden/coding-agent-discovery/sessions"
+        query = f"?version={DISCOVERY_API_VERSION}"
+        auth = _Auth({"X-Push-Key": push_key} if push_key else {})
+    home_list = homes(all_users, home_dirs_with_users)
     if not home_list:
         # The backend rejects an empty homes list, and local discovery finds nothing either.
         logger.info("Remote discovery skipped: no readable home directories.")
@@ -190,7 +227,7 @@ async def run_remote_discovery(
     ) as session:
         for attempt in range(MAX_RESTARTS + 1):
             try:
-                await _run_session(session, base, query, init, headers, result, cancel)
+                await _run_session(session, base, query, init, auth, result, cancel)
                 break
             except _SessionLost as lost:
                 if attempt == MAX_RESTARTS:
@@ -207,11 +244,11 @@ async def _run_session(
     base: str,
     query: str,
     init: dict[str, Any],
-    headers: dict[str, str],
+    auth: _Auth,
     result: RemoteResult,
     cancel: threading.Event,
 ) -> None:
-    response = await _post(session, base + query, init, headers, result)
+    response = await _post(session, base + query, init, auth, result)
     result.session_id = response["session_id"]
     result.supported_agents = response.get("supported_agents", [])
     while True:
@@ -226,7 +263,7 @@ async def _run_session(
         result.rounds += 1
         result.ops += len(ops)
         try:
-            response = await _post(session, f"{base}/{result.session_id}/steps{query}", step, headers, result)
+            response = await _post(session, f"{base}/{result.session_id}/steps{query}", step, auth, result)
         except RemoteDiscoveryError as error:
             # Steps only: an init 404 means the route is missing, not the session.
             if error.status == 404:

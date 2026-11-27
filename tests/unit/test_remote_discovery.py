@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from agent_scan.models import CouldNotParseMCPConfig
 from agent_scan.remote_discovery.builder import build_clients
 from agent_scan.remote_discovery.executor import run_op
 
@@ -81,6 +82,31 @@ def test_find_read_skips_files_over_budget_without_reading(tmp_path: Path, monke
     assert set(opened) == set(read)
 
 
+@pytest.mark.parametrize(
+    ("error", "reason"),
+    [
+        (PermissionError(13, "denied"), "unreadable"),
+        # Say, a OneDrive file macOS can't download.
+        (OSError(11, "resource deadlock avoided"), "read_error"),
+        (ValueError("bad path"), "read_error"),
+    ],
+)
+def test_read_errors_report_reason(tmp_path: Path, monkeypatch, error: Exception, reason: str) -> None:
+    from agent_scan.remote_discovery import executor
+
+    path = tmp_path / "mcp.json"
+    path.write_text("{}")
+
+    def failing_open(*_a, **_k):
+        raise error
+
+    monkeypatch.setattr(executor, "open", failing_open, raising=False)
+    result = run_op({"op_id": "1", "kind": "read", "paths": [str(path)]})
+
+    assert result["files"] == []
+    assert [(s["path"], s["reason"]) for s in result["skipped"]] == [(str(path), reason)]
+
+
 def test_cancelled_op_stops() -> None:
     import threading
 
@@ -129,6 +155,20 @@ def test_merge_last_write_wins_and_canonical(tmp_path: Path) -> None:
     # Two spellings of one file merge under its resolved path.
     assert [name for name, _ in configs[real.resolve().as_posix()]] == ["via-link", "direct"]
     assert str(link) not in configs
+
+
+@pytest.mark.parametrize("command", ["", 'npx -y "@scope/pkg'])
+def test_unparseable_command_fails_only_its_file(command: str) -> None:
+    bad = _mcp("/bad.json", "ok")
+    bad["candidates"][0]["maps"][0]["bad"] = {"command": command}
+    found = {
+        "clients": [{"name": "claude code", "client_path": "/x", "username": "me"}],
+        "mcp_configs": [bad, _mcp("/good.json", "good")],
+        "skills_dirs": [],
+    }
+    (client,) = build_clients(found)
+    assert isinstance(client.mcp_configs["/bad.json"], CouldNotParseMCPConfig)
+    assert [name for name, _ in client.mcp_configs["/good.json"]] == ["good"]
 
 
 def _stdio_found(raw: dict, roots: list[str]) -> dict:
@@ -193,18 +233,29 @@ def test_stdio_roots_ignored_when_ambiguous_or_escaping(tmp_path: Path, monkeypa
 _EMPTY_FOUND: dict[str, list[dict]] = {"clients": [], "mcp_configs": [], "skills_dirs": []}
 
 
-async def _serve(statuses: dict[str, list[int]], init_found: dict[str, list[dict]] | None = None):
-    """A discovery backend that answers each path with the given statuses in turn, then 200."""
+async def _serve(
+    statuses: dict[str, list[int]],
+    init_found: dict[str, list[dict]] | None = None,
+    version: str | None = None,
+    headers: list[dict[str, str]] | None = None,
+):
+    """A discovery backend that answers each path with the given statuses in turn, then 200.
+
+    It 404s requests without ``version`` (the push-key version by default) and
+    records each request's headers in ``headers`` when given.
+    """
     from aiohttp import web
     from aiohttp.test_utils import TestServer
+
+    from agent_scan.remote_discovery.client import DISCOVERY_API_VERSION
 
     bodies: dict[str, list[bytes]] = {}
 
     async def handle(request):
-        from agent_scan.remote_discovery.client import DISCOVERY_API_VERSION
-
-        if request.query.get("version") != DISCOVERY_API_VERSION:
+        if request.query.get("version") != (version or DISCOVERY_API_VERSION):
             return web.Response(status=404, text="no version")
+        if headers is not None:
+            headers.append(dict(request.headers))
         bodies.setdefault(request.path, []).append(await request.read())
         queue = statuses.get(request.path, [])
         if queue:
@@ -288,6 +339,110 @@ async def test_init_sends_client_identifier() -> None:
     client = json.loads(bodies[_SESSIONS][0])["client"]
     assert client["identifier"] == "machine-1"
     assert client["cli_version"] == "1.2.3"
+
+
+@pytest.mark.asyncio
+async def test_push_key_uses_push_key_routes() -> None:
+    from unittest.mock import patch
+
+    from agent_scan.remote_discovery.client import run_remote_discovery
+
+    seen: list[dict[str, str]] = []
+    server, bodies = await _serve({}, headers=seen)
+    try:
+        with patch("agent_scan.remote_discovery.client.get_readable_home_directories", return_value=_HOMES):
+            await run_remote_discovery(str(server.make_url("/")).rstrip("/"), push_key="push-abc")
+    finally:
+        await server.close()
+    assert set(bodies) == {_SESSIONS, _STEPS}
+    assert [h.get("X-Push-Key") for h in seen] == ["push-abc", "push-abc"]
+    assert all("Authorization" not in h for h in seen)
+
+
+@pytest.mark.asyncio
+async def test_machine_auth_uses_tenant_routes_with_bearer_token() -> None:
+    from unittest.mock import patch
+
+    from agent_scan.machine_auth import TENANT_API_VERSION, MachineAuth, MachineCredential
+    from agent_scan.remote_discovery.client import run_remote_discovery
+
+    seen: list[dict[str, str]] = []
+    server, bodies = await _serve({}, version=TENANT_API_VERSION, headers=seen)
+    machine_auth = MachineCredential(MachineAuth(str(server.make_url("/")), "tenant-1", "machine-token"))
+    tenant_sessions = "/hidden/tenants/tenant-1/coding-agent-discovery/sessions"
+    try:
+        with patch("agent_scan.remote_discovery.client.get_readable_home_directories", return_value=_HOMES):
+            result = await run_remote_discovery(
+                "https://unused.example", push_key="push-abc", machine_auth=machine_auth
+            )
+    finally:
+        await server.close()
+    assert result.session_id == "s1"
+    assert set(bodies) == {tenant_sessions, f"{tenant_sessions}/s1/steps"}
+    assert [h.get("Authorization") for h in seen] == ["Bearer machine-token", "Bearer machine-token"]
+    assert all("X-Push-Key" not in h for h in seen)
+
+
+async def _discover_with_machine_auth(statuses: dict[str, list[int]], fresh_token: str):
+    """Run a tenant session whose token command prints ``fresh_token``; returns the error, headers and result."""
+    from unittest.mock import patch
+
+    from agent_scan.machine_auth import TENANT_API_VERSION, MachineAuth, MachineCredential
+    from agent_scan.remote_discovery.client import run_remote_discovery
+
+    seen: list[dict[str, str]] = []
+    server, _bodies = await _serve(statuses, version=TENANT_API_VERSION, headers=seen)
+    machine_auth = MachineCredential(
+        MachineAuth(str(server.make_url("/")), "tenant-1", "old-token", token_command="/opt/ads/installer")
+    )
+    error, result = None, None
+    try:
+        with (
+            patch("agent_scan.remote_discovery.client.get_readable_home_directories", return_value=_HOMES),
+            patch("agent_scan.machine_auth.fetch_access_token", return_value=fresh_token) as fetch,
+        ):
+            try:
+                result = await run_remote_discovery("https://unused.example", machine_auth=machine_auth)
+            except Exception as e:
+                error = e
+    finally:
+        await server.close()
+    return error, [h.get("Authorization") for h in seen], result, fetch
+
+
+_TENANT_STEPS = "/hidden/tenants/tenant-1/coding-agent-discovery/sessions/s1/steps"
+
+
+@pytest.mark.asyncio
+async def test_machine_auth_401_retries_with_a_fresh_token() -> None:
+    # The token expired while ops ran: the step is resent once with the new token.
+    error, auth, result, fetch = await _discover_with_machine_auth({_TENANT_STEPS: [401]}, "new-token")
+    assert error is None
+    assert result.session_id == "s1"
+    assert auth == ["Bearer old-token", "Bearer old-token", "Bearer new-token"]
+    fetch.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_machine_auth_401_with_the_same_token_fails() -> None:
+    from agent_scan.remote_discovery.client import RemoteDiscoveryError
+
+    error, auth, _result, fetch = await _discover_with_machine_auth({_TENANT_STEPS: [401]}, "old-token")
+    assert isinstance(error, RemoteDiscoveryError)
+    assert error.status == 401
+    assert auth == ["Bearer old-token", "Bearer old-token"]
+    fetch.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_machine_auth_refreshes_at_most_once_per_request() -> None:
+    from agent_scan.remote_discovery.client import RemoteDiscoveryError
+
+    error, auth, _result, fetch = await _discover_with_machine_auth({_TENANT_STEPS: [401, 401]}, "new-token")
+    assert isinstance(error, RemoteDiscoveryError)
+    assert error.status == 401
+    assert auth == ["Bearer old-token", "Bearer old-token", "Bearer new-token"]
+    fetch.assert_called_once()
 
 
 @pytest.mark.asyncio

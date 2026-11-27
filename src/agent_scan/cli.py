@@ -20,9 +20,17 @@ import rich
 import yaml
 from pydantic import ValidationError
 from rich.logging import RichHandler
+from rich.markup import escape
 
 from agent_scan.agents import DiscoveryScope
 from agent_scan.consent import collect_consent
+from agent_scan.machine_auth import (
+    SYNC_ANALYSIS_ERROR,
+    MachineAuthError,
+    MachineCredential,
+    is_machine_mode,
+    resolve_machine_auth,
+)
 from agent_scan.models import (
     FAILURE_CATEGORY_TO_CODE,
     ControlServer,
@@ -668,6 +676,32 @@ def add_control_server_arguments(parser):
     )
 
 
+def add_machine_auth_arguments(parser):
+    """Machine identity auth, passed by the ADS installer in the scan config file."""
+    parser.add_argument(
+        "--token-command",
+        type=str,
+        default=None,
+        help=(
+            "Absolute path of a command that prints a machine access token when run as "
+            "'<command> token --base-url <api>', where <api> is the scheme and host of "
+            "--analysis-url. Set together with --tenant-id to call the tenant routes with "
+            "that token; the scan fails if the command fails."
+        ),
+        metavar="PATH",
+    )
+    parser.add_argument(
+        "--tenant-id",
+        type=str,
+        default=None,
+        help="Snyk tenant ID the --token-command token is for.",
+        metavar="ID",
+    )
+    # Accepted and ignored: installers that wrote base_url to the scan config file keep working.
+    # The API is the scheme and host of --analysis-url.
+    parser.add_argument("--base-url", type=str, default=None, help=argparse.SUPPRESS)
+
+
 def add_scan_arguments(scan_parser):
     scan_parser.add_argument(
         "--checks-per-server",
@@ -677,6 +711,7 @@ def add_scan_arguments(scan_parser):
         metavar="NUM",
     )
     add_control_server_arguments(scan_parser)
+    add_machine_auth_arguments(scan_parser)
 
 
 def add_ignore_failure_codes_argument(parser) -> None:
@@ -735,6 +770,52 @@ def _effective_push_key(args) -> str | None:
     return get_push_key(getattr(args, "control_servers", []) or [])
 
 
+def _machine_auth_values(args) -> tuple[str | None, str | None]:
+    """--token-command and --tenant-id; both None on evo, which always mints its own push key."""
+    if getattr(args, "command", None) == "evo":
+        return (None, None)
+    return (getattr(args, "token_command", None), getattr(args, "tenant_id", None))
+
+
+def _is_machine_auth_scan(args) -> bool:
+    """True when --token-command and --tenant-id are both set."""
+    return is_machine_mode(_machine_auth_values(args))
+
+
+def warn_partial_machine_auth(args) -> None:
+    """Warn when only one machine identity value is set; the scan then uses the push key."""
+    if getattr(args, "command", None) not in (None, "scan"):
+        return
+    token_command, tenant_id = _machine_auth_values(args)
+    present = {"--token-command": token_command, "--tenant-id": tenant_id}
+    missing = [name for name, value in present.items() if not (value and value.strip())]
+    if len(missing) == 1:
+        rich.print(
+            f"[yellow]Warning: Machine identity needs --token-command and --tenant-id; {missing[0]} is not set, "
+            "so the scan uses the push key.[/yellow]",
+            file=sys.stderr,
+        )
+
+
+async def _resolve_machine_auth(args) -> MachineCredential | None:
+    """The scan's machine credential from --token-command and --tenant-id on the --analysis-url API,
+    or None in push-key mode.
+
+    Runs the token command once here; the async analysis submit refreshes the token.
+    Every request in the scan shares the credential, so a token refreshed after a 401
+    is reused by later requests. Raises MachineAuthError when the token command is not
+    an absolute path or fails: machine mode never falls back to the push key.
+    """
+    token_command, tenant_id = _machine_auth_values(args)
+    auth = await asyncio.to_thread(
+        resolve_machine_auth,
+        token_command,
+        tenant_id,
+        discovery_base_url(args.analysis_url),
+    )
+    return MachineCredential(auth) if auth is not None else None
+
+
 def _effective_identifier(args) -> str | None:
     """Machine identifier from --machine-id, falling back to the deprecated
     --control-identifier on the first control-server block."""
@@ -745,6 +826,11 @@ def _effective_identifier(args) -> str | None:
     return next((s.identifier for s in control_servers), None)
 
 
+def _is_unattended_scan(args) -> bool:
+    """True when a push key or a machine identity is set, so the installer runs the scan."""
+    return bool(_effective_push_key(args)) or _is_machine_auth_scan(args)
+
+
 def is_interactive_run(args) -> bool:
     """
     True when the run is a manual, interactive invocation by a human who can
@@ -753,9 +839,8 @@ def is_interactive_run(args) -> bool:
     command = getattr(args, "command", None)
     if command == "inspect":
         return True
-    # If the scan is run with a push key, skip consent prompts.
-    has_push_key = bool(_effective_push_key(args))
-    return not has_push_key
+    # If the scan is run with a push key or a machine identity (installer-driven), skip consent prompts.
+    return not _is_unattended_scan(args)
 
 
 @dataclass(frozen=True)
@@ -775,6 +860,7 @@ def decide_handshake(args) -> HandshakeDecision:
 
         command       push_key  --dangerously  do_stdio_handshake  collect_consent
         ------------  --------  -------------  ------------------  ---------------
+        (push_key is "yes" for a machine identity scan too, see _is_machine_auth_scan)
         inspect       N/A       no             True                True
         inspect       N/A       yes            True                False
         scan / None   no        no             True                True
@@ -794,9 +880,9 @@ def decide_handshake(args) -> HandshakeDecision:
 
     # 2. Attended scan - handshake and prompt for per-server consent.
     # inspect always qualifies.
-    # scan / no-subcommand qualifies when there is no push key.
+    # scan / no-subcommand qualifies when there is no push key and no machine identity.
     is_attended_scan = command == "inspect" or (
-        (command is None or command == "scan") and not bool(_effective_push_key(args))
+        (command is None or command == "scan") and not _is_unattended_scan(args)
     )
     if is_attended_scan:
         return HandshakeDecision(do_stdio_handshake=True, collect_consent=True)
@@ -1083,6 +1169,7 @@ def main():
     # Resolve deferred defaults and enforce safety rules before dispatching.
     resolve_server_io_default(args)
     enforce_consent_requirements(args)
+    warn_partial_machine_auth(args)
 
     # Display version banner
     if not (hasattr(args, "json") and args.json):
@@ -1100,7 +1187,12 @@ def main():
         asyncio.run(print_scan_inspect(mode="inspect", args=args))
         sys.exit(0)
     elif args.command == "scan" or args.command is None:  # default to scan
-        asyncio.run(print_scan_inspect(args=args))
+        try:
+            asyncio.run(print_scan_inspect(args=args))
+        except MachineAuthError as e:
+            # Machine mode never falls back to the push key, so the scan stops here.
+            rich.print(f"[bold red]Error:[/bold red] Machine identity: {escape(str(e))}", file=sys.stderr)
+            sys.exit(1)
         sys.exit(0)
     elif args.command == "evo":
         asyncio.run(evo(args))
@@ -1191,7 +1283,12 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> ScanRespo
 
     Flow:
     1. Build InspectArgs from CLI args.
-    2. For push-key scans, fetch the tenant's Agent Scan config once.
+    2. For push-key or machine-auth scans, fetch the tenant's Agent Scan config
+       once. Machine auth (see _resolve_machine_auth) runs the token command
+       and uses the token for the config and discovery; async analysis
+       refreshes it first. Machine mode fails here when the config or the
+       args mean synchronous analysis.
+       A failed token command or tenant config read raises MachineAuthError.
     3. Discover the clients/configs that would be inspected, through the
        discovery backend when the config enables it, otherwise locally.
     4. If interactive and --dangerously-run-mcp-servers is not set, prompt
@@ -1238,10 +1335,23 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> ScanRespo
     push_key: str | None = _effective_push_key(args) if mode == "scan" else None
     identifier: str | None = _effective_identifier(args) if mode == "scan" else None
 
-    # Only push-key tenants have a config endpoint; everyone else keeps the defaults.
+    machine_auth: MachineCredential | None = await _resolve_machine_auth(args) if mode == "scan" else None
+    if machine_auth is not None and not identifier:
+        # The tenant analysis route requires X-Scan-User-Id.
+        identifier = get_hostname() or None
+
+    # Only push-key and machine-auth tenants have a config endpoint; everyone else keeps the defaults.
     agent_scan_config = AgentScanConfig()
-    if push_key:
-        agent_scan_config = await fetch_agent_scan_config(args.analysis_url, push_key, skip_ssl_verify=skip_ssl_verify)
+    if push_key or machine_auth:
+        agent_scan_config = await fetch_agent_scan_config(
+            args.analysis_url, push_key, skip_ssl_verify=skip_ssl_verify, machine_auth=machine_auth
+        )
+    if machine_auth is not None and (
+        _should_show_analysis_results(args) or not agent_scan_config.async_analysis_enabled
+    ):
+        # Synchronous analysis has no tenant route, and machine mode never uses the push key,
+        # so fail before discovering or inspecting anything.
+        raise MachineAuthError(SYNC_ANALYSIS_ERROR)
 
     # Step 1: Discover everything we would inspect without starting any server.
     discovered, discovery_metadata = await discover_clients(
@@ -1252,6 +1362,7 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> ScanRespo
         cli_version=version_info,
         identifier=identifier,
         skip_ssl_verify=skip_ssl_verify,
+        machine_auth=machine_auth,
     )
     clients_to_inspect, unresolved_paths, scanned_usernames = discovered
 
@@ -1277,6 +1388,7 @@ async def run_scan(args, mode: Literal["scan", "inspect"] = "scan") -> ScanRespo
             agent_scan_config=agent_scan_config,
             # Keep values stable across scans of an unchanged machine.
             scan_metadata={"discovery": discovery_metadata},
+            machine_auth=machine_auth,
         )
         push_args = PushArgs(
             control_servers=control_servers,
