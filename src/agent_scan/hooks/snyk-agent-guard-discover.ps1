@@ -1,7 +1,21 @@
 #
 # Session-start discovery trampoline for Snyk Agent Guard (Windows).
 # Sets the environment expected by `guard discover` and hands it this process's
-# stdin, from which it reads the hook payload. Parameters mirror snyk-agent-guard.ps1.
+# stdin, from which it reads the hook payload.
+#
+# Usage:
+#   powershell -File snyk-agent-guard-discover.ps1 -Client claude-code -Scope servers
+#   powershell -File snyk-agent-guard-discover.ps1 -Client claude-code -Scope servers -FromEnv
+#
+# Configuration is read from snyk-agent-guard.conf next to this script, written by
+# `snyk-agent-scan guard install`. Only when there is no such file and the command passes
+# -FromEnv are the values taken from the environment instead: a push key is then required
+# (machine identity is never taken from there), REMOTE_HOOKS_BASE_URL must be an https Snyk
+# host.
+#
+# In both modes AGENT_SCAN_COMMAND must be the absolute path of an existing file. It is run as
+# that file and never evaluated; a relative path would resolve against the agent's working
+# directory, which is the repository. Any other value skips discovery with one line on stderr.
 #
 param(
     [Parameter(Mandatory=$true)]
@@ -9,51 +23,82 @@ param(
     [string]$Client,
 
     [Parameter(Mandatory=$false)]
+    [ValidateSet("servers","skills","all")]
+    [string]$Scope = "servers",
+
+    # Accepted but never used: hook commands written by earlier versions still pass these,
+    # and must keep working until `guard install` rewrites them. All values come from the
+    # configuration file.
     [string]$PushKey,
-
-    [Parameter(Mandatory=$false)]
+    [string]$TokenCommand,
     [string]$RemoteUrl,
-
-    [Parameter(Mandatory=$false)]
+    [string]$TenantId,
     [string]$MachineId,
-
-    [Parameter(Mandatory=$false)]
     [string]$MachineSerial,
-
-    [Parameter(Mandatory=$false)]
     [string]$AgentScanCommand,
 
-    [Parameter(Mandatory=$false)]
-    [string]$TenantId,
-
-    [Parameter(Mandatory=$false)]
-    [string]$TokenCommand,
-
-    [Parameter(Mandatory=$false)]
-    [ValidateSet("servers","skills","all")]
-    [string]$Scope = "servers"
+    [switch]$FromEnv
 )
 
 $ErrorActionPreference = "Stop"
 
-if ($PushKey)   { $env:PUSH_KEY = $PushKey }
-if ($RemoteUrl) { $env:REMOTE_HOOKS_BASE_URL = $RemoteUrl }
-if (-not $MachineId) { $MachineId = $env:MACHINE_ID }
-if (-not $MachineId) { exit 0 }
-$env:MACHINE_ID = $MachineId
-$env:MACHINE_SERIAL = $MachineSerial
-# Machine identity for `guard discover` (see snyk-agent-guard.ps1).
-if ($TenantId)     { $env:TENANT_ID = $TenantId }
-if ($TokenCommand) { $env:ADS_TOKEN_COMMAND = $TokenCommand }
-# `guard discover` lets a push key win over machine identity, so a PUSH_KEY in the agent's
-# environment must not reach it from a machine identity hook.
-if ($TokenCommand -and -not $PushKey) {
-    Remove-Item Env:PUSH_KEY -ErrorAction SilentlyContinue
-    Remove-Item Env:PUSHKEY -ErrorAction SilentlyContinue
+$ConfigFile = Join-Path $PSScriptRoot "snyk-agent-guard.conf"
+# Same rule as snyk-agent-guard.ps1.
+$EnvUrlPattern = '^https://([A-Za-z0-9-]+\.)*snyk\.io(:[0-9]+)?(/.*)?$'
+$Config = @{}
+$valuesFromEnv = (-not (Test-Path -LiteralPath $ConfigFile)) -and $FromEnv
+if ($valuesFromEnv) {
+    # Push key only, as in snyk-agent-guard.ps1: machine identity is never taken from the
+    # environment, so ADS_TOKEN_COMMAND and TENANT_ID are cleared below.
+    $Config["PUSH_KEY"] = if (Test-Path Env:PUSH_KEY) { $env:PUSH_KEY } else { $env:PUSHKEY }
+    if (-not $Config["PUSH_KEY"]) { exit 0 }
+    $Config["REMOTE_HOOKS_BASE_URL"] = $env:REMOTE_HOOKS_BASE_URL
+    $Config["MACHINE_ID"] = $env:MACHINE_ID
+    $Config["MACHINE_SERIAL"] = $env:MACHINE_SERIAL
+    $Config["AGENT_SCAN_COMMAND"] = $env:AGENT_SCAN_COMMAND
+    $envUrl = $Config["REMOTE_HOOKS_BASE_URL"]
+    # A missing URL would make `guard discover` fall back to its default API, so it ends here
+    # like the forwarder's usage error.
+    if (-not $envUrl -or $envUrl -cnotmatch $EnvUrlPattern) { exit 0 }
+} else {
+    if (-not (Test-Path -LiteralPath $ConfigFile -PathType Leaf)) { exit 0 }
+    # Session-start discovery is best-effort: an unreadable file ends it quietly, as in
+    # snyk-agent-guard-discover.sh.
+    try {
+        $lines = Get-Content -LiteralPath $ConfigFile -Encoding UTF8
+    } catch {
+        exit 0
+    }
+    foreach ($line in $lines) {
+        $parts = $line.Split([char[]]@('='), 2)
+        if ($parts.Count -eq 2) { $Config[$parts[0]] = $parts[1] }
+    }
 }
 
-$cmd = if ($AgentScanCommand) { $AgentScanCommand } elseif ($env:AGENT_SCAN_COMMAND) { $env:AGENT_SCAN_COMMAND } else { $null }
+# Every value is set, even when empty (which removes it): an inherited one must not stand in
+# for the one captured at install. `guard discover` uses the push key when PUSH_KEY is set,
+# and machine identity (ADS_TOKEN_COMMAND, TENANT_ID) otherwise, as snyk-agent-guard.ps1 does.
+$env:PUSH_KEY = $Config["PUSH_KEY"]
+$env:ADS_TOKEN_COMMAND = $Config["ADS_TOKEN_COMMAND"]
+$env:TENANT_ID = $Config["TENANT_ID"]
+$env:REMOTE_HOOKS_BASE_URL = $Config["REMOTE_HOOKS_BASE_URL"]
+$env:MACHINE_ID = $Config["MACHINE_ID"]
+$env:MACHINE_SERIAL = $Config["MACHINE_SERIAL"]
+if (-not $env:MACHINE_ID) { exit 0 }
+
+$cmd = $Config["AGENT_SCAN_COMMAND"]
 if (-not $cmd) { exit 0 }
+# Fully qualified only: IsPathRooted would also accept a drive-relative C:name, which resolves
+# against the working directory.
+$absolute = if ([System.IO.Path]::DirectorySeparatorChar -eq '\') {
+    $cmd -match '^([A-Za-z]:[\\/]|[\\/]{2})'
+} else {
+    $cmd.StartsWith('/')
+}
+if (-not $absolute -or -not (Test-Path -LiteralPath $cmd -PathType Leaf)) {
+    [Console]::Error.WriteLine("snyk-agent-guard: AGENT_SCAN_COMMAND must be the absolute path of an executable file; session-start discovery skipped")
+    exit 0
+}
 
 $arguments = @("guard", "discover", "--client", $Client, "--scope", $Scope)
 
@@ -62,11 +107,7 @@ $arguments = @("guard", "discover", "--client", $Client, "--scope", $Scope)
 # cap -- matching snyk-agent-guard-discover.sh, which never touches fd 0. Reading it
 # here instead would block forever on an agent that keeps the pipe open.
 try {
-    if (Test-Path -LiteralPath $cmd -PathType Leaf) {
-        & $cmd @arguments *> $null
-    } else {
-        Invoke-Expression "$cmd $($arguments -join ' ')" *> $null
-    }
+    & $cmd @arguments *> $null
 } catch {
     # Session-start discovery is best-effort telemetry.
 }

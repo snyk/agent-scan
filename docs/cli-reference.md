@@ -404,6 +404,65 @@ configuration file, set them again after installing or uninstalling.
 | `--managed` | boolean | `false` | Install in the admin/MDM-managed configuration rather than the user configuration. |
 | `--check-installed` | boolean | `false` | With `--managed`, skip agents that are not installed for any user on the machine. Without it, managed installs do not check. Non-managed installs always check. |
 | `--test` | boolean | `false` | **Deprecated/no-op.** |
+| `--no-config-file` | boolean | `false` | Write no guard configuration file; the hooks read their values from the environment (see below). Needs `PUSH_KEY` set and `--env-placeholder PUSH_KEY=<VAR>`. |
+| `--env-placeholder NAME=VAR` | string, repeatable | — | With `--no-config-file`, write `NAME="$VAR"` into the hook commands, expanded when the hook runs. `NAME` is one of `PUSH_KEY`, `REMOTE_HOOKS_BASE_URL`, `MACHINE_ID`, `MACHINE_SERIAL`, `AGENT_SCAN_COMMAND`. Values without a placeholder are written as literals; the push key never is. `AGENT_SCAN_COMMAND` must be the absolute path of an executable file: install refuses another literal value, and the discovery hook skips another expanded one. |
+
+#### Where the hooks get their values
+
+By default, `guard install` writes the hook values (`PUSH_KEY`, or with [machine identity](#guard-machine-identity)
+`ADS_TOKEN_COMMAND` instead; `REMOTE_HOOKS_BASE_URL`, `TENANT_ID`, `MACHINE_ID`, `MACHINE_SERIAL`,
+`AGENT_SCAN_COMMAND`) to `snyk-agent-guard.conf`, next to the hook scripts: mode 0600 for a user install, 0644 for a
+managed one. The hook commands carry no values. The scripts parse the file line by line, never
+source or evaluate it, and ignore these variables in their environment.
+
+With `--no-config-file`, no such file is written, and an existing one is removed. It is for push-key installs only;
+with `ADS_TOKEN_COMMAND` set, install fails. The hook commands pass
+`--from-env` (`-FromEnv` on Windows), and the scripts read the values from their environment:
+
+| Configuration file next to the script | `--from-env` on the hook command | Values come from |
+| --- | --- | --- |
+| present | either | the file only; the environment is ignored |
+| absent | yes | the environment (`PUSH_KEY`, or `PUSHKEY` when `PUSH_KEY` is unset; `REMOTE_HOOKS_BASE_URL`; `MACHINE_ID`; `MACHINE_SERIAL`; for discovery also `AGENT_SCAN_COMMAND`). A push key is required: machine identity is never taken from the environment |
+| absent | no | nowhere: the hook fails open (exit 0, one line on stderr, the `systemMessage` where supported), and the environment is not used |
+
+A file that exists but can't be read, for example one without read permission, fails open the same way, with or
+without `--from-env`. The discovery hook then does nothing.
+
+This lets the hook scripts run without `guard install`, for example from a plugin that ships them. Such a hook
+command just adds `--from-env`. On POSIX, the command can set the values from differently named variables, for
+example secrets:
+
+```bash
+PUSH_KEY=... sudo -E snyk-agent-scan guard install cursor --managed --url https://api.snyk.io \
+  --no-config-file --env-placeholder PUSH_KEY=SNYK_ADS_PUSH_KEY --env-placeholder MACHINE_ID=SNYK_ADS_MACHINE_ID
+# writes: PUSH_KEY="$SNYK_ADS_PUSH_KEY" REMOTE_HOOKS_BASE_URL='https://api.snyk.io' MACHINE_ID="$SNYK_ADS_MACHINE_ID" \
+#         bash '/etc/cursor/hooks/snyk-agent-guard.sh' --client cursor --from-env
+```
+
+On Windows, `powershell -File` cannot set environment variables, so every value must already be in the agent's
+environment under its own name. `--env-placeholder` then only accepts `NAME=NAME`.
+
+**Security.** In environment mode, whatever sets the agent's environment controls the hooks. That includes the push
+key, and so the tenant whose policy decides and which receives the events. Use it only where an administrator
+controls that environment, such as agent secrets or MDM. Don't use it where a repository or user can set it, for
+example through `env` in a project's agent settings. The scripts limit the damage:
+
+- `REMOTE_HOOKS_BASE_URL` from the environment must be `https://` to `snyk.io` or a subdomain.
+  Any other URL is refused, `localhost` included, so events and the push key can't be sent anywhere else. A local
+  endpoint, for example in a developer setup, goes in the configuration file, which is not checked.
+- The hooks need a push key from the environment and never switch to machine identity there. A `PUSH_KEY="$VAR"`
+  placeholder that expands to nothing is an error; it doesn't fall back to an inherited `PUSHKEY`.
+- The discovery hook runs `AGENT_SCAN_COMMAND` only if it's the absolute path of an executable file, in both modes. It
+  never evaluates it as a shell command, and a relative path, which would resolve against the agent's working
+  directory (the repository), is refused.
+- A hook command without `--from-env` never falls back to the environment, so deleting the configuration file makes
+  the hooks fail open instead of handing them to the environment.
+
+There is no configuration file, so there is no configuration checksum: agent-monitor can't detect a change to the
+values between installs.
+
+`guard uninstall` never revokes the push key of environment-mode hooks. Install didn't mint it, and in cloud-agent or
+plugin setups every machine usually shares it. Revoke it in Snyk when nothing else uses it.
 
 ### `guard discover`
 
@@ -444,7 +503,7 @@ kept.
 | `SNYK_TOKEN` | Required to mint/revoke push keys and verify that Guard is enabled for the tenant |
 | `MACHINE_ID` | Required non-anonymous machine identifier sent with hook events; alternative to `guard install --machine-id` |
 | `MACHINE_SERIAL` | Optional hardware serial captured by `guard install` for hook and discovery events. Sent as `machine_serial` alongside the hostname; absent or empty values become JSON `null`. The captured value, including an empty value, overrides any later inherited `MACHINE_SERIAL`. Does not change `MACHINE_ID`. |
-| `AGENT_SCAN_COMMAND` | Optional Agent Scan command invoked by the session-start discovery hook, with the hook arguments appended. The hook is installed only when this is set. A value that is not an existing executable file is run as a shell command. |
+| `AGENT_SCAN_COMMAND` | Optional Agent Scan command invoked by the session-start discovery hook, with the hook arguments appended. The hook is installed only when this is set. It must be the absolute path of an executable file, such as the `snyk-agent-scan` binary: `guard install` refuses anything else, and the hook never runs it as a shell command. |
 | `ADS_TOKEN_COMMAND` | Machine identity: a command that prints a machine access token on stdout when run as `<command> token --base-url <url>`, where `<url>` is `guard install --url`. Set together with `TENANT_ID`; see [Guard machine identity](#guard-machine-identity). |
 
 Pass `MACHINE_SERIAL` again whenever you reinstall or update Guard hooks. Reinstalling without it, or with a blank value, replaces any previously captured serial with JSON `null`; the old value is not preserved.
@@ -453,9 +512,9 @@ Pass `MACHINE_SERIAL` again whenever you reinstall or update Guard hooks. Reinst
 
 The ADS installer decides how the hooks authenticate and passes `guard install` either a push key or a machine identity: `ADS_TOKEN_COMMAND` and `TENANT_ID` (or `--tenant-id`), for user-mode installs on an enrolled machine. Machine identity needs both, as in `scan`. `TENANT_ID` alone is the push-key flow's tenant, and `ADS_TOKEN_COMMAND` without `TENANT_ID` prints a warning and uses the push key. The API is `--url`, as for a push key; the token command refuses any API other than the one the machine enrolled with. `ADS_BASE_URL` is not used.
 
-- **Install:** `guard install` runs `"$ADS_TOKEN_COMMAND" token --base-url <--url>` once as a check. If it fails (non-zero exit, timeout, no single token on stdout), the install fails with an error and exit code 1 and changes nothing. A `TENANT_ID` that is not a plain id (letters, digits, `.`, `_`, `~`, `-`), or a `--url` with quotes, backslashes or whitespace fails the same way. No push key is minted or used, even when `PUSH_KEY` is also set. The hook commands carry `ADS_TOKEN_COMMAND`, `REMOTE_HOOKS_BASE_URL`, `TENANT_ID`, `MACHINE_ID` and `MACHINE_SERIAL` (`-TokenCommand`, `-RemoteUrl`, `-TenantId`, `-MachineId`, `-MachineSerial` for PowerShell) and no push key or other secret (POSIX commands set `PUSH_KEY` and `PUSHKEY` empty). The test event goes through the tenant route like every later hook event; if it is rejected, the install fails as it does with a push key. `--managed` installs use a push key only and fail when `ADS_TOKEN_COMMAND` is set.
-- **Hook runtime:** on every invocation the hooks, and the events that `guard install` and `guard discover` send themselves, run the token command and send the event to `POST {REMOTE_HOOKS_BASE_URL}/hidden/tenants/{TENANT_ID}/agent-monitor/hooks/{client}?version=2025-11-11` (the same version as the push-key route) with `Authorization: Bearer <token>` and no `X-Client-Id`. The token command's time counts toward the 60-second request budget. If it fails, the hook fails open like an unreachable API (exit 0, one stderr line, the `systemMessage` where supported); it never falls back to the push key. The payload and the other headers are the same as with a push key. The token is never logged and never put on a command line. A push key wins over machine identity in the hooks and in `guard discover`: a hook installed with a push key ignores any `ADS_TOKEN_COMMAND` in the agent's environment, and a machine identity hook ignores any `PUSH_KEY` there.
-- **Switching:** re-running `guard install` in the other mode replaces the installed hooks. Switching from a push key to machine identity does not revoke the old push key, because a machine identity install has no Snyk API token to revoke it with; install warns, and the key stays active until you revoke it in Snyk. `guard status` shows `[Machine identity]` for such hooks, and `guard uninstall` removes them without a push key to revoke.
+- **Install:** `guard install` runs `"$ADS_TOKEN_COMMAND" token --base-url <--url>` once as a check. If it fails (non-zero exit, timeout, no single token on stdout), the install fails with an error and exit code 1 and changes nothing. A `TENANT_ID` that is not a plain id (letters, digits, `.`, `_`, `~`, `-`), or a `--url` with quotes, backslashes or whitespace fails the same way. No push key is minted or used, even when `PUSH_KEY` is also set. The [configuration file](#where-the-hooks-get-their-values) holds `ADS_TOKEN_COMMAND`, `REMOTE_HOOKS_BASE_URL`, `TENANT_ID`, `MACHINE_ID` and `MACHINE_SERIAL`, and no push key or other secret. The test event goes through the tenant route like every later hook event; if it is rejected, the install fails as it does with a push key. `--managed` installs use a push key only and fail when `ADS_TOKEN_COMMAND` is set.
+- **Hook runtime:** on every invocation the hooks, and the events that `guard install` and `guard discover` send themselves, run the token command and send the event to `POST {REMOTE_HOOKS_BASE_URL}/hidden/tenants/{TENANT_ID}/agent-monitor/hooks/{client}?version=2025-11-11` (the same version as the push-key route) with `Authorization: Bearer <token>` and no `X-Client-Id`. The token command's time counts toward the 60-second request budget. If it fails, the hook fails open like an unreachable API (exit 0, one stderr line, the `systemMessage` where supported); it never falls back to the push key. The payload and the other headers are the same as with a push key. The token is never logged and never put on a command line. A push key wins over machine identity in the hooks and in `guard discover`. With a configuration file the hooks read neither from the agent's environment, so an `ADS_TOKEN_COMMAND` or `PUSH_KEY` there cannot change the mode. Machine identity needs the configuration file: environment mode (`--from-env`, no file) is push-key only.
+- **Switching:** re-running `guard install` in the other mode rewrites the configuration file; the hook commands stay the same. Switching from a push key to machine identity does not revoke the old push key, because a machine identity install has no Snyk API token to revoke it with; install warns, and the key stays active until you revoke it in Snyk. `guard status` shows `[Machine identity]` for such hooks, and `guard uninstall` removes them without a push key to revoke.
 
 ## Environment variables
 
