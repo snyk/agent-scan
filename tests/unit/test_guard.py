@@ -4268,6 +4268,39 @@ class TestBashHookScript:
         headers = _HookHandler.last_request["headers"]
         assert headers.get("X-Agent-Surface") == expected_surface
 
+    @pytest.mark.parametrize(
+        ("client", "extra_env", "expected_surface"),
+        [
+            ("cursor", {"CURSOR_AGENT_SOCKET": "/tmp/cursor-agent.sock"}, "cursor-cloud"),
+            # Any other Cursor surface sends no header.
+            ("cursor", {}, None),
+            ("cursor", {"CURSOR_AGENT_SOCKET": ""}, None),
+            # The variable is inherited by whatever a Cursor cloud session spawns, so it must
+            # not make another client's hook claim the surface.
+            ("claude-code", {"CURSOR_AGENT_SOCKET": "/tmp/cursor-agent.sock"}, None),
+            ("codex", {"CURSOR_AGENT_SOCKET": "/tmp/cursor-agent.sock"}, None),
+        ],
+    )
+    def test_surface_header_for_cursor_cloud_sessions(self, hook_server, client, extra_env, expected_surface):
+        script = _get_script_path("snyk-agent-guard.sh")
+        result = subprocess.run(
+            ["bash", str(script), "--client", client],
+            input='{"hook_event_name":"preToolUse","conversation_id":"s1"}',
+            capture_output=True,
+            text=True,
+            timeout=10,
+            env={
+                "PATH": "/usr/bin:/bin:/usr/local/bin",
+                "PUSH_KEY": "test-pk-surface",
+                "REMOTE_HOOKS_BASE_URL": hook_server,
+                "MACHINE_ID": "machine-42",
+                **extra_env,
+            },
+        )
+        assert result.returncode == 0, result.stderr
+        headers = _HookHandler.last_request["headers"]
+        assert headers.get("X-Agent-Surface") == expected_surface
+
     def test_response_body_is_forwarded_unchanged(self, hook_server):
         """The script is a pass-through: agent-monitor's body reaches the agent verbatim."""
         script = _get_script_path("snyk-agent-guard.sh")

@@ -133,18 +133,24 @@ AGENT_SURFACE_HEADER = "X-Agent-Surface"
 
 
 def agent_surface(hook_client: str) -> str | None:
-    """Identify the agent surface from the environment, or None if it isn't Copilot.
+    """Identify the agent surface from the environment, or None if there is nothing to report.
 
-    Reported only for the Copilot client. These variables describe the environment, not
-    the caller, and they are inherited: another agent running inside a Copilot session
-    sees them too, while the hook that fired belongs to whichever config invoked us.
+    Reported only for the Copilot and Cursor clients, and only for the surfaces named below.
+    These variables describe the environment, not the caller, and they are inherited: another
+    agent running inside a Copilot session sees them too, while the hook that fired belongs to
+    whichever config invoked us.
 
     Copilot's hosts each set AI_AGENT (github_copilot_vscode_agent inside VS Code,
     github_copilot_app_agent for the desktop app) and all of them set COPILOT_CLI. The
     desktop app and the CLI share a surface, since neither users nor enforcement
     distinguish them; a future github_copilot_* host falls in with them rather than
     going unrecognized.
+
+    A Cursor cloud session sets CURSOR_AGENT_SOCKET. It does not fire Cursor's specialized
+    hooks, which agent-monitor needs to know. Every other Cursor surface reports nothing.
     """
+    if hook_client == "cursor":
+        return "cursor-cloud" if os.environ.get("CURSOR_AGENT_SOCKET") else None
     if hook_client != "github-copilot":
         return None
     ai_agent = os.environ.get("AI_AGENT", "")

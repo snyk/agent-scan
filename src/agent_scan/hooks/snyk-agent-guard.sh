@@ -154,8 +154,16 @@ get_username() {
 # Only reported for the Copilot client: these variables describe the environment rather
 # than the caller and are inherited, so another agent running inside a Copilot session
 # would otherwise claim a Copilot surface.
+#
+# The Cursor client reports a surface for one case only: a Cursor cloud session, which sets
+# CURSOR_AGENT_SOCKET ("cursor-cloud"). It does not fire Cursor's specialized hooks, which
+# agent-monitor needs to know. Every other Cursor surface sends no header.
 get_agent_surface() {
   local client=${1:-}
+  if [[ "$client" == "cursor" ]]; then
+    [[ -z "${CURSOR_AGENT_SOCKET:-}" ]] || printf '%s' "cursor-cloud"
+    return 0
+  fi
   [[ "$client" == "github-copilot" ]] || return 0
   if [[ "${AI_AGENT:-}" == "github_copilot_vscode_agent" ]]; then
     printf '%s' "copilot-vscode"

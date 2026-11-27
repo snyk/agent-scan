@@ -146,6 +146,48 @@ def test_reports_the_agent_surface_from_the_environment(env, expected_surface):
     assert headers.get("X-Agent-Surface") == expected_surface
 
 
+@pytest.mark.parametrize(
+    ("env", "expected_surface"),
+    [
+        # A Cursor cloud session is identified by CURSOR_AGENT_SOCKET.
+        ({"CURSOR_AGENT_SOCKET": "/tmp/cursor-agent.sock"}, "cursor-cloud"),
+        # Every other Cursor surface sends no surface at all.
+        ({}, None),
+        ({"CURSOR_AGENT_SOCKET": ""}, None),
+        # Copilot's variables say nothing about a Cursor hook.
+        ({"AI_AGENT": "github_copilot_vscode_agent", "COPILOT_CLI": "1"}, None),
+    ],
+)
+def test_cursor_reports_a_surface_only_for_cloud_sessions(env, expected_surface):
+    session = _FakeSession()
+
+    with (
+        patch.dict(os.environ, env, clear=True),
+        patch("agent_scan.hook_events.get_hostname", return_value="host-1"),
+        patch("agent_scan.hook_events.get_username", return_value="user-1"),
+        _patch_session(session),
+    ):
+        send_hook_event("https://api.snyk.io", "cursor", "push-key", "{}", "machine-1", machine_serial="")
+
+    assert session.posts[0]["headers"].get("X-Agent-Surface") == expected_surface
+
+
+@pytest.mark.parametrize("client", ["claude-code", "codex", "github-copilot"])
+def test_other_clients_never_claim_a_cursor_cloud_surface(client):
+    """CURSOR_AGENT_SOCKET is inherited by anything a Cursor cloud session spawns."""
+    session = _FakeSession()
+
+    with (
+        patch.dict(os.environ, {"CURSOR_AGENT_SOCKET": "/tmp/cursor-agent.sock"}, clear=True),
+        patch("agent_scan.hook_events.get_hostname", return_value="host-1"),
+        patch("agent_scan.hook_events.get_username", return_value="user-1"),
+        _patch_session(session),
+    ):
+        send_hook_event("https://api.snyk.io", client, "push-key", "{}", "machine-1", machine_serial="")
+
+    assert "X-Agent-Surface" not in session.posts[0]["headers"]
+
+
 @pytest.mark.parametrize("client", ["claude-code", "cursor", "codex"])
 def test_other_clients_never_claim_a_copilot_surface(client):
     """The env describes the environment, not the caller, and it is inherited.
