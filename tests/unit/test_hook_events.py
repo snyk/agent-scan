@@ -111,7 +111,9 @@ def test_discovery_distinguishes_installation_from_runtime(client, runtime_env, 
     runtime_headers = session.posts[-1]["headers"]
     assert all("X-Agent-Surface-Evidence" not in post["headers"] for post in installer_posts)
     if expected_evidence:
-        assert json.loads(runtime_headers["X-Agent-Surface-Evidence"]) == expected_evidence
+        wire = runtime_headers["X-Agent-Surface-Evidence"]
+        assert all(" " <= char <= "~" for char in wire)
+        assert json.loads(wire) == expected_evidence
     else:
         assert "X-Agent-Surface-Evidence" not in runtime_headers
     assert all("X-Agent-Surface" not in post["headers"] for post in session.posts)

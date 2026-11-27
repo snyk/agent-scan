@@ -240,13 +240,13 @@ def send_hook_event(
             key: value
             if key not in ("CURSOR_CLI", "CURSOR_AGENT_SOCKET")
             and len(value) <= 128
-            and all(" " <= char <= "~" for char in value)
+            and not re.search(r"[\ud800-\udfff]", value)
             else None
             for key in SURFACE_EVIDENCE_MARKERS.get(hook_client, ())
             if (value := os.environ.get(key)) is not None
         }
         if evidence:
-            headers["X-Agent-Surface-Evidence"] = json.dumps(evidence, separators=(",", ":"))
+            headers["X-Agent-Surface-Evidence"] = json.dumps(evidence, ensure_ascii=True, separators=(",", ":"))
 
     try:
         return asyncio.run(_post_hook_event(url, body, headers, max_retries, retry_policy))

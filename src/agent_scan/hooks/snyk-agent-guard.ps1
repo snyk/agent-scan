@@ -167,14 +167,21 @@ try {
         if ($null -eq $value) {
             continue
         }
-        if ($name -in ("CURSOR_CLI", "CURSOR_AGENT_SOCKET") -or $value.Length -gt 128 -or $value -cmatch '[^ -~]') {
+        # Count a UTF-16 surrogate pair as one Unicode code point.
+        if ($name -in ("CURSOR_CLI", "CURSOR_AGENT_SOCKET") -or
+            $value -cnotmatch '\A(?:[^\uD800-\uDFFF]|[\uD800-\uDBFF][\uDC00-\uDFFF]){0,128}\z') {
             $evidence[$name] = $null
         } else {
             $evidence[$name] = $value
         }
     }
     if ($evidence.Count) {
-        $headers["X-Agent-Surface-Evidence"] = ConvertTo-Json -InputObject $evidence -Compress
+        # Windows PowerShell 5.1 has no ConvertTo-Json -EscapeHandling.
+        $json = ConvertTo-Json -InputObject $evidence -Compress
+        $headers["X-Agent-Surface-Evidence"] = [regex]::Replace($json, '[^\x20-\x7e]', {
+            param($match)
+            '\u{0:x4}' -f [int][char]$match.Value
+        })
     }
     $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($body)
     $response = Invoke-WebRequest -Uri $url -Method POST -Body $bodyBytes -Headers $headers `

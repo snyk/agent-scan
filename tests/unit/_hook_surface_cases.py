@@ -15,7 +15,17 @@ HOOK_SURFACE_CASES = [
         {"CODEX_INTERNAL_ORIGINATOR_OVERRIDE": "Codex Desktop"},
         {"CODEX_INTERNAL_ORIGINATOR_OVERRIDE": "Codex Desktop"},
     ),
-    ("codex", {"CODEX_INTERNAL_ORIGINATOR_OVERRIDE": "unsafe\r\nmarker"}, {"CODEX_INTERNAL_ORIGINATOR_OVERRIDE": None}),
+    (
+        "codex",
+        {"CODEX_INTERNAL_ORIGINATOR_OVERRIDE": 'Größe 😀 "\\literal\\u00e9"\r\n\t\x01\x7f'},
+        {"CODEX_INTERNAL_ORIGINATOR_OVERRIDE": 'Größe 😀 "\\literal\\u00e9"\r\n\t\x01\x7f'},
+    ),
+    (
+        "cursor",
+        {"CURSOR_INVOKED_AS": "😀" * 128, "CURSOR_CLI_MODE": "🌍" * 128},
+        {"CURSOR_INVOKED_AS": "😀" * 128, "CURSOR_CLI_MODE": "🌍" * 128},
+    ),
+    ("codex", {"CODEX_INTERNAL_ORIGINATOR_OVERRIDE": "😀" * 129}, {"CODEX_INTERNAL_ORIGINATOR_OVERRIDE": None}),
     ("codex", {"CODEX_INTERNAL_ORIGINATOR_OVERRIDE": "a" * 129}, {"CODEX_INTERNAL_ORIGINATOR_OVERRIDE": None}),
     ("codex", {"CODEX_INTERNAL_ORIGINATOR_OVERRIDE": "a" * 128}, {"CODEX_INTERNAL_ORIGINATOR_OVERRIDE": "a" * 128}),
     ("codex", {}, {}),

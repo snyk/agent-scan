@@ -120,6 +120,37 @@ get_username() {
   printf '%s' "unknown"
 }
 
+# Encode UTF-8 independently of the caller's locale. JSON represents supplementary
+# characters as two UTF-16 escapes, which count as one character toward the limit.
+quote_surface_marker() {
+  local units unit code offset count=0 quoted=""
+  if ! units="$(printf '%s' "$1" | iconv -f UTF-8 -t UTF-16BE 2>/dev/null | od -An -v -tx1 | tr -d ' \n')"; then
+    printf '%s' null
+    return
+  fi
+
+  for (( offset=0; offset<${#units}; offset+=4 )); do
+    unit="${units:offset:4}"
+    case "$unit" in
+      d[89ab]??) ;;  # Count the pair when its low surrogate is read.
+      *) count=$((count + 1)) ;;
+    esac
+    if (( count > 128 )); then
+      printf '%s' null
+      return
+    fi
+
+    code=$((16#$unit))
+    if (( code >= 32 && code <= 126 && code != 34 && code != 92 )); then
+      printf -v unit '%b' "\\x${unit:2}"
+      quoted+="$unit"
+    else
+      quoted+="\u$unit"
+    fi
+  done
+  printf '"%s"' "$quoted"
+}
+
 # Emit only the invoking detector's markers, including present-but-empty values.
 get_surface_evidence() {
   case "$1" in
@@ -129,14 +160,13 @@ get_surface_evidence() {
     github-copilot) set -- AI_AGENT COPILOT_CLI ;;
     *) return 0 ;;
   esac
-  local LC_ALL=C key value fields=""
+  local key value fields=""
   for key in "$@"; do
     [[ -n "${!key+x}" ]] || continue
-    value="${!key}"
-    if [[ "$key" == CURSOR_CLI || "$key" == CURSOR_AGENT_SOCKET || ${#value} -gt 128 || "$value" == *[!\ -~]* ]]; then
+    if [[ "$key" == CURSOR_CLI || "$key" == CURSOR_AGENT_SOCKET ]]; then
       value=null
     else
-      value="$(json_quote "$value")"
+      value="$(quote_surface_marker "${!key}")"
     fi
     fields+="${fields:+,}\"$key\":$value"
   done

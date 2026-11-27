@@ -4160,7 +4160,9 @@ def test_hook_forwarder_sends_surface_evidence(hook_server, forwarder, client, r
     request = _HookHandler.last_request
     assert request is not None
     if expected_evidence:
-        assert json.loads(request["headers"]["X-Agent-Surface-Evidence"]) == expected_evidence
+        wire = request["headers"]["X-Agent-Surface-Evidence"]
+        assert all(" " <= char <= "~" for char in wire)
+        assert json.loads(wire) == expected_evidence
     else:
         assert "X-Agent-Surface-Evidence" not in request["headers"]
     assert "X-Agent-Surface" not in request["headers"]
