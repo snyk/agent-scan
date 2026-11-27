@@ -25,6 +25,7 @@ class _FakeHookServer(BaseHTTPRequestHandler):
         body = self.rfile.read(length).decode()
         _FakeHookServer.requests.append(
             {
+                "path": self.path,
                 "body": json.loads(base64.b64decode(body.removeprefix("base64:"))),
                 "headers": dict(self.headers),
             }
