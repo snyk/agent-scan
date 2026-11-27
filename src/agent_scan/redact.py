@@ -732,6 +732,39 @@ def redact_text(text: str | None) -> str | None:
     return "\n".join(_redact_secrets_in_line(line, entropy_plugins) for line in text.split("\n"))
 
 
+_TEXT_URL_RE = re.compile(r"https?://(?:\[[0-9a-fA-F:%._-]+\]|[^\s\"'<>)\]}\\[])+", re.IGNORECASE)
+_TEXT_HEADER_NAMES = "|".join(re.escape(h) for h in (*sorted(_SENSITIVE_HEADER_NAMES), "proxy-authorization"))
+_QUOTED_AUTH_HEADER_RE = re.compile(rf"(?i)\b((?:{_TEXT_HEADER_NAMES})['\"]?\s*:\s*)(['\"])(?:\\.|(?!\2).)+\2")
+_UNQUOTED_AUTH_HEADER_RE = re.compile(
+    rf"(?i)\b((?:{_TEXT_HEADER_NAMES})\s*:\s*(?:(?:bearer|basic|token|digest)\s+)?)(['\"]?)(?!['\"\s])[^\s\"',;}}\])\\]+\2"
+)
+_BEARER_TOKEN_RE = re.compile(r"(?i)\b(bearer\s+)(['\"]?)(?!['\"\s])[^\s\"',;}\])\\]+\2")
+
+
+def _redact_url_match(match: re.Match[str]) -> str:
+    raw = match.group(0)
+    url = raw.rstrip(".,;:!?")
+    destination, frag_sep, fragment = url.partition("#")
+    base, query_sep, query = destination.partition("?")
+    if not query_sep:
+        return raw
+    redacted_query = "&".join(
+        f"{part.partition('=')[0]}={REDACTED}" if "=" in part else (REDACTED if part else "")
+        for part in query.split("&")
+    )
+    return f"{base}{query_sep}{redacted_query}{frag_sep}{fragment}{raw[len(url) :]}"
+
+
+def redact_urls_and_headers_in_text(text: str | None) -> str | None:
+    """Redact URL query parameter values, Authorization/Proxy-Authorization headers, and Bearer tokens in text."""
+    if not text:
+        return text
+    result = _TEXT_URL_RE.sub(_redact_url_match, text)
+    result = _QUOTED_AUTH_HEADER_RE.sub(rf"\1\2{REDACTED}\2", result)
+    result = _UNQUOTED_AUTH_HEADER_RE.sub(rf"\1\2{REDACTED}\2", result)
+    return _BEARER_TOKEN_RE.sub(rf"\1\2{REDACTED}\2", result)
+
+
 def redact_error_text(text: str | None) -> str | None:
     """Redact a traceback or captured server output string.
 

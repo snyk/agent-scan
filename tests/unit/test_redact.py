@@ -17,6 +17,7 @@ from agent_scan.redact import (
     redact_push_keys,
     redact_push_keys_in_data,
     redact_text,
+    redact_urls_and_headers_in_text,
 )
 from tests.unit._secret_fixtures import synthetic_secret
 
@@ -1367,3 +1368,57 @@ class TestRedactPushKeysInData:
             in data["modified"]["PreToolUse"]["expected_value"][0]["hooks"][0]["command"]
         )
         assert data["session_id"] == "hooks-setup"
+
+
+class TestRedactUrlsAndHeadersInText:
+    """Tests for redact_urls_and_headers_in_text helper."""
+
+    def test_none_and_empty(self):
+        assert redact_urls_and_headers_in_text(None) is None
+        assert redact_urls_and_headers_in_text("") == ""
+
+    def test_redacts_url_query_params_and_preserves_trailing_punctuation(self):
+        line = "Remote server with url: https://example.com/mcp?token=FAKE-SECRET-123&mode=sse#frag, type: http"
+        result = redact_urls_and_headers_in_text(line)
+        assert result == (
+            "Remote server with url: https://example.com/mcp?token=**REDACTED**&mode=**REDACTED**#frag, type: http"
+        )
+
+    def test_preserves_url_without_query(self):
+        line = "Connecting to https://example.com/v1/mcp"
+        assert redact_urls_and_headers_in_text(line) == line
+
+    def test_redacts_quoted_dict_headers_and_bearer(self):
+        headers = {
+            "Authorization": "Bearer FAKE-SECRET-123",
+            "Proxy-Authorization": "Basic FAKE-SECRET-456",
+            "Accept": "application/json",
+        }
+        line = (
+            "Creating Streamable HTTP client with URL: https://example.com/mcp?token=FAKE-SECRET-789 "
+            f"with headers {headers}"
+        )
+        result = redact_urls_and_headers_in_text(line)
+        assert "FAKE-SECRET-123" not in result
+        assert "FAKE-SECRET-456" not in result
+        assert "FAKE-SECRET-789" not in result
+        assert "'Authorization': '**REDACTED**'" in result
+        assert "'Proxy-Authorization': '**REDACTED**'" in result
+        assert "'Accept': 'application/json'" in result
+
+    def test_redacts_unquoted_headers_and_standalone_bearer(self):
+        line = "Authorization: Bearer FAKE-SECRET-123 | Proxy-Authorization: FAKE-SECRET-456 | Bearer FAKE-SECRET-789"
+        result = redact_urls_and_headers_in_text(line)
+        assert "FAKE-SECRET-123" not in result
+        assert "FAKE-SECRET-456" not in result
+        assert "FAKE-SECRET-789" not in result
+        assert result.count("**REDACTED**") == 3
+
+    def test_redacts_ipv6_url_query_and_quoted_bearer_token(self):
+        line = (
+            'Connecting to [http://[::1]:8080/mcp?token=FAKE-SECRET-123] with Authorization: Bearer "FAKE-SECRET-456"'
+        )
+        result = redact_urls_and_headers_in_text(line)
+        assert result == (
+            'Connecting to [http://[::1]:8080/mcp?token=**REDACTED**] with Authorization: Bearer "**REDACTED**"'
+        )

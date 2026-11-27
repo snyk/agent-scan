@@ -17,6 +17,8 @@ from typing import Any
 
 import rich
 
+from agent_scan.redact import redact_text, redact_urls_and_headers_in_text
+
 # Palette used to color per-server stderr prefixes.
 _STREAM_COLOR_PALETTE: tuple[str, ...] = (
     "cyan",
@@ -82,9 +84,10 @@ def _print_server_line(
     # emitting our own style tags.
     from rich.markup import escape
 
+    sanitized = redact_text(redact_urls_and_headers_in_text(line)) or ""
     target = console or rich.get_console()
     with _STREAM_PRINT_LOCK:
-        target.print(f"[{color}]\\[{escape(server_name)}][/{color}] {escape(line)}")
+        target.print(f"[{color}]\\[{escape(server_name)}][/{color}] {escape(sanitized)}")
 
 
 @dataclass
