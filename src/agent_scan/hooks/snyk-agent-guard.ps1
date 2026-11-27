@@ -262,7 +262,12 @@ $xUser = @{
 # Only reported for the Copilot client: these variables describe the environment rather
 # than the caller and are inherited, so another agent running inside a Copilot session
 # would otherwise claim a Copilot surface.
-$agentSurface = if ($Client -ne "github-copilot") {
+# The Cursor client reports "cursor-cloud" for a Cursor cloud session only (it sets
+# CURSOR_AGENT_SOCKET and does not fire Cursor's specialized hooks); other Cursor surfaces
+# send no header.
+$agentSurface = if ($Client -eq "cursor") {
+    if ($env:CURSOR_AGENT_SOCKET) { "cursor-cloud" } else { "" }
+} elseif ($Client -ne "github-copilot") {
     ""
 } elseif ($env:AI_AGENT -eq "github_copilot_vscode_agent") {
     "copilot-vscode"
